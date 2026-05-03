@@ -1,10 +1,15 @@
 # M0 — Storage Foundation: ObjectStore Contract, localfs Adapter, Conformance Suite
 
 Date: 2026-05-03
-Status: design draft
+Status: design draft (revision 2)
 Milestone: M0 (first critical-path milestone of bucketvcs OSS-core)
 Source spec sections: §9, §10, §29 (subset), §35, §40.1, §40.4
 Decomposition: see `2026-05-03-bucketvcs-oss-decomposition-design.md`
+Implementation plan: see `docs/superpowers/plans/2026-05-03-m0-storage-foundation.md` (32 bite-sized TDD tasks)
+
+Revision history:
+- 2026-05-03 r1: initial design.
+- 2026-05-03 r2: address roborev design review (job 7684) findings — read-side mutex acquisition for atomicity; `PutIfAbsent` Stat-then-rename made explicit; `PutOptions.Metadata` removed for M0; multipart lifecycle table added; symlink rejection added; filesystem portability assumptions documented; sidecar schema versioning surfaced from plan; part numbering pinned to 1-based.
 
 ## Purpose
 
@@ -35,12 +40,15 @@ These were settled during brainstorming and are not re-litigated below.
 |---|----------|-----------|
 | AD1 | Own the `ObjectStore` interface; do not wrap `gocloud.dev/blob` or any portable-blob library | The §9 contract is fundamentally about CAS primitives (`PutIfVersionMatches`, `DeleteIfVersionMatches`, `CompleteMultipartIfAbsent`). Portable blob libraries do not expose these uniformly. The §29 conformance suite tests precisely the semantics those libraries hide. |
 | AD2 | Cloud adapters use provider SDKs directly (per spec §40.4) when they land later | SDKs handle auth, retries, signing, throttling backoff, multipart abstractions — undifferentiated work. M0 itself ships no cloud adapters. |
-| AD3 | localfs CAS implemented via in-process keyed `sync.Mutex` map | Spec §35 frames localfs as "dev/test." All M0–M3 demos run in a single process. Simpler than `flock` (no NFS/Windows trouble); simpler than SQLite (preserves on-disk inspectability). Multi-process can be retrofitted later without changing the interface. |
+| AD3 | localfs concurrency: in-process keyed `sync.Mutex` map serializes BOTH read and write paths per key. Cross-key operations are independent. | Spec §35 frames localfs as "dev/test." All M0–M3 demos run in a single process. Acquiring the per-key mutex on reads (Get/Head/GetRange) prevents the read from observing a torn (content-N, sidecar-N-1) pair during a concurrent write. Read throughput is serialized per key but parallel across keys, which is acceptable for single-process dev/test. Simpler than `flock` (no NFS/Windows trouble); simpler than SQLite (preserves on-disk inspectability). Multi-process can be retrofitted later without changing the interface. |
 | AD4 | `ObjectVersion` token on localfs = `sha256(content)` hex string | Deterministic, derivable from content, no separate state. Matches the "content-addressed" theme of the broader spec. Computed on write, cached in JSON sidecar. |
 | AD5 | Multipart implemented as a real spec-conforming operation on localfs | The §29 multipart tests need real code paths to exercise. Stubbing leaves a hole that only fills at M5. Cost on localfs is small (~100 lines). |
 | AD6 | `SignedGetURL` stays on the contract; localfs returns `ErrNotSupported`; capability flag declared | Real signed-URL emulation only matters when a milestone needs it (likely M11 packfile-uri). Adding a capability flag now lets the conformance suite skip cleanly with a documented reason. |
 | AD7 | Conformance suite is a regular Go package (`internal/storage/conformance`) callable from any adapter's `_test.go` AND from a future CLI subcommand | One implementation, two callers. M0 ships only the `go test` entry point; the CLI hook lands at M3. |
 | AD8 | §29 correctness test #14 ("network retry does not duplicate committed object") recast on localfs as: "PutIfAbsent twice with the same args returns ErrAlreadyExists cleanly without corrupting state on the second call." | Same invariant, exercised at the local level. Spec mapping table in this doc documents the recast. Cloud adapters at M5/M7 add a transient-retry-mid-call simulation as an additional case. |
+| AD9 | M0 omits `PutOptions.Metadata` (user-defined K/V metadata). Only `ContentType` is supported. | The field added complexity (sidecar schema, `ObjectMetadata` exposure, conformance assertions) without a caller for it in M0. Cloud adapters at M5/M7 reintroduce it with explicit semantics keyed to provider-native metadata (S3 `x-amz-meta-*`, GCS object metadata, etc.). The interface stays additive: adding `Metadata` later does not break existing callers. |
+| AD10 | Multipart `PartNumber` is 1-based (S3 convention). Reject part numbers < 1. | Cloud adapters all use 1-based numbering (S3, GCS resumable, Azure block IDs); having localfs match avoids a class of porting bugs. |
+| AD11 | Localfs read paths reject symlinks under the bucket root via `os.Lstat` checks at `Get`/`Head`/`GetRange`/`List`. | Defense against the dev-test footgun of an operator dropping a symlink into `<root>/objects/` and exposing files outside the bucket. Full path-resolution sandboxing (`renameat2(RESOLVE_BENEATH)` on Linux) is out of scope for M0; symlink rejection covers the realistic risk. |
 
 ## ObjectStore interface
 
@@ -119,7 +127,6 @@ type GetOptions struct {
 
 type PutOptions struct {
     ContentType string
-    Metadata    map[string]string
 }
 
 type ListOptions struct {
@@ -207,18 +214,89 @@ Under the bucket root directory:
   .lock                    process-wide lockfile (advisory)
 ```
 
+### Concurrency model
+
+Per AD3, the keyed mutex serializes BOTH reads and writes per key. Concretely:
+
+- Every method that touches an object on disk (`Get`, `Head`, `GetRange`, `PutIfAbsent`, `PutIfVersionMatches`, `DeleteIfVersionMatches`, `CompleteMultipartIfAbsent`) acquires `mutexes.lock(key)` for the whole operation.
+- `List` does not lock at the prefix level; it iterates keys and calls the per-key `head()` helper for each, which acquires the per-key mutex. List therefore sees a consistent view of each individual key, but the page is not a strict snapshot across keys.
+- Cross-key operations are independent: locking key `a` does not block work on key `b`.
+- Multipart `UploadPart` does not lock the target key (parts go into `<root>/uploads/<id>/`, not `<root>/objects/<key>`). Only `CompleteMultipartIfAbsent` acquires the target's mutex.
+
+This rule eliminates the (content-N, sidecar-N-1) torn-read window: a writer holds the mutex for the full content-rename + sidecar-rename sequence, so any concurrent reader either sees both pre-write or both post-write state.
+
+The cost is that read throughput is serialized per key. For a single-process dev/test adapter that is acceptable; cloud adapters at M5/M7 do not have this constraint because their read paths use provider-side strong consistency, not local mutexes.
+
 ### Mechanics
 
-- **CAS critical sections** are guarded by a keyed mutex map: `map[string]*sync.Mutex` accessed under a `sync.RWMutex` for the map itself. Acquired around the read-modify-write sequence: lock, read sidecar, compare expected version, write temp file, atomic rename, write new sidecar, release.
-- **Atomic write pattern** for any object: write to `<root>/objects/<key>.tmp.<rand>`, fsync the file, rename to `<root>/objects/<key>`, write `<root>/objects/<key>.meta.tmp.<rand>`, fsync, rename. POSIX rename within the same filesystem is atomic. There is a small window where content is committed but sidecar lags; `Get`/`Head` self-heal by recomputing sha256 from content if sidecar is missing or stale.
-- **`PutIfAbsent`** uses `os.OpenFile(path, O_CREATE|O_EXCL|O_WRONLY, ...)` on a temp path, then performs the atomic rename under the keyed mutex. If the target object already exists at rename time, returns `ErrAlreadyExists` and removes the temp file.
-- **`PutIfVersionMatches`** acquires the keyed mutex, reads the sidecar, compares `expected.Token` against `sidecar.sha256`, and proceeds only if equal; otherwise returns `ErrVersionMismatch`.
-- **`DeleteIfVersionMatches`** mirrors `PutIfVersionMatches`: acquire mutex, compare version, then `os.Remove` content + sidecar. Removal of an absent object returns `ErrNotFound`.
-- **`List`** walks `<root>/objects/<prefix>` lexicographically. Pagination uses last-returned key as a continuation token. `Delimiter` support produces `CommonPrefixes` to match the cloud-style "directory-like" listing semantics.
-- **`CreateMultipart`** generates a UUID, creates `<root>/uploads/<id>/parts/`, writes `manifest.json` with target key. Returns a `MultipartUpload` whose `UploadPart` writes part bytes to `parts/NNNNN` and returns the part's sha256 as its token.
-- **`CompleteMultipartIfAbsent`** validates parts (numbering contiguous, tokens match), concatenates them in order while computing a streaming sha256, atomically promotes the assembled content to `<root>/objects/<key>` under the keyed mutex via the same atomic-write pattern, writes the sidecar, and removes the upload directory. If the target key already exists, returns `ErrAlreadyExists` and discards the assembled bytes.
+- **Atomic write pattern** for any object body: write to `<root>/objects/<key>.tmp.<rand>`, fsync the file, rename to `<root>/objects/<key>`, write `<root>/objects/<key>.meta.tmp.<rand>`, fsync, rename. POSIX rename within the same filesystem is atomic. Because the per-key mutex is held for the whole sequence, no concurrent reader observes a torn pair.
+- **`PutIfAbsent`** acquires the per-key mutex, then explicitly `os.Stat`s the target path. If the target exists, returns `ErrAlreadyExists` and writes nothing. If absent, runs the atomic write pattern. *Note: POSIX `rename(2)` overwrites existing targets silently, so the absence check must be performed under the same mutex held during rename. Defense-in-depth on Linux: callers may use `unix.Renameat2(..., RENAME_NOREPLACE)`; M0 relies on the Stat-under-mutex check because localfs is single-process.*
+- **`PutIfVersionMatches`** acquires the per-key mutex, reads the sidecar, compares `expected.Token` against `sidecar.sha256`. If equal, runs the atomic write pattern; otherwise returns `ErrVersionMismatch`. Returns `ErrVersionMismatch` (not `ErrNotFound`) when the key does not exist, matching S3 If-Match semantics.
+- **`DeleteIfVersionMatches`** mirrors `PutIfVersionMatches`: acquire mutex, read and compare version, then `os.Remove` content + sidecar. Returns `ErrVersionMismatch` on skew, `ErrNotFound` if absent.
+- **`Get` / `Head` / `GetRange`** acquire the per-key mutex, perform an `os.Lstat` on the content path (rejects symlinks under AD11), read sidecar (or self-heal), then read content. Sidecar self-heal recomputes sha256 from content and rewrites a fresh sidecar; if heal fails (e.g., I/O error), the original error is wrapped and returned.
+- **`List`** walks `<root>/objects/<prefix>` lexicographically using `filepath.WalkDir`. Pagination uses last-returned key as the continuation token; the next call returns keys strictly greater than that token. `Delimiter` support produces `CommonPrefixes` to match cloud-style "directory-like" listing semantics. List skips entries whose `Lstat` reports a symlink, with a structured warning log.
+- **`CreateMultipart`** generates a UUID, creates `<root>/uploads/<id>/parts/`, writes `manifest.json` recording the target key, content type, and creation time. Does not lock the target key; multipart uploads do not reserve the key.
+- **`UploadPart`** streams part bytes via temp + atomic rename to `parts/NNNNN` (zero-padded; `PartNumber` is 1-based per AD10). Returns the part's sha256 as its token. Out-of-order or repeated part numbers are allowed at upload time; repeated `PartNumber` overwrites the prior part's bytes via the same temp+rename. Part numbers < 1 return `ErrInvalidArgument`.
+- **`CompleteMultipartIfAbsent`** validates the `parts` slice is non-empty and contiguously numbered (1, 2, 3, ...); acquires the target key's mutex; performs the same Stat-then-write sequence as `PutIfAbsent`; concatenates parts in order while computing streaming sha256; atomically promotes the assembled content via the atomic write pattern; removes the upload directory on success. If the target already exists, returns `ErrAlreadyExists` and leaves the upload directory intact (the caller may `Abort` or retry against a new key).
+- **`Abort`** removes the upload directory. Idempotent: aborting an already-aborted or already-completed upload is a no-op (silently succeeds).
 - **`SignedGetURL`** returns `ErrNotSupported`.
-- **`.lock` startup check** opens `<root>/.lock` with `O_CREATE|O_EXCL`. On success, holds it open for process lifetime. On failure, returns an error indicating another process may be using this root. Stale locks can be removed by `bucketvcs doctor` (M16) or by hand.
+- **`.lock` startup check** opens `<root>/.lock` with `O_CREATE|O_EXCL`. On success, holds it open for process lifetime. On failure, returns `ErrAlreadyLocked`. Stale locks can be removed by `bucketvcs doctor` (M16) or by hand.
+
+### Multipart lifecycle reference
+
+Codifies edge-case behavior so cloud adapters at M5/M7 inherit a consistent contract:
+
+| Scenario | Behavior |
+|----------|----------|
+| `UploadPart` with `partNumber < 1` | `ErrInvalidArgument` |
+| `UploadPart` with non-contiguous numbers (e.g., 1 then 3) | Allowed at upload time; `Complete` validates contiguity |
+| `UploadPart` repeats a `partNumber` (e.g., 2 uploaded twice) | Second upload overwrites the first via temp+rename. The token returned by the second call is the token used at `Complete` time. |
+| `Complete` with empty `parts` slice | `ErrInvalidArgument` |
+| `Complete` with non-contiguous part numbers in `parts` | `ErrInvalidArgument` |
+| `Complete` after target key already exists | `ErrAlreadyExists`. Upload directory is preserved so the caller can `Abort` explicitly. |
+| `Complete` referencing a part that wasn't uploaded | I/O error on opening the missing part file, surfaced wrapped (no special sentinel). |
+| `Complete` part-size mismatch (manifest size ≠ on-disk part size) | `ErrInvalidArgument`. |
+| Two concurrent `Complete` calls on the same upload, same target | Per-key mutex on target serializes them; one wins, the other sees `ErrAlreadyExists`. |
+| Two concurrent `Complete` calls on different uploads, same target | Same as above: per-key mutex serializes; one wins, others see `ErrAlreadyExists`. |
+| `Abort` after `Complete` | No-op (silently succeeds — the upload directory is already gone). |
+| `Complete` after `Abort` | Underlying part files are gone; opening fails with a wrapped I/O error. The contract surface is "you may not call Complete after Abort"; an explicit pre-check is not required. |
+| Abandoned uploads (caller never calls `Complete` or `Abort`) | Cleanup is the responsibility of `bucketvcs doctor` (M16). M0 does no automatic cleanup. |
+| `Complete` from a `MultipartUpload` returned by a different `Localfs` instance | `ErrInvalidArgument`. |
+
+### Symlink and hardlink safety (AD11)
+
+Localfs must not expose files outside the bucket root via symlinks placed within `<root>/objects/`. The protection is:
+
+- All read entry points (`Get`, `Head`, `GetRange`, `List`) call `os.Lstat` on the target path before opening. If the entry is a symlink (`Mode().Type() == fs.ModeSymlink`), the operation returns `ErrInvalidArgument` and `List` skips the entry with a structured warning.
+- Write paths create files via `os.OpenFile` with `O_CREATE|O_EXCL` on a temp path under `filepath.Dir(target)`. The dest directory is created with `os.MkdirAll`, which does not follow existing symlinks for the final component.
+- Full path-resolution sandboxing (e.g., `openat2(RESOLVE_BENEATH)` on Linux) is out of scope for M0. The defense above covers the realistic dev/test footgun.
+
+### Error normalization
+
+Error mapping for the non-obvious cases:
+
+- **Sidecar parse error** (corrupted JSON, unknown schema version): self-heal — recompute sha256 from content and rewrite a fresh sidecar at the current schema version. If heal also fails, return the original error wrapped with the operation name.
+- **`fsync` failure** during atomic write: surface the `*os.PathError` wrapped with the operation name. Caller decides retry policy.
+- **Permission errors** (`os.IsPermission`): wrap with `ErrAccessDenied`.
+- **Disk-full** (`ENOSPC`): surface the underlying error; no normalized sentinel in M0 (callers can `errors.Is(err, syscall.ENOSPC)` if needed).
+- **Partial writes**: cannot occur at the public-API level because writes go through temp+rename. A torn temp file left behind by a crash is not visible to readers; `bucketvcs doctor` cleans it up.
+- **Cleanup failures** (e.g., `os.Remove` of a temp file): logged structured, do not fail the operation if the primary commit succeeded.
+
+### Filesystem portability assumptions
+
+Localfs in M0 assumes:
+
+- **Case-sensitive POSIX filesystem.** ext4, XFS, btrfs (Linux); APFS configured case-sensitive (macOS — note default APFS is case-INSENSITIVE; users on default-APFS macOS hosts will see CONTENT collisions if they rely on case-distinct keys). Unsupported: HFS+ (Unicode normalization folds NFC/NFD).
+- **Atomic same-filesystem rename.** Standard POSIX. Crossing filesystems via rename is an unspecified error.
+- **`fsync` flushes both data and metadata.** ext4 default behavior. `noatime` is fine; `data=writeback` is not recommended.
+- **Standard file permissions and ownership.** No special handling for setuid, sticky, or extended attributes.
+
+Unsupported (will refuse or behave undefined):
+
+- **Network filesystems (NFS, SMB, FUSE).** `flock`/lock-file behavior across NFS is unreliable; rename atomicity is not guaranteed on all FUSE backends. The M0 startup `.lock` does not detect cross-host conflict.
+- **Windows filesystems.** Path separators, case folding, and `O_CREATE|O_EXCL` semantics differ enough that M0 does not target Windows.
+
+The README documents these restrictions verbatim.
 
 ### Capabilities reported
 
@@ -328,8 +406,33 @@ Beyond the §29 list, the suite includes a small "key namespace" test set that a
 - Keys with backslashes are rejected
 - Keys ≤ 1024 bytes UTF-8 succeed
 - Keys > 1024 bytes are rejected
+- Keys ending in `.meta` are rejected (localfs reserves this suffix for sidecars)
 
 These are not §29-derived but are a baseline safety floor for any adapter. Heavier fuzzing belongs in a security-review pass after M5.
+
+### Multipart lifecycle conformance tests
+
+In addition to §29 #8 (multipart cannot overwrite existing key), the conformance suite includes the following tests that codify the behavior described in the "Multipart lifecycle reference" table above:
+
+- `MultipartHappyPath` — create, upload N parts, complete, get; assert content equals concatenation.
+- `MultipartInvalidPartNumber` — `UploadPart` with `partNumber < 1` returns `ErrInvalidArgument`.
+- `MultipartRepeatedPartNumber` — uploading the same `partNumber` twice succeeds; `Complete` uses the second upload's bytes.
+- `MultipartCompleteEmptyParts` — `Complete` with empty `parts` returns `ErrInvalidArgument`.
+- `MultipartCompleteNonContiguous` — `Complete` with `parts` numbered `[1, 3]` returns `ErrInvalidArgument`.
+- `MultipartCompleteSizeMismatch` — `Complete` with `parts[i].Size` differing from on-disk part size returns `ErrInvalidArgument`.
+- `MultipartConcurrentComplete` — two concurrent `Complete` calls on the same upload+target serialize via the per-key mutex; one wins, the other sees `ErrAlreadyExists`.
+- `MultipartAbortIdempotent` — `Abort` after `Complete` is a no-op; `Abort` called twice in a row is a no-op.
+- `MultipartCompleteAfterAbort` — `Complete` after `Abort` returns a wrapped I/O error from the missing part.
+- `MultipartCrossInstance` — `Complete` with a `MultipartUpload` from a different `Localfs` instance returns `ErrInvalidArgument`.
+
+### Symlink rejection conformance test
+
+A `SymlinkRejection` test asserts:
+
+- After `Put`-ing a key, manually replacing the on-disk content file with a symlink to `/etc/passwd` causes `Get`, `Head`, and `GetRange` to return `ErrInvalidArgument`.
+- `List` skips the symlinked entry.
+
+This test is localfs-only by nature (cloud adapters have no concept of symlinks) and lives in `internal/storage/localfs/localfs_test.go`, not in the conformance package.
 
 ### Expected divergence list
 
@@ -381,12 +484,14 @@ Notes:
 1. `go test ./internal/storage/...` is green on Linux and macOS.
 2. The 15 §29 correctness tests (with the AD8 recast for #14) pass against localfs.
 3. The 3 applicable §29 stress tests pass against localfs.
-4. `Capabilities()` declarations round-trip through the interface correctly.
-5. Documented error taxonomy maps to the conformance assertions per the table above.
-6. Package layout matches §40.1.
-7. `internal/storage/README.md` documents: the interface contract, how to add a new adapter, how to run the conformance suite against an arbitrary adapter, the AD8 recast and any expected divergences.
-8. Public Go-doc comments on every exported symbol in `internal/storage`.
-9. A worked example (~50 lines, in `internal/storage/example_test.go` or under `examples/`) exercises Put, Get, PutIfVersionMatches, List, Multipart, Delete on localfs, including the conflict paths.
+4. The multipart lifecycle conformance tests (10 cases listed above) pass against localfs.
+5. The localfs-only `SymlinkRejection` test passes.
+6. `Capabilities()` declarations round-trip through the interface correctly.
+7. Documented error taxonomy maps to the conformance assertions per the table above; the error-normalization rules in this spec match implementation behavior.
+8. Package layout matches §40.1.
+9. `internal/storage/README.md` documents: the interface contract, how to add a new adapter, how to run the conformance suite against an arbitrary adapter, the AD8 recast, the filesystem portability assumptions, and any expected divergences.
+10. Public Go-doc comments on every exported symbol in `internal/storage`.
+11. A worked example (~50 lines, in `internal/storage/example_test.go` or under `examples/`) exercises Put, Get, PutIfVersionMatches, List, Multipart, Delete on localfs, including the conflict paths.
 
 ## Dependencies
 
@@ -402,18 +507,20 @@ Notes:
 | Sidecar drift: `.meta` deleted or corrupted out of band | Self-heal on read by recomputing sha256 from content; surface a structured warning via the logger. |
 | Time-to-first-cloud: holding M1 hostage to a "perfect" interface | Ship M0 with a pragmatic interface; revise based on what M5 cloud-adapter work surfaces. |
 | `O_EXCL` over networked filesystems is unreliable | Out of scope — localfs is for local filesystems only. NFS-backed roots are unsupported and the README documents this. |
+| Mutex map growth on long-running localfs serving millions of distinct keys | M0 does not evict idle entries. Acceptable because localfs is dev/test and per-process. M9 (background maintenance) revisits if a real workload surfaces memory pressure; success criterion is "no localfs deployment to date has needed eviction." |
+| HFS+ / case-insensitive APFS: keys differing only in case collide silently | README documents the case-sensitive POSIX assumption. macOS users on default-APFS hosts who need bucketvcs functionality at scale should use a case-sensitive volume or wait for cloud adapters at M5. |
+| Symlink under bucket root exposes files outside the bucket | AD11: read paths `Lstat` and reject symlinks; `List` skips symlinks with structured warning. Full sandboxing (`openat2(RESOLVE_BENEATH)`) deferred to a later hardening pass. |
 
 ## Open questions deferred to implementation
 
 These are implementation-plan decisions, not design-spec decisions:
 
-- Exact JSON sidecar schema (field names, version field migration policy)
-- Whether to integrate with `golang.org/x/exp/slog` or wait for M3's logging framework decision
-- Specific UUID library choice for upload IDs
-- Whether part numbering is 1-based (S3 convention) or 0-based (cleaner Go)
-- Whether `Capabilities` is fetched once per adapter instance or per call (cached vs not)
-- Concurrency limits inside the keyed-mutex map (when to evict idle entries)
-- Test parallelism caps (`t.Parallel()` policy across the conformance suite)
+- Exact JSON sidecar field names (the schema-versioning policy is fixed: every sidecar carries an integer `version` field; readers reject unknown versions; localfs ships with `version=1`).
+- Whether to integrate with `golang.org/x/exp/slog` or wait for M3's logging framework decision.
+- Specific UUID library choice for upload IDs.
+- Whether `Capabilities` is fetched once per adapter instance or per call (cached vs not).
+- Concurrency limits inside the keyed-mutex map (when to evict idle entries — see "Mutex map growth" risk below).
+- Test parallelism caps (`t.Parallel()` policy across the conformance suite).
 
 ## Out-of-scope deferrals (deferred from this milestone, summarized)
 
