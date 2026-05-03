@@ -1,7 +1,7 @@
 # M0 — Storage Foundation: ObjectStore Contract, localfs Adapter, Conformance Suite
 
 Date: 2026-05-03
-Status: design draft (revision 7)
+Status: design draft (revision 8)
 Milestone: M0 (first critical-path milestone of bucketvcs OSS-core)
 Source spec sections: §9, §10, §29 (subset), §35, §40.1, §40.4
 Decomposition: see `2026-05-03-bucketvcs-oss-decomposition-design.md`
@@ -15,6 +15,7 @@ Revision history:
 - 2026-05-03 r5: address roborev design review (job 7690) findings — replaced "must run doctor at M16" with M0-shipped `Localfs.Verify(ctx)` method and package-level `localfs.Verify(root)` function; lockfile (`<root>/.lock`) doubles as unclean-shutdown marker (its presence at `Open` time triggers `ErrAlreadyLocked` with the operator instructed to call `Verify` before retrying); read-path sequence rewritten as an explicit 4-step procedure; self-heal failure semantics specified (original read error wins, partial sidecar left for retry); size-mismatch coverage extended to all reads and conditional writes via the shared `headLocked` helper.
 - 2026-05-03 r6: address roborev design review (job 7693) findings — fix the regression introduced in r5 where package-level `Verify(root)` could trample a live process holding the bucket open. Lockfile now stores PID + host + start time; `Verify` checks if the recorded PID is alive on the recorded host before proceeding (`kill(pid, 0)` on POSIX); refuses with `ErrLockedByLiveProcess` if alive unless `WithForce(true)` opt is passed. Package-level `Verify` signature changed to `Verify(ctx context.Context, root string, opts ...VerifyOption) error` for cancellation, force-override, and progress reporting. Reconciliation outcome matrix added covering missing/parse-broken/orphan sidecars, symlinks, dirs, unreadable files, ctx cancellation, partial failure. Same-size torn-sidecar test made an explicit exit criterion (the actual case Verify exists for).
 - 2026-05-03 r7: address roborev design review (job 7696) findings — fix the contradictory `started_at` semantics introduced in r6. Lockfile field renamed to `acquired_at` and is forensics-only (not used for liveness logic). M0 liveness check is `kill(pid, 0)` on the same host; PID reuse is documented as a known limitation operator resolves via `WithForce`. Add unchanged-lock snapshot/recheck around `Verify`'s lockfile removal so a legitimate process Opening the bucket mid-Verify is not trampled. Specify progress callback as fire-and-forget (caller owns panic handling). Two new tests required: PID-reuse-via-WithForce and lock-changed-during-Verify.
+- 2026-05-03 r8: address roborev design review (job 7698) findings — package-level `Verify` on absent lock now returns nil immediately without any reconciliation, eliminating the absent-lock-at-start race where a legitimate Open during reconciliation could see torn state. Periodic maintenance on a clean open bucket is what `Localfs.Verify(ctx)` (instance method) is for; package-level `Verify` is exclusively for unclean-shutdown recovery (i.e., when `Open` returned `ErrAlreadyLocked`). Unreadable-lockfile wording fixed: non-`ENOENT` read errors propagate (fail closed), `ENOENT` means absent (early return), malformed JSON means treat as stale and proceed (recheck still applies). New test `TestVerifyAbsentLockNoOp` exercises the absent-lock early-return.
 
 ## Purpose
 
@@ -377,11 +378,23 @@ func WithProgress(cb func(processed int)) VerifyOption
 **Lock-liveness rule used by package-level `Verify` (AD12 + AD13):**
 
 ```text
-1. Snapshot <root>/.lock bytes at the start of Verify (preLockBytes).
-   If absent: clean shutdown; reconcile and return.
-   If unreadable: treat as stale; reconcile and (per AD13) skip the
-   "remove only if unchanged" rule because there is nothing to compare.
-2. Parse the JSON. Malformed: treat as stale; reconcile and remove.
+1. Snapshot <root>/.lock bytes at the start of Verify.
+   - ENOENT (absent) → return nil immediately. Package-level Verify
+     does NOT reconcile clean buckets; periodic maintenance on a
+     healthy open bucket is the job of Localfs.Verify(ctx) (instance
+     method), which acquires the per-key mutex per object and is
+     safe to run alongside writes. Treating a clean bucket as
+     "nothing to do" eliminates the race where a legitimate Open
+     during reconciliation could observe torn sidecars.
+   - Any other read error (permission denied, transient I/O) → fail
+     closed. Return the error wrapped; do NOT proceed. Operators can
+     fix the underlying I/O problem and retry, or pass WithForce(true)
+     after manual inspection.
+   - Read succeeded → preLockBytes = bytes; proceed to step 2.
+2. Parse the JSON.
+   - Malformed → treat as stale; proceed to reconcile (the AD13
+     recheck still applies because preLockBytes are non-nil).
+   - Parsed → proceed to step 3.
 3. If recorded host != current host:
      - Without WithForce: refuse with ErrLockedByLiveProcess
        (M0 cannot probe liveness on a remote host).
@@ -714,7 +727,8 @@ Notes:
 8. Package layout matches §40.1.
 9. `internal/storage/README.md` documents: the interface contract; how to add a new adapter; how to run the conformance suite against an arbitrary adapter; the AD8 recast; the AD11 best-effort symlink claim **including the verbatim "What is NOT covered in M0" list from the "Symlink and hardlink safety" section**; the **verbatim "Filesystem portability assumptions" section**; the **verbatim "Crash recovery and `Localfs.Verify`" section including the operator workflow**; and any expected divergences. The README is operator-facing; copying these blocks verbatim ensures the warnings are not diluted as the spec evolves.
 10. `Localfs.Verify(ctx)` (instance method) and `localfs.Verify(ctx, root, opts...)` (package-level function) ship in M0 with the following test coverage:
-    - **Clean bucket** → no-op success.
+    - **Clean bucket** → instance-method `Verify(ctx)` is a no-op success.
+    - **Absent lockfile (no recovery needed)** → package-level `Verify(ctx, root)` returns nil immediately without mutating any sidecar (no reconciliation on clean buckets per r8).
     - **Same-size torn sidecar** → reconciled successfully (the case Verify exists for; size-mismatch fast-path on read cannot catch this).
     - **Different-size torn sidecar** → reconciled successfully (also the size-mismatch fast-path's territory).
     - **Missing sidecar** → reconciled.
