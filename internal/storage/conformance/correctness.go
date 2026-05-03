@@ -25,6 +25,7 @@ func runCorrectness(t *testing.T, f Factory) {
 	t.Run("§29#7_ListAfterDelete", func(t *testing.T) { test29_7(t, f) })
 	t.Run("ListPagination", func(t *testing.T) { testListPagination(t, f) })
 	t.Run("ListDelimiter", func(t *testing.T) { testListDelimiter(t, f) })
+	t.Run("MultipartHappyPath", func(t *testing.T) { testMultipartHappyPath(t, f) })
 }
 
 // §29 #4: Read after write sees latest object.
@@ -417,5 +418,51 @@ func testListDelimiter(t *testing.T, f Factory) {
 		if !gotObjs[k] {
 			t.Errorf("missing direct object %q (got %v)", k, page.Objects)
 		}
+	}
+}
+
+func testMultipartHappyPath(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	const partSize = 1 << 16 // 64 KiB
+	const numParts = 4
+	full := DeterministicBytes(partSize*numParts, "multi-happy")
+
+	mp, err := s.CreateMultipart(ctx(), "rk/multi-happy", &storage.MultipartOptions{ContentType: "application/octet-stream"})
+	if err != nil {
+		t.Fatalf("CreateMultipart: %v", err)
+	}
+	if mp.UploadID() == "" {
+		t.Error("UploadID empty")
+	}
+	if mp.Key() != "rk/multi-happy" {
+		t.Errorf("Key = %q, want %q", mp.Key(), "rk/multi-happy")
+	}
+
+	parts := make([]storage.MultipartPart, 0, numParts)
+	for i := 0; i < numParts; i++ {
+		chunk := full[i*partSize : (i+1)*partSize]
+		p, err := mp.UploadPart(ctx(), i+1, bytes.NewReader(chunk))
+		if err != nil {
+			t.Fatalf("UploadPart %d: %v", i+1, err)
+		}
+		parts = append(parts, p)
+	}
+
+	v, err := s.CompleteMultipartIfAbsent(ctx(), mp, parts)
+	if err != nil {
+		t.Fatalf("CompleteMultipartIfAbsent: %v", err)
+	}
+	if v.Token == "" {
+		t.Error("complete returned empty version token")
+	}
+
+	obj, err := s.Get(ctx(), "rk/multi-happy", nil)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer obj.Body.Close()
+	got, _ := io.ReadAll(obj.Body)
+	if !bytes.Equal(got, full) {
+		t.Errorf("multipart content mismatch: got len=%d want len=%d", len(got), len(full))
 	}
 }

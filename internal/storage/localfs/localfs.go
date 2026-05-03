@@ -509,14 +509,6 @@ func (l *Localfs) collectKeys(prefix string) ([]string, error) {
 	return keys, nil
 }
 
-func (l *Localfs) CreateMultipart(ctx context.Context, key string, opts *storage.MultipartOptions) (storage.MultipartUpload, error) {
-	return nil, storage.ErrNotSupported
-}
-
-func (l *Localfs) CompleteMultipartIfAbsent(ctx context.Context, upload storage.MultipartUpload, parts []storage.MultipartPart) (storage.ObjectVersion, error) {
-	return storage.ObjectVersion{}, storage.ErrNotSupported
-}
-
 func (l *Localfs) SignedGetURL(ctx context.Context, key string, opts storage.SignedURLOptions) (string, error) {
 	return "", storage.ErrNotSupported
 }
