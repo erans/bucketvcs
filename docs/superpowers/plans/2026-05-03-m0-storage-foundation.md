@@ -9,7 +9,7 @@
 **Tech Stack:** Go 1.22, `github.com/google/uuid` v1.6.0. No other external dependencies in M0. Linux + macOS targets.
 
 **Reference docs:**
-- Design spec (r4): `docs/superpowers/specs/2026-05-03-m0-storage-foundation-design.md`
+- Design spec (r5): `docs/superpowers/specs/2026-05-03-m0-storage-foundation-design.md`
 - Original spec sections: §9, §10, §29, §35, §40.1
 - Decomposition: `docs/superpowers/specs/2026-05-03-bucketvcs-oss-decomposition-design.md`
 
@@ -36,6 +36,13 @@
 - Task 14 `headLocked` adds a size-mismatch fast-path: if `os.Stat(content).Size() != sidecar.Size`, the sidecar is treated as stale and self-heal triggers (recompute sha256 from content, rewrite sidecar). This catches the post-crash "content (new) + sidecar (old)" window when content size changed; same-size crash windows are addressed by `bucketvcs doctor` at M16. Conditional writes (`PutIfVersionMatches`, `DeleteIfVersionMatches`) inherit the fast-path because they call `headLocked` first.
 - Task 30 split into two unit tests: missing-sidecar self-heal and size-mismatch self-heal.
 - Task 32 README expanded with three verbatim sections from the design spec: "Symlink and hardlink safety (AD11)", "Filesystem portability assumptions", and "Crash recovery and `bucketvcs doctor`". Operator-facing warnings cannot be silently diluted.
+
+**Plan revision r5 changes (2026-05-03):** Updated to match design spec r5 (addresses roborev round 4, job 7690).
+
+- New **Task 35**: implement `Localfs.Verify(ctx) error` (instance method) and `localfs.Verify(root string) error` (package-level function). Verify walks every object under `<root>/objects/`, recomputes sha256 from content, and rewrites stale sidecars. The package-level function additionally clears `<root>/.lock` so a subsequent `Open` succeeds. M0 ships this verifier itself rather than deferring to M16's `bucketvcs doctor`.
+- Task 30 expanded with size-mismatch tests against Get/GetRange/PutIfVersionMatches/DeleteIfVersionMatches in addition to the existing Head coverage. The shared `headLocked` helper is exercised through every code path that depends on it.
+- Task 32 README updated: replace the "must run `bucketvcs doctor` at M16" text with the verbatim "Crash recovery and `Localfs.Verify`" section from the spec, including the operator workflow.
+- Final-verification exit criteria expanded to 13 items (Verify named explicitly).
 
 ---
 
@@ -72,6 +79,8 @@ github.com/bucketvcs/bucketvcs/
 │       ├── localfs.go                                     Task 7 (stub) → Tasks 13–23 (real)
 │       ├── localfs_test.go                                Tasks 13, 30, 34 (lock file, self-heal, symlink rejection)
 │       ├── multipart.go                                   Task 21
+│       ├── verify.go                                      Task 35
+│       ├── verify_test.go                                 Task 35
 │       └── localfs_conformance_test.go                    Task 9
 ```
 
@@ -4407,35 +4416,41 @@ Unsupported (will refuse or behave undefined):
   `O_CREATE|O_EXCL` semantics differ enough that M0 does not target
   Windows.
 
-## Crash recovery and `bucketvcs doctor` — verbatim from M0 design spec r4
+## Crash recovery and `Localfs.Verify` — verbatim from M0 design spec r5
 
 Localfs's stale-sidecar fast-path (size-mismatch detection on read)
 catches the common case where a crashed `PutIfVersionMatches` left
 content of a different size than the previous version. It does NOT
 catch the rarer case where the new and old content happen to share
-the same size. To preserve CAS correctness across crashes:
+the same size. To preserve CAS correctness across crashes, M0 ships
+a verifier in the localfs package itself.
 
-> **After unclean shutdown (`kill -9`, OOM, host crash, etc.),
-> localfs MUST be re-validated by `bucketvcs doctor` (M16) before
-> write traffic resumes.** Doctor walks every object under
-> `<root>/objects/`, recomputes sha256 from content, and rewrites
-> stale sidecars. After doctor completes successfully, the (content,
-> sidecar) pair is guaranteed consistent and CAS semantics are fully
-> restored.
+**Verifier API:**
 
-Operational guidance:
+- `Localfs.Verify(ctx) error` (instance method): walks every object,
+  recomputes sha256, rewrites stale sidecars. Safe to call as
+  periodic maintenance on a healthy open bucket.
+- `localfs.Verify(root) error` (package-level function): for
+  recovery from unclean shutdown. Opens the bucket in repair mode
+  (bypassing the lockfile check), reconciles, then clears
+  `<root>/.lock` so a subsequent `Open` succeeds.
 
-- **Clean shutdown**: a graceful `Close` on the `Localfs` instance
-  does not require doctor. Subsequent opens are safe.
-- **Unclean shutdown without doctor**: read traffic is allowed
-  (size-mismatch fast-path catches most stale sidecars).
-  Conditional writes against an undetected stale sidecar may
-  operate on the wrong version, breaking CAS. Operators MUST treat
-  this as data loss risk for any keys touched during the crashed
-  write.
-- **Doctor is M16 work, not M0**: until M16 ships, localfs M0
-  deployments must be considered ephemeral; production-style
-  operators should keep an off-bucket replica as recourse.
+**Operator workflow on unclean shutdown:**
+
+1. Process running localfs is killed (kill -9, OOM, host crash).
+2. New process calls `localfs.Open(root)` →
+   returns `ErrAlreadyLocked` because the dead process's `.lock`
+   is still present.
+3. Operator confirms the prior process is gone (ps, systemctl, etc.).
+4. Operator calls `localfs.Verify(root)`. Verify scans every object,
+   recomputes sha256, rewrites stale sidecars, and clears
+   `<root>/.lock` on successful completion.
+5. New process calls `localfs.Open(root)` → succeeds.
+
+**Future M16 integration**: `bucketvcs doctor` will wrap
+`localfs.Verify` (and equivalents for cloud adapters) as a CLI
+subcommand. The underlying primitive ships in M0; the "doctor" name
+is reserved for the M16 wrapper.
 
 This requirement applies to localfs only. Cloud adapters at M5/M7
 do not have an equivalent torn-state because their version tokens
@@ -4803,6 +4818,317 @@ entry without disrupting the listing of the normal sibling."
 
 ---
 
+## Task 35: Localfs.Verify and package-level Verify
+
+**Files:**
+- Create: `internal/storage/localfs/verify.go`
+- Create: `internal/storage/localfs/verify_test.go`
+
+Implements the M0 reconciliation primitive that handles same-size post-crash torn states. M16's eventual `bucketvcs doctor` CLI subcommand will wrap this primitive; the underlying logic ships in M0.
+
+- [ ] **Step 1: Write the failing tests for Verify**
+
+Write `internal/storage/localfs/verify_test.go`:
+
+```go
+package localfs_test
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
+)
+
+// TestVerifyClean: Verify on a healthy bucket is a no-op success.
+func TestVerifyClean(t *testing.T) {
+	dir := t.TempDir()
+	s, err := localfs.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	for i := 0; i < 5; i++ {
+		key := "rk/clean-" + string(rune('a'+i))
+		if _, err := s.PutIfAbsent(context.Background(), key, bytes.NewReader([]byte("payload-"+key)), nil); err != nil {
+			t.Fatalf("seed %s: %v", key, err)
+		}
+	}
+	if err := s.Verify(context.Background()); err != nil {
+		t.Errorf("Verify on clean bucket = %v, want nil", err)
+	}
+}
+
+// TestVerifyReconcilesSameSize: simulate a same-size post-crash torn
+// state — content rewritten out of band with same size as before but
+// different bytes; sidecar still records the OLD sha256. Verify must
+// detect and rewrite the sidecar with the NEW sha256.
+func TestVerifyReconcilesSameSize(t *testing.T) {
+	dir := t.TempDir()
+	s, err := localfs.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	original := []byte("aaaaaaaa")
+	if _, err := s.PutIfAbsent(context.Background(), "rk/torn", bytes.NewReader(original), nil); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Out-of-band rewrite with same-size content. Sidecar untouched.
+	objPath := filepath.Join(dir, "objects", "rk", "torn")
+	tornContent := []byte("BBBBBBBB")
+	if len(tornContent) != len(original) {
+		t.Fatal("test fixture: content sizes must match")
+	}
+	if err := os.WriteFile(objPath, tornContent, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// Reopen the bucket. Open will fail because .lock still exists
+	// from the prior process (we explicitly closed cleanly, but for
+	// a torn-state test we treat this as if the prior process crashed.
+	// The cleanest way: invoke the package-level Verify which bypasses
+	// the lock check and clears it.
+	if err := localfs.Verify(dir); err != nil {
+		t.Fatalf("package Verify: %v", err)
+	}
+
+	s2, err := localfs.Open(dir)
+	if err != nil {
+		t.Fatalf("reopen after Verify: %v", err)
+	}
+	t.Cleanup(func() { _ = s2.Close() })
+
+	md, err := s2.Head(context.Background(), "rk/torn")
+	if err != nil {
+		t.Fatalf("Head: %v", err)
+	}
+	expectedHash := sha256.Sum256(tornContent)
+	want := hex.EncodeToString(expectedHash[:])
+	if md.Version.Token != want {
+		t.Errorf("token after Verify = %s, want %s (sha256 of NEW content)", md.Version.Token, want)
+	}
+}
+
+// TestVerifyClearsLock: package-level Verify on a bucket whose .lock
+// still exists from a prior (clean or unclean) instance must clear
+// the lock so a subsequent Open succeeds.
+func TestVerifyClearsLock(t *testing.T) {
+	dir := t.TempDir()
+	s, err := localfs.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := s.PutIfAbsent(context.Background(), "rk/x", bytes.NewReader([]byte("y")), nil); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Simulate a crash by NOT calling Close. The lock stays.
+	// (In the test we cannot actually crash, but we can leak the
+	// instance pointer and rely on t.TempDir cleanup.)
+
+	// Sanity: a fresh Open should fail because .lock exists.
+	if _, err := localfs.Open(dir); err == nil {
+		t.Fatal("expected Open to fail with ErrAlreadyLocked")
+	}
+
+	if err := localfs.Verify(dir); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+
+	s2, err := localfs.Open(dir)
+	if err != nil {
+		t.Fatalf("Open after Verify: %v", err)
+	}
+	if err := s2.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+```
+
+- [ ] **Step 2: Run tests to verify failure**
+
+```bash
+go test -race ./internal/storage/localfs/... -run TestVerify
+```
+
+Expected: FAIL — `Verify` (instance method and package function) undefined.
+
+- [ ] **Step 3: Implement Verify**
+
+Write `internal/storage/localfs/verify.go`:
+
+```go
+package localfs
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+// Verify walks every object under <root>/objects/, recomputes sha256
+// from content, and rewrites stale sidecars (missing, parse-broken, or
+// size-mismatched). Safe to call on a healthy Localfs as periodic
+// maintenance. Caller already holds the bucket open.
+func (l *Localfs) Verify(ctx context.Context) error {
+	root := filepath.Join(l.root, objectsDir)
+	return walkAndReconcile(ctx, root, func(path string) error {
+		// Acquire the per-key mutex so Verify does not race a concurrent
+		// writer on the same key.
+		key := keyForPath(l.root, path)
+		l.mutexes.lock(key)
+		defer l.mutexes.unlock(key)
+		return reconcileOne(path)
+	})
+}
+
+// Verify (package-level) is for recovery from unclean shutdown. It
+// opens the bucket in repair mode (bypassing the .lock check), runs
+// the same reconciliation, then removes <root>/.lock so a subsequent
+// localfs.Open succeeds.
+func Verify(root string) error {
+	if root == "" {
+		return errors.New("localfs: Verify root must be non-empty")
+	}
+	if err := walkAndReconcile(context.Background(),
+		filepath.Join(root, objectsDir),
+		func(path string) error { return reconcileOne(path) }); err != nil {
+		return err
+	}
+	// Clear the lockfile so Open succeeds. Ignore "does not exist".
+	if err := os.Remove(filepath.Join(root, lockFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("localfs.Verify: clear lockfile: %w", err)
+	}
+	return nil
+}
+
+// walkAndReconcile walks objects/ and calls reconcile for each
+// non-symlink, non-sidecar file.
+func walkAndReconcile(ctx context.Context, objectsRoot string, reconcile func(path string) error) error {
+	return filepath.WalkDir(objectsRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			return nil // skip symlinks; AD11 says they are out-of-bounds
+		}
+		if filepath.Ext(path) == metaSuffix {
+			return nil // sidecars are reconciled alongside their content
+		}
+		return reconcile(path)
+	})
+}
+
+// reconcileOne ensures the (content, sidecar) pair at path is
+// consistent. Recomputes sha256 from content; if sidecar is missing,
+// unparseable, or records a different sha256/size, rewrites it.
+func reconcileOne(contentPath string) error {
+	contentInfo, err := os.Stat(contentPath)
+	if err != nil {
+		return err
+	}
+	f, err := os.Open(contentPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return err
+	}
+	actualSha := hex.EncodeToString(h.Sum(nil))
+
+	metaPath := contentPath + metaSuffix
+	scBytes, err := os.ReadFile(metaPath)
+	if err == nil {
+		if sc, perr := parseSidecar(scBytes); perr == nil {
+			if sc.Sha256 == actualSha && sc.Size == contentInfo.Size() {
+				return nil // already consistent; no rewrite needed
+			}
+		}
+	}
+	// Sidecar missing, unparseable, or stale. Rewrite.
+	sc := newSidecar(actualSha, contentInfo.Size(), "", contentInfo.ModTime())
+	out, err := encodeSidecar(sc)
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(metaPath, out)
+}
+
+// keyForPath inverts objectPath: given the absolute on-disk path of a
+// content file, returns the corresponding object key.
+func keyForPath(root, contentPath string) string {
+	rel, err := filepath.Rel(filepath.Join(root, objectsDir), contentPath)
+	if err != nil {
+		return contentPath // best effort; mutex collision worst case
+	}
+	return filepath.ToSlash(rel)
+}
+
+// silence "imported and not used" for time when only used transitively
+var _ = time.Time{}
+```
+
+- [ ] **Step 4: Run tests to verify pass**
+
+```bash
+go test -race ./internal/storage/localfs/... -run TestVerify
+```
+
+Expected: PASS for `TestVerifyClean`, `TestVerifyReconcilesSameSize`, and `TestVerifyClearsLock`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/storage/localfs/verify.go internal/storage/localfs/verify_test.go
+git commit -m "localfs: Verify ships in M0 (instance method + package-level)
+
+Localfs.Verify(ctx) walks every object, recomputes sha256, and
+rewrites stale sidecars (missing, parse-broken, or content/size
+mismatch). Acquires per-key mutex per object so Verify does not
+race concurrent writers on a healthy bucket.
+
+localfs.Verify(root) is the package-level entry point used to
+recover from unclean shutdown. It bypasses the .lock check, runs
+the same reconciliation, and clears the lockfile so a subsequent
+Open succeeds.
+
+This addresses the same-size post-crash torn-state case that the
+size-mismatch fast-path on read cannot detect. M16's eventual
+bucketvcs doctor CLI subcommand will wrap this primitive."
+```
+
+---
+
 ## Final verification
 
 - [ ] **Step 1: Run the full test suite**
@@ -4831,7 +5157,7 @@ Expected: `clean`.
 
 - [ ] **Step 4: Verify the exit-criteria checklist**
 
-Confirm against the design spec r4 exit criteria:
+Confirm against the design spec r5 exit criteria:
 
 1. `go test ./internal/storage/...` is green on Linux/macOS — verified Step 1
 2. 15 §29 correctness tests pass — verified by Task 26 inventory
@@ -4842,9 +5168,10 @@ Confirm against the design spec r4 exit criteria:
 7. `Capabilities()` declarations round-trip — verified Task 23
 8. Error taxonomy maps to conformance assertions — verified across §29 #13, #15, #10, key namespace; error normalization rules and `fsyncDir` failure semantics from spec r3/r4 implemented in Task 14 helpers
 9. Package layout matches §40.1 — verified by file structure at top of plan
-10. README documents contract, adding adapters, running conformance, AD8 recast, and includes the verbatim "Symlink and hardlink safety", "Filesystem portability assumptions", and "Crash recovery and `bucketvcs doctor`" sections — Task 32
-11. Public Go-doc comments on every exported symbol in `internal/storage` — verified across Tasks 2–6
-12. Worked example exercises Put/Get/PutIfVersionMatches/List/Multipart/Delete with success and conflict paths — Task 31
+10. README documents contract, adding adapters, running conformance, AD8 recast, and includes the verbatim "Symlink and hardlink safety", "Filesystem portability assumptions", and "Crash recovery and `Localfs.Verify`" sections — Task 32
+11. `Localfs.Verify(ctx)` and `localfs.Verify(root)` ship with the three named test cases (clean, same-size reconciliation, lockfile-cleared) — Task 35
+12. Public Go-doc comments on every exported symbol in `internal/storage` — verified across Tasks 2–6
+13. Worked example exercises Put/Get/PutIfVersionMatches/List/Multipart/Delete with success and conflict paths — Task 31
 
 - [ ] **Step 5: Tag M0 milestone (optional)**
 
