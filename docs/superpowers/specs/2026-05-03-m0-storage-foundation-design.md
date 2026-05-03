@@ -1,7 +1,7 @@
 # M0 — Storage Foundation: ObjectStore Contract, localfs Adapter, Conformance Suite
 
 Date: 2026-05-03
-Status: design draft (revision 5)
+Status: design draft (revision 6)
 Milestone: M0 (first critical-path milestone of bucketvcs OSS-core)
 Source spec sections: §9, §10, §29 (subset), §35, §40.1, §40.4
 Decomposition: see `2026-05-03-bucketvcs-oss-decomposition-design.md`
@@ -13,6 +13,7 @@ Revision history:
 - 2026-05-03 r3: address roborev design review (job 7686) findings — AD11 narrowed to best-effort final-path symlink rejection with documented limitations (ancestor symlinks, hardlinks, TOCTOU not covered); directory `fsync` added to the atomic write pattern for crash durability; version-conditional operation contract table added; plan stages summarized inline; crash-recovery semantics tabulated.
 - 2026-05-03 r4: address roborev design review (job 7688) findings — stale-sidecar detection on read added (size-mismatch fast-path triggers self-heal) plus `bucketvcs doctor` mandated as a precondition for resuming write traffic after unclean shutdown; `fsyncDir` failure behavior specified (error propagated, operation reported as failed); List symlink mechanism pinned to `DirEntry.Type()` from `filepath.WalkDir`; size-mismatch detection surfaced into the stage 3 summary; README verbatim-copy obligations enumerated.
 - 2026-05-03 r5: address roborev design review (job 7690) findings — replaced "must run doctor at M16" with M0-shipped `Localfs.Verify(ctx)` method and package-level `localfs.Verify(root)` function; lockfile (`<root>/.lock`) doubles as unclean-shutdown marker (its presence at `Open` time triggers `ErrAlreadyLocked` with the operator instructed to call `Verify` before retrying); read-path sequence rewritten as an explicit 4-step procedure; self-heal failure semantics specified (original read error wins, partial sidecar left for retry); size-mismatch coverage extended to all reads and conditional writes via the shared `headLocked` helper.
+- 2026-05-03 r6: address roborev design review (job 7693) findings — fix the regression introduced in r5 where package-level `Verify(root)` could trample a live process holding the bucket open. Lockfile now stores PID + host + start time; `Verify` checks if the recorded PID is alive on the recorded host before proceeding (`kill(pid, 0)` on POSIX); refuses with `ErrLockedByLiveProcess` if alive unless `WithForce(true)` opt is passed. Package-level `Verify` signature changed to `Verify(ctx context.Context, root string, opts ...VerifyOption) error` for cancellation, force-override, and progress reporting. Reconciliation outcome matrix added covering missing/parse-broken/orphan sidecars, symlinks, dirs, unreadable files, ctx cancellation, partial failure. Same-size torn-sidecar test made an explicit exit criterion (the actual case Verify exists for).
 
 ## Purpose
 
@@ -66,6 +67,7 @@ These were settled during brainstorming and are not re-litigated below.
 | AD9 | M0 omits `PutOptions.Metadata` (user-defined K/V metadata). Only `ContentType` is supported. | The field added complexity (sidecar schema, `ObjectMetadata` exposure, conformance assertions) without a caller for it in M0. Cloud adapters at M5/M7 reintroduce it with explicit semantics keyed to provider-native metadata (S3 `x-amz-meta-*`, GCS object metadata, etc.). The interface stays additive: adding `Metadata` later does not break existing callers. |
 | AD10 | Multipart `PartNumber` is 1-based (S3 convention). Reject part numbers < 1. | Cloud adapters all use 1-based numbering (S3, GCS resumable, Azure block IDs); having localfs match avoids a class of porting bugs. |
 | AD11 | Localfs read paths perform **best-effort final-path symlink rejection** via `os.Lstat`. Ancestor-directory symlinks, hardlinks, and TOCTOU between `Lstat` and the subsequent `Open` are explicitly NOT detected. | The realistic dev-test footgun is `ln -s /etc/passwd <root>/objects/foo`; the final-path lstat catches it. Stronger sandboxing (every-component validation, `openat2(RESOLVE_BENEATH)` on Linux, `Nlink>1` checks for hardlinks) is out of scope for M0; the README and the "Symlink and hardlink safety" section document the limitations honestly. Cloud adapters at M5/M7 do not have these concerns because they do not see a host filesystem. |
+| AD12 | The localfs lockfile `<root>/.lock` records `{pid, host, started_at}` JSON. `Open` writes the JSON via `O_CREAT\|O_EXCL`. `Verify` reads the JSON to determine whether the lock-holder is alive (POSIX `kill(pid, 0)`) on the same host before deciding whether to proceed. | r5 introduced a package-level `Verify(root)` that bypassed the lockfile check unconditionally — a regression that allowed the verifier to trample a live process. The PID-encoded lockfile lets `Verify` distinguish "previous process is dead" (proceed safely) from "another process is actually using the bucket" (refuse unless `WithForce(true)` is passed). Cross-host detection is best-effort: a recorded host that differs from the current host means M0 cannot determine liveness and refuses without `WithForce`. PID reuse is mitigated by checking `started_at` if the PID is alive — if the live PID's start time predates the recorded `started_at`, it is a different process and we treat the lock-holder as dead. |
 
 ## ObjectStore interface
 
@@ -198,6 +200,26 @@ var (
 )
 ```
 
+Localfs additionally exposes:
+
+```go
+// In the localfs package:
+
+// ErrAlreadyLocked is returned by Open when <root>/.lock already
+// exists. The cause may be that another process has the bucket open
+// or that a previous process crashed without cleaning up. Callers
+// resolve the ambiguity by invoking localfs.Verify (which performs
+// the AD12 liveness check) or by manual inspection.
+var ErrAlreadyLocked = errors.New("localfs: root is already locked by another instance")
+
+// ErrLockedByLiveProcess is returned by package-level Verify when
+// the lockfile points to a process that is alive on the current host
+// (or to a process on a different host where M0 cannot probe
+// liveness). Caller can pass WithForce(true) to override; doing so
+// against a truly live holder will corrupt that holder's state.
+var ErrLockedByLiveProcess = errors.New("localfs: lockfile holder is alive")
+```
+
 The conformance suite (§29 #13) verifies CAS conflicts surface as `ErrVersionMismatch` and `ErrAlreadyExists` correctly. §29 #15 verifies throttling classification — N/A for localfs but real for cloud adapters.
 
 ### Design notes on the interface
@@ -305,30 +327,91 @@ The "content (new) + sidecar (old)" window is the one M0 limitation that a cloud
 
 ### Crash recovery and `Localfs.Verify`
 
-Localfs's stale-sidecar fast-path (size-mismatch detection on read) catches the common case where a crashed `PutIfVersionMatches` left content of a different size than the previous version. It does NOT catch the rarer case where the new and old content happen to share the same size. To preserve CAS correctness across crashes, M0 **ships a verifier in the localfs package itself** — not a deferred dependency on M16.
+Localfs's stale-sidecar fast-path (size-mismatch detection on read) catches the common case where a crashed `PutIfVersionMatches` left content of a different size than the previous version. It does NOT catch the rarer case where the new and old content happen to share the same size. To preserve CAS correctness across crashes, M0 ships a verifier in the localfs package itself.
 
 **Verifier API:**
 
 ```go
 // Localfs.Verify walks every object under <root>/objects/, recomputes
-// sha256 from content, and rewrites stale sidecars. Safe to call on a
-// healthy Localfs; useful as periodic maintenance or after suspected
-// torn states. Caller already holds the bucket open.
+// sha256 from content, and reconciles sidecars per the outcome matrix
+// below. Caller already holds the bucket open; Verify acquires the
+// per-key mutex per object so it can run alongside normal writes.
 func (l *Localfs) Verify(ctx context.Context) error
 
-// Verify is a package-level entry point that operates on a closed
-// bucket: opens it in repair mode (bypassing the lockfile check),
-// runs the same reconciliation, then clears the lockfile so a
-// subsequent Open succeeds. Used to recover from unclean shutdown.
-func Verify(root string) error
+// Verify is the package-level entry point used to recover from unclean
+// shutdown. It checks the lockfile for liveness (AD12) before doing
+// anything; if the recorded process is alive, returns
+// ErrLockedByLiveProcess unless WithForce(true) was passed. On success
+// it removes the lockfile so a subsequent Open succeeds.
+func Verify(ctx context.Context, root string, opts ...VerifyOption) error
+
+type VerifyOption func(*verifyConfig)
+
+// WithForce overrides the live-lock check. Destructive: only use when
+// the operator has independently confirmed no other process is using
+// the bucket.
+func WithForce(force bool) VerifyOption
+
+// WithProgress installs a callback that is invoked as objects are
+// processed. Called in the same goroutine as Verify.
+func WithProgress(cb func(processed int)) VerifyOption
 ```
 
-**Lockfile doubles as unclean-shutdown marker.**
+**Lockfile content (AD12):**
 
-`<root>/.lock` is created on `Open` (via `O_CREAT|O_EXCL`) and removed on clean `Close`. If `Open` finds an existing lockfile, the previous shutdown was unclean OR another process has the bucket open. M0 cannot programmatically distinguish these; `Open` returns `ErrAlreadyLocked` in both cases and the caller decides:
+```json
+{
+  "pid": 12345,
+  "host": "hostname.local",
+  "started_at": "2026-05-03T20:00:00Z"
+}
+```
 
-- If the operator knows the previous process is gone (e.g., they observed the crash, or it has been long enough), they call `localfs.Verify(root)` to reconcile and clear the marker.
-- If the operator suspects another process actually owns the bucket, they leave it alone.
+`Open` writes this content via `O_CREAT|O_EXCL`. `Close` removes it.
+
+**Lock-liveness rule used by package-level `Verify`:**
+
+```text
+1. Read <root>/.lock. If absent: clean shutdown; reconcile and return.
+2. Parse the JSON. Malformed: treat as stale; reconcile and remove.
+3. If recorded host != current host:
+     - Without WithForce: refuse with ErrLockedByLiveProcess
+       (M0 cannot probe liveness on a remote host).
+     - With WithForce: proceed.
+4. If recorded host == current host:
+     a. Probe POSIX kill(pid, 0).
+     b. ESRCH (no such process) → lock-holder is dead; proceed.
+     c. PID is alive: read /proc/<pid>/stat (Linux) or equivalent on
+        macOS to compare process start time against recorded
+        started_at. If the live process started AFTER recorded
+        started_at, PID has been reused; lock-holder is dead;
+        proceed.
+     d. PID alive AND started_at matches: lock-holder is live.
+        Without WithForce: refuse with ErrLockedByLiveProcess.
+        With WithForce: proceed (operator owns the safety call).
+5. If proceeding: walk objects, reconcile per the outcome matrix,
+   remove the lockfile on success.
+```
+
+**Reconciliation outcome matrix:**
+
+| Encountered state | Verify action | Notes |
+|-------------------|---------------|-------|
+| Content + matching sidecar (sha256 + size both equal) | No-op | Healthy entry. |
+| Content + missing sidecar | Recompute, write fresh sidecar | Self-heal. |
+| Content + parse-broken sidecar | Recompute, overwrite sidecar | Self-heal. |
+| Content + size-mismatched sidecar | Recompute, overwrite sidecar | Stale-sidecar fast-path's territory; Verify also covers it for completeness. |
+| Content + sha-mismatched sidecar (same size, different bytes) | Recompute, overwrite sidecar | **The case Verify exists for.** Read-path size-mismatch fast-path cannot catch this; Verify must. |
+| Sidecar without content (`<key>.meta` exists, `<key>` missing) | Remove the orphan sidecar | Cleanup. Possible if a Delete crashed between content removal and sidecar removal. |
+| Symlink under `objects/` | Skip with structured warning | AD11. Verify does not chase symlinks. |
+| Subdirectories | Recurse normally | Standard `WalkDir` behavior. |
+| Unreadable file (permission denied, I/O error) | Return wrapped error; partial reconciliation valid | Subsequent Verify can retry; previously reconciled entries stay reconciled. |
+| `ctx.Done()` | Return `ctx.Err()` | Partial reconciliation valid; idempotent. |
+
+**Concurrency rule:**
+
+- `Localfs.Verify(ctx)` (instance method): acquires the per-key mutex per object during reconciliation. Safe to call alongside normal writes; throughput is reduced but correctness is preserved.
+- `localfs.Verify(ctx, root, opts...)` (package-level): runs only after the live-lock check has confirmed no live process holds the bucket (or the operator has passed `WithForce`). It does not need per-key mutexes because no other process should be writing.
 
 **Operator workflow on unclean shutdown:**
 
@@ -337,13 +420,18 @@ func Verify(root string) error
 2. New process calls localfs.Open(root).
    → returns ErrAlreadyLocked (the dead process's .lock is still there).
 3. Operator confirms the prior process is gone (ps, systemctl, etc.).
-4. Operator calls localfs.Verify(root).
-   → Verify scans every object, recomputes sha256, rewrites stale sidecars.
-   → Verify clears <root>/.lock on successful completion.
+4. Operator calls localfs.Verify(ctx, root).
+   → Verify reads the lockfile, runs the AD12 liveness check.
+   → If the recorded PID is dead or its start time predates the
+     recorded started_at: Verify reconciles every object and clears
+     the lockfile.
+   → If the recorded PID is alive (e.g., operator was wrong about
+     the crash): Verify returns ErrLockedByLiveProcess and does
+     nothing destructive.
 5. New process calls localfs.Open(root) → succeeds.
 ```
 
-`Localfs.Verify(ctx)` (instance method) is also safe to call on a healthy open bucket as periodic maintenance — it just confirms every (content, sidecar) pair is consistent and is a no-op when nothing is torn.
+**Operator warning**: passing `WithForce(true)` against a bucket whose lockfile points to a live process WILL corrupt that process's view of the bucket. The flag exists for cases where M0's heuristics cannot determine liveness (e.g., cross-host buckets, containers with namespaced PIDs); operators are responsible for the safety judgment.
 
 **Future M16 integration**: `bucketvcs doctor` will wrap `localfs.Verify` (and equivalents for cloud adapters) as a CLI subcommand, but the underlying primitive ships in M0. The "doctor" name is reserved; M0 callers should use `localfs.Verify` directly.
 
@@ -606,7 +694,19 @@ Notes:
 7. Documented error taxonomy maps to the conformance assertions per the table above; the error-normalization rules in this spec match implementation behavior.
 8. Package layout matches §40.1.
 9. `internal/storage/README.md` documents: the interface contract; how to add a new adapter; how to run the conformance suite against an arbitrary adapter; the AD8 recast; the AD11 best-effort symlink claim **including the verbatim "What is NOT covered in M0" list from the "Symlink and hardlink safety" section**; the **verbatim "Filesystem portability assumptions" section**; the **verbatim "Crash recovery and `Localfs.Verify`" section including the operator workflow**; and any expected divergences. The README is operator-facing; copying these blocks verbatim ensures the warnings are not diluted as the spec evolves.
-10. `Localfs.Verify(ctx)` (instance method) and `localfs.Verify(root)` (package-level function) ship in M0 with at least the following test coverage: clean bucket → no-op success; size-mismatched torn sidecar → reconciled successfully; package-level `Verify` clears `.lock` so a subsequent `Open` succeeds.
+10. `Localfs.Verify(ctx)` (instance method) and `localfs.Verify(ctx, root, opts...)` (package-level function) ship in M0 with the following test coverage:
+    - **Clean bucket** → no-op success.
+    - **Same-size torn sidecar** → reconciled successfully (the case Verify exists for; size-mismatch fast-path on read cannot catch this).
+    - **Different-size torn sidecar** → reconciled successfully (also the size-mismatch fast-path's territory).
+    - **Missing sidecar** → reconciled.
+    - **Parse-broken sidecar** → reconciled.
+    - **Orphan sidecar** (no content) → removed.
+    - **Symlink under `objects/`** → skipped with structured warning.
+    - **Live-process lockfile** → `Verify(ctx, root)` without `WithForce` returns `ErrLockedByLiveProcess`; with `WithForce` it proceeds.
+    - **Cross-host lockfile** → `Verify` without `WithForce` returns `ErrLockedByLiveProcess` (M0 cannot probe a remote host).
+    - **PID-reused lockfile** → live PID with start time after recorded `started_at` treated as dead; reconciliation proceeds.
+    - **Context cancellation** → `Verify` returns `ctx.Err()`; previously reconciled entries stay reconciled (idempotent retry).
+    - **Lockfile cleared on success** → after reconciliation, `<root>/.lock` no longer exists; subsequent `Open` succeeds.
 11. Public Go-doc comments on every exported symbol in `internal/storage`.
 12. A worked example (~50 lines, in `internal/storage/example_test.go` or under `examples/`) exercises Put, Get, PutIfVersionMatches, List, Multipart, Delete on localfs, including the conflict paths.
 
