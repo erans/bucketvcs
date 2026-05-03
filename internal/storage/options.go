@@ -70,8 +70,13 @@ type ListOptions struct {
 	// means start from the beginning of the prefix.
 	ContinuationToken string
 
-	// Delimiter, if non-empty, causes the adapter to roll keys ending in
-	// Delimiter into CommonPrefixes rather than Objects.
+	// Delimiter, if non-empty, groups keys cloud-style: for each key
+	// whose remainder after the requested Prefix contains Delimiter,
+	// the adapter omits the key from Objects and emits the substring
+	// from Prefix up to and including the first Delimiter occurrence
+	// as a single entry in CommonPrefixes (duplicates collapsed). Keys
+	// whose remainder does not contain Delimiter are returned in
+	// Objects as usual. Matches S3/GCS list-with-delimiter semantics.
 	Delimiter string
 }
 
