@@ -31,9 +31,10 @@ const (
 
 // Localfs is the local-filesystem ObjectStore implementation.
 type Localfs struct {
-	root     string
-	lock     *os.File
-	mutexes  *keyedMutex
+	root            string
+	lock            *os.File
+	lockfileRemoved bool
+	mutexes         *keyedMutex
 }
 
 // Compile-time assertion that *Localfs satisfies storage.ObjectStore.
@@ -105,18 +106,31 @@ type lockfileContent struct {
 	AcquiredAt time.Time `json:"acquired_at"`
 }
 
-// Close releases the lockfile.
+// Close releases the lockfile. If either closing the file handle or
+// removing the on-disk lockfile fails, Close leaves enough state on
+// the receiver that a subsequent Close call retries the failed step.
+// Callers MUST keep calling Close until it returns nil; otherwise a
+// stranded lockfile blocks future Open calls.
+//
+// Recovery from a process crash (no Close ran at all) is the job of
+// the package-level Verify with WithForce(true) — see verify.go.
 func (l *Localfs) Close() error {
-	if l.lock == nil {
+	if l.lockfileRemoved {
 		return nil
 	}
-	closeErr := l.lock.Close()
-	l.lock = nil
-	rmErr := os.Remove(filepath.Join(l.root, lockFile))
-	if closeErr != nil {
-		return closeErr
+	if l.lock != nil {
+		if err := l.lock.Close(); err != nil {
+			return fmt.Errorf("localfs: close lockfile handle: %w", err)
+		}
+		l.lock = nil
 	}
-	return rmErr
+	if err := os.Remove(filepath.Join(l.root, lockFile)); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("localfs: remove lockfile: %w", err)
+		}
+	}
+	l.lockfileRemoved = true
+	return nil
 }
 
 func (l *Localfs) Capabilities() storage.Capabilities {
