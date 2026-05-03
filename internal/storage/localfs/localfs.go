@@ -404,6 +404,9 @@ func (l *Localfs) List(ctx context.Context, prefix string, opts *storage.ListOpt
 	if err := l.checkOpen(); err != nil {
 		return nil, err
 	}
+	if err := validatePrefix(prefix); err != nil {
+		return nil, err
+	}
 	maxKeys := 1000
 	delimiter := ""
 	cont := ""
@@ -439,6 +442,14 @@ func (l *Localfs) List(ctx context.Context, prefix string, opts *storage.ListOpt
 				if !commonSeen[cp] {
 					commonSeen[cp] = true
 					page.CommonPrefixes = append(page.CommonPrefixes, cp)
+					if len(page.Objects)+len(page.CommonPrefixes) >= maxKeys {
+						// Set the continuation token to a sentinel that
+						// lexically exceeds every key under cp, so the next
+						// page resumes after this rolled-up group instead
+						// of re-emitting the same CommonPrefix.
+						page.NextToken = cp + "\xff"
+						return page, nil
+					}
 				}
 				continue
 			}
@@ -456,24 +467,22 @@ func (l *Localfs) List(ctx context.Context, prefix string, opts *storage.ListOpt
 	return page, nil
 }
 
-// collectKeys walks the objects directory under prefix and returns
-// matching keys in lexicographic order. Sidecar files are excluded.
+// collectKeys walks the entire objects/ tree and returns keys whose
+// string form has the requested prefix, in lexicographic order. We do
+// NOT narrow the walk root by prefix because object-store prefixes are
+// string prefixes, not directory prefixes — List("foo") must surface
+// keys like "foo2/bar" that do not live under the objects/foo/
+// directory. The performance cost is acceptable at M0 (Localfs is for
+// dev/test; cloud adapters at M5/M7 use the provider's own list API).
+//
+// Sidecar files (".meta" suffix) and atomic-write temp files (basename
+// starts with ".") are excluded — neither corresponds to a real object
+// key, and validateKey forbids both patterns at the API boundary so no
+// real key can collide with the skip rule.
 func (l *Localfs) collectKeys(prefix string) ([]string, error) {
 	root := filepath.Join(l.root, objectsDir)
-	prefixFs := filepath.FromSlash(prefix)
-	walkRoot := root
-	if prefixFs != "" {
-		walkRoot = filepath.Join(root, prefixFs)
-		// If walkRoot is a file (the prefix happens to be a complete key),
-		// list the parent directory and filter by prefix.
-		info, err := os.Stat(walkRoot)
-		if err != nil || !info.IsDir() {
-			walkRoot = root
-		}
-	}
-
 	var keys []string
-	err := filepath.WalkDir(walkRoot, func(path string, d os.DirEntry, err error) error {
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return nil
@@ -488,7 +497,12 @@ func (l *Localfs) collectKeys(prefix string) ([]string, error) {
 		if d.Type()&fs.ModeSymlink != 0 {
 			return nil
 		}
-		if strings.HasSuffix(path, metaSuffix) {
+		base := d.Name()
+		// Sidecars and atomic-write temp files: invisible to List.
+		if strings.HasSuffix(base, metaSuffix) {
+			return nil
+		}
+		if strings.HasPrefix(base, ".") {
 			return nil
 		}
 		rel, err := filepath.Rel(root, path)

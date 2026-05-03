@@ -212,3 +212,55 @@ func TestGetRangeFailsClosedOnFutureSidecarSchema(t *testing.T) {
 		t.Errorf("GetRange against future-schema sidecar: got %v, want ErrUnsupportedSidecarSchema", err)
 	}
 }
+
+// TestListPrefixDoesNotNarrowOnDirectoryBoundary asserts that List("foo")
+// surfaces keys whose names extend past "foo" without a slash, e.g.
+// "foo2/bar". Earlier versions narrowed the walk to <root>/objects/foo/
+// when that directory existed, which would silently omit "foo2/...".
+func TestListPrefixDoesNotNarrowOnDirectoryBoundary(t *testing.T) {
+	dir := t.TempDir()
+	s, err := localfs.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	keys := []string{"foo/x", "foo/y", "foo2/bar"}
+	for _, k := range keys {
+		if _, err := s.PutIfAbsent(context.Background(), k, bytes.NewReader([]byte("v")), nil); err != nil {
+			t.Fatalf("PutIfAbsent(%q): %v", k, err)
+		}
+	}
+
+	page, err := s.List(context.Background(), "foo", nil)
+	if err != nil {
+		t.Fatalf("List(\"foo\"): %v", err)
+	}
+	got := map[string]bool{}
+	for _, md := range page.Objects {
+		got[md.Key] = true
+	}
+	for _, k := range keys {
+		if !got[k] {
+			t.Errorf("List(\"foo\") missing %q (got %v)", k, page.Objects)
+		}
+	}
+}
+
+// TestListRejectsEscapingPrefix asserts List validates the prefix and
+// refuses to walk paths that could escape the bucket.
+func TestListRejectsEscapingPrefix(t *testing.T) {
+	dir := t.TempDir()
+	s, err := localfs.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	bad := []string{"../etc/passwd", "/abs", "a/../b", "a/./b"}
+	for _, p := range bad {
+		if _, err := s.List(context.Background(), p, nil); err == nil {
+			t.Errorf("List(%q) returned nil, want error", p)
+		}
+	}
+}
