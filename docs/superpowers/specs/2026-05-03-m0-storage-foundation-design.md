@@ -387,9 +387,13 @@ func WithProgress(cb func(processed int)) VerifyOption
      "nothing to do" eliminates the race where a legitimate Open
      during reconciliation could observe torn sidecars.
    - Any other read error (permission denied, transient I/O) → fail
-     closed. Return the error wrapped; do NOT proceed. Operators can
-     fix the underlying I/O problem and retry, or pass WithForce(true)
-     after manual inspection.
+     closed. Return the error wrapped; do NOT proceed. **`WithForce(true)`
+     does NOT override this**: it would skip the AD13 protection by
+     leaving `preLockBytes` empty/untrustworthy. Operators must fix the
+     underlying I/O problem (permissions, disk failure) and retry;
+     `WithForce` is reserved for parsed cross-host/live-PID cases where
+     the operator has independently confirmed no other process is using
+     the bucket.
    - Read succeeded → preLockBytes = bytes; proceed to step 2.
 2. Parse the JSON.
    - Malformed → treat as stale; proceed to reconcile (the AD13
