@@ -29,6 +29,9 @@ func TestValidateKey(t *testing.T) {
 		strings.Repeat("a", 1025),
 		"foo.meta",
 		"a/b.meta",
+		"foo.meta/bar",
+		"a/foo.meta/b",
+		".meta",
 	}
 	for _, k := range invalid {
 		if err := validateKey(k); err == nil {

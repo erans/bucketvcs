@@ -13,9 +13,12 @@ const maxKeyBytes = 1024
 // rules. The rules are conservative — they match the most-restrictive
 // floor across cloud providers — so a key valid for localfs is also
 // valid for S3, GCS, R2, and Azure Blob. Localfs additionally reserves
-// the ".meta" suffix for its own JSON sidecars; keys ending in ".meta"
-// are rejected so that the sidecar namespace cannot collide with real
-// object keys.
+// the ".meta" suffix in *every* path segment for its own JSON sidecars:
+// the sidecar of object "foo" lives at "<root>/objects/foo.meta", so a
+// key like "foo.meta" would collide with that file, and a key like
+// "foo.meta/bar" would require "foo.meta" to be both a file (the
+// sidecar of "foo") and a directory at the same time. Both are
+// rejected up front.
 func validateKey(key string) error {
 	if key == "" {
 		return errKey("empty")
@@ -29,9 +32,6 @@ func validateKey(key string) error {
 	if strings.HasSuffix(key, "/") {
 		return errKey("has trailing /")
 	}
-	if strings.HasSuffix(key, ".meta") {
-		return errKey("ends in .meta (reserved for localfs sidecars)")
-	}
 	if strings.Contains(key, "\\") {
 		return errKey("contains backslash")
 	}
@@ -41,6 +41,9 @@ func validateKey(key string) error {
 	for _, seg := range strings.Split(key, "/") {
 		if seg == ".." || seg == "." || seg == "" {
 			return errKey(fmt.Sprintf("contains forbidden segment %q", seg))
+		}
+		if strings.HasSuffix(seg, ".meta") {
+			return errKey(fmt.Sprintf("contains segment %q ending in .meta (reserved for localfs sidecars)", seg))
 		}
 	}
 	return nil

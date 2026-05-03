@@ -44,15 +44,18 @@ var _ storage.ObjectStore = (*Localfs)(nil)
 // is created if missing. Open holds a process-wide lockfile at
 // <root>/.lock; a second Open against the same root returns
 // ErrAlreadyLocked.
+//
+// Initialization order is deliberate to keep mutual exclusion strict:
+// only the root directory is created before the O_CREATE|O_EXCL
+// lockfile acquisition. Subdirectories (objects/, uploads/) are
+// created afterwards while holding the lock, so a second concurrent
+// Open is refused before it can mutate the bucket.
 func Open(root string) (*Localfs, error) {
 	if root == "" {
 		return nil, errors.New("localfs: root must be non-empty")
 	}
-	if err := os.MkdirAll(filepath.Join(root, objectsDir), 0o755); err != nil {
-		return nil, fmt.Errorf("localfs: mkdir objects: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Join(root, uploadsDir), 0o755); err != nil {
-		return nil, fmt.Errorf("localfs: mkdir uploads: %w", err)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return nil, fmt.Errorf("localfs: mkdir root: %w", err)
 	}
 
 	lockPath := filepath.Join(root, lockFile)
@@ -87,6 +90,18 @@ func Open(root string) (*Localfs, error) {
 		_ = f.Close()
 		_ = os.Remove(lockPath)
 		return nil, fmt.Errorf("localfs: sync lockfile: %w", err)
+	}
+
+	// We hold the lock now: safe to create subdirectories.
+	if err := os.MkdirAll(filepath.Join(root, objectsDir), 0o755); err != nil {
+		_ = f.Close()
+		_ = os.Remove(lockPath)
+		return nil, fmt.Errorf("localfs: mkdir objects: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, uploadsDir), 0o755); err != nil {
+		_ = f.Close()
+		_ = os.Remove(lockPath)
+		return nil, fmt.Errorf("localfs: mkdir uploads: %w", err)
 	}
 
 	return &Localfs{

@@ -77,3 +77,32 @@ func TestCloseToleratesMissingLockfile(t *testing.T) {
 		t.Fatalf("Close after external lockfile removal: %v", err)
 	}
 }
+
+// TestOpenAcquiresLockBeforeSubdirs asserts that when an Open is refused
+// because a .lock already exists, the would-be Open does not create the
+// objects/ or uploads/ subdirectories. Initialization that mutates bucket
+// state must happen only while holding the lock; otherwise a second
+// concurrent caller can scribble on the bucket root before being told it
+// cannot proceed.
+func TestOpenAcquiresLockBeforeSubdirs(t *testing.T) {
+	dir := t.TempDir()
+	// Plant a .lock file before the first Open runs.
+	if err := os.WriteFile(filepath.Join(dir, ".lock"), []byte(`{"pid":99999,"host":"prelocked","acquired_at":"2026-05-03T12:00:00Z"}`), 0o644); err != nil {
+		t.Fatalf("plant lockfile: %v", err)
+	}
+
+	s, err := localfs.Open(dir)
+	if err == nil {
+		_ = s.Close()
+		t.Fatalf("Open succeeded with pre-existing .lock, want ErrAlreadyLocked")
+	}
+	if !errors.Is(err, localfs.ErrAlreadyLocked) {
+		t.Fatalf("Open with pre-existing .lock: got %v, want ErrAlreadyLocked", err)
+	}
+
+	for _, sub := range []string{"objects", "uploads"} {
+		if _, err := os.Stat(filepath.Join(dir, sub)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("subdirectory %q exists after refused Open (err=%v); Open mutated bucket state before acquiring lock", sub, err)
+		}
+	}
+}
