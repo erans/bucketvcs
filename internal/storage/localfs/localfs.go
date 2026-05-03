@@ -162,6 +162,22 @@ func (l *Localfs) Close() error {
 	return nil
 }
 
+// ErrClosed is returned by Localfs operations called after Close has
+// fully succeeded (lockfile released). A closed instance refuses to
+// service any read or write so it cannot scribble on a bucket whose
+// lock another process may now hold.
+var ErrClosed = errors.New("localfs: instance is closed")
+
+// checkOpen returns ErrClosed if the lockfile has been released. Every
+// method that touches the bucket calls this before acquiring per-key
+// mutexes or performing I/O.
+func (l *Localfs) checkOpen() error {
+	if l.lockfileRemoved {
+		return ErrClosed
+	}
+	return nil
+}
+
 func (l *Localfs) Capabilities() storage.Capabilities {
 	return storage.Capabilities{
 		SignedURLs:           false,
@@ -173,6 +189,9 @@ func (l *Localfs) Capabilities() storage.Capabilities {
 }
 
 func (l *Localfs) Get(ctx context.Context, key string, opts *storage.GetOptions) (*storage.Object, error) {
+	if err := l.checkOpen(); err != nil {
+		return nil, err
+	}
 	if err := validateKey(key); err != nil {
 		return nil, err
 	}
@@ -204,6 +223,9 @@ func (l *Localfs) Get(ctx context.Context, key string, opts *storage.GetOptions)
 }
 
 func (l *Localfs) Head(ctx context.Context, key string) (*storage.ObjectMetadata, error) {
+	if err := l.checkOpen(); err != nil {
+		return nil, err
+	}
 	if err := validateKey(key); err != nil {
 		return nil, err
 	}
@@ -217,6 +239,9 @@ func (l *Localfs) Head(ctx context.Context, key string) (*storage.ObjectMetadata
 }
 
 func (l *Localfs) GetRange(ctx context.Context, key string, start, endInclusive int64) (io.ReadCloser, error) {
+	if err := l.checkOpen(); err != nil {
+		return nil, err
+	}
 	if err := validateKey(key); err != nil {
 		return nil, err
 	}
@@ -264,6 +289,9 @@ type limitedReadCloser struct {
 }
 
 func (l *Localfs) PutIfAbsent(ctx context.Context, key string, body io.Reader, opts *storage.PutOptions) (storage.ObjectVersion, error) {
+	if err := l.checkOpen(); err != nil {
+		return storage.ObjectVersion{}, err
+	}
 	if err := validateKey(key); err != nil {
 		return storage.ObjectVersion{}, err
 	}

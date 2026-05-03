@@ -1,6 +1,8 @@
 package localfs_test
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -104,5 +106,39 @@ func TestOpenAcquiresLockBeforeSubdirs(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dir, sub)); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("subdirectory %q exists after refused Open (err=%v); Open mutated bucket state before acquiring lock", sub, err)
 		}
+	}
+}
+
+// TestOperationsRefuseAfterClose asserts that every public method that
+// touches the bucket fails with ErrClosed once Close has fully succeeded.
+// A closed instance must NOT be able to mutate or read the bucket because
+// another process may now hold the lockfile and own the bucket state.
+func TestOperationsRefuseAfterClose(t *testing.T) {
+	dir := t.TempDir()
+	s, err := localfs.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	// Stash a value first so reads have something to find if the closed
+	// guard were missing.
+	if _, err := s.PutIfAbsent(context.Background(), "before-close", bytes.NewReader([]byte("x")), nil); err != nil {
+		t.Fatalf("PutIfAbsent before close: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	ctx := context.Background()
+	if _, err := s.PutIfAbsent(ctx, "after-close", bytes.NewReader([]byte("y")), nil); !errors.Is(err, localfs.ErrClosed) {
+		t.Errorf("PutIfAbsent after Close: got %v, want ErrClosed", err)
+	}
+	if _, err := s.Get(ctx, "before-close", nil); !errors.Is(err, localfs.ErrClosed) {
+		t.Errorf("Get after Close: got %v, want ErrClosed", err)
+	}
+	if _, err := s.Head(ctx, "before-close"); !errors.Is(err, localfs.ErrClosed) {
+		t.Errorf("Head after Close: got %v, want ErrClosed", err)
+	}
+	if _, err := s.GetRange(ctx, "before-close", 0, 0); !errors.Is(err, localfs.ErrClosed) {
+		t.Errorf("GetRange after Close: got %v, want ErrClosed", err)
 	}
 }
