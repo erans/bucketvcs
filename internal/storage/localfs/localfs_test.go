@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 )
 
@@ -340,5 +341,63 @@ func TestSidecarSelfHealSizeMismatch(t *testing.T) {
 	want := hex.EncodeToString(expectedHash[:])
 	if md.Version.Token != want {
 		t.Errorf("token after self-heal = %s, want %s (sha256 of new content)", md.Version.Token, want)
+	}
+}
+
+func TestSymlinkRejection(t *testing.T) {
+	dir := t.TempDir()
+	s, err := localfs.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Seed a normal object so the bucket has at least one valid entry.
+	if _, err := s.PutIfAbsent(context.Background(), "rk/normal", bytes.NewReader([]byte("ok")), nil); err != nil {
+		t.Fatalf("seed normal: %v", err)
+	}
+
+	// Place a symlink at <root>/objects/rk/symlinked pointing to /etc/hosts.
+	target := "/etc/hosts"
+	if _, err := os.Stat(target); err != nil {
+		t.Skipf("test target %s not present: %v", target, err)
+	}
+	linkPath := filepath.Join(dir, "objects", "rk", "symlinked")
+	if err := os.MkdirAll(filepath.Dir(linkPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.Symlink(target, linkPath); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	// Get/Head/GetRange must reject the symlinked key.
+	if _, err := s.Get(context.Background(), "rk/symlinked", nil); !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Errorf("Get(symlink) = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := s.Head(context.Background(), "rk/symlinked"); !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Errorf("Head(symlink) = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := s.GetRange(context.Background(), "rk/symlinked", 0, 0); !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Errorf("GetRange(symlink) = %v, want ErrInvalidArgument", err)
+	}
+
+	// List must skip the symlinked entry but still return the normal one.
+	page, err := s.List(context.Background(), "rk/", nil)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, md := range page.Objects {
+		if md.Key == "rk/symlinked" {
+			t.Error("List returned a symlinked key; expected it to be skipped")
+		}
+	}
+	foundNormal := false
+	for _, md := range page.Objects {
+		if md.Key == "rk/normal" {
+			foundNormal = true
+		}
+	}
+	if !foundNormal {
+		t.Error("List did not return the normal entry alongside the skipped symlink")
 	}
 }
