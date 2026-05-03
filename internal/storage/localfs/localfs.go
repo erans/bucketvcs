@@ -21,10 +21,12 @@ type Localfs struct {
 // Compile-time assertion that *Localfs satisfies storage.ObjectStore.
 var _ storage.ObjectStore = (*Localfs)(nil)
 
-// Open returns a Localfs rooted at the given directory. The directory
-// must exist. Real implementations land in later tasks; this stub just
-// returns ErrNotSupported on every method so the package compiles and
-// the conformance suite has a target to fail against.
+// Open returns a Localfs rooted at the given directory. This stub
+// performs no on-disk validation beyond rejecting an empty root and
+// returns ErrNotSupported on every method, so the package compiles
+// and the conformance suite has a target to fail against. Real root
+// validation (directory exists, is a directory, lock file acquired)
+// lands in Task 13.
 func Open(root string) (*Localfs, error) {
 	if root == "" {
 		return nil, errors.New("localfs: root must be non-empty")
