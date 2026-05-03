@@ -32,6 +32,7 @@ const (
 // Localfs is the local-filesystem ObjectStore implementation.
 type Localfs struct {
 	root            string
+	lockPath        string
 	lock            *os.File
 	lockfileRemoved bool
 	mutexes         *keyedMutex
@@ -54,11 +55,15 @@ func Open(root string) (*Localfs, error) {
 	if root == "" {
 		return nil, errors.New("localfs: root must be non-empty")
 	}
-	if err := os.MkdirAll(root, 0o755); err != nil {
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("localfs: resolve root path: %w", err)
+	}
+	if err := os.MkdirAll(absRoot, 0o755); err != nil {
 		return nil, fmt.Errorf("localfs: mkdir root: %w", err)
 	}
 
-	lockPath := filepath.Join(root, lockFile)
+	lockPath := filepath.Join(absRoot, lockFile)
 	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
@@ -93,21 +98,22 @@ func Open(root string) (*Localfs, error) {
 	}
 
 	// We hold the lock now: safe to create subdirectories.
-	if err := os.MkdirAll(filepath.Join(root, objectsDir), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(absRoot, objectsDir), 0o755); err != nil {
 		_ = f.Close()
 		_ = os.Remove(lockPath)
 		return nil, fmt.Errorf("localfs: mkdir objects: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Join(root, uploadsDir), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(absRoot, uploadsDir), 0o755); err != nil {
 		_ = f.Close()
 		_ = os.Remove(lockPath)
 		return nil, fmt.Errorf("localfs: mkdir uploads: %w", err)
 	}
 
 	return &Localfs{
-		root:    root,
-		lock:    f,
-		mutexes: newKeyedMutex(),
+		root:     absRoot,
+		lockPath: lockPath,
+		lock:     f,
+		mutexes:  newKeyedMutex(),
 	}, nil
 }
 
@@ -127,6 +133,10 @@ type lockfileContent struct {
 // Callers MUST keep calling Close until it returns nil; otherwise a
 // stranded lockfile blocks future Open calls.
 //
+// Close removes the absolute lockfile path captured at Open time, not
+// a path recomputed from l.root, so an os.Chdir between Open and
+// Close cannot redirect the unlink at a different file.
+//
 // Recovery from a process crash (no Close ran at all) is the job of
 // the package-level Verify with WithForce(true) — see verify.go.
 func (l *Localfs) Close() error {
@@ -139,7 +149,7 @@ func (l *Localfs) Close() error {
 		}
 		l.lock = nil
 	}
-	if err := os.Remove(filepath.Join(l.root, lockFile)); err != nil {
+	if err := os.Remove(l.lockPath); err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("localfs: remove lockfile: %w", err)
 		}
