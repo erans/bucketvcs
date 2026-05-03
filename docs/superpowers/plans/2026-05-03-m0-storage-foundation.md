@@ -9,7 +9,7 @@
 **Tech Stack:** Go 1.22, `github.com/google/uuid` v1.6.0. No other external dependencies in M0. Linux + macOS targets.
 
 **Reference docs:**
-- Design spec (r6): `docs/superpowers/specs/2026-05-03-m0-storage-foundation-design.md`
+- Design spec (r7): `docs/superpowers/specs/2026-05-03-m0-storage-foundation-design.md`
 - Original spec sections: §9, §10, §29, §35, §40.1
 - Decomposition: `docs/superpowers/specs/2026-05-03-bucketvcs-oss-decomposition-design.md`
 
@@ -55,6 +55,14 @@
   - Test list expanded to 12 cases naming the same-size torn-sidecar case and active-lock-refusal cases explicitly.
 - New sentinel error `localfs.ErrLockedByLiveProcess` alongside existing `localfs.ErrAlreadyLocked`.
 - Task 32 README adds the operator warning that `WithForce(true)` against a truly live holder will corrupt state.
+
+**Plan revision r7 changes (2026-05-03):** Updated to match design spec r7 (addresses roborev round 6, job 7696). r6 introduced contradictory `started_at` semantics and a lock-changed-during-Verify race; r7 simplifies both away.
+
+- Task 13 lockfile field renamed from `started_at` to `acquired_at` (forensics-only; not used for liveness logic per AD12). Update of the `lockfileContent` struct.
+- Task 35 Verify simplified per AD12: liveness check is just `kill(pid, 0)` on the same host. PID-reuse start-time comparison is removed; PID reuse is a documented limitation that operators resolve via `WithForce`.
+- Task 35 Verify adds AD13's snapshot-and-recheck around lockfile removal: read lockfile bytes at start, re-read before `os.Remove`, refuse with `ErrLockedByLiveProcess` if changed.
+- Task 35 test list updated: the old "PID-reused lockfile is treated as dead" test is replaced with a "PID-reused lockfile is conservative-treated-as-live" test (matches the simplified rule). New test `TestVerifyDetectsLockChange` exercises AD13: mutate the lockfile out of band (via WithProgress hook) between snapshot and recheck, assert Verify returns ErrLockedByLiveProcess.
+- WithProgress callback semantics documented as fire-and-forget (panics propagate, no error channel).
 
 ---
 
@@ -1600,15 +1608,15 @@ func Open(root string) (*Localfs, error) {
 		}
 		return nil, fmt.Errorf("localfs: create lockfile: %w", err)
 	}
-	// Write lockfile content per AD12: {pid, host, started_at}. Verify
-	// uses this content to determine whether the holder is alive on the
-	// current host before bypassing the lock.
+	// Write lockfile content per AD12: {pid, host, acquired_at}.
+	// Verify uses pid + host for the liveness check; acquired_at is
+	// forensics-only and is NOT consulted by the liveness logic.
 	host, _ := os.Hostname()
-	startedAt := time.Now().UTC()
+	acquiredAt := time.Now().UTC()
 	lockContent, err := json.Marshal(lockfileContent{
-		PID:       os.Getpid(),
-		Host:      host,
-		StartedAt: startedAt,
+		PID:        os.Getpid(),
+		Host:       host,
+		AcquiredAt: acquiredAt,
 	})
 	if err != nil {
 		_ = f.Close()
@@ -1633,13 +1641,14 @@ func Open(root string) (*Localfs, error) {
 	}, nil
 }
 
-// lockfileContent is the JSON payload of <root>/.lock. AD12: Verify
-// uses this content to perform a liveness check on the recorded
-// process before bypassing the lock during repair-mode reconciliation.
+// lockfileContent is the JSON payload of <root>/.lock. Per AD12,
+// `pid` and `host` are used by Verify's liveness check;
+// `acquired_at` is forensics-only (logging, debugging) and is NOT
+// consulted by the liveness logic.
 type lockfileContent struct {
-	PID       int       `json:"pid"`
-	Host      string    `json:"host"`
-	StartedAt time.Time `json:"started_at"`
+	PID        int       `json:"pid"`
+	Host       string    `json:"host"`
+	AcquiredAt time.Time `json:"acquired_at"`
 }
 
 // Close releases the lockfile.
@@ -5142,7 +5151,7 @@ func TestVerifyClearsDeadLock(t *testing.T) {
 	lockBytes, _ := json.Marshal(map[string]any{
 		"pid":        deadPID,
 		"host":       host,
-		"started_at": time.Now().UTC().Format(time.RFC3339),
+		"acquired_at": time.Now().UTC().Format(time.RFC3339),
 	})
 	if err := os.WriteFile(filepath.Join(dir, ".lock"), lockBytes, 0o644); err != nil {
 		t.Fatalf("WriteFile lockfile: %v", err)
@@ -5201,6 +5210,100 @@ func TestVerifySymlinkSkipped(t *testing.T) {
 	}
 }
 
+// TestVerifyDetectsLockChange (AD13): if the lockfile bytes change
+// between Verify's snapshot and its final cleanup, Verify must NOT
+// remove the lockfile and must return ErrLockedByLiveProcess.
+//
+// We seed the bucket with at least one object to give us a place to
+// hook in the WithProgress callback, which we use to mutate the
+// lockfile partway through reconciliation.
+func TestVerifyDetectsLockChange(t *testing.T) {
+	dir := setupBucketAndOrphanLock(t)
+	// Seed enough objects that the progress callback fires.
+	for i := 0; i < 5; i++ {
+		objPath := filepath.Join(dir, "objects", "rk", "lc-"+string(rune('a'+i)))
+		if err := os.MkdirAll(filepath.Dir(objPath), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(objPath, []byte("payload"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+
+	lockPath := filepath.Join(dir, ".lock")
+	mutateOnce := false
+	progressCb := func(processed int) {
+		if mutateOnce {
+			return
+		}
+		mutateOnce = true
+		// Simulate another process having opened the bucket: rewrite
+		// the lockfile with different content.
+		host, _ := os.Hostname()
+		newLock, _ := json.Marshal(map[string]any{
+			"pid":         os.Getpid(),
+			"host":        host,
+			"acquired_at": time.Now().UTC().Format(time.RFC3339),
+		})
+		if err := os.WriteFile(lockPath, newLock, 0o644); err != nil {
+			t.Fatalf("rewrite lockfile: %v", err)
+		}
+	}
+
+	err := localfs.Verify(context.Background(), dir,
+		localfs.WithForce(true), // skip the initial liveness check
+		localfs.WithProgress(progressCb),
+	)
+	if !errors.Is(err, localfs.ErrLockedByLiveProcess) {
+		t.Errorf("Verify with lock changed mid-flight = %v, want ErrLockedByLiveProcess", err)
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Errorf("lockfile removed despite mid-flight change: %v", err)
+	}
+}
+
+// TestVerifyPIDReusedConservative (AD12): a stale lockfile whose PID
+// has been reassigned to an unrelated live process appears live to
+// kill(pid, 0). M0 conservatively refuses without WithForce; with
+// WithForce the operator's claim of "the recorded process is gone"
+// wins and Verify proceeds.
+//
+// We approximate this by writing a lockfile pointing at the test
+// process's own PID — definitely alive — and running Verify with and
+// without WithForce.
+func TestVerifyPIDReusedConservative(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "objects"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	host, _ := os.Hostname()
+	lockBytes, _ := json.Marshal(map[string]any{
+		"pid":         os.Getpid(),
+		"host":        host,
+		"acquired_at": time.Now().UTC().Format(time.RFC3339),
+	})
+	lockPath := filepath.Join(dir, ".lock")
+	if err := os.WriteFile(lockPath, lockBytes, 0o644); err != nil {
+		t.Fatalf("WriteFile lockfile: %v", err)
+	}
+
+	// Without WithForce: refuse.
+	if err := localfs.Verify(context.Background(), dir); !errors.Is(err, localfs.ErrLockedByLiveProcess) {
+		t.Errorf("Verify against live PID without force = %v, want ErrLockedByLiveProcess", err)
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Errorf("lockfile removed without WithForce: %v", err)
+	}
+
+	// With WithForce: proceeds and removes the lock.
+	if err := localfs.Verify(context.Background(), dir, localfs.WithForce(true)); err != nil {
+		t.Fatalf("Verify with force = %v, want nil", err)
+	}
+	if _, err := os.Stat(lockPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("lockfile not removed with WithForce: %v", err)
+	}
+}
+
 // setupBucketAndOrphanLock creates a fresh dir with objects/ and an
 // orphan lockfile pointing at a definitely-dead PID, so package-level
 // Verify can run without being blocked by an Open.
@@ -5214,7 +5317,7 @@ func setupBucketAndOrphanLock(t *testing.T) string {
 	lockBytes, _ := json.Marshal(map[string]any{
 		"pid":        -99999,
 		"host":       host,
-		"started_at": time.Now().UTC().Format(time.RFC3339),
+		"acquired_at": time.Now().UTC().Format(time.RFC3339),
 	})
 	if err := os.WriteFile(filepath.Join(dir, ".lock"), lockBytes, 0o644); err != nil {
 		t.Fatalf("WriteFile lockfile: %v", err)
@@ -5262,6 +5365,7 @@ Write `internal/storage/localfs/verify.go`:
 package localfs
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -5298,7 +5402,10 @@ func WithForce(force bool) VerifyOption {
 }
 
 // WithProgress installs a callback invoked after each object is
-// processed. Called in the same goroutine as Verify.
+// processed. Called synchronously in the Verify goroutine. The
+// callback is fire-and-forget: panics propagate (caller's
+// responsibility to recover); blocking blocks Verify; no return
+// value, so signal cancellation via ctx instead.
 func WithProgress(cb func(processed int)) VerifyOption {
 	return func(c *verifyConfig) { c.progress = cb }
 }
@@ -5323,7 +5430,10 @@ func (l *Localfs) Verify(ctx context.Context) error {
 }
 
 // Verify (package-level) recovers an unclean-shutdown bucket. Performs
-// the AD12 liveness check on the lockfile before bypassing it.
+// the AD12 liveness check on the lockfile before bypassing it, and the
+// AD13 snapshot-and-recheck around the final lockfile removal so a
+// process that legitimately Opens the bucket mid-Verify is not
+// trampled.
 func Verify(ctx context.Context, root string, opts ...VerifyOption) error {
 	if root == "" {
 		return errors.New("localfs: Verify root must be non-empty")
@@ -5333,19 +5443,15 @@ func Verify(ctx context.Context, root string, opts ...VerifyOption) error {
 		o(cfg)
 	}
 
-	// AD12 liveness check.
+	// AD12 + AD13: snapshot the lockfile bytes BEFORE reconciliation.
 	lockPath := filepath.Join(root, lockFile)
-	scBytes, err := os.ReadFile(lockPath)
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		// No lock; clean shutdown. Proceed without checks.
-	case err != nil:
+	preLockBytes, lockExists, err := readLockfileSnapshot(lockPath)
+	if err != nil {
 		return fmt.Errorf("localfs.Verify: read lockfile: %w", err)
-	default:
+	}
+	if lockExists {
 		var lc lockfileContent
-		if perr := json.Unmarshal(scBytes, &lc); perr != nil {
-			// Malformed lockfile: treat as stale, proceed.
-		} else {
+		if perr := json.Unmarshal(preLockBytes, &lc); perr == nil {
 			alive, checkErr := isLockHolderAlive(lc)
 			if checkErr != nil && !cfg.force {
 				return fmt.Errorf("localfs.Verify: liveness check: %w", checkErr)
@@ -5354,6 +5460,7 @@ func Verify(ctx context.Context, root string, opts ...VerifyOption) error {
 				return ErrLockedByLiveProcess
 			}
 		}
+		// Malformed JSON: treat as stale, proceed.
 	}
 
 	// Reconcile every object under objects/.
@@ -5371,16 +5478,44 @@ func Verify(ctx context.Context, root string, opts ...VerifyOption) error {
 		return err
 	}
 
-	// Sweep for orphan sidecars (sidecar present, content absent).
+	// Sweep for orphan sidecars.
 	if err := sweepOrphanSidecars(ctx, filepath.Join(root, objectsDir)); err != nil {
 		return err
 	}
 
-	// Clear the lockfile so subsequent Open succeeds.
+	// AD13: re-read the lockfile and remove only if unchanged.
+	postLockBytes, postExists, err := readLockfileSnapshot(lockPath)
+	if err != nil {
+		return fmt.Errorf("localfs.Verify: re-read lockfile: %w", err)
+	}
+	if !postExists {
+		// Lock already removed (perhaps by a previous run); nothing to do.
+		return nil
+	}
+	if !lockExists || !bytes.Equal(preLockBytes, postLockBytes) {
+		// Lock either appeared during repair or its contents changed —
+		// a different process now holds the bucket. Refuse to remove.
+		return ErrLockedByLiveProcess
+	}
 	if err := os.Remove(lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("localfs.Verify: clear lockfile: %w", err)
 	}
 	return nil
+}
+
+// readLockfileSnapshot reads the lockfile and returns its bytes plus
+// an "exists" flag. ErrNotExist returns (nil, false, nil); other
+// errors propagate. Used by Verify for the AD13 snapshot-and-recheck
+// pattern.
+func readLockfileSnapshot(path string) ([]byte, bool, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return b, true, nil
 }
 
 // isLockHolderAlive returns true iff the lockfile's recorded process
@@ -5584,7 +5719,7 @@ Expected: `clean`.
 
 - [ ] **Step 4: Verify the exit-criteria checklist**
 
-Confirm against the design spec r6 exit criteria:
+Confirm against the design spec r7 exit criteria:
 
 1. `go test ./internal/storage/...` is green on Linux/macOS — verified Step 1
 2. 15 §29 correctness tests pass — verified by Task 26 inventory
@@ -5596,7 +5731,7 @@ Confirm against the design spec r6 exit criteria:
 8. Error taxonomy maps to conformance assertions — verified across §29 #13, #15, #10, key namespace; `fsyncDir` failure semantics from spec r3/r4 implemented in Task 14 helpers
 9. Package layout matches §40.1 — verified by file structure at top of plan
 10. README documents contract, adding adapters, running conformance, AD8 recast, and includes the verbatim "Symlink and hardlink safety", "Filesystem portability assumptions", and "Crash recovery and `Localfs.Verify`" sections (with the operator warning about WithForce) — Task 32
-11. `Localfs.Verify(ctx)` and `localfs.Verify(ctx, root, opts...)` ship per spec r6 exit criterion #10 with all 12 named test cases (clean, same-size torn, different-size torn, missing sidecar, parse-broken sidecar, orphan sidecar, symlink skipped, live-lock refusal, force override, dead-PID lock cleared, ctx cancellation, lockfile cleared on success) — Task 35
+11. `Localfs.Verify(ctx)` and `localfs.Verify(ctx, root, opts...)` ship per spec r7 exit criterion #10 with all 13 named test cases (clean; same-size torn; different-size torn; missing sidecar; parse-broken sidecar; orphan sidecar; symlink skipped; live-lock refusal; force override; PID reuse → conservative refusal then WithForce override; lock changed during Verify (AD13); ctx cancellation; lockfile cleared on success) — Task 35
 12. Public Go-doc comments on every exported symbol in `internal/storage` — verified across Tasks 2–6
 13. Worked example exercises Put/Get/PutIfVersionMatches/List/Multipart/Delete with success and conflict paths — Task 31
 
