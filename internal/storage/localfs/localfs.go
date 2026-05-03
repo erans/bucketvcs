@@ -408,9 +408,17 @@ func (l *Localfs) headLocked(key string) (*storage.ObjectMetadata, error) {
 		err = fmt.Errorf("sidecar size %d != content size %d (stale)", sc.Size, contentInfo.Size())
 	}
 	if err != nil {
+		// Fail closed on unsupported schema version: an older binary
+		// must NOT overwrite a future-schema sidecar with the current
+		// schema, because that would silently downgrade the on-disk
+		// format. Operators upgrade by running a binary that knows the
+		// future schema.
+		if errors.Is(err, ErrUnsupportedSidecarSchema) {
+			return nil, err
+		}
 		// Self-heal: recompute sha256 from content. Sidecar may be
-		// missing, truncated, schema-incompatible, or stale relative
-		// to content (size-mismatch fast-path).
+		// missing, truncated, JSON-malformed, or stale relative to
+		// content (size-mismatch fast-path).
 		sc, err = l.healSidecar(key, contentInfo)
 		if err != nil {
 			return nil, err

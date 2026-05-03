@@ -142,3 +142,42 @@ func TestOperationsRefuseAfterClose(t *testing.T) {
 		t.Errorf("GetRange after Close: got %v, want ErrClosed", err)
 	}
 }
+
+// TestHeadFailsClosedOnFutureSidecarSchema plants a sidecar with a
+// version greater than this binary understands. Head must return
+// ErrUnsupportedSidecarSchema and MUST NOT silently downgrade the
+// sidecar to the current schema (which would corrupt the on-disk
+// format for any future binary that reads it).
+func TestHeadFailsClosedOnFutureSidecarSchema(t *testing.T) {
+	dir := t.TempDir()
+	s, err := localfs.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Write a real object first so the content file exists.
+	if _, err := s.PutIfAbsent(context.Background(), "future-key", bytes.NewReader([]byte("payload")), nil); err != nil {
+		t.Fatalf("PutIfAbsent: %v", err)
+	}
+
+	// Replace the sidecar with a future-schema one.
+	metaPath := filepath.Join(dir, "objects", "future-key.meta")
+	futureSidecar := []byte(`{"version":2,"sha256":"unknown","size":7,"content_type":"","modified_at":"2030-01-01T00:00:00Z","new_field":"reserved"}`)
+	if err := os.WriteFile(metaPath, futureSidecar, 0o644); err != nil {
+		t.Fatalf("plant future sidecar: %v", err)
+	}
+
+	if _, err := s.Head(context.Background(), "future-key"); !errors.Is(err, localfs.ErrUnsupportedSidecarSchema) {
+		t.Errorf("Head against future-schema sidecar: got %v, want ErrUnsupportedSidecarSchema", err)
+	}
+
+	// Confirm the on-disk sidecar was NOT overwritten by self-heal.
+	got, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatalf("re-read sidecar: %v", err)
+	}
+	if !bytes.Equal(got, futureSidecar) {
+		t.Errorf("sidecar was mutated by failed Head; on-disk overwrite is a downgrade attack")
+	}
+}
