@@ -3,6 +3,8 @@ package localfs_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -262,5 +264,81 @@ func TestListRejectsEscapingPrefix(t *testing.T) {
 		if _, err := s.List(context.Background(), p, nil); err == nil {
 			t.Errorf("List(%q) returned nil, want error", p)
 		}
+	}
+}
+
+func TestSidecarSelfHealMissing(t *testing.T) {
+	dir := t.TempDir()
+	s, err := localfs.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	want := []byte("self-heal-missing")
+	v, err := s.PutIfAbsent(context.Background(), "rk/self-heal", bytes.NewReader(want), nil)
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	// Delete the sidecar out of band.
+	metaPath := filepath.Join(dir, "objects", "rk", "self-heal.meta")
+	if err := os.Remove(metaPath); err != nil {
+		t.Fatalf("remove sidecar: %v", err)
+	}
+
+	md, err := s.Head(context.Background(), "rk/self-heal")
+	if err != nil {
+		t.Fatalf("Head after sidecar removal: %v", err)
+	}
+	if md.Version.Token != v.Token {
+		t.Errorf("self-heal recovered version = %s, want %s", md.Version.Token, v.Token)
+	}
+	if md.Size != int64(len(want)) {
+		t.Errorf("self-heal recovered size = %d, want %d", md.Size, len(want))
+	}
+
+	// Sidecar should now exist again.
+	if _, err := os.Stat(metaPath); err != nil {
+		t.Errorf("sidecar not recreated: %v", err)
+	}
+}
+
+// TestSidecarSelfHealSizeMismatch simulates the post-crash "content
+// (new) + sidecar (old)" window: rewrite content out of band so its
+// size differs from what the sidecar records, then call Head and
+// assert the size-mismatch fast-path detects the staleness and
+// regenerates the sidecar with sha256 of the new content.
+func TestSidecarSelfHealSizeMismatch(t *testing.T) {
+	dir := t.TempDir()
+	s, err := localfs.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	if _, err := s.PutIfAbsent(context.Background(), "rk/torn", bytes.NewReader([]byte("aaa")), nil); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Out-of-band rewrite content with a different size; sidecar still
+	// records the original size. This simulates a crash mid-rewrite.
+	objPath := filepath.Join(dir, "objects", "rk", "torn")
+	newContent := []byte("BBBBBBBBBB")
+	if err := os.WriteFile(objPath, newContent, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	md, err := s.Head(context.Background(), "rk/torn")
+	if err != nil {
+		t.Fatalf("Head: %v", err)
+	}
+	if md.Size != int64(len(newContent)) {
+		t.Errorf("size after self-heal = %d, want %d", md.Size, len(newContent))
+	}
+	expectedHash := sha256.Sum256(newContent)
+	want := hex.EncodeToString(expectedHash[:])
+	if md.Version.Token != want {
+		t.Errorf("token after self-heal = %s, want %s (sha256 of new content)", md.Version.Token, want)
 	}
 }
