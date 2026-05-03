@@ -20,6 +20,7 @@ func runCorrectness(t *testing.T, f Factory) {
 	t.Run("§29#2_ConcurrentPutIfVersionMatches", func(t *testing.T) { test29_2(t, f) })
 	t.Run("§29#3_FailedConditionalDoesNotAlter", func(t *testing.T) { test29_3(t, f) })
 	t.Run("§29#5_OverwriteThenRead", func(t *testing.T) { test29_5(t, f) })
+	t.Run("§29#11_DeleteIfVersionMatches", func(t *testing.T) { test29_11(t, f) })
 }
 
 // §29 #4: Read after write sees latest object.
@@ -266,5 +267,35 @@ func test29_5(t *testing.T, f Factory) {
 	}
 	if obj.Metadata.Version != v1 {
 		t.Errorf("Metadata.Version = %+v, want %+v", obj.Metadata.Version, v1)
+	}
+}
+
+// §29 #11: DeleteIfVersionMatches fails if object changed.
+func test29_11(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	v0, err := s.PutIfAbsent(ctx(), "rk/29-11", bytes.NewReader([]byte("v0")), nil)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	v1, err := s.PutIfVersionMatches(ctx(), "rk/29-11", v0, bytes.NewReader([]byte("v1")), nil)
+	if err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+
+	if err := s.DeleteIfVersionMatches(ctx(), "rk/29-11", v0); !errors.Is(err, storage.ErrVersionMismatch) {
+		t.Errorf("DeleteIfVersionMatches(stale) = %v, want ErrVersionMismatch", err)
+	}
+	if _, err := s.Head(ctx(), "rk/29-11"); err != nil {
+		t.Errorf("after failed delete, Head = %v, want nil", err)
+	}
+
+	if err := s.DeleteIfVersionMatches(ctx(), "rk/29-11", v1); err != nil {
+		t.Errorf("DeleteIfVersionMatches(current) = %v, want nil", err)
+	}
+	if _, err := s.Head(ctx(), "rk/29-11"); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("after delete, Head = %v, want ErrNotFound", err)
+	}
+	if err := s.DeleteIfVersionMatches(ctx(), "rk/29-11", v1); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("DeleteIfVersionMatches(absent) = %v, want ErrNotFound", err)
 	}
 }

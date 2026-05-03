@@ -357,7 +357,45 @@ func (l *Localfs) PutIfVersionMatches(ctx context.Context, key string, expected 
 }
 
 func (l *Localfs) DeleteIfVersionMatches(ctx context.Context, key string, expected storage.ObjectVersion) error {
-	return storage.ErrNotSupported
+	if err := l.checkOpen(); err != nil {
+		return err
+	}
+	if err := validateKey(key); err != nil {
+		return err
+	}
+	l.mutexes.lock(key)
+	defer l.mutexes.unlock(key)
+
+	current, err := l.headLocked(key)
+	if err != nil {
+		return err
+	}
+	if current.Version.Token != expected.Token {
+		return fmt.Errorf("%w: have %s want %s", storage.ErrVersionMismatch, current.Version.Token, expected.Token)
+	}
+	// Order: remove content first, then sidecar. A crash between the
+	// two leaves "no content + orphan sidecar"; subsequent Head returns
+	// ErrNotFound (correct outcome). The reverse order would leave
+	// "content present + missing sidecar"; Head's self-heal would
+	// regenerate the sidecar and the deleted object would resurrect.
+	objPath := l.objectPath(key)
+	objDir := filepath.Dir(objPath)
+	if err := os.Remove(objPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return storage.ErrNotFound
+		}
+		return err
+	}
+	if err := fsyncDir(objDir); err != nil {
+		return err
+	}
+	if err := os.Remove(l.metaPath(key)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := fsyncDir(objDir); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (l *Localfs) List(ctx context.Context, prefix string, opts *storage.ListOptions) (*storage.ListPage, error) {
