@@ -28,6 +28,9 @@ func runCorrectness(t *testing.T, f Factory) {
 	t.Run("MultipartHappyPath", func(t *testing.T) { testMultipartHappyPath(t, f) })
 	t.Run("§29#8_MultipartCannotOverwrite", func(t *testing.T) { test29_8(t, f) })
 	t.Run("§29#10_SignedURL", func(t *testing.T) { test29_10(t, f) })
+	t.Run("§29#12_VersionRoundTrip", func(t *testing.T) { test29_12(t, f) })
+	t.Run("§29#13_CASConflictClassification", func(t *testing.T) { test29_13(t, f) })
+	t.Run("§29#15_ThrottlingClassification", func(t *testing.T) { test29_15(t, f) })
 }
 
 // §29 #4: Read after write sees latest object.
@@ -518,4 +521,52 @@ func test29_10(t *testing.T, f Factory) {
 		return
 	}
 	t.Skip("adapter declares SignedURLs=true; full URL semantics tested by adapter-specific suite")
+}
+
+// §29 #12: Metadata/version token round-trips Put → Head.
+func test29_12(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	v, err := s.PutIfAbsent(ctx(), "rk/29-12", bytes.NewReader([]byte("payload")), &storage.PutOptions{ContentType: "text/plain"})
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	md, err := s.Head(ctx(), "rk/29-12")
+	if err != nil {
+		t.Fatalf("Head: %v", err)
+	}
+	if md.Version != v {
+		t.Errorf("Head Version = %+v, want %+v", md.Version, v)
+	}
+	if md.Size != int64(len("payload")) {
+		t.Errorf("Size = %d, want %d", md.Size, len("payload"))
+	}
+	if md.ContentType != "text/plain" {
+		t.Errorf("ContentType = %q, want %q", md.ContentType, "text/plain")
+	}
+	if md.Key != "rk/29-12" {
+		t.Errorf("Key = %q, want %q", md.Key, "rk/29-12")
+	}
+}
+
+// §29 #13: CAS conflict error maps to normalized conflict type.
+func test29_13(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	if _, err := s.PutIfAbsent(ctx(), "rk/29-13", bytes.NewReader([]byte("a")), nil); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	_, err := s.PutIfAbsent(ctx(), "rk/29-13", bytes.NewReader([]byte("b")), nil)
+	if !errors.Is(err, storage.ErrAlreadyExists) {
+		t.Errorf("PutIfAbsent on existing = %v, want ErrAlreadyExists", err)
+	}
+
+	_, err = s.PutIfVersionMatches(ctx(), "rk/29-13", storage.ObjectVersion{Token: "deadbeef"}, bytes.NewReader([]byte("c")), nil)
+	if !errors.Is(err, storage.ErrVersionMismatch) {
+		t.Errorf("PutIfVersionMatches stale = %v, want ErrVersionMismatch", err)
+	}
+}
+
+// §29 #15: Provider throttling errors are classified correctly.
+// Localfs does not throttle. Cloud adapters override this skip.
+func test29_15(t *testing.T, f Factory) {
+	t.Skip("localfs has no throttling; cloud adapters at M5/M7 inject and assert ErrThrottled")
 }
