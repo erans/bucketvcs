@@ -252,6 +252,14 @@ func sweepOrphanSidecars(ctx context.Context, objectsRoot string) error {
 // consistent. Recomputes sha256; rewrites sidecar if missing,
 // unparseable, size-mismatched, or sha-mismatched (the same-size torn
 // case Verify exists for).
+//
+// If the on-disk sidecar carries a Version newer than the current
+// binary understands, reconcileOne leaves the sidecar untouched and
+// returns nil. Self-healing a future-schema sidecar would silently
+// downgrade the on-disk format and cause every binary that wrote it
+// to lose its forward-compatibility marker — see headLocked's
+// asymmetric schema gate. The same rule applies to Verify: never
+// rewrite a future-schema sidecar.
 func reconcileOne(contentPath string) error {
 	contentInfo, err := os.Stat(contentPath)
 	if err != nil {
@@ -272,7 +280,14 @@ func reconcileOne(contentPath string) error {
 	metaPath := contentPath + metaSuffix
 	scBytes, readErr := os.ReadFile(metaPath)
 	if readErr == nil {
-		if sc, perr := parseSidecar(scBytes); perr == nil {
+		sc, perr := parseSidecar(scBytes)
+		if errors.Is(perr, ErrUnsupportedSidecarSchema) {
+			// Future-schema sidecar: never rewrite. Forward-compat
+			// contract requires the older binary to refuse rather than
+			// downgrade.
+			return nil
+		}
+		if perr == nil {
 			if sc.Sha256 == actualSha && sc.Size == contentInfo.Size() {
 				return nil // already consistent
 			}

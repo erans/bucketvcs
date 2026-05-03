@@ -401,3 +401,65 @@ func TestSymlinkRejection(t *testing.T) {
 		t.Error("List did not return the normal entry alongside the skipped symlink")
 	}
 }
+
+// TestCASRejectsSymlink asserts PutIfVersionMatches and
+// DeleteIfVersionMatches refuse a key whose on-disk path is a
+// symlink — without this guard, headLocked would follow the symlink
+// via os.Stat/os.Open and hash an external file (e.g. /etc/hosts),
+// leaking that hash through the eventual mismatch error.
+func TestCASRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	s, err := localfs.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	target := "/etc/hosts"
+	if _, err := os.Stat(target); err != nil {
+		t.Skipf("test target %s not present: %v", target, err)
+	}
+	linkPath := filepath.Join(dir, "objects", "rk", "linked")
+	if err := os.MkdirAll(filepath.Dir(linkPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.Symlink(target, linkPath); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	bogus := storage.ObjectVersion{Provider: "localfs", Token: "deadbeef", Kind: storage.VersionEtag}
+	if _, err := s.PutIfVersionMatches(context.Background(), "rk/linked", bogus, bytes.NewReader([]byte("DROP")), nil); !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Errorf("PutIfVersionMatches(symlink) = %v, want ErrInvalidArgument", err)
+	}
+	if err := s.DeleteIfVersionMatches(context.Background(), "rk/linked", bogus); !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Errorf("DeleteIfVersionMatches(symlink) = %v, want ErrInvalidArgument", err)
+	}
+}
+
+// TestVersionEqualityIsFullStruct asserts that CAS and Get
+// preconditions compare the entire ObjectVersion value, not just
+// Token. A version with the right token but wrong Provider/Kind must
+// still be rejected.
+func TestVersionEqualityIsFullStruct(t *testing.T) {
+	dir := t.TempDir()
+	s, err := localfs.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	v0, err := s.PutIfAbsent(context.Background(), "rk/version-id", bytes.NewReader([]byte("payload")), nil)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	wrongProvider := storage.ObjectVersion{Provider: "s3", Token: v0.Token, Kind: v0.Kind}
+	if _, err := s.PutIfVersionMatches(context.Background(), "rk/version-id", wrongProvider, bytes.NewReader([]byte("X")), nil); !errors.Is(err, storage.ErrVersionMismatch) {
+		t.Errorf("PutIfVersionMatches(wrongProvider) = %v, want ErrVersionMismatch", err)
+	}
+
+	wrongKind := storage.ObjectVersion{Provider: v0.Provider, Token: v0.Token, Kind: storage.VersionGeneration}
+	if err := s.DeleteIfVersionMatches(context.Background(), "rk/version-id", wrongKind); !errors.Is(err, storage.ErrVersionMismatch) {
+		t.Errorf("DeleteIfVersionMatches(wrongKind) = %v, want ErrVersionMismatch", err)
+	}
+}

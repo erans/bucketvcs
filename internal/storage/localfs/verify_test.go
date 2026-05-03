@@ -429,3 +429,37 @@ func itoa(n int) string {
 	}
 	return string(buf[i:])
 }
+
+// TestVerifyDoesNotDowngradeFutureSchemaSidecar asserts the asymmetric
+// schema gate applies to Verify too: a future-schema sidecar must not
+// be self-healed/rewritten, otherwise an older binary running Verify
+// would silently downgrade the on-disk format and a newer binary's
+// reads would lose their forward-compat marker.
+func TestVerifyDoesNotDowngradeFutureSchemaSidecar(t *testing.T) {
+	dir := setupBucketAndOrphanLock(t)
+	objPath := filepath.Join(dir, "objects", "rk", "future-schema")
+	metaPath := objPath + ".meta"
+	if err := os.MkdirAll(filepath.Dir(objPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(objPath, []byte("payload"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	// Plant a future-schema sidecar (Version > current understood).
+	futureSidecar := []byte(`{"version":2,"sha256":"ignored","size":7,"content_type":"","modified_at":"2030-01-01T00:00:00Z","new_field":"reserved"}`)
+	if err := os.WriteFile(metaPath, futureSidecar, 0o644); err != nil {
+		t.Fatalf("WriteFile sidecar: %v", err)
+	}
+
+	if err := localfs.Verify(context.Background(), dir, localfs.WithForce(true)); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+
+	got, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatalf("ReadFile sidecar after Verify: %v", err)
+	}
+	if !bytes.Equal(got, futureSidecar) {
+		t.Errorf("Verify rewrote a future-schema sidecar; downgrade prevention broken.\ngot:  %s\nwant: %s", got, futureSidecar)
+	}
+}

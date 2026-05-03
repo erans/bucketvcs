@@ -224,7 +224,7 @@ func (l *Localfs) Get(ctx context.Context, key string, opts *storage.GetOptions)
 	if err != nil {
 		return nil, err
 	}
-	if opts != nil && opts.IfVersionMatches != nil && opts.IfVersionMatches.Token != md.Version.Token {
+	if opts != nil && opts.IfVersionMatches != nil && md.Version != *opts.IfVersionMatches {
 		return nil, fmt.Errorf("%w: get if-version-matches", storage.ErrVersionMismatch)
 	}
 	f, err := os.Open(l.objectPath(key))
@@ -357,6 +357,16 @@ func (l *Localfs) PutIfVersionMatches(ctx context.Context, key string, expected 
 	l.mutexes.lock(key)
 	defer l.mutexes.unlock(key)
 
+	// Reject symlinks before headLocked. Without this, headLocked's
+	// os.Stat / os.Open would follow the symlink and hash an external
+	// target, leaking that hash in the eventual mismatch error.
+	if err := lstatNoSymlink(l.objectPath(key)); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return storage.ObjectVersion{}, fmt.Errorf("%w: object absent", storage.ErrVersionMismatch)
+		}
+		return storage.ObjectVersion{}, err
+	}
+
 	current, err := l.headLocked(key)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
@@ -364,8 +374,8 @@ func (l *Localfs) PutIfVersionMatches(ctx context.Context, key string, expected 
 		}
 		return storage.ObjectVersion{}, err
 	}
-	if current.Version.Token != expected.Token {
-		return storage.ObjectVersion{}, fmt.Errorf("%w: have %s want %s", storage.ErrVersionMismatch, current.Version.Token, expected.Token)
+	if current.Version != expected {
+		return storage.ObjectVersion{}, fmt.Errorf("%w: have %+v want %+v", storage.ErrVersionMismatch, current.Version, expected)
 	}
 
 	contentType := ""
@@ -385,12 +395,18 @@ func (l *Localfs) DeleteIfVersionMatches(ctx context.Context, key string, expect
 	l.mutexes.lock(key)
 	defer l.mutexes.unlock(key)
 
+	// Same reasoning as PutIfVersionMatches: reject symlinks before
+	// the metadata read so headLocked does not follow them.
+	if err := lstatNoSymlink(l.objectPath(key)); err != nil {
+		return err
+	}
+
 	current, err := l.headLocked(key)
 	if err != nil {
 		return err
 	}
-	if current.Version.Token != expected.Token {
-		return fmt.Errorf("%w: have %s want %s", storage.ErrVersionMismatch, current.Version.Token, expected.Token)
+	if current.Version != expected {
+		return fmt.Errorf("%w: have %+v want %+v", storage.ErrVersionMismatch, current.Version, expected)
 	}
 	// Order: remove content first, then sidecar. A crash between the
 	// two leaves "no content + orphan sidecar"; subsequent Head returns
@@ -673,55 +689,108 @@ func (l *Localfs) healSidecar(key string, contentInfo os.FileInfo) (sidecar, err
 }
 
 // writeAtomic streams body to a temp file in the destination directory,
-// hashes it as it goes, atomically renames into place, fsyncs the
-// directory, then writes the sidecar via the same pattern. Caller holds
-// the keyed mutex.
+// hashes it as it goes, stages the sidecar bytes to a sibling temp,
+// then promotes both into place. Caller holds the keyed mutex.
+//
+// Promotion order is content-then-sidecar; if the sidecar rename
+// fails after the content rename succeeded, the target carries new
+// content but a stale (or absent) sidecar — Head/Get/GetRange's
+// self-heal regenerates the sidecar from content sha256 on the next
+// read. The caller observes an error from this call but the new
+// version is committed; this is documented in the localfs README
+// alongside the asymmetric-schema and self-heal sections. Failures
+// before the content rename leave the target untouched.
 func (l *Localfs) writeAtomic(key string, body io.Reader, contentType string) (storage.ObjectVersion, error) {
 	objPath := l.objectPath(key)
 	objDir := filepath.Dir(objPath)
 	if err := os.MkdirAll(objDir, 0o755); err != nil {
 		return storage.ObjectVersion{}, err
 	}
-	tmp, err := os.CreateTemp(objDir, "."+filepath.Base(objPath)+".tmp.*")
+	tmpContent, err := os.CreateTemp(objDir, "."+filepath.Base(objPath)+".tmp.*")
 	if err != nil {
 		return storage.ObjectVersion{}, err
 	}
-	tmpName := tmp.Name()
-	cleanup := func() { _ = os.Remove(tmpName) }
+	tmpContentName := tmpContent.Name()
+	cleanupContent := func() { _ = os.Remove(tmpContentName) }
 
 	h := sha256.New()
 	tee := io.TeeReader(body, h)
-	n, err := io.Copy(tmp, tee)
+	n, err := io.Copy(tmpContent, tee)
 	if err != nil {
-		_ = tmp.Close()
-		cleanup()
+		_ = tmpContent.Close()
+		cleanupContent()
 		return storage.ObjectVersion{}, err
 	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		cleanup()
+	if err := tmpContent.Sync(); err != nil {
+		_ = tmpContent.Close()
+		cleanupContent()
 		return storage.ObjectVersion{}, err
 	}
-	if err := tmp.Close(); err != nil {
-		cleanup()
-		return storage.ObjectVersion{}, err
-	}
-	if err := os.Rename(tmpName, objPath); err != nil {
-		cleanup()
-		return storage.ObjectVersion{}, err
-	}
-	if err := fsyncDir(objDir); err != nil {
+	if err := tmpContent.Close(); err != nil {
+		cleanupContent()
 		return storage.ObjectVersion{}, err
 	}
 
+	// Stage the sidecar BEFORE the content rename so a sidecar-write
+	// failure leaves the target unchanged. Encode includes the just-
+	// computed content sha256 and a current timestamp.
 	sum := hex.EncodeToString(h.Sum(nil))
 	sc := newSidecar(sum, n, contentType, time.Now().UTC())
 	scBytes, err := encodeSidecar(sc)
 	if err != nil {
+		cleanupContent()
 		return storage.ObjectVersion{}, err
 	}
-	if err := writeFileAtomic(l.metaPath(key), scBytes); err != nil {
+	metaPath := l.metaPath(key)
+	metaDir := filepath.Dir(metaPath)
+	tmpMeta, err := os.CreateTemp(metaDir, "."+filepath.Base(metaPath)+".tmp.*")
+	if err != nil {
+		cleanupContent()
 		return storage.ObjectVersion{}, err
+	}
+	tmpMetaName := tmpMeta.Name()
+	cleanupMeta := func() { _ = os.Remove(tmpMetaName) }
+	if _, err := tmpMeta.Write(scBytes); err != nil {
+		_ = tmpMeta.Close()
+		cleanupMeta()
+		cleanupContent()
+		return storage.ObjectVersion{}, err
+	}
+	if err := tmpMeta.Sync(); err != nil {
+		_ = tmpMeta.Close()
+		cleanupMeta()
+		cleanupContent()
+		return storage.ObjectVersion{}, err
+	}
+	if err := tmpMeta.Close(); err != nil {
+		cleanupMeta()
+		cleanupContent()
+		return storage.ObjectVersion{}, err
+	}
+
+	// Promote content first.
+	if err := os.Rename(tmpContentName, objPath); err != nil {
+		cleanupMeta()
+		cleanupContent()
+		return storage.ObjectVersion{}, err
+	}
+	if err := fsyncDir(objDir); err != nil {
+		// Content rename succeeded but its directory entry is not yet
+		// durable. The staged sidecar temp is still untouched; remove
+		// it so we do not leave a half-baked sidecar around. Content
+		// commit/self-heal correctness is preserved across crash.
+		cleanupMeta()
+		return storage.ObjectVersion{}, err
+	}
+
+	// Promote sidecar. Failures here leave new content with old (or
+	// absent) sidecar; the read-path self-heal recovers metadata.
+	if err := os.Rename(tmpMetaName, metaPath); err != nil {
+		cleanupMeta()
+		return storage.ObjectVersion{}, fmt.Errorf("localfs: write committed, sidecar promotion failed: %w", err)
+	}
+	if err := fsyncDir(metaDir); err != nil {
+		return storage.ObjectVersion{}, fmt.Errorf("localfs: write committed, sidecar fsync failed: %w", err)
 	}
 
 	return storage.ObjectVersion{

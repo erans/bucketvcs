@@ -273,22 +273,62 @@ func (l *Localfs) CompleteMultipartIfAbsent(ctx context.Context, upload storage.
 		cleanup()
 		return storage.ObjectVersion{}, err
 	}
-	if err := os.Rename(tmpName, objPath); err != nil {
-		cleanup()
-		return storage.ObjectVersion{}, err
-	}
-	if err := fsyncDir(filepath.Dir(objPath)); err != nil {
-		return storage.ObjectVersion{}, err
-	}
 
+	// Stage the sidecar before content rename: same ordering rationale
+	// as writeAtomic in localfs.go. A sidecar-write failure leaves the
+	// target unchanged; a sidecar-rename failure after content commit
+	// leaves new content with absent sidecar — read-path self-heal
+	// recovers metadata.
 	sum := hex.EncodeToString(h.Sum(nil))
 	sc := newSidecar(sum, total, u.contentType, time.Now().UTC())
 	scBytes, err := encodeSidecar(sc)
 	if err != nil {
+		cleanup()
 		return storage.ObjectVersion{}, err
 	}
-	if err := writeFileAtomic(l.metaPath(u.key), scBytes); err != nil {
+	metaPath := l.metaPath(u.key)
+	metaDir := filepath.Dir(metaPath)
+	tmpMeta, err := os.CreateTemp(metaDir, "."+filepath.Base(metaPath)+".tmp.*")
+	if err != nil {
+		cleanup()
 		return storage.ObjectVersion{}, err
+	}
+	tmpMetaName := tmpMeta.Name()
+	cleanupMeta := func() { _ = os.Remove(tmpMetaName) }
+	if _, err := tmpMeta.Write(scBytes); err != nil {
+		_ = tmpMeta.Close()
+		cleanupMeta()
+		cleanup()
+		return storage.ObjectVersion{}, err
+	}
+	if err := tmpMeta.Sync(); err != nil {
+		_ = tmpMeta.Close()
+		cleanupMeta()
+		cleanup()
+		return storage.ObjectVersion{}, err
+	}
+	if err := tmpMeta.Close(); err != nil {
+		cleanupMeta()
+		cleanup()
+		return storage.ObjectVersion{}, err
+	}
+
+	if err := os.Rename(tmpName, objPath); err != nil {
+		cleanupMeta()
+		cleanup()
+		return storage.ObjectVersion{}, err
+	}
+	if err := fsyncDir(filepath.Dir(objPath)); err != nil {
+		cleanupMeta()
+		return storage.ObjectVersion{}, err
+	}
+
+	if err := os.Rename(tmpMetaName, metaPath); err != nil {
+		cleanupMeta()
+		return storage.ObjectVersion{}, fmt.Errorf("localfs: multipart committed, sidecar promotion failed: %w", err)
+	}
+	if err := fsyncDir(metaDir); err != nil {
+		return storage.ObjectVersion{}, fmt.Errorf("localfs: multipart committed, sidecar fsync failed: %w", err)
 	}
 
 	// Mark the upload terminated *before* removing the on-disk dir so a
