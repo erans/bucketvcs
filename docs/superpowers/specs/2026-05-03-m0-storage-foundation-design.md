@@ -1,7 +1,7 @@
 # M0 — Storage Foundation: ObjectStore Contract, localfs Adapter, Conformance Suite
 
 Date: 2026-05-03
-Status: design draft (revision 3)
+Status: design draft (revision 4)
 Milestone: M0 (first critical-path milestone of bucketvcs OSS-core)
 Source spec sections: §9, §10, §29 (subset), §35, §40.1, §40.4
 Decomposition: see `2026-05-03-bucketvcs-oss-decomposition-design.md`
@@ -11,6 +11,7 @@ Revision history:
 - 2026-05-03 r1: initial design.
 - 2026-05-03 r2: address roborev design review (job 7684) findings — read-side mutex acquisition for atomicity; `PutIfAbsent` Stat-then-rename made explicit; `PutOptions.Metadata` removed for M0; multipart lifecycle table added; symlink rejection added; filesystem portability assumptions documented; sidecar schema versioning surfaced from plan; part numbering pinned to 1-based.
 - 2026-05-03 r3: address roborev design review (job 7686) findings — AD11 narrowed to best-effort final-path symlink rejection with documented limitations (ancestor symlinks, hardlinks, TOCTOU not covered); directory `fsync` added to the atomic write pattern for crash durability; version-conditional operation contract table added; plan stages summarized inline; crash-recovery semantics tabulated.
+- 2026-05-03 r4: address roborev design review (job 7688) findings — stale-sidecar detection on read added (size-mismatch fast-path triggers self-heal) plus `bucketvcs doctor` mandated as a precondition for resuming write traffic after unclean shutdown; `fsyncDir` failure behavior specified (error propagated, operation reported as failed); List symlink mechanism pinned to `DirEntry.Type()` from `filepath.WalkDir`; size-mismatch detection surfaced into the stage 3 summary; README verbatim-copy obligations enumerated.
 
 ## Purpose
 
@@ -39,7 +40,7 @@ The full implementation plan (`docs/superpowers/plans/2026-05-03-m0-storage-foun
 
 1. **Bootstrap** (Tasks 1–9): Go module + `.gitignore` + `cmd/bucketvcs/main.go` skeleton; sentinel errors; `ObjectVersion`; option/result types; `MultipartUpload` interface; `ObjectStore` interface; localfs stub returning `ErrNotSupported`; conformance package scaffolding; localfs ↔ conformance wiring.
 2. **Localfs internals** (Tasks 10–13): key validation; in-process keyed mutex; JSON sidecar with versioned schema; `Open`/`Close` + lock file.
-3. **Core operations** (Tasks 14–18): `Put` + `Head` + `Get` with the atomic write pattern (per-key mutex on reads, `Lstat` symlink rejection, directory `fsync`); `GetRange`; `PutIfAbsent` concurrency tests; `PutIfVersionMatches`; `DeleteIfVersionMatches` (content-first removal order).
+3. **Core operations** (Tasks 14–18): `Put` + `Head` + `Get` with the atomic write pattern (per-key mutex on reads, `Lstat` symlink rejection, **size-mismatch fast-path triggering sidecar self-heal**, directory `fsync`); `GetRange`; `PutIfAbsent` concurrency tests; `PutIfVersionMatches` (with size-mismatch check before token compare); `DeleteIfVersionMatches` (content-first removal order; size-mismatch check before token compare).
 4. **List + multipart** (Tasks 19–23): List + pagination + symlink skip; List delimiter + common prefixes; multipart happy path; multipart-vs-existing-key (§29 #8); `Capabilities` + `SignedGetURL` returning `ErrNotSupported`.
 5. **§29 conformance fill-in** (Tasks 24–26): error classification + version round-trip + throttling-skip; key namespace floor; suite self-review checking that all 15 §29 items are covered.
 6. **Stress tests** (Tasks 27–29): 100 concurrent CAS attempts; 10,000 small object creates; 256 MiB multipart conflict.
@@ -250,12 +251,15 @@ The cost is that read throughput is serialized per key. For a single-process dev
   3. `rename` to the final path.
   4. **`fsync` the parent directory.** POSIX `rename` is atomic in memory but the directory entry change is not durable until the directory itself is fsynced. Without this step, a crash between steps 3 and the next operation can lose the rename even though the file fsync succeeded. The implementation provides a `fsyncDir(dir string) error` helper used by both content and sidecar writes.
 
+  **`fsyncDir` failure semantics**: if `fsyncDir` returns an error after a successful `rename`, the operation has performed the rename but the directory entry is not durably persisted. The operation MUST return that error (wrapped with the operation name); callers MUST treat it as a failure even though some on-disk state may have changed. The next successful write to the same key will durably persist the previous rename via its own `fsyncDir`. This is consistent with how filesystems and databases conventionally surface fsync errors.
+
   Because the per-key mutex is held for the whole sequence, no concurrent reader observes a torn pair. The directory fsync makes the rename durable across crashes; it is required for the crash-recovery semantics described below.
+- **Stale sidecar detection on read.** Before trusting `sidecar.Sha256` as the version token, `Head` / `Get` / `GetRange` / `PutIfVersionMatches` / `DeleteIfVersionMatches` MUST compare `os.Stat(content).Size()` against `sidecar.Size`. If they differ, the sidecar is stale relative to content (the most likely cause is a crash mid-`PutIfVersionMatches` between the content rename and the sidecar rename). The implementation MUST trigger sidecar self-heal: recompute sha256 from content and rewrite a fresh sidecar at the current schema version. The size-mismatch path is cheap (one `Stat`); same-size collisions are NOT detected by this fast-path and are addressed by `bucketvcs doctor` (see "Crash recovery and bucketvcs doctor" below).
 - **`PutIfAbsent`** acquires the per-key mutex, then explicitly `os.Lstat`s the target path. If the target exists (regular file or symlink), returns `ErrAlreadyExists` and writes nothing. If absent, runs the atomic write pattern. *Note: POSIX `rename(2)` overwrites existing targets silently, so the absence check must be performed under the same mutex held during rename. Defense-in-depth on Linux: callers may use `unix.Renameat2(..., RENAME_NOREPLACE)`; M0 relies on the Lstat-under-mutex check because localfs is single-process.*
-- **`PutIfVersionMatches`** acquires the per-key mutex, reads the sidecar, compares `expected.Token` against `sidecar.sha256`. If equal, runs the atomic write pattern; otherwise returns `ErrVersionMismatch`. Returns `ErrVersionMismatch` (not `ErrNotFound`) when the key does not exist, matching S3 If-Match semantics. See the "Version-conditional operation contract" table below for the full matrix.
-- **`DeleteIfVersionMatches`** acquires the per-key mutex, reads and compares the version, then removes content first, then sidecar; each removal is followed by `fsyncDir` of the parent. Returns `ErrVersionMismatch` on skew, `ErrNotFound` if absent. **Order rationale**: removing content first means a crash mid-delete leaves "no content + orphan sidecar"; subsequent `Head` returns `ErrNotFound` (correct outcome). The reverse order would leave "content present + missing sidecar"; subsequent `Head` would self-heal the sidecar and the deleted object would resurrect.
-- **`Get` / `Head` / `GetRange`** acquire the per-key mutex, perform `Lstat` on the content path (rejects symlinks under AD11), read the sidecar (or self-heal), then read content. Sidecar self-heal recomputes sha256 from content and rewrites a fresh sidecar; if heal fails (e.g., I/O error), the original error is wrapped and returned.
-- **`List`** walks `<root>/objects/<prefix>` lexicographically using `filepath.WalkDir`. Pagination uses last-returned key as the continuation token; the next call returns keys strictly greater than that token. `Delimiter` support produces `CommonPrefixes` to match cloud-style "directory-like" listing semantics. List skips entries whose `Type()` reports a symlink, with a structured warning log.
+- **`PutIfVersionMatches`** acquires the per-key mutex, reads the sidecar, applies the size-mismatch fast-path (self-heal if `Stat.Size != sidecar.Size`), then compares `expected.Token` against `sidecar.sha256`. If equal, runs the atomic write pattern; otherwise returns `ErrVersionMismatch`. Returns `ErrVersionMismatch` (not `ErrNotFound`) when the key does not exist, matching S3 If-Match semantics. See the "Version-conditional operation contract" table below for the full matrix.
+- **`DeleteIfVersionMatches`** acquires the per-key mutex, reads and compares the version (with size-mismatch fast-path), then removes content first, then sidecar; each removal is followed by `fsyncDir` of the parent. Returns `ErrVersionMismatch` on skew, `ErrNotFound` if absent. **Order rationale**: removing content first means a crash mid-delete leaves "no content + orphan sidecar"; subsequent `Head` returns `ErrNotFound` (correct outcome). The reverse order would leave "content present + missing sidecar"; subsequent `Head` would self-heal the sidecar and the deleted object would resurrect.
+- **`Get` / `Head` / `GetRange`** acquire the per-key mutex, perform `Lstat` on the content path (rejects symlinks under AD11), apply the size-mismatch fast-path, read the sidecar (or self-heal), then read content. Sidecar self-heal recomputes sha256 from content and rewrites a fresh sidecar; if heal fails (e.g., I/O error), the original error is wrapped and returned.
+- **`List`** walks `<root>/objects/<prefix>` lexicographically using `filepath.WalkDir`. **Symlink detection mechanism**: `filepath.WalkDir` calls the visit function with a `fs.DirEntry` whose `Type()` returns `fs.ModeSymlink` for symlinks (POSIX guarantee — `WalkDir` does not follow symlinks). `List` skips entries where `d.Type()&fs.ModeSymlink != 0` and emits a structured warning. No additional `Lstat` is required for the type check. Pagination uses last-returned key as the continuation token; the next call returns keys strictly greater than that token. `Delimiter` support produces `CommonPrefixes` to match cloud-style "directory-like" listing semantics.
 - **`CreateMultipart`** generates a UUID, creates `<root>/uploads/<id>/parts/`, writes `manifest.json` recording the target key, content type, and creation time. Does not lock the target key; multipart uploads do not reserve the key.
 - **`UploadPart`** streams part bytes via temp + atomic rename to `parts/NNNNN` (zero-padded; `PartNumber` is 1-based per AD10). Returns the part's sha256 as its token. Out-of-order or repeated part numbers are allowed at upload time; repeated `PartNumber` overwrites the prior part's bytes via the same temp+rename. Part numbers < 1 return `ErrInvalidArgument`.
 - **`CompleteMultipartIfAbsent`** validates the `parts` slice is non-empty and contiguously numbered (1, 2, 3, ...); acquires the target key's mutex; performs the same Lstat-then-write sequence as `PutIfAbsent`; concatenates parts in order while computing streaming sha256; atomically promotes the assembled content via the atomic write pattern (with directory fsync); removes the upload directory on success. If the target already exists, returns `ErrAlreadyExists` and leaves the upload directory intact (the caller may `Abort` or retry against a new key).
@@ -289,6 +293,20 @@ Localfs in M0 commits to crash recovery for the following states (assuming direc
 | Completed object with failed upload-dir cleanup | RemoveAll fails after object commit | Object is committed (success); upload-dir leak is a gc concern only, not a correctness one. |
 
 The "content (new) + sidecar (old)" window is the one M0 limitation that a cloud adapter would not exhibit. The conformance suite does not (and cannot) inject mid-write crashes into localfs without OS-level chaos tooling; `bucketvcs doctor` is responsible for detecting torn states by recomputing sha256 and comparing against sidecar.
+
+### Crash recovery and `bucketvcs doctor` requirement
+
+Localfs's stale-sidecar fast-path (size-mismatch detection) catches the common case where a crashed `PutIfVersionMatches` left content of a different size than the previous version. It does NOT catch the rarer case where the new and old content happen to share the same size. To preserve CAS correctness across crashes:
+
+> **After unclean shutdown (`kill -9`, OOM, host crash, etc.), localfs MUST be re-validated by `bucketvcs doctor` (M16) before write traffic resumes.** Doctor walks every object under `<root>/objects/`, recomputes sha256 from content, and rewrites stale sidecars. After doctor completes successfully, the (content, sidecar) pair is guaranteed consistent and CAS semantics are fully restored.
+
+Operational guidance:
+
+- **Clean shutdown**: a graceful `Close` on the `Localfs` instance does not require doctor. Subsequent opens are safe.
+- **Unclean shutdown without doctor**: read traffic is allowed (size-mismatch fast-path catches most stale sidecars; readers see correct version tokens for size-changing rewrites). Conditional writes against an undetected stale sidecar may operate on the wrong version, breaking CAS. Operators MUST treat this as data loss risk for any keys touched during the crashed write.
+- **Doctor is M16 work, not M0**: the requirement is stated in M0 so operators understand the contract. Until M16 ships, localfs M0 deployments must be considered ephemeral; production-style operators should keep an off-bucket replica as recourse.
+
+This requirement applies to localfs only. Cloud adapters at M5/M7 do not have an equivalent torn-state because their version tokens are server-side.
 
 ### Multipart lifecycle reference
 
@@ -546,7 +564,7 @@ Notes:
 6. `Capabilities()` declarations round-trip through the interface correctly.
 7. Documented error taxonomy maps to the conformance assertions per the table above; the error-normalization rules in this spec match implementation behavior.
 8. Package layout matches §40.1.
-9. `internal/storage/README.md` documents: the interface contract, how to add a new adapter, how to run the conformance suite against an arbitrary adapter, the AD8 recast, the filesystem portability assumptions, and any expected divergences.
+9. `internal/storage/README.md` documents: the interface contract; how to add a new adapter; how to run the conformance suite against an arbitrary adapter; the AD8 recast; the AD11 best-effort symlink claim **including the verbatim "What is NOT covered in M0" list from the "Symlink and hardlink safety" section**; the **verbatim "Filesystem portability assumptions" section**; the **verbatim `bucketvcs doctor` post-unclean-shutdown requirement**; and any expected divergences. The README is operator-facing; copying these blocks verbatim ensures the warnings are not diluted as the spec evolves.
 10. Public Go-doc comments on every exported symbol in `internal/storage`.
 11. A worked example (~50 lines, in `internal/storage/example_test.go` or under `examples/`) exercises Put, Get, PutIfVersionMatches, List, Multipart, Delete on localfs, including the conflict paths.
 
