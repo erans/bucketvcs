@@ -7,40 +7,126 @@ package localfs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
 
+// ErrAlreadyLocked is returned by Open when another Localfs instance
+// (in this process) already holds the root.
+var ErrAlreadyLocked = errors.New("localfs: root is already locked by another instance")
+
+const (
+	objectsDir = "objects"
+	uploadsDir = "uploads"
+	lockFile   = ".lock"
+	metaSuffix = ".meta"
+)
+
 // Localfs is the local-filesystem ObjectStore implementation.
 type Localfs struct {
-	root string
+	root     string
+	lock     *os.File
+	mutexes  *keyedMutex
 }
 
 // Compile-time assertion that *Localfs satisfies storage.ObjectStore.
 var _ storage.ObjectStore = (*Localfs)(nil)
 
-// Open returns a Localfs rooted at the given directory. This stub
-// performs no on-disk validation beyond rejecting an empty root and
-// returns ErrNotSupported on every method, so the package compiles
-// and the conformance suite has a target to fail against. Real root
-// validation (directory exists, is a directory, lock file acquired)
-// lands in Task 13.
+// Open returns a Localfs rooted at the given directory. The directory
+// is created if missing. Open holds a process-wide lockfile at
+// <root>/.lock; a second Open against the same root returns
+// ErrAlreadyLocked.
 func Open(root string) (*Localfs, error) {
 	if root == "" {
 		return nil, errors.New("localfs: root must be non-empty")
 	}
-	return &Localfs{root: root}, nil
+	if err := os.MkdirAll(filepath.Join(root, objectsDir), 0o755); err != nil {
+		return nil, fmt.Errorf("localfs: mkdir objects: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, uploadsDir), 0o755); err != nil {
+		return nil, fmt.Errorf("localfs: mkdir uploads: %w", err)
+	}
+
+	lockPath := filepath.Join(root, lockFile)
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return nil, ErrAlreadyLocked
+		}
+		return nil, fmt.Errorf("localfs: create lockfile: %w", err)
+	}
+	// Write lockfile content per AD12: {pid, host, acquired_at}.
+	// Verify uses pid + host for the liveness check; acquired_at is
+	// forensics-only and is NOT consulted by the liveness logic.
+	host, _ := os.Hostname()
+	acquiredAt := time.Now().UTC()
+	lockContent, err := json.Marshal(lockfileContent{
+		PID:        os.Getpid(),
+		Host:       host,
+		AcquiredAt: acquiredAt,
+	})
+	if err != nil {
+		_ = f.Close()
+		_ = os.Remove(lockPath)
+		return nil, fmt.Errorf("localfs: encode lockfile: %w", err)
+	}
+	if _, err := f.Write(lockContent); err != nil {
+		_ = f.Close()
+		_ = os.Remove(lockPath)
+		return nil, fmt.Errorf("localfs: write lockfile: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(lockPath)
+		return nil, fmt.Errorf("localfs: sync lockfile: %w", err)
+	}
+
+	return &Localfs{
+		root:    root,
+		lock:    f,
+		mutexes: newKeyedMutex(),
+	}, nil
 }
 
-// Close releases any resources held by the Localfs instance.
+// lockfileContent is the JSON payload of <root>/.lock. Per AD12,
+// `pid` and `host` are used by Verify's liveness check;
+// `acquired_at` is forensics-only (logging, debugging) and is NOT
+// consulted by the liveness logic.
+type lockfileContent struct {
+	PID        int       `json:"pid"`
+	Host       string    `json:"host"`
+	AcquiredAt time.Time `json:"acquired_at"`
+}
+
+// Close releases the lockfile.
 func (l *Localfs) Close() error {
-	return nil
+	if l.lock == nil {
+		return nil
+	}
+	closeErr := l.lock.Close()
+	l.lock = nil
+	rmErr := os.Remove(filepath.Join(l.root, lockFile))
+	if closeErr != nil {
+		return closeErr
+	}
+	return rmErr
 }
 
 func (l *Localfs) Capabilities() storage.Capabilities {
-	return storage.Capabilities{}
+	return storage.Capabilities{
+		SignedURLs:           false,
+		MultipartMinPartSize: 0,
+		MultipartMaxParts:    0,
+		MaxObjectSize:        0,
+		StrongList:           true,
+	}
 }
 
 func (l *Localfs) Get(ctx context.Context, key string, opts *storage.GetOptions) (*storage.Object, error) {
