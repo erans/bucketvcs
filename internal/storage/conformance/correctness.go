@@ -15,6 +15,8 @@ func runCorrectness(t *testing.T, f Factory) {
 	t.Helper()
 	t.Run("§29#4_PutThenGet_RAW", func(t *testing.T) { test29_4(t, f) })
 	t.Run("§29#9_GetRange", func(t *testing.T) { test29_9(t, f) })
+	t.Run("§29#1_ConcurrentPutIfAbsent", func(t *testing.T) { test29_1(t, f) })
+	t.Run("§29#14_PutIfAbsentIdempotentRetry", func(t *testing.T) { test29_14(t, f) })
 }
 
 // §29 #4: Read after write sees latest object.
@@ -112,5 +114,61 @@ func test29_9(t *testing.T, f Factory) {
 	// Missing key.
 	if _, err := s.GetRange(ctx(), "rk/29-9-missing", 0, 0); !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("GetRange(missing) = %v, want ErrNotFound", err)
+	}
+}
+
+// §29 #1: Concurrent putIfAbsent same key — exactly one succeeds.
+func test29_1(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	const n = 64
+	content := []byte("payload-29-1")
+	results := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			_, err := s.PutIfAbsent(ctx(), "rk/29-1", bytes.NewReader(content), nil)
+			results <- err
+		}()
+	}
+	successes, conflicts, others := 0, 0, 0
+	for i := 0; i < n; i++ {
+		err := <-results
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, storage.ErrAlreadyExists):
+			conflicts++
+		default:
+			others++
+			t.Errorf("unexpected error: %v", err)
+		}
+	}
+	if successes != 1 {
+		t.Errorf("successes = %d, want 1", successes)
+	}
+	if conflicts != n-1 {
+		t.Errorf("conflicts = %d, want %d", conflicts, n-1)
+	}
+}
+
+// §29 #14 (recast per AD8): PutIfAbsent twice with the same args returns
+// ErrAlreadyExists cleanly without corrupting state on the second call.
+// See M0 design doc Architectural Decision 8.
+func test29_14(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	content := []byte("payload-29-14")
+	v1, err := s.PutIfAbsent(ctx(), "rk/29-14", bytes.NewReader(content), nil)
+	if err != nil {
+		t.Fatalf("first PutIfAbsent: %v", err)
+	}
+	if _, err := s.PutIfAbsent(ctx(), "rk/29-14", bytes.NewReader(content), nil); !errors.Is(err, storage.ErrAlreadyExists) {
+		t.Errorf("second PutIfAbsent = %v, want ErrAlreadyExists", err)
+	}
+
+	md, err := s.Head(ctx(), "rk/29-14")
+	if err != nil {
+		t.Fatalf("Head: %v", err)
+	}
+	if md.Version != v1 {
+		t.Errorf("version mutated by failed second PutIfAbsent: got %+v, want %+v", md.Version, v1)
 	}
 }
