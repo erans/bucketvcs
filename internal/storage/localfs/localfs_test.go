@@ -181,3 +181,34 @@ func TestHeadFailsClosedOnFutureSidecarSchema(t *testing.T) {
 		t.Errorf("sidecar was mutated by failed Head; on-disk overwrite is a downgrade attack")
 	}
 }
+
+// TestGetRangeFailsClosedOnFutureSidecarSchema mirrors the Head test for
+// GetRange: range reads must respect the same schema-version gate Head
+// and Get apply, otherwise an older binary could stream bytes from an
+// object whose forward-schema sidecar would otherwise be refused.
+func TestGetRangeFailsClosedOnFutureSidecarSchema(t *testing.T) {
+	dir := t.TempDir()
+	s, err := localfs.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	if _, err := s.PutIfAbsent(context.Background(), "future-range", bytes.NewReader([]byte("payload")), nil); err != nil {
+		t.Fatalf("PutIfAbsent: %v", err)
+	}
+
+	metaPath := filepath.Join(dir, "objects", "future-range.meta")
+	if err := os.WriteFile(metaPath, []byte(`{"version":2,"sha256":"x","size":7,"content_type":"","modified_at":"2030-01-01T00:00:00Z"}`), 0o644); err != nil {
+		t.Fatalf("plant future sidecar: %v", err)
+	}
+
+	rc, err := s.GetRange(context.Background(), "future-range", 0, 3)
+	if err == nil {
+		_ = rc.Close()
+		t.Fatal("GetRange against future-schema sidecar succeeded; expected ErrUnsupportedSidecarSchema")
+	}
+	if !errors.Is(err, localfs.ErrUnsupportedSidecarSchema) {
+		t.Errorf("GetRange against future-schema sidecar: got %v, want ErrUnsupportedSidecarSchema", err)
+	}
+}

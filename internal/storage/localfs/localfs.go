@@ -254,6 +254,14 @@ func (l *Localfs) GetRange(ctx context.Context, key string, start, endInclusive 
 	if err := lstatNoSymlink(l.objectPath(key)); err != nil {
 		return nil, err
 	}
+	// Run the sidecar gate before streaming bytes. headLocked fails
+	// closed on ErrUnsupportedSidecarSchema; without this check, an
+	// older binary could happily stream bytes for an object whose
+	// future-schema sidecar Head/Get would refuse, hiding the
+	// downgrade signal from range-read callers.
+	if _, err := l.headLocked(key); err != nil {
+		return nil, err
+	}
 	f, err := os.Open(l.objectPath(key))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
