@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/storage"
@@ -27,29 +28,69 @@ type uploadManifest struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
-const uploadManifestVersion = 1
+const (
+	uploadManifestVersion = 1
+	uploadManifestName    = "manifest.json"
+	uploadPartsDirName    = "parts"
+)
 
 // localfsUpload is the MultipartUpload returned by Localfs.CreateMultipart.
+//
+// Lifecycle: created live; Abort or successful Complete sets terminated.
+// Once terminated, further UploadPart and Complete calls return
+// ErrInvalidArgument so a stale handle cannot resurrect a finished
+// upload via UploadPart's MkdirAll. The on-disk manifest is the
+// cross-process witness — missing manifest also fails active-state
+// checks.
 type localfsUpload struct {
 	parent      *Localfs
 	uploadID    string
 	key         string
 	contentType string
 	dir         string // <root>/uploads/<id>
+	terminated  atomic.Bool
 }
 
 func (u *localfsUpload) UploadID() string { return u.uploadID }
 func (u *localfsUpload) Key() string      { return u.key }
 
-func (u *localfsUpload) UploadPart(ctx context.Context, partNumber int, body io.Reader) (storage.MultipartPart, error) {
+// validateActive returns an error if the upload cannot accept further
+// part uploads or completion: the parent Localfs is closed, the
+// in-memory terminated flag is set, or the on-disk manifest is missing
+// (e.g., another instance Aborted, or the uploads/ tree was tampered
+// with). UploadPart and CompleteMultipartIfAbsent gate on this so a
+// stale handle held after Abort/Complete cannot drive new I/O.
+func (u *localfsUpload) validateActive() error {
 	if err := u.parent.checkOpen(); err != nil {
+		return err
+	}
+	if u.terminated.Load() {
+		return fmt.Errorf("%w: upload %s already terminated", storage.ErrInvalidArgument, u.uploadID)
+	}
+	if _, err := os.Stat(filepath.Join(u.dir, uploadManifestName)); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%w: upload manifest missing (upload aborted or never created)", storage.ErrInvalidArgument)
+		}
+		return err
+	}
+	return nil
+}
+
+func (u *localfsUpload) UploadPart(ctx context.Context, partNumber int, body io.Reader) (storage.MultipartPart, error) {
+	if err := u.validateActive(); err != nil {
 		return storage.MultipartPart{}, err
 	}
 	if partNumber < 1 {
 		return storage.MultipartPart{}, fmt.Errorf("%w: partNumber must be >= 1", storage.ErrInvalidArgument)
 	}
-	partsDir := filepath.Join(u.dir, "parts")
-	if err := os.MkdirAll(partsDir, 0o755); err != nil {
+	partsDir := filepath.Join(u.dir, uploadPartsDirName)
+	// The parts directory is created at CreateMultipart time. If it is
+	// gone we treat the upload as terminated rather than recreating it,
+	// so a stale handle cannot drive new I/O after Abort/Complete.
+	if _, err := os.Stat(partsDir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return storage.MultipartPart{}, fmt.Errorf("%w: upload parts directory missing (upload terminated)", storage.ErrInvalidArgument)
+		}
 		return storage.MultipartPart{}, err
 	}
 	partPath := filepath.Join(partsDir, fmt.Sprintf("%05d", partNumber))
@@ -90,6 +131,10 @@ func (u *localfsUpload) Abort(ctx context.Context) error {
 	if err := u.parent.checkOpen(); err != nil {
 		return err
 	}
+	// Set terminated *before* RemoveAll so a concurrent UploadPart
+	// observes the terminated state even if it loses the race against
+	// the directory removal.
+	u.terminated.Store(true)
 	return os.RemoveAll(u.dir)
 }
 
@@ -104,7 +149,7 @@ func (l *Localfs) CreateMultipart(ctx context.Context, key string, opts *storage
 	}
 	id := uuid.NewString()
 	dir := filepath.Join(l.root, uploadsDir, id)
-	if err := os.MkdirAll(filepath.Join(dir, "parts"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, uploadPartsDirName), 0o755); err != nil {
 		return nil, err
 	}
 	contentType := ""
@@ -122,7 +167,7 @@ func (l *Localfs) CreateMultipart(ctx context.Context, key string, opts *storage
 	if err != nil {
 		return nil, err
 	}
-	if err := writeFileAtomic(filepath.Join(dir, "manifest.json"), mb); err != nil {
+	if err := writeFileAtomic(filepath.Join(dir, uploadManifestName), mb); err != nil {
 		return nil, err
 	}
 	return &localfsUpload{
@@ -136,7 +181,10 @@ func (l *Localfs) CreateMultipart(ctx context.Context, key string, opts *storage
 
 // CompleteMultipartIfAbsent assembles parts in order and atomically
 // promotes them to the target key, only if the target does not already
-// exist. Returns ErrAlreadyExists otherwise.
+// exist. Returns ErrAlreadyExists otherwise. Each part is hashed during
+// reassembly and its hash is compared against the MultipartPart.Token
+// the caller supplied; mismatch returns ErrInvalidArgument and leaves
+// the target key untouched.
 func (l *Localfs) CompleteMultipartIfAbsent(ctx context.Context, upload storage.MultipartUpload, parts []storage.MultipartPart) (storage.ObjectVersion, error) {
 	if err := l.checkOpen(); err != nil {
 		return storage.ObjectVersion{}, err
@@ -147,6 +195,9 @@ func (l *Localfs) CompleteMultipartIfAbsent(ctx context.Context, upload storage.
 	}
 	if u.parent != l {
 		return storage.ObjectVersion{}, fmt.Errorf("%w: upload not from this Localfs instance", storage.ErrInvalidArgument)
+	}
+	if err := u.validateActive(); err != nil {
+		return storage.ObjectVersion{}, err
 	}
 	if len(parts) == 0 {
 		return storage.ObjectVersion{}, fmt.Errorf("%w: no parts", storage.ErrInvalidArgument)
@@ -179,7 +230,7 @@ func (l *Localfs) CompleteMultipartIfAbsent(ctx context.Context, upload storage.
 
 	h := sha256.New()
 	var total int64
-	partsDir := filepath.Join(u.dir, "parts")
+	partsDir := filepath.Join(u.dir, uploadPartsDirName)
 	for _, p := range parts {
 		partPath := filepath.Join(partsDir, fmt.Sprintf("%05d", p.PartNumber))
 		f, err := os.Open(partPath)
@@ -188,7 +239,8 @@ func (l *Localfs) CompleteMultipartIfAbsent(ctx context.Context, upload storage.
 			cleanup()
 			return storage.ObjectVersion{}, err
 		}
-		tee := io.TeeReader(f, h)
+		partHash := sha256.New()
+		tee := io.TeeReader(f, io.MultiWriter(h, partHash))
 		n, err := io.Copy(tmp, tee)
 		_ = f.Close()
 		if err != nil {
@@ -200,6 +252,12 @@ func (l *Localfs) CompleteMultipartIfAbsent(ctx context.Context, upload storage.
 			_ = tmp.Close()
 			cleanup()
 			return storage.ObjectVersion{}, fmt.Errorf("%w: part %d size mismatch (manifest=%d, on-disk=%d)", storage.ErrInvalidArgument, p.PartNumber, p.Size, n)
+		}
+		actualToken := hex.EncodeToString(partHash.Sum(nil))
+		if p.Token != "" && actualToken != p.Token {
+			_ = tmp.Close()
+			cleanup()
+			return storage.ObjectVersion{}, fmt.Errorf("%w: part %d token mismatch (caller=%q, on-disk=%q)", storage.ErrInvalidArgument, p.PartNumber, p.Token, actualToken)
 		}
 		total += n
 	}
@@ -230,6 +288,10 @@ func (l *Localfs) CompleteMultipartIfAbsent(ctx context.Context, upload storage.
 		return storage.ObjectVersion{}, err
 	}
 
+	// Mark the upload terminated *before* removing the on-disk dir so a
+	// concurrent UploadPart sees the in-memory flag even if it races the
+	// directory removal.
+	u.terminated.Store(true)
 	if err := os.RemoveAll(u.dir); err != nil {
 		// Non-fatal: the object is committed; the upload dir leak is a
 		// gc concern, not a correctness one.
