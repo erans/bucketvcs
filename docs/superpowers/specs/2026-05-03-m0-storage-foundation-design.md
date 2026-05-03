@@ -1,7 +1,7 @@
 # M0 — Storage Foundation: ObjectStore Contract, localfs Adapter, Conformance Suite
 
 Date: 2026-05-03
-Status: design draft (revision 6)
+Status: design draft (revision 7)
 Milestone: M0 (first critical-path milestone of bucketvcs OSS-core)
 Source spec sections: §9, §10, §29 (subset), §35, §40.1, §40.4
 Decomposition: see `2026-05-03-bucketvcs-oss-decomposition-design.md`
@@ -14,6 +14,7 @@ Revision history:
 - 2026-05-03 r4: address roborev design review (job 7688) findings — stale-sidecar detection on read added (size-mismatch fast-path triggers self-heal) plus `bucketvcs doctor` mandated as a precondition for resuming write traffic after unclean shutdown; `fsyncDir` failure behavior specified (error propagated, operation reported as failed); List symlink mechanism pinned to `DirEntry.Type()` from `filepath.WalkDir`; size-mismatch detection surfaced into the stage 3 summary; README verbatim-copy obligations enumerated.
 - 2026-05-03 r5: address roborev design review (job 7690) findings — replaced "must run doctor at M16" with M0-shipped `Localfs.Verify(ctx)` method and package-level `localfs.Verify(root)` function; lockfile (`<root>/.lock`) doubles as unclean-shutdown marker (its presence at `Open` time triggers `ErrAlreadyLocked` with the operator instructed to call `Verify` before retrying); read-path sequence rewritten as an explicit 4-step procedure; self-heal failure semantics specified (original read error wins, partial sidecar left for retry); size-mismatch coverage extended to all reads and conditional writes via the shared `headLocked` helper.
 - 2026-05-03 r6: address roborev design review (job 7693) findings — fix the regression introduced in r5 where package-level `Verify(root)` could trample a live process holding the bucket open. Lockfile now stores PID + host + start time; `Verify` checks if the recorded PID is alive on the recorded host before proceeding (`kill(pid, 0)` on POSIX); refuses with `ErrLockedByLiveProcess` if alive unless `WithForce(true)` opt is passed. Package-level `Verify` signature changed to `Verify(ctx context.Context, root string, opts ...VerifyOption) error` for cancellation, force-override, and progress reporting. Reconciliation outcome matrix added covering missing/parse-broken/orphan sidecars, symlinks, dirs, unreadable files, ctx cancellation, partial failure. Same-size torn-sidecar test made an explicit exit criterion (the actual case Verify exists for).
+- 2026-05-03 r7: address roborev design review (job 7696) findings — fix the contradictory `started_at` semantics introduced in r6. Lockfile field renamed to `acquired_at` and is forensics-only (not used for liveness logic). M0 liveness check is `kill(pid, 0)` on the same host; PID reuse is documented as a known limitation operator resolves via `WithForce`. Add unchanged-lock snapshot/recheck around `Verify`'s lockfile removal so a legitimate process Opening the bucket mid-Verify is not trampled. Specify progress callback as fire-and-forget (caller owns panic handling). Two new tests required: PID-reuse-via-WithForce and lock-changed-during-Verify.
 
 ## Purpose
 
@@ -67,7 +68,8 @@ These were settled during brainstorming and are not re-litigated below.
 | AD9 | M0 omits `PutOptions.Metadata` (user-defined K/V metadata). Only `ContentType` is supported. | The field added complexity (sidecar schema, `ObjectMetadata` exposure, conformance assertions) without a caller for it in M0. Cloud adapters at M5/M7 reintroduce it with explicit semantics keyed to provider-native metadata (S3 `x-amz-meta-*`, GCS object metadata, etc.). The interface stays additive: adding `Metadata` later does not break existing callers. |
 | AD10 | Multipart `PartNumber` is 1-based (S3 convention). Reject part numbers < 1. | Cloud adapters all use 1-based numbering (S3, GCS resumable, Azure block IDs); having localfs match avoids a class of porting bugs. |
 | AD11 | Localfs read paths perform **best-effort final-path symlink rejection** via `os.Lstat`. Ancestor-directory symlinks, hardlinks, and TOCTOU between `Lstat` and the subsequent `Open` are explicitly NOT detected. | The realistic dev-test footgun is `ln -s /etc/passwd <root>/objects/foo`; the final-path lstat catches it. Stronger sandboxing (every-component validation, `openat2(RESOLVE_BENEATH)` on Linux, `Nlink>1` checks for hardlinks) is out of scope for M0; the README and the "Symlink and hardlink safety" section document the limitations honestly. Cloud adapters at M5/M7 do not have these concerns because they do not see a host filesystem. |
-| AD12 | The localfs lockfile `<root>/.lock` records `{pid, host, started_at}` JSON. `Open` writes the JSON via `O_CREAT\|O_EXCL`. `Verify` reads the JSON to determine whether the lock-holder is alive (POSIX `kill(pid, 0)`) on the same host before deciding whether to proceed. | r5 introduced a package-level `Verify(root)` that bypassed the lockfile check unconditionally — a regression that allowed the verifier to trample a live process. The PID-encoded lockfile lets `Verify` distinguish "previous process is dead" (proceed safely) from "another process is actually using the bucket" (refuse unless `WithForce(true)` is passed). Cross-host detection is best-effort: a recorded host that differs from the current host means M0 cannot determine liveness and refuses without `WithForce`. PID reuse is mitigated by checking `started_at` if the PID is alive — if the live PID's start time predates the recorded `started_at`, it is a different process and we treat the lock-holder as dead. |
+| AD12 | The localfs lockfile `<root>/.lock` records `{pid, host, acquired_at}` JSON. `Open` writes the JSON via `O_CREAT\|O_EXCL`. `Verify` reads `pid` and `host`; if `host` matches the current host and `kill(pid, 0)` reports the process alive, the lock-holder is treated as live and `Verify` refuses with `ErrLockedByLiveProcess` unless `WithForce(true)` is passed. The `acquired_at` field is forensics-only (logging, debugging) and is NOT used for liveness logic. PID reuse is a documented limitation: a stale lockfile whose PID was later assigned to an unrelated live process will look "alive" and require `WithForce(true)` to bypass. | r5 introduced a regression: package-level `Verify(root)` bypassed the lockfile check unconditionally and could trample a live process. r6 added PID + start-time logic but introduced contradictory `started_at` semantics (lock-acquisition time vs process start time, with internally inconsistent comparison rules). r7 simplifies to the safe direction: `kill(pid, 0)` is enough to refuse against a live PID; `WithForce(true)` lets operators recover from PID-reuse false positives. False refusals are recoverable; false permits are not. Cross-host detection remains unchanged: a recorded host that differs from the current host means M0 cannot probe liveness and refuses without `WithForce`. Reading process start times portably (Linux `/proc/<pid>/stat`, macOS `sysctl(KERN_PROC)`) is OS-specific and deferred to a future revision if PID-reuse false positives become a real operational issue. |
+| AD13 | Package-level `Verify` snapshots the lockfile bytes at the start of repair and re-reads them just before removing the lockfile. If the bytes have changed, `Verify` returns an error and does NOT remove the lockfile, preserving whatever new lock has appeared. | If a legitimate process Opens the bucket between `Verify`'s liveness check and its `os.Remove(<root>/.lock)`, removing the lock would let yet another process Open and break the single-writer invariant. The snapshot-then-recheck pattern catches the race: any change to the lockfile (new PID, new host, malformed contents, or absent altogether) aborts the cleanup. The pattern is not strictly atomic against a writer that races between recheck and `Remove`, but it shrinks the window from "entire reconciliation" to "two syscalls"; combined with operator workflow (Verify is invoked when the operator believes the bucket is unowned), the residual race is acceptable for a single-process dev/test adapter. |
 
 ## ObjectStore interface
 
@@ -353,7 +355,10 @@ type VerifyOption func(*verifyConfig)
 func WithForce(force bool) VerifyOption
 
 // WithProgress installs a callback that is invoked as objects are
-// processed. Called in the same goroutine as Verify.
+// processed. Called in the same goroutine as Verify. The callback is
+// fire-and-forget: panics propagate out of Verify (caller responsibility
+// to recover); a callback that blocks blocks Verify; the callback has
+// no return value and cannot signal cancellation (use ctx for that).
 func WithProgress(cb func(processed int)) VerifyOption
 ```
 
@@ -363,16 +368,19 @@ func WithProgress(cb func(processed int)) VerifyOption
 {
   "pid": 12345,
   "host": "hostname.local",
-  "started_at": "2026-05-03T20:00:00Z"
+  "acquired_at": "2026-05-03T20:00:00Z"
 }
 ```
 
-`Open` writes this content via `O_CREAT|O_EXCL`. `Close` removes it.
+`Open` writes this content via `O_CREAT|O_EXCL`. `Close` removes it. `acquired_at` is recorded for forensics (logs, debugging) and is NOT consulted by the liveness check.
 
-**Lock-liveness rule used by package-level `Verify`:**
+**Lock-liveness rule used by package-level `Verify` (AD12 + AD13):**
 
 ```text
-1. Read <root>/.lock. If absent: clean shutdown; reconcile and return.
+1. Snapshot <root>/.lock bytes at the start of Verify (preLockBytes).
+   If absent: clean shutdown; reconcile and return.
+   If unreadable: treat as stale; reconcile and (per AD13) skip the
+   "remove only if unchanged" rule because there is nothing to compare.
 2. Parse the JSON. Malformed: treat as stale; reconcile and remove.
 3. If recorded host != current host:
      - Without WithForce: refuse with ErrLockedByLiveProcess
@@ -381,16 +389,27 @@ func WithProgress(cb func(processed int)) VerifyOption
 4. If recorded host == current host:
      a. Probe POSIX kill(pid, 0).
      b. ESRCH (no such process) → lock-holder is dead; proceed.
-     c. PID is alive: read /proc/<pid>/stat (Linux) or equivalent on
-        macOS to compare process start time against recorded
-        started_at. If the live process started AFTER recorded
-        started_at, PID has been reused; lock-holder is dead;
-        proceed.
-     d. PID alive AND started_at matches: lock-holder is live.
-        Without WithForce: refuse with ErrLockedByLiveProcess.
-        With WithForce: proceed (operator owns the safety call).
-5. If proceeding: walk objects, reconcile per the outcome matrix,
-   remove the lockfile on success.
+     c. Any other "alive" indication (success, EPERM): lock-holder is
+        treated as live. Without WithForce: refuse with
+        ErrLockedByLiveProcess. With WithForce: proceed (operator owns
+        the safety call).
+5. After reconciliation completes, re-read <root>/.lock (postLockBytes).
+   - If absent: another process already removed it; do nothing.
+   - If equal to preLockBytes: remove the lockfile so subsequent Open
+     succeeds.
+   - If different from preLockBytes: another process has acquired the
+     lock during repair. Return ErrLockedByLiveProcess and do NOT
+     remove the lockfile, preserving the new owner's lock. The
+     reconciliation work already performed is harmless: stale sidecars
+     are now correct relative to content, which is the same invariant
+     normal writers maintain.
+6. Note on PID reuse: M0 does NOT probe process start time to defeat
+   PID reuse. A stale lockfile whose PID has been reassigned to an
+   unrelated live process appears live and requires WithForce(true)
+   to bypass. False refusals are recoverable; false permits are not.
+   This is documented as a known limitation; future revisions may add
+   OS-specific start-time validation if PID-reuse false positives
+   become a real operational concern.
 ```
 
 **Reconciliation outcome matrix:**
@@ -704,9 +723,10 @@ Notes:
     - **Symlink under `objects/`** → skipped with structured warning.
     - **Live-process lockfile** → `Verify(ctx, root)` without `WithForce` returns `ErrLockedByLiveProcess`; with `WithForce` it proceeds.
     - **Cross-host lockfile** → `Verify` without `WithForce` returns `ErrLockedByLiveProcess` (M0 cannot probe a remote host).
-    - **PID-reused lockfile** → live PID with start time after recorded `started_at` treated as dead; reconciliation proceeds.
+    - **PID reuse: simulated stale lockfile whose PID has been reassigned to an unrelated live process** → `Verify` without `WithForce` returns `ErrLockedByLiveProcess` (correct, conservative); with `WithForce` it proceeds (AD12).
+    - **Lock changed during Verify** (lockfile bytes differ between snapshot and recheck) → `Verify` returns `ErrLockedByLiveProcess` and leaves the new lockfile intact (AD13). Test mutates the lockfile out of band between Verify's snapshot read and reconciliation completion using a progress callback hook.
     - **Context cancellation** → `Verify` returns `ctx.Err()`; previously reconciled entries stay reconciled (idempotent retry).
-    - **Lockfile cleared on success** → after reconciliation, `<root>/.lock` no longer exists; subsequent `Open` succeeds.
+    - **Lockfile cleared on success** → after reconciliation against a stale lock, `<root>/.lock` no longer exists; subsequent `Open` succeeds.
 11. Public Go-doc comments on every exported symbol in `internal/storage`.
 12. A worked example (~50 lines, in `internal/storage/example_test.go` or under `examples/`) exercises Put, Get, PutIfVersionMatches, List, Multipart, Delete on localfs, including the conflict paths.
 
