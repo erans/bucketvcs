@@ -4,16 +4,25 @@
 
 **Goal:** Ship a provider-neutral `ObjectStore` Go interface, a single-process localfs adapter, and a reusable conformance test suite that verifies the §29 correctness and stress invariants. After M0, M1 (manifest CAS) can be built directly on top of `ObjectStore`.
 
-**Architecture:** Bespoke `ObjectStore` interface (no portable-blob library wrapper). Localfs implements the contract with in-process keyed `sync.Mutex` for CAS, JSON sidecars for metadata, content sha256 as version token, atomic-rename for durable writes, real spec-conforming multipart. Conformance suite is a regular Go package that any adapter can call from its own test file via `conformance.Run(t, factory)`.
+**Architecture:** Bespoke `ObjectStore` interface (no portable-blob library wrapper). Localfs implements the contract with in-process keyed `sync.Mutex` for both reads and writes (AD3), JSON sidecars for metadata, content sha256 as version token, atomic-rename for durable writes, real spec-conforming multipart, lstat-based symlink rejection (AD11). Conformance suite is a regular Go package that any adapter can call from its own test file via `conformance.Run(t, factory)`.
 
 **Tech Stack:** Go 1.22, `github.com/google/uuid` v1.6.0. No other external dependencies in M0. Linux + macOS targets.
 
 **Reference docs:**
-- Design spec: `docs/superpowers/specs/2026-05-03-m0-storage-foundation-design.md`
+- Design spec (r2): `docs/superpowers/specs/2026-05-03-m0-storage-foundation-design.md`
 - Original spec sections: §9, §10, §29, §35, §40.1
 - Decomposition: `docs/superpowers/specs/2026-05-03-bucketvcs-oss-decomposition-design.md`
 
 **Module path placeholder:** uses `github.com/bucketvcs/bucketvcs`. This is a TBD pending governance gate G1. Substitute the real path once G1 is settled. The plan itself is unchanged by the substitution.
+
+**Plan revision r2 changes (2026-05-03):** Updated to match design spec r2 (which addresses roborev design review job 7684). Notable plan-level changes from r1:
+
+- Tasks 14 and 15 now acquire the per-key keyed mutex on read paths (`Get`, `Head`, `GetRange`) per AD3, eliminating the (content-N, sidecar-N-1) torn-read window.
+- Tasks 14, 15, and 19 reject symlinks via `lstatNoSymlink` / WalkDir filter per AD11.
+- Task 4 drops `PutOptions.Metadata` per AD9.
+- Task 5 doc comment updated to allow out-of-order and repeated multipart part numbers (AD10 pins 1-based).
+- The `head()` helper splits into `headLocked()` (caller holds mutex) and `head()` (locking wrapper for List).
+- Two new tasks: Task 33 (multipart lifecycle edge-case conformance tests) and Task 34 (localfs symlink-rejection test).
 
 ---
 
@@ -36,7 +45,7 @@ github.com/bucketvcs/bucketvcs/
 │   ├── example_test.go                                    Task 31
 │   ├── conformance/
 │   │   ├── suite.go                                       Task 8
-│   │   ├── correctness.go                                 Tasks 14–26 (additive)
+│   │   ├── correctness.go                                 Tasks 14–26 + 33 (additive)
 │   │   ├── stress.go                                      Tasks 27–29 (additive)
 │   │   ├── fixtures.go                                    Task 8
 │   │   └── testenv.go                                     Task 8
@@ -48,7 +57,7 @@ github.com/bucketvcs/bucketvcs/
 │       ├── meta.go                                        Task 12
 │       ├── meta_test.go                                   Task 12
 │       ├── localfs.go                                     Task 7 (stub) → Tasks 13–23 (real)
-│       ├── localfs_test.go                                Task 13 (lock file, self-heal)
+│       ├── localfs_test.go                                Tasks 13, 30, 34 (lock file, self-heal, symlink rejection)
 │       ├── multipart.go                                   Task 21
 │       └── localfs_conformance_test.go                    Task 9
 ```
@@ -428,10 +437,12 @@ type GetOptions struct {
 	IfVersionMatches *ObjectVersion
 }
 
-// PutOptions controls Put-family behavior.
+// PutOptions controls Put-family behavior. M0 ships only ContentType;
+// user-defined metadata is intentionally deferred (AD9 in the M0 design
+// spec). Cloud adapters at M5/M7 reintroduce metadata mapped to
+// provider-native fields (S3 x-amz-meta-*, GCS object metadata, etc.).
 type PutOptions struct {
 	ContentType string
-	Metadata    map[string]string
 }
 
 // ListOptions controls List behavior.
@@ -528,9 +539,12 @@ type MultipartUpload interface {
 	// Key is the target object key the upload will become on completion.
 	Key() string
 
-	// UploadPart uploads one part. PartNumber starts at 1 and must be
-	// monotonically increasing across calls. Body may exceed
-	// MultipartMinPartSize for non-final parts.
+	// UploadPart uploads one part. PartNumber is 1-based (1, 2, 3,
+	// ...). Out-of-order and repeated part numbers are allowed at
+	// upload time; uploading the same partNumber twice overwrites the
+	// prior part. Final ordering and contiguity are validated at
+	// CompleteMultipartIfAbsent. Body may exceed MultipartMinPartSize
+	// for non-final parts.
 	UploadPart(ctx context.Context, partNumber int, body io.Reader) (MultipartPart, error)
 
 	// Abort cancels the upload and removes any temporary state. After
@@ -1728,6 +1742,8 @@ Expected: FAIL — `PutIfAbsent` returns `ErrNotSupported`.
 
 Replace the `Get`, `Head`, `PutIfAbsent` methods in `internal/storage/localfs/localfs.go` and add helper functions. The `Open`, `Close`, `Capabilities` and other stubs stay unchanged.
 
+The read paths (`Get`, `Head`, and `GetRange` in Task 15) acquire the per-key mutex per AD3 in the M0 design spec to eliminate the (content-N, sidecar-N-1) torn-read window. Read paths also reject symlinks per AD11.
+
 Replace these three method bodies in `internal/storage/localfs/localfs.go`:
 
 ```go
@@ -1735,7 +1751,13 @@ func (l *Localfs) Get(ctx context.Context, key string, opts *storage.GetOptions)
 	if err := validateKey(key); err != nil {
 		return nil, err
 	}
-	md, err := l.head(key)
+	l.mutexes.lock(key)
+	defer l.mutexes.unlock(key)
+
+	if err := lstatNoSymlink(l.objectPath(key)); err != nil {
+		return nil, err
+	}
+	md, err := l.headLocked(key)
 	if err != nil {
 		return nil, err
 	}
@@ -1749,6 +1771,10 @@ func (l *Localfs) Get(ctx context.Context, key string, opts *storage.GetOptions)
 		}
 		return nil, err
 	}
+	// Note: f remains valid for the caller to read after we release
+	// the keyed mutex on return. POSIX guarantees the inode stays
+	// reachable through the open file descriptor even if a subsequent
+	// writer renames a new file over the path.
 	return &storage.Object{Body: f, Metadata: *md}, nil
 }
 
@@ -1756,7 +1782,13 @@ func (l *Localfs) Head(ctx context.Context, key string) (*storage.ObjectMetadata
 	if err := validateKey(key); err != nil {
 		return nil, err
 	}
-	return l.head(key)
+	l.mutexes.lock(key)
+	defer l.mutexes.unlock(key)
+
+	if err := lstatNoSymlink(l.objectPath(key)); err != nil {
+		return nil, err
+	}
+	return l.headLocked(key)
 }
 
 func (l *Localfs) PutIfAbsent(ctx context.Context, key string, body io.Reader, opts *storage.PutOptions) (storage.ObjectVersion, error) {
@@ -1767,7 +1799,11 @@ func (l *Localfs) PutIfAbsent(ctx context.Context, key string, body io.Reader, o
 	defer l.mutexes.unlock(key)
 
 	objPath := l.objectPath(key)
-	if _, err := os.Stat(objPath); err == nil {
+	// rename(2) silently overwrites existing targets, so the absence
+	// check must be performed under the same mutex held during the
+	// atomic write below. Defense-in-depth on Linux would use
+	// renameat2(RENAME_NOREPLACE), deferred.
+	if _, err := os.Lstat(objPath); err == nil {
 		return storage.ObjectVersion{}, storage.ErrAlreadyExists
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return storage.ObjectVersion{}, err
@@ -1798,10 +1834,32 @@ func (l *Localfs) metaPath(key string) string {
 	return l.objectPath(key) + metaSuffix
 }
 
-// head reads the sidecar (or self-heals from content if the sidecar is
-// missing or unreadable) and returns metadata. Returns ErrNotFound if
-// the object content does not exist.
-func (l *Localfs) head(key string) (*storage.ObjectMetadata, error) {
+// lstatNoSymlink rejects symlinks under the bucket root per AD11.
+// Returns ErrNotFound if the path does not exist, ErrInvalidArgument
+// if it does and is a symlink, nil otherwise. Not TOCTOU-safe: an
+// attacker who can write to the bucket can race symlink replacement
+// against subsequent open calls. For the localfs dev/test threat model
+// this is acceptable; full path-resolution sandboxing
+// (openat2 RESOLVE_BENEATH) is deferred.
+func lstatNoSymlink(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return storage.ErrNotFound
+		}
+		return err
+	}
+	if info.Mode().Type()&fs.ModeSymlink != 0 {
+		return fmt.Errorf("%w: path is a symlink (not allowed)", storage.ErrInvalidArgument)
+	}
+	return nil
+}
+
+// headLocked reads the sidecar (or self-heals from content if the
+// sidecar is missing or unreadable) and returns metadata. Caller MUST
+// hold l.mutexes for the key. Returns ErrNotFound if the object
+// content does not exist.
+func (l *Localfs) headLocked(key string) (*storage.ObjectMetadata, error) {
 	contentInfo, err := os.Stat(l.objectPath(key))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -1837,9 +1895,18 @@ func (l *Localfs) head(key string) (*storage.ObjectMetadata, error) {
 	}, nil
 }
 
+// head is the locking wrapper for headLocked. Used by callers that do
+// NOT already hold the per-key mutex (notably List, which walks across
+// keys and locks each one individually).
+func (l *Localfs) head(key string) (*storage.ObjectMetadata, error) {
+	l.mutexes.lock(key)
+	defer l.mutexes.unlock(key)
+	return l.headLocked(key)
+}
+
 // healSidecar recomputes a sidecar from content when the on-disk sidecar
 // is missing or unreadable. Writes the new sidecar back so subsequent
-// reads are fast.
+// reads are fast. Caller holds the keyed mutex.
 func (l *Localfs) healSidecar(key string, contentInfo os.FileInfo) (sidecar, error) {
 	f, err := os.Open(l.objectPath(key))
 	if err != nil {
@@ -1951,6 +2018,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -2066,7 +2134,7 @@ Expected: FAIL — `GetRange` returns `ErrNotSupported`.
 
 - [ ] **Step 3: Implement GetRange on localfs**
 
-Replace the `GetRange` method in `internal/storage/localfs/localfs.go`:
+Replace the `GetRange` method in `internal/storage/localfs/localfs.go`. Per AD3 read paths acquire the per-key mutex; per AD11 they reject symlinks via `lstatNoSymlink`.
 
 ```go
 func (l *Localfs) GetRange(ctx context.Context, key string, start, endInclusive int64) (io.ReadCloser, error) {
@@ -2075,6 +2143,12 @@ func (l *Localfs) GetRange(ctx context.Context, key string, start, endInclusive 
 	}
 	if start < 0 || endInclusive < start {
 		return nil, fmt.Errorf("%w: invalid range [%d,%d]", storage.ErrInvalidArgument, start, endInclusive)
+	}
+	l.mutexes.lock(key)
+	defer l.mutexes.unlock(key)
+
+	if err := lstatNoSymlink(l.objectPath(key)); err != nil {
+		return nil, err
 	}
 	f, err := os.Open(l.objectPath(key))
 	if err != nil {
@@ -2100,6 +2174,8 @@ func (l *Localfs) GetRange(ctx context.Context, key string, start, endInclusive 
 		_ = f.Close()
 		return nil, err
 	}
+	// As with Get, the open file descriptor remains valid for the
+	// caller after we release the keyed mutex on return.
 	return &limitedReadCloser{Reader: io.LimitReader(f, end-start+1), Closer: f}, nil
 }
 
@@ -2363,7 +2439,7 @@ func (l *Localfs) PutIfVersionMatches(ctx context.Context, key string, expected 
 	l.mutexes.lock(key)
 	defer l.mutexes.unlock(key)
 
-	current, err := l.head(key)
+	current, err := l.headLocked(key)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return storage.ObjectVersion{}, fmt.Errorf("%w: object absent", storage.ErrVersionMismatch)
@@ -2471,7 +2547,7 @@ func (l *Localfs) DeleteIfVersionMatches(ctx context.Context, key string, expect
 	l.mutexes.lock(key)
 	defer l.mutexes.unlock(key)
 
-	current, err := l.head(key)
+	current, err := l.headLocked(key)
 	if err != nil {
 		return err // ErrNotFound or fs error
 	}
@@ -2699,6 +2775,12 @@ func (l *Localfs) collectKeys(prefix string) ([]string, error) {
 			return err
 		}
 		if d.IsDir() {
+			return nil
+		}
+		// Skip symlinks per AD11. filepath.WalkDir does not follow
+		// symlinks; d.Type() reports ModeSymlink for them.
+		if d.Type()&fs.ModeSymlink != 0 {
+			// TODO: structured warning log when M3 logging framework lands.
 			return nil
 		}
 		if strings.HasSuffix(path, metaSuffix) {
@@ -4146,6 +4228,17 @@ mid-call case in addition to the localfs-equivalent assertion.
 - Signed URLs: `SignedGetURL` returns `ErrNotSupported`.
 - No historical version retention. Each PUT overwrites previous
   content.
+- Read paths (`Get`, `Head`, `GetRange`) acquire the per-key keyed
+  mutex per AD3, so concurrent reads of the same key serialize.
+  Cross-key parallelism is unaffected.
+- Symlinks under the bucket root are rejected on read and skipped on
+  list per AD11. Full path-resolution sandboxing
+  (`openat2 RESOLVE_BENEATH`) is not implemented.
+- Filesystem assumptions: case-sensitive POSIX; atomic same-fs
+  rename; standard `fsync` semantics. Default-APFS macOS hosts are
+  case-insensitive — keys differing only in case will collide
+  silently. NFS, SMB, and FUSE are unsupported. HFS+ Unicode
+  normalization is unsupported.
 - The keyed-mutex map does not evict idle entries in M0. Long-running
   processes serving millions of distinct keys may want this revisited.
 
@@ -4170,6 +4263,343 @@ Covers contract summary, how to add a new adapter, how to run the
 conformance suite, the §29 test mapping table, AD8 recast rationale,
 localfs caveats, and the module path placeholder pending governance
 gate G1."
+```
+
+---
+
+## Task 33: Multipart lifecycle edge-case conformance tests
+
+**Files:**
+- Modify: `internal/storage/conformance/correctness.go`
+
+Codifies the multipart lifecycle reference table from the M0 design spec into executable tests. Localfs already implements the behavior from Tasks 21 and 22; these tests pin it down for cloud adapters at M5/M7.
+
+- [ ] **Step 1: Add the lifecycle test runs to `runCorrectness`**
+
+In `internal/storage/conformance/correctness.go`, add to `runCorrectness`:
+
+```go
+	t.Run("MultipartInvalidPartNumber", func(t *testing.T) { testMultipartInvalidPartNumber(t, f) })
+	t.Run("MultipartRepeatedPartNumber", func(t *testing.T) { testMultipartRepeatedPartNumber(t, f) })
+	t.Run("MultipartCompleteEmptyParts", func(t *testing.T) { testMultipartCompleteEmptyParts(t, f) })
+	t.Run("MultipartCompleteNonContiguous", func(t *testing.T) { testMultipartCompleteNonContiguous(t, f) })
+	t.Run("MultipartCompleteSizeMismatch", func(t *testing.T) { testMultipartCompleteSizeMismatch(t, f) })
+	t.Run("MultipartConcurrentComplete", func(t *testing.T) { testMultipartConcurrentComplete(t, f) })
+	t.Run("MultipartAbortIdempotent", func(t *testing.T) { testMultipartAbortIdempotent(t, f) })
+	t.Run("MultipartCompleteAfterAbort", func(t *testing.T) { testMultipartCompleteAfterAbort(t, f) })
+```
+
+Add the test functions at the end of the file:
+
+```go
+// MultipartInvalidPartNumber: UploadPart with partNumber < 1 returns
+// ErrInvalidArgument.
+func testMultipartInvalidPartNumber(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	mp, err := s.CreateMultipart(ctx(), "rk/multi-invalid", nil)
+	if err != nil {
+		t.Fatalf("CreateMultipart: %v", err)
+	}
+	if _, err := mp.UploadPart(ctx(), 0, bytes.NewReader([]byte("x"))); !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Errorf("UploadPart(0) = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := mp.UploadPart(ctx(), -1, bytes.NewReader([]byte("x"))); !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Errorf("UploadPart(-1) = %v, want ErrInvalidArgument", err)
+	}
+	_ = mp.Abort(ctx())
+}
+
+// MultipartRepeatedPartNumber: uploading the same partNumber twice
+// succeeds; Complete uses the second upload's bytes.
+func testMultipartRepeatedPartNumber(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	mp, err := s.CreateMultipart(ctx(), "rk/multi-repeat", nil)
+	if err != nil {
+		t.Fatalf("CreateMultipart: %v", err)
+	}
+	if _, err := mp.UploadPart(ctx(), 1, bytes.NewReader([]byte("first"))); err != nil {
+		t.Fatalf("UploadPart 1 first: %v", err)
+	}
+	p1, err := mp.UploadPart(ctx(), 1, bytes.NewReader([]byte("SECOND")))
+	if err != nil {
+		t.Fatalf("UploadPart 1 second: %v", err)
+	}
+	if _, err := s.CompleteMultipartIfAbsent(ctx(), mp, []storage.MultipartPart{p1}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	obj, err := s.Get(ctx(), "rk/multi-repeat", nil)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer obj.Body.Close()
+	got, _ := io.ReadAll(obj.Body)
+	if string(got) != "SECOND" {
+		t.Errorf("content = %q, want %q (second upload should win)", got, "SECOND")
+	}
+}
+
+// MultipartCompleteEmptyParts: Complete with empty parts slice returns
+// ErrInvalidArgument.
+func testMultipartCompleteEmptyParts(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	mp, err := s.CreateMultipart(ctx(), "rk/multi-empty", nil)
+	if err != nil {
+		t.Fatalf("CreateMultipart: %v", err)
+	}
+	if _, err := s.CompleteMultipartIfAbsent(ctx(), mp, nil); !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Errorf("Complete(nil parts) = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := s.CompleteMultipartIfAbsent(ctx(), mp, []storage.MultipartPart{}); !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Errorf("Complete(empty parts) = %v, want ErrInvalidArgument", err)
+	}
+	_ = mp.Abort(ctx())
+}
+
+// MultipartCompleteNonContiguous: Complete with non-contiguous part
+// numbers returns ErrInvalidArgument.
+func testMultipartCompleteNonContiguous(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	mp, err := s.CreateMultipart(ctx(), "rk/multi-noncontig", nil)
+	if err != nil {
+		t.Fatalf("CreateMultipart: %v", err)
+	}
+	p1, _ := mp.UploadPart(ctx(), 1, bytes.NewReader([]byte("a")))
+	p3, _ := mp.UploadPart(ctx(), 3, bytes.NewReader([]byte("c")))
+	if _, err := s.CompleteMultipartIfAbsent(ctx(), mp, []storage.MultipartPart{p1, p3}); !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Errorf("Complete([1,3]) = %v, want ErrInvalidArgument", err)
+	}
+	_ = mp.Abort(ctx())
+}
+
+// MultipartCompleteSizeMismatch: Complete with a parts entry whose Size
+// differs from the on-disk part size returns ErrInvalidArgument.
+func testMultipartCompleteSizeMismatch(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	mp, err := s.CreateMultipart(ctx(), "rk/multi-sizemis", nil)
+	if err != nil {
+		t.Fatalf("CreateMultipart: %v", err)
+	}
+	p1, err := mp.UploadPart(ctx(), 1, bytes.NewReader([]byte("five.")))
+	if err != nil {
+		t.Fatalf("UploadPart: %v", err)
+	}
+	p1.Size = p1.Size + 1 // claim wrong size
+	if _, err := s.CompleteMultipartIfAbsent(ctx(), mp, []storage.MultipartPart{p1}); !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Errorf("Complete(size mismatch) = %v, want ErrInvalidArgument", err)
+	}
+	_ = mp.Abort(ctx())
+}
+
+// MultipartConcurrentComplete: two concurrent Complete calls on the
+// same upload+target serialize via the per-key mutex; one wins, the
+// other sees ErrAlreadyExists.
+func testMultipartConcurrentComplete(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	mp, err := s.CreateMultipart(ctx(), "rk/multi-conc", nil)
+	if err != nil {
+		t.Fatalf("CreateMultipart: %v", err)
+	}
+	p1, err := mp.UploadPart(ctx(), 1, bytes.NewReader([]byte("payload")))
+	if err != nil {
+		t.Fatalf("UploadPart: %v", err)
+	}
+
+	results := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			_, err := s.CompleteMultipartIfAbsent(ctx(), mp, []storage.MultipartPart{p1})
+			results <- err
+		}()
+	}
+	successes, conflicts, others := 0, 0, 0
+	for i := 0; i < 2; i++ {
+		err := <-results
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, storage.ErrAlreadyExists):
+			conflicts++
+		default:
+			others++
+			t.Errorf("unexpected error: %v", err)
+		}
+	}
+	if successes != 1 {
+		t.Errorf("successes = %d, want 1", successes)
+	}
+	if conflicts != 1 {
+		t.Errorf("conflicts = %d, want 1", conflicts)
+	}
+}
+
+// MultipartAbortIdempotent: Abort after Complete is a no-op; Abort
+// twice in a row is a no-op.
+func testMultipartAbortIdempotent(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	// Abort twice on a fresh upload.
+	mp, err := s.CreateMultipart(ctx(), "rk/multi-abort1", nil)
+	if err != nil {
+		t.Fatalf("CreateMultipart: %v", err)
+	}
+	if err := mp.Abort(ctx()); err != nil {
+		t.Errorf("Abort: %v", err)
+	}
+	if err := mp.Abort(ctx()); err != nil {
+		t.Errorf("second Abort: %v", err)
+	}
+
+	// Abort after Complete.
+	mp2, err := s.CreateMultipart(ctx(), "rk/multi-abort2", nil)
+	if err != nil {
+		t.Fatalf("CreateMultipart: %v", err)
+	}
+	p1, err := mp2.UploadPart(ctx(), 1, bytes.NewReader([]byte("x")))
+	if err != nil {
+		t.Fatalf("UploadPart: %v", err)
+	}
+	if _, err := s.CompleteMultipartIfAbsent(ctx(), mp2, []storage.MultipartPart{p1}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if err := mp2.Abort(ctx()); err != nil {
+		t.Errorf("Abort after Complete: %v", err)
+	}
+}
+
+// MultipartCompleteAfterAbort: Complete after Abort fails (the part
+// files are gone). The contract surface is "you may not call Complete
+// after Abort"; the precise error is the wrapped underlying I/O error.
+func testMultipartCompleteAfterAbort(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	mp, err := s.CreateMultipart(ctx(), "rk/multi-cafterA", nil)
+	if err != nil {
+		t.Fatalf("CreateMultipart: %v", err)
+	}
+	p1, err := mp.UploadPart(ctx(), 1, bytes.NewReader([]byte("x")))
+	if err != nil {
+		t.Fatalf("UploadPart: %v", err)
+	}
+	if err := mp.Abort(ctx()); err != nil {
+		t.Fatalf("Abort: %v", err)
+	}
+	if _, err := s.CompleteMultipartIfAbsent(ctx(), mp, []storage.MultipartPart{p1}); err == nil {
+		t.Error("Complete after Abort returned nil, want non-nil error")
+	}
+}
+```
+
+- [ ] **Step 2: Run tests to verify pass**
+
+```bash
+go test -race -v ./internal/storage/localfs/... -run TestConformance/correctness
+```
+
+Expected: every new lifecycle test reports PASS. (Localfs already implements the behavior; these tests just make it explicit.)
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add internal/storage/conformance/correctness.go
+git commit -m "conformance: multipart lifecycle edge-case tests
+
+Codifies the M0 design spec multipart lifecycle reference table:
+invalid part numbers, repeated/non-contiguous numbering,
+empty/size-mismatch parts, concurrent Complete (per-key mutex
+serializes), idempotent Abort, Complete after Abort. Cloud adapters
+at M5/M7 will inherit this contract."
+```
+
+---
+
+## Task 34: Localfs symlink-rejection test
+
+**Files:**
+- Modify: `internal/storage/localfs/localfs_test.go`
+
+Localfs-specific (cloud adapters have no concept of symlinks). Asserts that symlinks placed under the bucket root are rejected on read per AD11 and skipped on List.
+
+- [ ] **Step 1: Append the failing test**
+
+In `internal/storage/localfs/localfs_test.go`, append:
+
+```go
+func TestSymlinkRejection(t *testing.T) {
+	dir := t.TempDir()
+	s, err := localfs.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Seed a normal object so the bucket has at least one valid entry.
+	if _, err := s.PutIfAbsent(context.Background(), "rk/normal", bytes.NewReader([]byte("ok")), nil); err != nil {
+		t.Fatalf("seed normal: %v", err)
+	}
+
+	// Place a symlink at <root>/objects/rk/symlinked pointing to /etc/hosts.
+	target := "/etc/hosts"
+	if _, err := os.Stat(target); err != nil {
+		t.Skipf("test target %s not present: %v", target, err)
+	}
+	linkPath := filepath.Join(dir, "objects", "rk", "symlinked")
+	if err := os.MkdirAll(filepath.Dir(linkPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.Symlink(target, linkPath); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	// Get/Head/GetRange must reject the symlinked key.
+	if _, err := s.Get(context.Background(), "rk/symlinked", nil); !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Errorf("Get(symlink) = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := s.Head(context.Background(), "rk/symlinked"); !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Errorf("Head(symlink) = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := s.GetRange(context.Background(), "rk/symlinked", 0, 0); !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Errorf("GetRange(symlink) = %v, want ErrInvalidArgument", err)
+	}
+
+	// List must skip the symlinked entry but still return the normal one.
+	page, err := s.List(context.Background(), "rk/", nil)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, md := range page.Objects {
+		if md.Key == "rk/symlinked" {
+			t.Error("List returned a symlinked key; expected it to be skipped")
+		}
+	}
+	foundNormal := false
+	for _, md := range page.Objects {
+		if md.Key == "rk/normal" {
+			foundNormal = true
+		}
+	}
+	if !foundNormal {
+		t.Error("List did not return the normal entry alongside the skipped symlink")
+	}
+}
+```
+
+Add the imports `"errors"` and `"github.com/bucketvcs/bucketvcs/internal/storage"` to the existing import block of `localfs_test.go` if missing. (`bytes`, `context`, `os`, `path/filepath`, `testing` should already be present from earlier tasks.)
+
+- [ ] **Step 2: Run the test to verify pass**
+
+```bash
+go test -race ./internal/storage/localfs/... -run TestSymlinkRejection
+```
+
+Expected: PASS — `lstatNoSymlink` from Task 14 and the WalkDir symlink-skip from Task 19 already implement the behavior.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add internal/storage/localfs/localfs_test.go
+git commit -m "localfs: symlink-rejection test (AD11)
+
+Drops a symlink to /etc/hosts under <root>/objects/rk/ and asserts
+Get/Head/GetRange return ErrInvalidArgument while List skips the
+entry without disrupting the listing of the normal sibling."
 ```
 
 ---
@@ -4202,17 +4632,19 @@ Expected: `clean`.
 
 - [ ] **Step 4: Verify the exit-criteria checklist**
 
-Confirm against the design spec's exit criteria:
+Confirm against the design spec r2 exit criteria:
 
 1. `go test ./internal/storage/...` is green on Linux/macOS — verified Step 1
 2. 15 §29 correctness tests pass — verified by Task 26 inventory
 3. 3 applicable §29 stress tests pass — verified Tasks 27/28/29
-4. `Capabilities()` declarations round-trip — verified Task 23
-5. Error taxonomy maps to conformance assertions — verified across §29 #13, #15, #10, key namespace
-6. Package layout matches §40.1 — verified by file structure at top of plan
-7. README documents contract, adding adapters, running conformance, AD8 recast, expected divergences — Task 32
-8. Public Go-doc comments on every exported symbol in `internal/storage` — verified across Tasks 2–6
-9. Worked example exercises Put/Get/PutIfVersionMatches/List/Multipart/Delete with success and conflict paths — Task 31
+4. Multipart lifecycle conformance tests (10 cases) pass — verified Tasks 21, 22, 33
+5. Localfs symlink-rejection test passes — verified Task 34
+6. `Capabilities()` declarations round-trip — verified Task 23
+7. Error taxonomy maps to conformance assertions — verified across §29 #13, #15, #10, key namespace; error normalization rules from spec r2 implemented in Task 14 helpers
+8. Package layout matches §40.1 — verified by file structure at top of plan
+9. README documents contract, adding adapters, running conformance, AD8 recast, filesystem portability assumptions, and expected divergences — Task 32
+10. Public Go-doc comments on every exported symbol in `internal/storage` — verified across Tasks 2–6
+11. Worked example exercises Put/Get/PutIfVersionMatches/List/Multipart/Delete with success and conflict paths — Task 31
 
 - [ ] **Step 5: Tag M0 milestone (optional)**
 
