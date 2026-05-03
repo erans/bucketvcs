@@ -9,7 +9,7 @@
 **Tech Stack:** Go 1.22, `github.com/google/uuid` v1.6.0. No other external dependencies in M0. Linux + macOS targets.
 
 **Reference docs:**
-- Design spec (r3): `docs/superpowers/specs/2026-05-03-m0-storage-foundation-design.md`
+- Design spec (r4): `docs/superpowers/specs/2026-05-03-m0-storage-foundation-design.md`
 - Original spec sections: §9, §10, §29, §35, §40.1
 - Decomposition: `docs/superpowers/specs/2026-05-03-bucketvcs-oss-decomposition-design.md`
 
@@ -30,6 +30,12 @@
 - Task 18 swaps the Delete order to **content-first then sidecar** so a crash mid-delete leaves an orphan sidecar (subsequent `Head` returns `ErrNotFound`, the correct outcome) rather than the inverse failure mode where self-heal would resurrect the deleted object. Each `os.Remove` is followed by `fsyncDir`.
 - Task 21 multipart `CompleteMultipartIfAbsent` calls `fsyncDir` after the assembled-content rename.
 - The localfs `lstatNoSymlink` claim is narrowed to "best-effort final-path"; the README and `localfs_test.go` document residual gaps (ancestor-directory symlinks, hardlinks, TOCTOU between `Lstat` and `Open`).
+
+**Plan revision r4 changes (2026-05-03):** Updated to match design spec r4 (addresses roborev round 3, job 7688).
+
+- Task 14 `headLocked` adds a size-mismatch fast-path: if `os.Stat(content).Size() != sidecar.Size`, the sidecar is treated as stale and self-heal triggers (recompute sha256 from content, rewrite sidecar). This catches the post-crash "content (new) + sidecar (old)" window when content size changed; same-size crash windows are addressed by `bucketvcs doctor` at M16. Conditional writes (`PutIfVersionMatches`, `DeleteIfVersionMatches`) inherit the fast-path because they call `headLocked` first.
+- Task 30 split into two unit tests: missing-sidecar self-heal and size-mismatch self-heal.
+- Task 32 README expanded with three verbatim sections from the design spec: "Symlink and hardlink safety (AD11)", "Filesystem portability assumptions", and "Crash recovery and `bucketvcs doctor`". Operator-facing warnings cannot be silently diluted.
 
 ---
 
@@ -1863,9 +1869,17 @@ func lstatNoSymlink(path string) error {
 }
 
 // headLocked reads the sidecar (or self-heals from content if the
-// sidecar is missing or unreadable) and returns metadata. Caller MUST
-// hold l.mutexes for the key. Returns ErrNotFound if the object
-// content does not exist.
+// sidecar is missing, unreadable, or stale relative to content) and
+// returns metadata. Caller MUST hold l.mutexes for the key. Returns
+// ErrNotFound if the object content does not exist.
+//
+// The "stale relative to content" check is a size-mismatch fast-path
+// that catches the post-crash "content (new) + sidecar (old)" window
+// when the new content has a different size from the old. Same-size
+// post-crash torn states are NOT detected by this fast-path; operators
+// must run bucketvcs doctor (M16) after unclean shutdown to fully
+// reconcile. See the M0 design spec "Crash recovery and bucketvcs
+// doctor" section.
 func (l *Localfs) headLocked(key string) (*storage.ObjectMetadata, error) {
 	contentInfo, err := os.Stat(l.objectPath(key))
 	if err != nil {
@@ -1880,9 +1894,17 @@ func (l *Localfs) headLocked(key string) (*storage.ObjectMetadata, error) {
 	if err == nil {
 		sc, err = parseSidecar(scBytes)
 	}
+	if err == nil && sc.Size != contentInfo.Size() {
+		// Stale sidecar: content size disagrees with sidecar's recorded
+		// size. Most likely a crash mid-PutIfVersionMatches between
+		// content rename and sidecar rename. Treat as if the sidecar is
+		// missing.
+		err = fmt.Errorf("sidecar size %d != content size %d (stale)", sc.Size, contentInfo.Size())
+	}
 	if err != nil {
 		// Self-heal: recompute sha256 from content. Sidecar may be
-		// missing, truncated, or schema-incompatible.
+		// missing, truncated, schema-incompatible, or stale relative
+		// to content (size-mismatch fast-path).
 		sc, err = l.healSidecar(key, contentInfo)
 		if err != nil {
 			return nil, err
@@ -3939,14 +3961,14 @@ content + version are unchanged."
 **Files:**
 - Modify: `internal/storage/localfs/localfs_test.go`
 
-Self-heal already implemented in Task 14's `head`. Add a localfs-specific unit test (this behavior is not in §29 so it lives in localfs_test.go, not the conformance suite).
+Self-heal already implemented in Task 14's `headLocked` (sidecar missing/corrupt → recompute) and the size-mismatch fast-path added in plan r4 (sidecar size disagrees with content size → recompute). This task adds two localfs-specific unit tests for both self-heal triggers.
 
-- [ ] **Step 1: Add the failing self-heal test**
+- [ ] **Step 1: Add the failing tests**
 
 In `internal/storage/localfs/localfs_test.go`, append:
 
 ```go
-func TestSidecarSelfHeal(t *testing.T) {
+func TestSidecarSelfHealMissing(t *testing.T) {
 	dir := t.TempDir()
 	s, err := localfs.Open(dir)
 	if err != nil {
@@ -3954,7 +3976,7 @@ func TestSidecarSelfHeal(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 
-	want := []byte("self-heal")
+	want := []byte("self-heal-missing")
 	v, err := s.PutIfAbsent(context.Background(), "rk/self-heal", bytes.NewReader(want), nil)
 	if err != nil {
 		t.Fatalf("Put: %v", err)
@@ -3982,27 +4004,73 @@ func TestSidecarSelfHeal(t *testing.T) {
 		t.Errorf("sidecar not recreated: %v", err)
 	}
 }
+
+// TestSidecarSelfHealSizeMismatch simulates the post-crash "content
+// (new) + sidecar (old)" window: rewrite content out of band so its
+// size differs from what the sidecar records, then call Head and
+// assert the size-mismatch fast-path detects the staleness and
+// regenerates the sidecar with sha256 of the new content.
+func TestSidecarSelfHealSizeMismatch(t *testing.T) {
+	dir := t.TempDir()
+	s, err := localfs.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	if _, err := s.PutIfAbsent(context.Background(), "rk/torn", bytes.NewReader([]byte("aaa")), nil); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Out-of-band rewrite content with a different size; sidecar still
+	// records the original size. This simulates a crash mid-rewrite.
+	objPath := filepath.Join(dir, "objects", "rk", "torn")
+	newContent := []byte("BBBBBBBBBB")
+	if err := os.WriteFile(objPath, newContent, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	md, err := s.Head(context.Background(), "rk/torn")
+	if err != nil {
+		t.Fatalf("Head: %v", err)
+	}
+	if md.Size != int64(len(newContent)) {
+		t.Errorf("size after self-heal = %d, want %d", md.Size, len(newContent))
+	}
+	// Token should be the sha256 of the NEW content, not the old.
+	expectedHash := sha256.Sum256(newContent)
+	want := hex.EncodeToString(expectedHash[:])
+	if md.Version.Token != want {
+		t.Errorf("token after self-heal = %s, want %s (sha256 of new content)", md.Version.Token, want)
+	}
+}
 ```
 
-Add the imports `"bytes"`, `"context"`, `"os"`, `"path/filepath"` to the existing imports if missing.
+Add the imports `"bytes"`, `"context"`, `"crypto/sha256"`, `"encoding/hex"`, `"os"`, `"path/filepath"` to the existing imports if missing.
 
-- [ ] **Step 2: Run the test to verify pass**
+- [ ] **Step 2: Run the tests to verify pass**
 
 ```bash
-go test -race ./internal/storage/localfs/... -run TestSidecarSelfHeal
+go test -race ./internal/storage/localfs/... -run "TestSidecarSelfHeal"
 ```
 
-Expected: PASS — `head()` already self-heals via Task 14's implementation.
+Expected: PASS for both `TestSidecarSelfHealMissing` and `TestSidecarSelfHealSizeMismatch` — `headLocked()` self-heals on either trigger via Task 14's r4 implementation.
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add internal/storage/localfs/localfs_test.go
-git commit -m "localfs: unit test for sidecar self-heal
+git commit -m "localfs: unit tests for sidecar self-heal (missing + size-mismatch)
 
-Removes the .meta sidecar out of band and asserts Head still returns
-the correct version (recomputed from content sha256) and rewrites the
-sidecar."
+Missing-sidecar test removes the .meta file out of band and asserts
+Head returns the correct version (recomputed from content sha256)
+and rewrites the sidecar.
+
+Size-mismatch test rewrites content out of band so the sidecar's
+recorded size disagrees with the on-disk content; asserts the
+size-mismatch fast-path triggers self-heal and the recovered token
+is sha256 of the NEW content. This is the post-crash content-vs-
+sidecar torn-state recovery path described in M0 design spec r4."
 ```
 
 ---
@@ -4280,16 +4348,98 @@ mid-call case in addition to the localfs-equivalent assertion.
 - Read paths (`Get`, `Head`, `GetRange`) acquire the per-key keyed
   mutex per AD3, so concurrent reads of the same key serialize.
   Cross-key parallelism is unaffected.
-- Symlinks under the bucket root are rejected on read and skipped on
-  list per AD11. Full path-resolution sandboxing
-  (`openat2 RESOLVE_BENEATH`) is not implemented.
-- Filesystem assumptions: case-sensitive POSIX; atomic same-fs
-  rename; standard `fsync` semantics. Default-APFS macOS hosts are
-  case-insensitive — keys differing only in case will collide
-  silently. NFS, SMB, and FUSE are unsupported. HFS+ Unicode
-  normalization is unsupported.
 - The keyed-mutex map does not evict idle entries in M0. Long-running
   processes serving millions of distinct keys may want this revisited.
+
+## Symlink and hardlink safety (AD11) — verbatim from M0 design spec r4
+
+Localfs in M0 implements **best-effort final-path symlink rejection**,
+not full path-resolution sandboxing.
+
+**What is covered:**
+
+- All read entry points (`Get`, `Head`, `GetRange`, `List`) call
+  `os.Lstat` on the **final** path component before opening. If that
+  entry is a symlink, the operation returns `ErrInvalidArgument` and
+  `List` skips the entry with a structured warning.
+- Write paths create files via `os.OpenFile` with `O_CREATE|O_EXCL`
+  on a temp path, then `os.Rename` into place.
+
+**What is NOT covered in M0:**
+
+- **Ancestor-directory symlinks.** If `<root>/objects/foo/` is itself
+  a symlink to a directory outside the bucket, files under
+  `<root>/objects/foo/bar` actually live outside the bucket. M0 does
+  not validate every path component.
+- **Hardlinks.** Hardlinks within or outside the bucket cannot be
+  detected by `Lstat` alone. M0 does not perform `Nlink>1` checks.
+- **TOCTOU between `Lstat` and `Open`.** An attacker who can write
+  to the bucket can race symlink replacement against subsequent
+  `Open` calls.
+
+The realistic threat in M0 is a casual misconfiguration —
+`ln -s /etc/passwd <root>/objects/foo` — which the best-effort check
+catches. Operators are responsible for ensuring `<root>/objects/` and
+its descendants are normal directories under operator-trusted control.
+
+## Filesystem portability assumptions — verbatim from M0 design spec r4
+
+Localfs in M0 assumes:
+
+- **Case-sensitive POSIX filesystem.** ext4, XFS, btrfs (Linux);
+  APFS configured case-sensitive (macOS — note default APFS is
+  case-INSENSITIVE; users on default-APFS macOS hosts will see
+  CONTENT collisions if they rely on case-distinct keys).
+  Unsupported: HFS+ (Unicode normalization folds NFC/NFD).
+- **Atomic same-filesystem rename.** Standard POSIX. Crossing
+  filesystems via rename is an unspecified error.
+- **`fsync` flushes both data and metadata.** ext4 default behavior.
+  `noatime` is fine; `data=writeback` is not recommended.
+- **Standard file permissions and ownership.** No special handling
+  for setuid, sticky, or extended attributes.
+
+Unsupported (will refuse or behave undefined):
+
+- **Network filesystems (NFS, SMB, FUSE).** `flock`/lock-file
+  behavior across NFS is unreliable; rename atomicity is not
+  guaranteed on all FUSE backends.
+- **Windows filesystems.** Path separators, case folding, and
+  `O_CREATE|O_EXCL` semantics differ enough that M0 does not target
+  Windows.
+
+## Crash recovery and `bucketvcs doctor` — verbatim from M0 design spec r4
+
+Localfs's stale-sidecar fast-path (size-mismatch detection on read)
+catches the common case where a crashed `PutIfVersionMatches` left
+content of a different size than the previous version. It does NOT
+catch the rarer case where the new and old content happen to share
+the same size. To preserve CAS correctness across crashes:
+
+> **After unclean shutdown (`kill -9`, OOM, host crash, etc.),
+> localfs MUST be re-validated by `bucketvcs doctor` (M16) before
+> write traffic resumes.** Doctor walks every object under
+> `<root>/objects/`, recomputes sha256 from content, and rewrites
+> stale sidecars. After doctor completes successfully, the (content,
+> sidecar) pair is guaranteed consistent and CAS semantics are fully
+> restored.
+
+Operational guidance:
+
+- **Clean shutdown**: a graceful `Close` on the `Localfs` instance
+  does not require doctor. Subsequent opens are safe.
+- **Unclean shutdown without doctor**: read traffic is allowed
+  (size-mismatch fast-path catches most stale sidecars).
+  Conditional writes against an undetected stale sidecar may
+  operate on the wrong version, breaking CAS. Operators MUST treat
+  this as data loss risk for any keys touched during the crashed
+  write.
+- **Doctor is M16 work, not M0**: until M16 ships, localfs M0
+  deployments must be considered ephemeral; production-style
+  operators should keep an off-bucket replica as recourse.
+
+This requirement applies to localfs only. Cloud adapters at M5/M7
+do not have an equivalent torn-state because their version tokens
+are server-side.
 
 ## Module path placeholder
 
@@ -4681,19 +4831,20 @@ Expected: `clean`.
 
 - [ ] **Step 4: Verify the exit-criteria checklist**
 
-Confirm against the design spec r2 exit criteria:
+Confirm against the design spec r4 exit criteria:
 
 1. `go test ./internal/storage/...` is green on Linux/macOS — verified Step 1
 2. 15 §29 correctness tests pass — verified by Task 26 inventory
 3. 3 applicable §29 stress tests pass — verified Tasks 27/28/29
 4. Multipart lifecycle conformance tests (10 cases) pass — verified Tasks 21, 22, 33
 5. Localfs symlink-rejection test passes — verified Task 34
-6. `Capabilities()` declarations round-trip — verified Task 23
-7. Error taxonomy maps to conformance assertions — verified across §29 #13, #15, #10, key namespace; error normalization rules from spec r2 implemented in Task 14 helpers
-8. Package layout matches §40.1 — verified by file structure at top of plan
-9. README documents contract, adding adapters, running conformance, AD8 recast, filesystem portability assumptions, and expected divergences — Task 32
-10. Public Go-doc comments on every exported symbol in `internal/storage` — verified across Tasks 2–6
-11. Worked example exercises Put/Get/PutIfVersionMatches/List/Multipart/Delete with success and conflict paths — Task 31
+6. Sidecar self-heal triggers (missing + size-mismatch) covered — verified Task 30
+7. `Capabilities()` declarations round-trip — verified Task 23
+8. Error taxonomy maps to conformance assertions — verified across §29 #13, #15, #10, key namespace; error normalization rules and `fsyncDir` failure semantics from spec r3/r4 implemented in Task 14 helpers
+9. Package layout matches §40.1 — verified by file structure at top of plan
+10. README documents contract, adding adapters, running conformance, AD8 recast, and includes the verbatim "Symlink and hardlink safety", "Filesystem portability assumptions", and "Crash recovery and `bucketvcs doctor`" sections — Task 32
+11. Public Go-doc comments on every exported symbol in `internal/storage` — verified across Tasks 2–6
+12. Worked example exercises Put/Get/PutIfVersionMatches/List/Multipart/Delete with success and conflict paths — Task 31
 
 - [ ] **Step 5: Tag M0 milestone (optional)**
 
