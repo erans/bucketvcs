@@ -32,6 +32,14 @@ func runCorrectness(t *testing.T, f Factory) {
 	t.Run("§29#13_CASConflictClassification", func(t *testing.T) { test29_13(t, f) })
 	t.Run("§29#15_ThrottlingClassification", func(t *testing.T) { test29_15(t, f) })
 	t.Run("KeyNamespace", func(t *testing.T) { testKeyNamespace(t, f) })
+	t.Run("MultipartInvalidPartNumber", func(t *testing.T) { testMultipartInvalidPartNumber(t, f) })
+	t.Run("MultipartRepeatedPartNumber", func(t *testing.T) { testMultipartRepeatedPartNumber(t, f) })
+	t.Run("MultipartCompleteEmptyParts", func(t *testing.T) { testMultipartCompleteEmptyParts(t, f) })
+	t.Run("MultipartCompleteNonContiguous", func(t *testing.T) { testMultipartCompleteNonContiguous(t, f) })
+	t.Run("MultipartCompleteSizeMismatch", func(t *testing.T) { testMultipartCompleteSizeMismatch(t, f) })
+	t.Run("MultipartConcurrentComplete", func(t *testing.T) { testMultipartConcurrentComplete(t, f) })
+	t.Run("MultipartAbortIdempotent", func(t *testing.T) { testMultipartAbortIdempotent(t, f) })
+	t.Run("MultipartCompleteAfterAbort", func(t *testing.T) { testMultipartCompleteAfterAbort(t, f) })
 }
 
 // §29 #4: Read after write sees latest object.
@@ -605,5 +613,208 @@ func testKeyNamespace(t *testing.T, f Factory) {
 		if _, err := s.PutIfAbsent(ctx(), k, bytes.NewReader([]byte("x")), nil); err != nil {
 			t.Errorf("PutIfAbsent(%q) returned %v, want nil", k, err)
 		}
+	}
+}
+
+// MultipartInvalidPartNumber: UploadPart with partNumber < 1 returns
+// ErrInvalidArgument.
+func testMultipartInvalidPartNumber(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	mp, err := s.CreateMultipart(ctx(), "rk/multi-invalid", nil)
+	if err != nil {
+		t.Fatalf("CreateMultipart: %v", err)
+	}
+	if _, err := mp.UploadPart(ctx(), 0, bytes.NewReader([]byte("x"))); !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Errorf("UploadPart(0) = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := mp.UploadPart(ctx(), -1, bytes.NewReader([]byte("x"))); !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Errorf("UploadPart(-1) = %v, want ErrInvalidArgument", err)
+	}
+	_ = mp.Abort(ctx())
+}
+
+// MultipartRepeatedPartNumber: uploading the same partNumber twice
+// succeeds; Complete uses the second upload's bytes.
+func testMultipartRepeatedPartNumber(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	mp, err := s.CreateMultipart(ctx(), "rk/multi-repeat", nil)
+	if err != nil {
+		t.Fatalf("CreateMultipart: %v", err)
+	}
+	if _, err := mp.UploadPart(ctx(), 1, bytes.NewReader([]byte("first"))); err != nil {
+		t.Fatalf("UploadPart 1 first: %v", err)
+	}
+	p1, err := mp.UploadPart(ctx(), 1, bytes.NewReader([]byte("SECOND")))
+	if err != nil {
+		t.Fatalf("UploadPart 1 second: %v", err)
+	}
+	if _, err := s.CompleteMultipartIfAbsent(ctx(), mp, []storage.MultipartPart{p1}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	obj, err := s.Get(ctx(), "rk/multi-repeat", nil)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer obj.Body.Close()
+	got, _ := io.ReadAll(obj.Body)
+	if string(got) != "SECOND" {
+		t.Errorf("content = %q, want %q (second upload should win)", got, "SECOND")
+	}
+}
+
+// MultipartCompleteEmptyParts: Complete with empty parts slice returns
+// ErrInvalidArgument.
+func testMultipartCompleteEmptyParts(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	mp, err := s.CreateMultipart(ctx(), "rk/multi-empty", nil)
+	if err != nil {
+		t.Fatalf("CreateMultipart: %v", err)
+	}
+	if _, err := s.CompleteMultipartIfAbsent(ctx(), mp, nil); !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Errorf("Complete(nil parts) = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := s.CompleteMultipartIfAbsent(ctx(), mp, []storage.MultipartPart{}); !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Errorf("Complete(empty parts) = %v, want ErrInvalidArgument", err)
+	}
+	_ = mp.Abort(ctx())
+}
+
+// MultipartCompleteNonContiguous: Complete with non-contiguous part
+// numbers returns ErrInvalidArgument.
+func testMultipartCompleteNonContiguous(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	mp, err := s.CreateMultipart(ctx(), "rk/multi-noncontig", nil)
+	if err != nil {
+		t.Fatalf("CreateMultipart: %v", err)
+	}
+	p1, _ := mp.UploadPart(ctx(), 1, bytes.NewReader([]byte("a")))
+	p3, _ := mp.UploadPart(ctx(), 3, bytes.NewReader([]byte("c")))
+	if _, err := s.CompleteMultipartIfAbsent(ctx(), mp, []storage.MultipartPart{p1, p3}); !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Errorf("Complete([1,3]) = %v, want ErrInvalidArgument", err)
+	}
+	_ = mp.Abort(ctx())
+}
+
+// MultipartCompleteSizeMismatch: Complete with a parts entry whose Size
+// differs from the on-disk part size returns ErrInvalidArgument.
+func testMultipartCompleteSizeMismatch(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	mp, err := s.CreateMultipart(ctx(), "rk/multi-sizemis", nil)
+	if err != nil {
+		t.Fatalf("CreateMultipart: %v", err)
+	}
+	p1, err := mp.UploadPart(ctx(), 1, bytes.NewReader([]byte("five.")))
+	if err != nil {
+		t.Fatalf("UploadPart: %v", err)
+	}
+	p1.Size = p1.Size + 1 // claim wrong size
+	if _, err := s.CompleteMultipartIfAbsent(ctx(), mp, []storage.MultipartPart{p1}); !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Errorf("Complete(size mismatch) = %v, want ErrInvalidArgument", err)
+	}
+	_ = mp.Abort(ctx())
+}
+
+// MultipartConcurrentComplete: two concurrent Complete calls on the
+// same upload+target serialize via the per-key mutex; one wins, the
+// other sees ErrAlreadyExists.
+func testMultipartConcurrentComplete(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	mp, err := s.CreateMultipart(ctx(), "rk/multi-conc", nil)
+	if err != nil {
+		t.Fatalf("CreateMultipart: %v", err)
+	}
+	p1, err := mp.UploadPart(ctx(), 1, bytes.NewReader([]byte("payload")))
+	if err != nil {
+		t.Fatalf("UploadPart: %v", err)
+	}
+
+	results := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			_, err := s.CompleteMultipartIfAbsent(ctx(), mp, []storage.MultipartPart{p1})
+			results <- err
+		}()
+	}
+	successes, conflicts, others := 0, 0, 0
+	for i := 0; i < 2; i++ {
+		err := <-results
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, storage.ErrAlreadyExists):
+			conflicts++
+		case errors.Is(err, storage.ErrInvalidArgument):
+			// Acceptable: the second goroutine may observe the upload as
+			// terminated (validateActive saw the in-memory flag or the
+			// manifest removal that follows the first Complete) before
+			// the per-key mutex contention had a chance to surface
+			// ErrAlreadyExists. Either outcome rejects the second
+			// completion without corrupting state, which is what the
+			// test cares about.
+			conflicts++
+		default:
+			others++
+			t.Errorf("unexpected error: %v", err)
+		}
+	}
+	if successes != 1 {
+		t.Errorf("successes = %d, want 1", successes)
+	}
+	if conflicts != 1 {
+		t.Errorf("conflicts = %d, want 1", conflicts)
+	}
+}
+
+// MultipartAbortIdempotent: Abort after Complete is a no-op; Abort
+// twice in a row is a no-op.
+func testMultipartAbortIdempotent(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	// Abort twice on a fresh upload.
+	mp, err := s.CreateMultipart(ctx(), "rk/multi-abort1", nil)
+	if err != nil {
+		t.Fatalf("CreateMultipart: %v", err)
+	}
+	if err := mp.Abort(ctx()); err != nil {
+		t.Errorf("Abort: %v", err)
+	}
+	if err := mp.Abort(ctx()); err != nil {
+		t.Errorf("second Abort: %v", err)
+	}
+
+	// Abort after Complete.
+	mp2, err := s.CreateMultipart(ctx(), "rk/multi-abort2", nil)
+	if err != nil {
+		t.Fatalf("CreateMultipart: %v", err)
+	}
+	p1, err := mp2.UploadPart(ctx(), 1, bytes.NewReader([]byte("x")))
+	if err != nil {
+		t.Fatalf("UploadPart: %v", err)
+	}
+	if _, err := s.CompleteMultipartIfAbsent(ctx(), mp2, []storage.MultipartPart{p1}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if err := mp2.Abort(ctx()); err != nil {
+		t.Errorf("Abort after Complete: %v", err)
+	}
+}
+
+// MultipartCompleteAfterAbort: Complete after Abort fails. The error
+// surface is "Complete is not callable after Abort"; the precise sentinel
+// is the adapter's choice.
+func testMultipartCompleteAfterAbort(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	mp, err := s.CreateMultipart(ctx(), "rk/multi-cafterA", nil)
+	if err != nil {
+		t.Fatalf("CreateMultipart: %v", err)
+	}
+	p1, err := mp.UploadPart(ctx(), 1, bytes.NewReader([]byte("x")))
+	if err != nil {
+		t.Fatalf("UploadPart: %v", err)
+	}
+	if err := mp.Abort(ctx()); err != nil {
+		t.Fatalf("Abort: %v", err)
+	}
+	if _, err := s.CompleteMultipartIfAbsent(ctx(), mp, []storage.MultipartPart{p1}); err == nil {
+		t.Error("Complete after Abort returned nil, want non-nil error")
 	}
 }
