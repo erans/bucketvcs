@@ -27,6 +27,7 @@ func runCorrectness(t *testing.T, f Factory) {
 	t.Run("ListDelimiter", func(t *testing.T) { testListDelimiter(t, f) })
 	t.Run("MultipartHappyPath", func(t *testing.T) { testMultipartHappyPath(t, f) })
 	t.Run("§29#8_MultipartCannotOverwrite", func(t *testing.T) { test29_8(t, f) })
+	t.Run("§29#10_SignedURL", func(t *testing.T) { test29_10(t, f) })
 }
 
 // §29 #4: Read after write sees latest object.
@@ -501,4 +502,20 @@ func test29_8(t *testing.T, f Factory) {
 	if obj.Metadata.Version != v0 {
 		t.Errorf("version mutated: got %+v, want %+v", obj.Metadata.Version, v0)
 	}
+}
+
+// §29 #10: Signed URL can read but cannot write. Adapters that do not
+// support signed URLs declare so via Capabilities and return
+// ErrNotSupported from SignedGetURL.
+func test29_10(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	caps := s.Capabilities()
+	if !caps.SignedURLs {
+		_, err := s.SignedGetURL(ctx(), "rk/29-10", storage.SignedURLOptions{Expires: 0, Method: "GET"})
+		if !errors.Is(err, storage.ErrNotSupported) {
+			t.Errorf("Capabilities.SignedURLs=false but SignedGetURL = %v, want ErrNotSupported", err)
+		}
+		return
+	}
+	t.Skip("adapter declares SignedURLs=true; full URL semantics tested by adapter-specific suite")
 }
