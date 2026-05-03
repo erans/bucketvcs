@@ -26,6 +26,7 @@ func runCorrectness(t *testing.T, f Factory) {
 	t.Run("ListPagination", func(t *testing.T) { testListPagination(t, f) })
 	t.Run("ListDelimiter", func(t *testing.T) { testListDelimiter(t, f) })
 	t.Run("MultipartHappyPath", func(t *testing.T) { testMultipartHappyPath(t, f) })
+	t.Run("§29#8_MultipartCannotOverwrite", func(t *testing.T) { test29_8(t, f) })
 }
 
 // §29 #4: Read after write sees latest object.
@@ -464,5 +465,40 @@ func testMultipartHappyPath(t *testing.T, f Factory) {
 	got, _ := io.ReadAll(obj.Body)
 	if !bytes.Equal(got, full) {
 		t.Errorf("multipart content mismatch: got len=%d want len=%d", len(got), len(full))
+	}
+}
+
+// §29 #8: Multipart complete cannot silently overwrite existing object.
+func test29_8(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	original := []byte("original")
+	v0, err := s.PutIfAbsent(ctx(), "rk/29-8", bytes.NewReader(original), nil)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	mp, err := s.CreateMultipart(ctx(), "rk/29-8", nil)
+	if err != nil {
+		t.Fatalf("CreateMultipart: %v", err)
+	}
+	p, err := mp.UploadPart(ctx(), 1, bytes.NewReader([]byte("DROP")))
+	if err != nil {
+		t.Fatalf("UploadPart: %v", err)
+	}
+	if _, err := s.CompleteMultipartIfAbsent(ctx(), mp, []storage.MultipartPart{p}); !errors.Is(err, storage.ErrAlreadyExists) {
+		t.Errorf("Complete on existing key = %v, want ErrAlreadyExists", err)
+	}
+
+	obj, err := s.Get(ctx(), "rk/29-8", nil)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer obj.Body.Close()
+	got, _ := io.ReadAll(obj.Body)
+	if !bytes.Equal(got, original) {
+		t.Errorf("original mutated: got %q, want %q", got, original)
+	}
+	if obj.Metadata.Version != v0 {
+		t.Errorf("version mutated: got %+v, want %+v", obj.Metadata.Version, v0)
 	}
 }
