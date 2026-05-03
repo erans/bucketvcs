@@ -31,6 +31,7 @@ func runCorrectness(t *testing.T, f Factory) {
 	t.Run("§29#12_VersionRoundTrip", func(t *testing.T) { test29_12(t, f) })
 	t.Run("§29#13_CASConflictClassification", func(t *testing.T) { test29_13(t, f) })
 	t.Run("§29#15_ThrottlingClassification", func(t *testing.T) { test29_15(t, f) })
+	t.Run("KeyNamespace", func(t *testing.T) { testKeyNamespace(t, f) })
 }
 
 // §29 #4: Read after write sees latest object.
@@ -569,4 +570,40 @@ func test29_13(t *testing.T, f Factory) {
 // Localfs does not throttle. Cloud adapters override this skip.
 func test29_15(t *testing.T, f Factory) {
 	t.Skip("localfs has no throttling; cloud adapters at M5/M7 inject and assert ErrThrottled")
+}
+
+// Key namespace floor: invalid keys must be rejected with
+// ErrInvalidArgument across the contract.
+func testKeyNamespace(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	invalid := []string{
+		"",
+		"/leading-slash",
+		"trailing-slash/",
+		"contains/../segment",
+		"with\x00null",
+		"with\\backslash",
+	}
+	for _, k := range invalid {
+		if _, err := s.PutIfAbsent(ctx(), k, bytes.NewReader([]byte("x")), nil); !errors.Is(err, storage.ErrInvalidArgument) {
+			t.Errorf("PutIfAbsent(%q) = %v, want ErrInvalidArgument", k, err)
+		}
+		if _, err := s.Head(ctx(), k); !errors.Is(err, storage.ErrInvalidArgument) {
+			t.Errorf("Head(%q) = %v, want ErrInvalidArgument", k, err)
+		}
+		if err := s.DeleteIfVersionMatches(ctx(), k, storage.ObjectVersion{}); !errors.Is(err, storage.ErrInvalidArgument) {
+			t.Errorf("DeleteIfVersionMatches(%q) = %v, want ErrInvalidArgument", k, err)
+		}
+	}
+
+	// Valid keys at the floor should succeed. Namespaces are chosen to
+	// avoid file/directory collisions on adapters whose on-disk layout
+	// maps key segments directly to filesystem paths (e.g., localfs):
+	// a key that is a strict prefix of another would require the same
+	// path to be both a file and a directory.
+	for _, k := range []string{"alpha", "ns/leaf", "tenants/t1/repos/r1/manifest/root.json"} {
+		if _, err := s.PutIfAbsent(ctx(), k, bytes.NewReader([]byte("x")), nil); err != nil {
+			t.Errorf("PutIfAbsent(%q) returned %v, want nil", k, err)
+		}
+	}
 }
