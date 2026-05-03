@@ -17,6 +17,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/storage"
@@ -399,7 +401,112 @@ func (l *Localfs) DeleteIfVersionMatches(ctx context.Context, key string, expect
 }
 
 func (l *Localfs) List(ctx context.Context, prefix string, opts *storage.ListOptions) (*storage.ListPage, error) {
-	return nil, storage.ErrNotSupported
+	if err := l.checkOpen(); err != nil {
+		return nil, err
+	}
+	maxKeys := 1000
+	delimiter := ""
+	cont := ""
+	if opts != nil {
+		if opts.MaxKeys > 0 {
+			maxKeys = opts.MaxKeys
+		}
+		delimiter = opts.Delimiter
+		cont = opts.ContinuationToken
+	}
+
+	keys, err := l.collectKeys(prefix)
+	if err != nil {
+		return nil, err
+	}
+	// Filter to keys strictly greater than the continuation token, if any.
+	if cont != "" {
+		idx := sort.SearchStrings(keys, cont)
+		// Skip the cont key itself (token is the last key returned).
+		for idx < len(keys) && keys[idx] <= cont {
+			idx++
+		}
+		keys = keys[idx:]
+	}
+
+	page := &storage.ListPage{}
+	commonSeen := map[string]bool{}
+	for _, k := range keys {
+		if delimiter != "" {
+			rest := strings.TrimPrefix(k, prefix)
+			if i := strings.Index(rest, delimiter); i >= 0 {
+				cp := prefix + rest[:i+len(delimiter)]
+				if !commonSeen[cp] {
+					commonSeen[cp] = true
+					page.CommonPrefixes = append(page.CommonPrefixes, cp)
+				}
+				continue
+			}
+		}
+		md, err := l.head(k)
+		if err != nil {
+			return nil, err
+		}
+		page.Objects = append(page.Objects, *md)
+		if len(page.Objects)+len(page.CommonPrefixes) >= maxKeys {
+			page.NextToken = k
+			return page, nil
+		}
+	}
+	return page, nil
+}
+
+// collectKeys walks the objects directory under prefix and returns
+// matching keys in lexicographic order. Sidecar files are excluded.
+func (l *Localfs) collectKeys(prefix string) ([]string, error) {
+	root := filepath.Join(l.root, objectsDir)
+	prefixFs := filepath.FromSlash(prefix)
+	walkRoot := root
+	if prefixFs != "" {
+		walkRoot = filepath.Join(root, prefixFs)
+		// If walkRoot is a file (the prefix happens to be a complete key),
+		// list the parent directory and filter by prefix.
+		info, err := os.Stat(walkRoot)
+		if err != nil || !info.IsDir() {
+			walkRoot = root
+		}
+	}
+
+	var keys []string
+	err := filepath.WalkDir(walkRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		// Skip symlinks per AD11. filepath.WalkDir does not follow
+		// symlinks; d.Type() reports ModeSymlink for them.
+		if d.Type()&fs.ModeSymlink != 0 {
+			return nil
+		}
+		if strings.HasSuffix(path, metaSuffix) {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		key := filepath.ToSlash(rel)
+		if !strings.HasPrefix(key, prefix) {
+			return nil
+		}
+		keys = append(keys, key)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(keys)
+	return keys, nil
 }
 
 func (l *Localfs) CreateMultipart(ctx context.Context, key string, opts *storage.MultipartOptions) (storage.MultipartUpload, error) {

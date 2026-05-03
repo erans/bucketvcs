@@ -21,6 +21,9 @@ func runCorrectness(t *testing.T, f Factory) {
 	t.Run("§29#3_FailedConditionalDoesNotAlter", func(t *testing.T) { test29_3(t, f) })
 	t.Run("§29#5_OverwriteThenRead", func(t *testing.T) { test29_5(t, f) })
 	t.Run("§29#11_DeleteIfVersionMatches", func(t *testing.T) { test29_11(t, f) })
+	t.Run("§29#6_ListAfterWrite", func(t *testing.T) { test29_6(t, f) })
+	t.Run("§29#7_ListAfterDelete", func(t *testing.T) { test29_7(t, f) })
+	t.Run("ListPagination", func(t *testing.T) { testListPagination(t, f) })
 }
 
 // §29 #4: Read after write sees latest object.
@@ -297,5 +300,81 @@ func test29_11(t *testing.T, f Factory) {
 	}
 	if err := s.DeleteIfVersionMatches(ctx(), "rk/29-11", v1); !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("DeleteIfVersionMatches(absent) = %v, want ErrNotFound", err)
+	}
+}
+
+// §29 #6: List after write sees new object.
+func test29_6(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	for i := 0; i < 5; i++ {
+		key := Key("p/29-6", i)
+		if _, err := s.PutIfAbsent(ctx(), key, bytes.NewReader([]byte("x")), nil); err != nil {
+			t.Fatalf("seed %s: %v", key, err)
+		}
+	}
+	page, err := s.List(ctx(), "p/29-6/", &storage.ListOptions{MaxKeys: 100})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(page.Objects) != 5 {
+		t.Errorf("listed %d objects, want 5", len(page.Objects))
+	}
+}
+
+// §29 #7: List after delete does not show deleted object.
+func test29_7(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	v, err := s.PutIfAbsent(ctx(), "p/29-7/a", bytes.NewReader([]byte("a")), nil)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := s.DeleteIfVersionMatches(ctx(), "p/29-7/a", v); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	page, err := s.List(ctx(), "p/29-7/", nil)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, md := range page.Objects {
+		if md.Key == "p/29-7/a" {
+			t.Error("listed deleted object")
+		}
+	}
+}
+
+// Pagination: List returns at most MaxKeys; subsequent calls with
+// NextToken cover the remainder; concatenation matches the full set.
+func testListPagination(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	const total = 25
+	for i := 0; i < total; i++ {
+		if _, err := s.PutIfAbsent(ctx(), Key("p/page", i), bytes.NewReader([]byte{byte(i)}), nil); err != nil {
+			t.Fatalf("seed %d: %v", i, err)
+		}
+	}
+
+	got := map[string]bool{}
+	token := ""
+	for iter := 0; iter < 100; iter++ {
+		page, err := s.List(ctx(), "p/page/", &storage.ListOptions{MaxKeys: 7, ContinuationToken: token})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		for _, md := range page.Objects {
+			if got[md.Key] {
+				t.Errorf("duplicate key in pagination: %s", md.Key)
+			}
+			got[md.Key] = true
+		}
+		if page.NextToken == "" {
+			break
+		}
+		if len(page.Objects) > 7 {
+			t.Errorf("page returned %d objects, want <= 7", len(page.Objects))
+		}
+		token = page.NextToken
+	}
+	if len(got) != total {
+		t.Errorf("paginated total = %d, want %d", len(got), total)
 	}
 }
