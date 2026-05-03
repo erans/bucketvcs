@@ -6,6 +6,7 @@
 package localfs
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -216,7 +217,50 @@ func (l *Localfs) Head(ctx context.Context, key string) (*storage.ObjectMetadata
 }
 
 func (l *Localfs) GetRange(ctx context.Context, key string, start, endInclusive int64) (io.ReadCloser, error) {
-	return nil, storage.ErrNotSupported
+	if err := validateKey(key); err != nil {
+		return nil, err
+	}
+	if start < 0 || endInclusive < start {
+		return nil, fmt.Errorf("%w: invalid range [%d,%d]", storage.ErrInvalidArgument, start, endInclusive)
+	}
+	l.mutexes.lock(key)
+	defer l.mutexes.unlock(key)
+
+	if err := lstatNoSymlink(l.objectPath(key)); err != nil {
+		return nil, err
+	}
+	f, err := os.Open(l.objectPath(key))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, storage.ErrNotFound
+		}
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if start >= info.Size() {
+		_ = f.Close()
+		return io.NopCloser(bytes.NewReader(nil)), nil
+	}
+	end := endInclusive
+	if end >= info.Size() {
+		end = info.Size() - 1
+	}
+	if _, err := f.Seek(start, io.SeekStart); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	// As with Get, the open file descriptor remains valid for the
+	// caller after we release the keyed mutex on return.
+	return &limitedReadCloser{Reader: io.LimitReader(f, end-start+1), Closer: f}, nil
+}
+
+type limitedReadCloser struct {
+	io.Reader
+	io.Closer
 }
 
 func (l *Localfs) PutIfAbsent(ctx context.Context, key string, body io.Reader, opts *storage.PutOptions) (storage.ObjectVersion, error) {
