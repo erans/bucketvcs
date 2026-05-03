@@ -17,6 +17,9 @@ func runCorrectness(t *testing.T, f Factory) {
 	t.Run("§29#9_GetRange", func(t *testing.T) { test29_9(t, f) })
 	t.Run("§29#1_ConcurrentPutIfAbsent", func(t *testing.T) { test29_1(t, f) })
 	t.Run("§29#14_PutIfAbsentIdempotentRetry", func(t *testing.T) { test29_14(t, f) })
+	t.Run("§29#2_ConcurrentPutIfVersionMatches", func(t *testing.T) { test29_2(t, f) })
+	t.Run("§29#3_FailedConditionalDoesNotAlter", func(t *testing.T) { test29_3(t, f) })
+	t.Run("§29#5_OverwriteThenRead", func(t *testing.T) { test29_5(t, f) })
 }
 
 // §29 #4: Read after write sees latest object.
@@ -170,5 +173,98 @@ func test29_14(t *testing.T, f Factory) {
 	}
 	if md.Version != v1 {
 		t.Errorf("version mutated by failed second PutIfAbsent: got %+v, want %+v", md.Version, v1)
+	}
+}
+
+// §29 #2: Concurrent putIfVersionMatches same key — exactly one succeeds.
+func test29_2(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	v0, err := s.PutIfAbsent(ctx(), "rk/29-2", bytes.NewReader([]byte("v0")), nil)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	const n = 64
+	results := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			_, err := s.PutIfVersionMatches(ctx(), "rk/29-2", v0, bytes.NewReader([]byte("v1")), nil)
+			results <- err
+		}()
+	}
+	successes, conflicts, others := 0, 0, 0
+	for i := 0; i < n; i++ {
+		err := <-results
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, storage.ErrVersionMismatch):
+			conflicts++
+		default:
+			others++
+			t.Errorf("unexpected error: %v", err)
+		}
+	}
+	if successes != 1 {
+		t.Errorf("successes = %d, want 1", successes)
+	}
+	if conflicts != n-1 {
+		t.Errorf("conflicts = %d, want %d", conflicts, n-1)
+	}
+}
+
+// §29 #3: Failed conditional write does not alter object.
+func test29_3(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	want := []byte("original")
+	v0, err := s.PutIfAbsent(ctx(), "rk/29-3", bytes.NewReader(want), nil)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	bogus := storage.ObjectVersion{Provider: v0.Provider, Token: "deadbeef", Kind: v0.Kind}
+	if _, err := s.PutIfVersionMatches(ctx(), "rk/29-3", bogus, bytes.NewReader([]byte("DROP")), nil); !errors.Is(err, storage.ErrVersionMismatch) {
+		t.Errorf("PutIfVersionMatches(bogus) = %v, want ErrVersionMismatch", err)
+	}
+
+	obj, err := s.Get(ctx(), "rk/29-3", nil)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer obj.Body.Close()
+	got, _ := io.ReadAll(obj.Body)
+	if !bytes.Equal(got, want) {
+		t.Errorf("content mutated by failed conditional: got %q, want %q", got, want)
+	}
+	if obj.Metadata.Version != v0 {
+		t.Errorf("version mutated by failed conditional: got %+v, want %+v", obj.Metadata.Version, v0)
+	}
+}
+
+// §29 #5: Read after overwrite sees the latest object.
+func test29_5(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	v0, err := s.PutIfAbsent(ctx(), "rk/29-5", bytes.NewReader([]byte("v0")), nil)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	v1, err := s.PutIfVersionMatches(ctx(), "rk/29-5", v0, bytes.NewReader([]byte("v1-content")), nil)
+	if err != nil {
+		t.Fatalf("PutIfVersionMatches: %v", err)
+	}
+	if v1 == v0 {
+		t.Error("version did not change after overwrite")
+	}
+	obj, err := s.Get(ctx(), "rk/29-5", nil)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer obj.Body.Close()
+	got, _ := io.ReadAll(obj.Body)
+	if string(got) != "v1-content" {
+		t.Errorf("after overwrite content = %q, want %q", got, "v1-content")
+	}
+	if obj.Metadata.Version != v1 {
+		t.Errorf("Metadata.Version = %+v, want %+v", obj.Metadata.Version, v1)
 	}
 }

@@ -321,7 +321,31 @@ func (l *Localfs) PutIfAbsent(ctx context.Context, key string, body io.Reader, o
 }
 
 func (l *Localfs) PutIfVersionMatches(ctx context.Context, key string, expected storage.ObjectVersion, body io.Reader, opts *storage.PutOptions) (storage.ObjectVersion, error) {
-	return storage.ObjectVersion{}, storage.ErrNotSupported
+	if err := l.checkOpen(); err != nil {
+		return storage.ObjectVersion{}, err
+	}
+	if err := validateKey(key); err != nil {
+		return storage.ObjectVersion{}, err
+	}
+	l.mutexes.lock(key)
+	defer l.mutexes.unlock(key)
+
+	current, err := l.headLocked(key)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return storage.ObjectVersion{}, fmt.Errorf("%w: object absent", storage.ErrVersionMismatch)
+		}
+		return storage.ObjectVersion{}, err
+	}
+	if current.Version.Token != expected.Token {
+		return storage.ObjectVersion{}, fmt.Errorf("%w: have %s want %s", storage.ErrVersionMismatch, current.Version.Token, expected.Token)
+	}
+
+	contentType := ""
+	if opts != nil {
+		contentType = opts.ContentType
+	}
+	return l.writeAtomic(key, body, contentType)
 }
 
 func (l *Localfs) DeleteIfVersionMatches(ctx context.Context, key string, expected storage.ObjectVersion) error {
