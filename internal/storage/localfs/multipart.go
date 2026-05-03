@@ -206,6 +206,9 @@ func (l *Localfs) CompleteMultipartIfAbsent(ctx context.Context, upload storage.
 		if p.PartNumber != i+1 {
 			return storage.ObjectVersion{}, fmt.Errorf("%w: parts not contiguously numbered (parts[%d].PartNumber=%d)", storage.ErrInvalidArgument, i, p.PartNumber)
 		}
+		if p.Token == "" {
+			return storage.ObjectVersion{}, fmt.Errorf("%w: parts[%d] has empty Token (must round-trip the value returned by UploadPart)", storage.ErrInvalidArgument, i)
+		}
 	}
 
 	l.mutexes.lock(u.key)
@@ -254,7 +257,7 @@ func (l *Localfs) CompleteMultipartIfAbsent(ctx context.Context, upload storage.
 			return storage.ObjectVersion{}, fmt.Errorf("%w: part %d size mismatch (manifest=%d, on-disk=%d)", storage.ErrInvalidArgument, p.PartNumber, p.Size, n)
 		}
 		actualToken := hex.EncodeToString(partHash.Sum(nil))
-		if p.Token != "" && actualToken != p.Token {
+		if actualToken != p.Token {
 			_ = tmp.Close()
 			cleanup()
 			return storage.ObjectVersion{}, fmt.Errorf("%w: part %d token mismatch (caller=%q, on-disk=%q)", storage.ErrInvalidArgument, p.PartNumber, p.Token, actualToken)

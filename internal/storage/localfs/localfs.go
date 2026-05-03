@@ -102,6 +102,16 @@ func Open(root string) (*Localfs, error) {
 		_ = os.Remove(lockPath)
 		return nil, fmt.Errorf("localfs: sync lockfile: %w", err)
 	}
+	// Persist the directory entry for .lock so a crash between lockfile
+	// creation and the next fsync leaves the lockfile durably visible.
+	// Without this, recovery's "no .lock => clean" fast-path could skip
+	// reconciliation against a bucket whose dirty session never made it
+	// to disk.
+	if err := fsyncDir(absRoot); err != nil {
+		_ = f.Close()
+		_ = os.Remove(lockPath)
+		return nil, fmt.Errorf("localfs: fsync root after lockfile: %w", err)
+	}
 
 	// We hold the lock now: safe to create subdirectories.
 	if err := os.MkdirAll(filepath.Join(absRoot, objectsDir), 0o755); err != nil {
@@ -159,6 +169,13 @@ func (l *Localfs) Close() error {
 		if !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("localfs: remove lockfile: %w", err)
 		}
+	}
+	// Persist the unlink so a crash immediately after Close does not
+	// resurrect the lockfile entry from a stale directory page; without
+	// this, a fresh Open could be refused even though the previous
+	// process believed it had released the lock.
+	if err := fsyncDir(filepath.Dir(l.lockPath)); err != nil {
+		return fmt.Errorf("localfs: fsync root after lockfile remove: %w", err)
 	}
 	l.lockfileRemoved = true
 	return nil

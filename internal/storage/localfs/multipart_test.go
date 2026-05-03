@@ -139,3 +139,33 @@ func TestStaleUploadHandleRefusedAfterManifestRemoval(t *testing.T) {
 		t.Errorf("UploadPart with manifest gone = %v, want ErrInvalidArgument", err)
 	}
 }
+
+// TestCompleteRejectsEmptyPartToken asserts CompleteMultipartIfAbsent
+// refuses to assemble when any part has Token == "" — the caller must
+// round-trip the value returned by UploadPart so the integrity check is
+// real, not a wildcard pass.
+func TestCompleteRejectsEmptyPartToken(t *testing.T) {
+	dir := t.TempDir()
+	s, err := localfs.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	mp, err := s.CreateMultipart(context.Background(), "obj/empty-token", nil)
+	if err != nil {
+		t.Fatalf("CreateMultipart: %v", err)
+	}
+	p, err := mp.UploadPart(context.Background(), 1, bytes.NewReader([]byte("payload")))
+	if err != nil {
+		t.Fatalf("UploadPart: %v", err)
+	}
+
+	p.Token = "" // simulate a caller that forgot to round-trip the token
+	if _, err := s.CompleteMultipartIfAbsent(context.Background(), mp, []storage.MultipartPart{p}); !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Errorf("CompleteMultipartIfAbsent with empty Token = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := s.Head(context.Background(), "obj/empty-token"); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("Head after rejected complete = %v, want ErrNotFound", err)
+	}
+}
