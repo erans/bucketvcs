@@ -52,3 +52,30 @@ func TestSidecarParseErrorsAreDistinguishable(t *testing.T) {
 		t.Errorf("parseSidecar(invalid JSON) wrongly matched ErrUnsupportedSidecarSchema: %v", err)
 	}
 }
+
+// TestSidecarMissingVersionIsHealable asserts that valid JSON missing
+// the version field (defaulting Version to 0) does NOT match
+// ErrUnsupportedSidecarSchema. Only versions strictly greater than the
+// current schema fail closed; missing, zero, and negative values are
+// corruption that self-heal must rebuild.
+func TestSidecarMissingVersionIsHealable(t *testing.T) {
+	cases := []struct {
+		name string
+		data []byte
+	}{
+		{"empty object", []byte(`{}`)},
+		{"explicit zero", []byte(`{"version":0,"sha256":"x","size":1,"content_type":"","modified_at":"2026-05-03T12:00:00Z"}`)},
+		{"negative", []byte(`{"version":-1,"sha256":"x","size":1,"content_type":"","modified_at":"2026-05-03T12:00:00Z"}`)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := parseSidecar(c.data)
+			if err == nil {
+				t.Fatal("parseSidecar accepted, want error")
+			}
+			if errors.Is(err, ErrUnsupportedSidecarSchema) {
+				t.Errorf("got ErrUnsupportedSidecarSchema (would prevent self-heal); want plain corruption error: %v", err)
+			}
+		})
+	}
+}
