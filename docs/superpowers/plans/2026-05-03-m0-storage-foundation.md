@@ -4,12 +4,12 @@
 
 **Goal:** Ship a provider-neutral `ObjectStore` Go interface, a single-process localfs adapter, and a reusable conformance test suite that verifies the §29 correctness and stress invariants. After M0, M1 (manifest CAS) can be built directly on top of `ObjectStore`.
 
-**Architecture:** Bespoke `ObjectStore` interface (no portable-blob library wrapper). Localfs implements the contract with in-process keyed `sync.Mutex` for both reads and writes (AD3), JSON sidecars for metadata, content sha256 as version token, atomic-rename for durable writes, real spec-conforming multipart, lstat-based symlink rejection (AD11). Conformance suite is a regular Go package that any adapter can call from its own test file via `conformance.Run(t, factory)`.
+**Architecture:** Bespoke `ObjectStore` interface (no portable-blob library wrapper). Localfs implements the contract with in-process keyed `sync.Mutex` for both reads and writes (AD3), JSON sidecars for metadata, content sha256 as version token, atomic-rename + directory `fsync` for durable writes (crash recovery semantics tabulated in the spec), real spec-conforming multipart, lstat-based best-effort symlink rejection (AD11). Conformance suite is a regular Go package that any adapter can call from its own test file via `conformance.Run(t, factory)`.
 
 **Tech Stack:** Go 1.22, `github.com/google/uuid` v1.6.0. No other external dependencies in M0. Linux + macOS targets.
 
 **Reference docs:**
-- Design spec (r2): `docs/superpowers/specs/2026-05-03-m0-storage-foundation-design.md`
+- Design spec (r3): `docs/superpowers/specs/2026-05-03-m0-storage-foundation-design.md`
 - Original spec sections: §9, §10, §29, §35, §40.1
 - Decomposition: `docs/superpowers/specs/2026-05-03-bucketvcs-oss-decomposition-design.md`
 
@@ -23,6 +23,13 @@
 - Task 5 doc comment updated to allow out-of-order and repeated multipart part numbers (AD10 pins 1-based).
 - The `head()` helper splits into `headLocked()` (caller holds mutex) and `head()` (locking wrapper for List).
 - Two new tasks: Task 33 (multipart lifecycle edge-case conformance tests) and Task 34 (localfs symlink-rejection test).
+
+**Plan revision r3 changes (2026-05-03):** Updated to match design spec r3 (addresses roborev round 2, job 7686).
+
+- Task 14 adds `fsyncDir(path string) error` helper and calls `fsyncDir(filepath.Dir(...))` after every `os.Rename` in `writeAtomic` and `writeFileAtomic` for crash durability of directory-entry changes.
+- Task 18 swaps the Delete order to **content-first then sidecar** so a crash mid-delete leaves an orphan sidecar (subsequent `Head` returns `ErrNotFound`, the correct outcome) rather than the inverse failure mode where self-heal would resurrect the deleted object. Each `os.Remove` is followed by `fsyncDir`.
+- Task 21 multipart `CompleteMultipartIfAbsent` calls `fsyncDir` after the assembled-content rename.
+- The localfs `lstatNoSymlink` claim is narrowed to "best-effort final-path"; the README and `localfs_test.go` document residual gaps (ancestor-directory symlinks, hardlinks, TOCTOU between `Lstat` and `Open`).
 
 ---
 
@@ -1930,14 +1937,16 @@ func (l *Localfs) healSidecar(key string, contentInfo os.FileInfo) (sidecar, err
 }
 
 // writeAtomic streams body to a temp file in the destination directory,
-// hashes it as it goes, atomically renames into place, then writes the
-// sidecar. Caller holds the keyed mutex.
+// hashes it as it goes, atomically renames into place, fsyncs the
+// directory, then writes the sidecar via the same pattern. Caller holds
+// the keyed mutex.
 func (l *Localfs) writeAtomic(key string, body io.Reader, contentType string) (storage.ObjectVersion, error) {
 	objPath := l.objectPath(key)
-	if err := os.MkdirAll(filepath.Dir(objPath), 0o755); err != nil {
+	objDir := filepath.Dir(objPath)
+	if err := os.MkdirAll(objDir, 0o755); err != nil {
 		return storage.ObjectVersion{}, err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(objPath), "."+filepath.Base(objPath)+".tmp.*")
+	tmp, err := os.CreateTemp(objDir, "."+filepath.Base(objPath)+".tmp.*")
 	if err != nil {
 		return storage.ObjectVersion{}, err
 	}
@@ -1965,6 +1974,9 @@ func (l *Localfs) writeAtomic(key string, body io.Reader, contentType string) (s
 		cleanup()
 		return storage.ObjectVersion{}, err
 	}
+	if err := fsyncDir(objDir); err != nil {
+		return storage.ObjectVersion{}, err
+	}
 
 	sum := hex.EncodeToString(h.Sum(nil))
 	sc := newSidecar(sum, n, contentType, time.Now().UTC())
@@ -1983,9 +1995,11 @@ func (l *Localfs) writeAtomic(key string, body io.Reader, contentType string) (s
 	}, nil
 }
 
-// writeFileAtomic writes data to path via temp + rename.
+// writeFileAtomic writes data to path via temp + rename, then fsyncs
+// the parent directory so the rename is durable across crashes.
 func writeFileAtomic(path string, data []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp.*")
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp.*")
 	if err != nil {
 		return err
 	}
@@ -2004,7 +2018,23 @@ func writeFileAtomic(path string, data []byte) error {
 		_ = os.Remove(tmpName)
 		return err
 	}
-	return os.Rename(tmpName, path)
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	return fsyncDir(dir)
+}
+
+// fsyncDir opens the directory and calls Sync to durably persist any
+// rename or unlink that happened in it. POSIX requires this for crash
+// durability of directory-entry changes; without it, a rename can be
+// lost across a crash even though the file's own fsync succeeded.
+func fsyncDir(path string) error {
+	f, err := os.OpenFile(path, os.O_RDONLY, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
 }
 ```
 
@@ -2554,13 +2584,26 @@ func (l *Localfs) DeleteIfVersionMatches(ctx context.Context, key string, expect
 	if current.Version.Token != expected.Token {
 		return fmt.Errorf("%w: have %s want %s", storage.ErrVersionMismatch, current.Version.Token, expected.Token)
 	}
-	if err := os.Remove(l.metaPath(key)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	if err := os.Remove(l.objectPath(key)); err != nil {
+	// Order: remove content first, then sidecar. A crash between the
+	// two leaves "no content + orphan sidecar"; subsequent Head returns
+	// ErrNotFound (correct outcome). The reverse order would leave
+	// "content present + missing sidecar"; Head's self-heal would
+	// regenerate the sidecar and the deleted object would resurrect.
+	objPath := l.objectPath(key)
+	objDir := filepath.Dir(objPath)
+	if err := os.Remove(objPath); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return storage.ErrNotFound
 		}
+		return err
+	}
+	if err := fsyncDir(objDir); err != nil {
+		return err
+	}
+	if err := os.Remove(l.metaPath(key)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := fsyncDir(objDir); err != nil {
 		return err
 	}
 	return nil
@@ -2579,11 +2622,14 @@ Expected: PASS.
 
 ```bash
 git add internal/storage/localfs/localfs.go internal/storage/conformance/correctness.go
-git commit -m "localfs: implement DeleteIfVersionMatches
+git commit -m "localfs: implement DeleteIfVersionMatches with content-first removal
 
 Reads sidecar under lock; ErrVersionMismatch on skew, ErrNotFound on
-missing. Removes content and sidecar atomically. Conformance §29 #11
-passes."
+missing. Removes content first then sidecar so a crash mid-delete
+leaves an orphan sidecar (subsequent Head returns ErrNotFound, the
+correct outcome) rather than leaving content with no sidecar (which
+self-heal would resurrect). fsyncDir after each remove for crash
+durability. Conformance §29 #11 passes."
 ```
 
 ---
@@ -3198,6 +3244,9 @@ func (l *Localfs) CompleteMultipartIfAbsent(ctx context.Context, upload storage.
 	}
 	if err := os.Rename(tmpName, objPath); err != nil {
 		cleanup()
+		return storage.ObjectVersion{}, err
+	}
+	if err := fsyncDir(filepath.Dir(objPath)); err != nil {
 		return storage.ObjectVersion{}, err
 	}
 
