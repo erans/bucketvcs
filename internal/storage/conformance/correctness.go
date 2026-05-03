@@ -24,6 +24,7 @@ func runCorrectness(t *testing.T, f Factory) {
 	t.Run("§29#6_ListAfterWrite", func(t *testing.T) { test29_6(t, f) })
 	t.Run("§29#7_ListAfterDelete", func(t *testing.T) { test29_7(t, f) })
 	t.Run("ListPagination", func(t *testing.T) { testListPagination(t, f) })
+	t.Run("ListDelimiter", func(t *testing.T) { testListDelimiter(t, f) })
 }
 
 // §29 #4: Read after write sees latest object.
@@ -376,5 +377,45 @@ func testListPagination(t *testing.T, f Factory) {
 	}
 	if len(got) != total {
 		t.Errorf("paginated total = %d, want %d", len(got), total)
+	}
+}
+
+func testListDelimiter(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	keys := []string{
+		"d/a/1",
+		"d/a/2",
+		"d/b/1",
+		"d/c",
+	}
+	for _, k := range keys {
+		if _, err := s.PutIfAbsent(ctx(), k, bytes.NewReader([]byte("x")), nil); err != nil {
+			t.Fatalf("seed %s: %v", k, err)
+		}
+	}
+
+	page, err := s.List(ctx(), "d/", &storage.ListOptions{Delimiter: "/", MaxKeys: 100})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	wantPrefixes := map[string]bool{"d/a/": true, "d/b/": true}
+	gotPrefixes := map[string]bool{}
+	for _, p := range page.CommonPrefixes {
+		gotPrefixes[p] = true
+	}
+	for p := range wantPrefixes {
+		if !gotPrefixes[p] {
+			t.Errorf("missing common prefix %q (got %v)", p, page.CommonPrefixes)
+		}
+	}
+	wantObjs := map[string]bool{"d/c": true}
+	gotObjs := map[string]bool{}
+	for _, md := range page.Objects {
+		gotObjs[md.Key] = true
+	}
+	for k := range wantObjs {
+		if !gotObjs[k] {
+			t.Errorf("missing direct object %q (got %v)", k, page.Objects)
+		}
 	}
 }
