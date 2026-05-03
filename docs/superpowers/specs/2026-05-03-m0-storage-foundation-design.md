@@ -1,17 +1,18 @@
 # M0 — Storage Foundation: ObjectStore Contract, localfs Adapter, Conformance Suite
 
 Date: 2026-05-03
-Status: design draft (revision 4)
+Status: design draft (revision 5)
 Milestone: M0 (first critical-path milestone of bucketvcs OSS-core)
 Source spec sections: §9, §10, §29 (subset), §35, §40.1, §40.4
 Decomposition: see `2026-05-03-bucketvcs-oss-decomposition-design.md`
-Implementation plan: see `docs/superpowers/plans/2026-05-03-m0-storage-foundation.md` (34 bite-sized TDD tasks)
+Implementation plan: see `docs/superpowers/plans/2026-05-03-m0-storage-foundation.md` (35 bite-sized TDD tasks)
 
 Revision history:
 - 2026-05-03 r1: initial design.
 - 2026-05-03 r2: address roborev design review (job 7684) findings — read-side mutex acquisition for atomicity; `PutIfAbsent` Stat-then-rename made explicit; `PutOptions.Metadata` removed for M0; multipart lifecycle table added; symlink rejection added; filesystem portability assumptions documented; sidecar schema versioning surfaced from plan; part numbering pinned to 1-based.
 - 2026-05-03 r3: address roborev design review (job 7686) findings — AD11 narrowed to best-effort final-path symlink rejection with documented limitations (ancestor symlinks, hardlinks, TOCTOU not covered); directory `fsync` added to the atomic write pattern for crash durability; version-conditional operation contract table added; plan stages summarized inline; crash-recovery semantics tabulated.
 - 2026-05-03 r4: address roborev design review (job 7688) findings — stale-sidecar detection on read added (size-mismatch fast-path triggers self-heal) plus `bucketvcs doctor` mandated as a precondition for resuming write traffic after unclean shutdown; `fsyncDir` failure behavior specified (error propagated, operation reported as failed); List symlink mechanism pinned to `DirEntry.Type()` from `filepath.WalkDir`; size-mismatch detection surfaced into the stage 3 summary; README verbatim-copy obligations enumerated.
+- 2026-05-03 r5: address roborev design review (job 7690) findings — replaced "must run doctor at M16" with M0-shipped `Localfs.Verify(ctx)` method and package-level `localfs.Verify(root)` function; lockfile (`<root>/.lock`) doubles as unclean-shutdown marker (its presence at `Open` time triggers `ErrAlreadyLocked` with the operator instructed to call `Verify` before retrying); read-path sequence rewritten as an explicit 4-step procedure; self-heal failure semantics specified (original read error wins, partial sidecar left for retry); size-mismatch coverage extended to all reads and conditional writes via the shared `headLocked` helper.
 
 ## Purpose
 
@@ -44,7 +45,7 @@ The full implementation plan (`docs/superpowers/plans/2026-05-03-m0-storage-foun
 4. **List + multipart** (Tasks 19–23): List + pagination + symlink skip; List delimiter + common prefixes; multipart happy path; multipart-vs-existing-key (§29 #8); `Capabilities` + `SignedGetURL` returning `ErrNotSupported`.
 5. **§29 conformance fill-in** (Tasks 24–26): error classification + version round-trip + throttling-skip; key namespace floor; suite self-review checking that all 15 §29 items are covered.
 6. **Stress tests** (Tasks 27–29): 100 concurrent CAS attempts; 10,000 small object creates; 256 MiB multipart conflict.
-7. **Edge cases & polish** (Tasks 30–34): sidecar self-heal localfs unit test; worked example; README; multipart lifecycle conformance (8 cases); localfs symlink-rejection unit test.
+7. **Edge cases & polish** (Tasks 30–35): sidecar self-heal localfs unit tests (missing + size-mismatch across all read/conditional ops); `Localfs.Verify(ctx)` and `localfs.Verify(root)` implementation + tests; worked example; README; multipart lifecycle conformance (8 cases); localfs symlink-rejection unit test.
 
 Each task follows the same TDD shape: Step 1 writes the failing test; Step 2 verifies it fails; Step 3 implements the minimum to pass; Step 4 verifies it passes; Step 5 commits. Conformance tests are added per behavior slice as that slice is implemented; cloud adapters at M5/M7 inherit the same suite.
 
@@ -258,7 +259,15 @@ The cost is that read throughput is serialized per key. For a single-process dev
 - **`PutIfAbsent`** acquires the per-key mutex, then explicitly `os.Lstat`s the target path. If the target exists (regular file or symlink), returns `ErrAlreadyExists` and writes nothing. If absent, runs the atomic write pattern. *Note: POSIX `rename(2)` overwrites existing targets silently, so the absence check must be performed under the same mutex held during rename. Defense-in-depth on Linux: callers may use `unix.Renameat2(..., RENAME_NOREPLACE)`; M0 relies on the Lstat-under-mutex check because localfs is single-process.*
 - **`PutIfVersionMatches`** acquires the per-key mutex, reads the sidecar, applies the size-mismatch fast-path (self-heal if `Stat.Size != sidecar.Size`), then compares `expected.Token` against `sidecar.sha256`. If equal, runs the atomic write pattern; otherwise returns `ErrVersionMismatch`. Returns `ErrVersionMismatch` (not `ErrNotFound`) when the key does not exist, matching S3 If-Match semantics. See the "Version-conditional operation contract" table below for the full matrix.
 - **`DeleteIfVersionMatches`** acquires the per-key mutex, reads and compares the version (with size-mismatch fast-path), then removes content first, then sidecar; each removal is followed by `fsyncDir` of the parent. Returns `ErrVersionMismatch` on skew, `ErrNotFound` if absent. **Order rationale**: removing content first means a crash mid-delete leaves "no content + orphan sidecar"; subsequent `Head` returns `ErrNotFound` (correct outcome). The reverse order would leave "content present + missing sidecar"; subsequent `Head` would self-heal the sidecar and the deleted object would resurrect.
-- **`Get` / `Head` / `GetRange`** acquire the per-key mutex, perform `Lstat` on the content path (rejects symlinks under AD11), apply the size-mismatch fast-path, read the sidecar (or self-heal), then read content. Sidecar self-heal recomputes sha256 from content and rewrites a fresh sidecar; if heal fails (e.g., I/O error), the original error is wrapped and returned.
+- **`Get` / `Head` / `GetRange`** acquire the per-key mutex, then perform the following explicit sequence:
+  1. `Lstat` the content path. Absent → `ErrNotFound`. Symlink → `ErrInvalidArgument` (AD11).
+  2. Read the sidecar file. Missing or fails to parse → triggers self-heal (recompute sha256 from content, write a fresh sidecar at the current schema version).
+  3. If the sidecar parsed cleanly, compare `Stat(content).Size()` against `sidecar.Size`. Mismatch → triggers self-heal (same recompute path as step 2). Match → proceed.
+  4. Construct `ObjectMetadata` from the (possibly healed) sidecar. For `Get`/`GetRange`, additionally `os.Open` the content file and return it as `Body`. The open file descriptor remains valid after the keyed mutex is released because POSIX guarantees the inode stays reachable through an open fd even if a subsequent writer renames a new file over the path.
+
+  **Self-heal failure semantics**: if step 2 or step 3's recompute/rewrite fails (e.g., I/O error, disk full, permission denied), the **original** error is wrapped and returned as the primary; the operation reports failure. Any partial sidecar state on disk is bounded by the temp+rename pattern in `writeFileAtomic` — the on-disk sidecar is either fully old or fully new, never half-written. A subsequent read attempt retries the heal.
+
+- **`PutIfVersionMatches`** and **`DeleteIfVersionMatches`** also call `headLocked` at the start of their critical section, so they inherit the same Lstat → sidecar-read → size-mismatch → self-heal sequence. The size-mismatch fast-path therefore guards every read and every conditional write.
 - **`List`** walks `<root>/objects/<prefix>` lexicographically using `filepath.WalkDir`. **Symlink detection mechanism**: `filepath.WalkDir` calls the visit function with a `fs.DirEntry` whose `Type()` returns `fs.ModeSymlink` for symlinks (POSIX guarantee — `WalkDir` does not follow symlinks). `List` skips entries where `d.Type()&fs.ModeSymlink != 0` and emits a structured warning. No additional `Lstat` is required for the type check. Pagination uses last-returned key as the continuation token; the next call returns keys strictly greater than that token. `Delimiter` support produces `CommonPrefixes` to match cloud-style "directory-like" listing semantics.
 - **`CreateMultipart`** generates a UUID, creates `<root>/uploads/<id>/parts/`, writes `manifest.json` recording the target key, content type, and creation time. Does not lock the target key; multipart uploads do not reserve the key.
 - **`UploadPart`** streams part bytes via temp + atomic rename to `parts/NNNNN` (zero-padded; `PartNumber` is 1-based per AD10). Returns the part's sha256 as its token. Out-of-order or repeated part numbers are allowed at upload time; repeated `PartNumber` overwrites the prior part's bytes via the same temp+rename. Part numbers < 1 return `ErrInvalidArgument`.
@@ -294,17 +303,49 @@ Localfs in M0 commits to crash recovery for the following states (assuming direc
 
 The "content (new) + sidecar (old)" window is the one M0 limitation that a cloud adapter would not exhibit. The conformance suite does not (and cannot) inject mid-write crashes into localfs without OS-level chaos tooling; `bucketvcs doctor` is responsible for detecting torn states by recomputing sha256 and comparing against sidecar.
 
-### Crash recovery and `bucketvcs doctor` requirement
+### Crash recovery and `Localfs.Verify`
 
-Localfs's stale-sidecar fast-path (size-mismatch detection) catches the common case where a crashed `PutIfVersionMatches` left content of a different size than the previous version. It does NOT catch the rarer case where the new and old content happen to share the same size. To preserve CAS correctness across crashes:
+Localfs's stale-sidecar fast-path (size-mismatch detection on read) catches the common case where a crashed `PutIfVersionMatches` left content of a different size than the previous version. It does NOT catch the rarer case where the new and old content happen to share the same size. To preserve CAS correctness across crashes, M0 **ships a verifier in the localfs package itself** — not a deferred dependency on M16.
 
-> **After unclean shutdown (`kill -9`, OOM, host crash, etc.), localfs MUST be re-validated by `bucketvcs doctor` (M16) before write traffic resumes.** Doctor walks every object under `<root>/objects/`, recomputes sha256 from content, and rewrites stale sidecars. After doctor completes successfully, the (content, sidecar) pair is guaranteed consistent and CAS semantics are fully restored.
+**Verifier API:**
 
-Operational guidance:
+```go
+// Localfs.Verify walks every object under <root>/objects/, recomputes
+// sha256 from content, and rewrites stale sidecars. Safe to call on a
+// healthy Localfs; useful as periodic maintenance or after suspected
+// torn states. Caller already holds the bucket open.
+func (l *Localfs) Verify(ctx context.Context) error
 
-- **Clean shutdown**: a graceful `Close` on the `Localfs` instance does not require doctor. Subsequent opens are safe.
-- **Unclean shutdown without doctor**: read traffic is allowed (size-mismatch fast-path catches most stale sidecars; readers see correct version tokens for size-changing rewrites). Conditional writes against an undetected stale sidecar may operate on the wrong version, breaking CAS. Operators MUST treat this as data loss risk for any keys touched during the crashed write.
-- **Doctor is M16 work, not M0**: the requirement is stated in M0 so operators understand the contract. Until M16 ships, localfs M0 deployments must be considered ephemeral; production-style operators should keep an off-bucket replica as recourse.
+// Verify is a package-level entry point that operates on a closed
+// bucket: opens it in repair mode (bypassing the lockfile check),
+// runs the same reconciliation, then clears the lockfile so a
+// subsequent Open succeeds. Used to recover from unclean shutdown.
+func Verify(root string) error
+```
+
+**Lockfile doubles as unclean-shutdown marker.**
+
+`<root>/.lock` is created on `Open` (via `O_CREAT|O_EXCL`) and removed on clean `Close`. If `Open` finds an existing lockfile, the previous shutdown was unclean OR another process has the bucket open. M0 cannot programmatically distinguish these; `Open` returns `ErrAlreadyLocked` in both cases and the caller decides:
+
+- If the operator knows the previous process is gone (e.g., they observed the crash, or it has been long enough), they call `localfs.Verify(root)` to reconcile and clear the marker.
+- If the operator suspects another process actually owns the bucket, they leave it alone.
+
+**Operator workflow on unclean shutdown:**
+
+```text
+1. Process running localfs is killed (kill -9, OOM, host crash).
+2. New process calls localfs.Open(root).
+   → returns ErrAlreadyLocked (the dead process's .lock is still there).
+3. Operator confirms the prior process is gone (ps, systemctl, etc.).
+4. Operator calls localfs.Verify(root).
+   → Verify scans every object, recomputes sha256, rewrites stale sidecars.
+   → Verify clears <root>/.lock on successful completion.
+5. New process calls localfs.Open(root) → succeeds.
+```
+
+`Localfs.Verify(ctx)` (instance method) is also safe to call on a healthy open bucket as periodic maintenance — it just confirms every (content, sidecar) pair is consistent and is a no-op when nothing is torn.
+
+**Future M16 integration**: `bucketvcs doctor` will wrap `localfs.Verify` (and equivalents for cloud adapters) as a CLI subcommand, but the underlying primitive ships in M0. The "doctor" name is reserved; M0 callers should use `localfs.Verify` directly.
 
 This requirement applies to localfs only. Cloud adapters at M5/M7 do not have an equivalent torn-state because their version tokens are server-side.
 
@@ -564,9 +605,10 @@ Notes:
 6. `Capabilities()` declarations round-trip through the interface correctly.
 7. Documented error taxonomy maps to the conformance assertions per the table above; the error-normalization rules in this spec match implementation behavior.
 8. Package layout matches §40.1.
-9. `internal/storage/README.md` documents: the interface contract; how to add a new adapter; how to run the conformance suite against an arbitrary adapter; the AD8 recast; the AD11 best-effort symlink claim **including the verbatim "What is NOT covered in M0" list from the "Symlink and hardlink safety" section**; the **verbatim "Filesystem portability assumptions" section**; the **verbatim `bucketvcs doctor` post-unclean-shutdown requirement**; and any expected divergences. The README is operator-facing; copying these blocks verbatim ensures the warnings are not diluted as the spec evolves.
-10. Public Go-doc comments on every exported symbol in `internal/storage`.
-11. A worked example (~50 lines, in `internal/storage/example_test.go` or under `examples/`) exercises Put, Get, PutIfVersionMatches, List, Multipart, Delete on localfs, including the conflict paths.
+9. `internal/storage/README.md` documents: the interface contract; how to add a new adapter; how to run the conformance suite against an arbitrary adapter; the AD8 recast; the AD11 best-effort symlink claim **including the verbatim "What is NOT covered in M0" list from the "Symlink and hardlink safety" section**; the **verbatim "Filesystem portability assumptions" section**; the **verbatim "Crash recovery and `Localfs.Verify`" section including the operator workflow**; and any expected divergences. The README is operator-facing; copying these blocks verbatim ensures the warnings are not diluted as the spec evolves.
+10. `Localfs.Verify(ctx)` (instance method) and `localfs.Verify(root)` (package-level function) ship in M0 with at least the following test coverage: clean bucket → no-op success; size-mismatched torn sidecar → reconciled successfully; package-level `Verify` clears `.lock` so a subsequent `Open` succeeds.
+11. Public Go-doc comments on every exported symbol in `internal/storage`.
+12. A worked example (~50 lines, in `internal/storage/example_test.go` or under `examples/`) exercises Put, Get, PutIfVersionMatches, List, Multipart, Delete on localfs, including the conflict paths.
 
 ## Dependencies
 
