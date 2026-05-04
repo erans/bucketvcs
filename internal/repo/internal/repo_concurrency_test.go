@@ -16,7 +16,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	tx "github.com/bucketvcs/bucketvcs/internal/repo/tx"
@@ -316,28 +315,33 @@ func TestCommit_Scenario_ReadDuringWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	const (
+		writers          = 4
+		commitsPerWriter = 25 // 100 total commits — small enough to be fast
+	)
+
+	stop := make(chan struct{})
 	var (
 		readerErrs atomic.Int64
 		readerOps  atomic.Int64
-		readerDone sync.WaitGroup
+		writeOK    atomic.Int64
+		writeErr   atomic.Int64
 	)
-	readerDone.Add(1)
-	readerCtx, readerCancel := context.WithTimeout(ctx, 10*time.Second)
-	defer readerCancel()
+
+	// Reader goroutine: spins on ReadRoot until stop closes.
+	readerDone := make(chan struct{})
 	go func() {
-		defer readerDone.Done()
+		defer close(readerDone)
 		for {
 			select {
-			case <-readerCtx.Done():
+			case <-stop:
 				return
 			default:
 			}
-			v, rerr := r.ReadRoot(readerCtx)
+			v, rerr := r.ReadRoot(ctx)
 			readerOps.Add(1)
 			if rerr != nil {
-				if !errors.Is(rerr, context.DeadlineExceeded) {
-					readerErrs.Add(1)
-				}
+				readerErrs.Add(1)
 				return
 			}
 			if v.Header.SchemaVersion != 1 {
@@ -347,29 +351,53 @@ func TestCommit_Scenario_ReadDuringWrite(t *testing.T) {
 		}
 	}()
 
-	deadline := time.After(5 * time.Second)
+	// Writers commit a fixed number each, then exit.
 	var wg sync.WaitGroup
-	for w := 0; w < 2; w++ {
+	for w := 0; w < writers; w++ {
 		w := w
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for i := 0; i < 10; i++ {
-				select {
-				case <-deadline:
-					return
-				default:
-				}
-				_, _ = r.Commit(ctx, tx.Body{Type: "push", Actor: "u_" + strconv.Itoa(w)},
+			for i := 0; i < commitsPerWriter; i++ {
+				_, cerr := r.Commit(ctx,
+					tx.Body{Type: "push", Actor: "u_" + strconv.Itoa(w)},
 					func(prev *repo.RootView) ([]byte, error) { return prev.Body, nil },
 					repo.WithCommitPolicy(repo.CommitPolicy{MaxRetries: 16, BackoffBase: 0}),
 				)
+				if cerr == nil {
+					writeOK.Add(1)
+				} else {
+					var gaveUp *repo.CommitGaveUpError
+					if errors.As(cerr, &gaveUp) {
+						// Bounded retry exhaustion is expected under
+						// heavy contention; not a test failure.
+						writeErr.Add(1)
+					} else {
+						t.Errorf("unexpected non-retryable commit error: %v", cerr)
+						writeErr.Add(1)
+					}
+				}
 			}
 		}()
 	}
 	wg.Wait()
-	readerDone.Wait()
+	close(stop)
+	<-readerDone
+
 	if readerErrs.Load() != 0 {
 		t.Errorf("reader saw %d invalid snapshots over %d ops", readerErrs.Load(), readerOps.Load())
+	}
+	// Some commits must have succeeded; otherwise the reader's
+	// "valid snapshot" assertion is vacuous.
+	if writeOK.Load() == 0 {
+		t.Errorf("zero successful writes (writeErr=%d); test would be vacuous", writeErr.Load())
+	}
+	view, err := r.ReadRoot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// manifest_version must equal 1 + writeOK.Load().
+	if got, want := view.Header.ManifestVersion, uint64(1)+uint64(writeOK.Load()); got != want {
+		t.Errorf("manifest_version: want %d (1 create + %d successful writes), got %d", want, writeOK.Load(), got)
 	}
 }
