@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/bucketvcs/bucketvcs/internal/repo"
+	"github.com/bucketvcs/bucketvcs/internal/repo/repoerrs"
 )
 
 // Repo holds the pre-computed key prefix for one (tenant, repo) pair.
@@ -23,10 +23,10 @@ var idPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 // key prefix.
 func NewRepo(tenantID, repoID string) (*Repo, error) {
 	if !validID(tenantID) {
-		return nil, repo.ErrInvalidTenantID
+		return nil, repoerrs.ErrInvalidTenantID
 	}
 	if !validID(repoID) {
-		return nil, repo.ErrInvalidRepoID
+		return nil, repoerrs.ErrInvalidRepoID
 	}
 	return &Repo{
 		tenantID: tenantID,

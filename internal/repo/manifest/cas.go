@@ -8,7 +8,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/bucketvcs/bucketvcs/internal/repo"
+	"github.com/bucketvcs/bucketvcs/internal/repo/repoerrs"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
 
@@ -29,7 +29,7 @@ func ReadRoot(ctx context.Context, s storage.ObjectStore, key string) (
 	obj, err := s.Get(ctx, key, nil)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
-			return RootHeader{}, nil, storage.ObjectVersion{}, repo.ErrRepoNotFound
+			return RootHeader{}, nil, storage.ObjectVersion{}, repoerrs.ErrRepoNotFound
 		}
 		return RootHeader{}, nil, storage.ObjectVersion{}, fmt.Errorf("repo: read root: %w", err)
 	}

@@ -3,7 +3,7 @@ package manifest
 import (
 	"fmt"
 
-	"github.com/bucketvcs/bucketvcs/internal/repo"
+	"github.com/bucketvcs/bucketvcs/internal/repo/repoerrs"
 	"golang.org/x/mod/semver"
 )
 
@@ -26,7 +26,7 @@ const (
 func SchemaGate(h RootHeader) error {
 	if h.SchemaVersion < 1 || h.SchemaVersion > CurrentSchemaVersion {
 		return fmt.Errorf("%w: schema_version=%d (supported max=%d)",
-			repo.ErrUnsupportedSchema, h.SchemaVersion, CurrentSchemaVersion)
+			repoerrs.ErrUnsupportedSchema, h.SchemaVersion, CurrentSchemaVersion)
 	}
 	if h.MinReaderVersion == "" {
 		return nil
@@ -35,11 +35,11 @@ func SchemaGate(h RootHeader) error {
 	supported := vPrefix(SupportedReaderVersion)
 	if !semver.IsValid(mr) {
 		return fmt.Errorf("%w: min_reader_version=%q is not valid semver",
-			repo.ErrUnsupportedSchema, h.MinReaderVersion)
+			repoerrs.ErrUnsupportedSchema, h.MinReaderVersion)
 	}
 	if semver.Compare(mr, supported) > 0 {
 		return fmt.Errorf("%w: min_reader_version=%q exceeds supported=%q",
-			repo.ErrUnsupportedSchema, h.MinReaderVersion, SupportedReaderVersion)
+			repoerrs.ErrUnsupportedSchema, h.MinReaderVersion, SupportedReaderVersion)
 	}
 	return nil
 }
