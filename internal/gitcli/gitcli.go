@@ -171,10 +171,13 @@ func CloneBareMirror(ctx context.Context, src, dst string) error {
 }
 
 // PackObjectsAll produces a single pack containing every reachable object
-// in dir, written as outPrefix + "-{pack_id}.pack" + ".idx". Returns the
-// pack_id (40-char hex SHA-1, the Git-native pack name from §3.2 of the
-// M2 design). The function pipes `git rev-list --all --objects` into
-// `git pack-objects` to keep behavior deterministic across git versions.
+// in dir, written as `outPrefix-{pack_id}.pack` (and the corresponding
+// `outPrefix-{pack_id}.idx`). Returns the pack_id (40-char hex SHA-1, the
+// Git-native pack name from §3.2 of the M2 design). The function pipes
+// `git rev-list --all --objects` into `git pack-objects` to keep behavior
+// deterministic across git versions. Returns an error if pack-objects
+// produces zero packs (empty repo) or splits the output across multiple
+// packs; bucketvcs callers are expected to ensure the input fits in one pack.
 func PackObjectsAll(ctx context.Context, dir, outPrefix string) (string, error) {
 	bin, err := resolveBinary()
 	if err != nil {
@@ -198,6 +201,7 @@ func PackObjectsAll(ctx context.Context, dir, outPrefix string) (string, error) 
 	pack.Stderr = &packStderr
 
 	if err := pack.Start(); err != nil {
+		_ = pipe.Close()
 		return "", fmt.Errorf("gitcli: PackObjectsAll: pack start: %w", err)
 	}
 	if err := revList.Run(); err != nil {
@@ -209,8 +213,7 @@ func PackObjectsAll(ctx context.Context, dir, outPrefix string) (string, error) 
 		return "", fmt.Errorf("gitcli: PackObjectsAll: pack-objects: %w: stderr=%q",
 			err, packStderr.String())
 	}
-	// pack-objects prints exactly one pack_id line on stdout when one
-	// pack is produced. The output may include trailing whitespace.
+	// pack-objects writes the pack_id followed by a newline.
 	id := strings.TrimSpace(packStdout.String())
 	if len(id) != 40 {
 		return "", fmt.Errorf("gitcli: PackObjectsAll: unexpected pack-objects stdout %q",

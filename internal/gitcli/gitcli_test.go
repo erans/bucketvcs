@@ -165,8 +165,9 @@ func makeRepoWithOneCommit(t *testing.T) string {
 	}
 	mustRun("add", "README")
 	mustRun("commit", "-m", "init")
-	// Clone --bare into dir-bare so the source dir has objects.
-	out := dir + "-bare"
+	// Clone --bare into a fresh temp dir. Use a named subdir so git creates
+	// it (some git versions reject a pre-existing directory).
+	out := filepath.Join(t.TempDir(), "bare")
 	if err := CloneBareMirror(context.Background(), work, out); err != nil {
 		t.Fatalf("CloneBareMirror: %v", err)
 	}
@@ -224,5 +225,69 @@ func TestIndexPack_ReindexesExistingPack(t *testing.T) {
 	}
 	if _, err := os.Stat(idxPath); err != nil {
 		t.Fatalf("expected idx after IndexPack: %v", err)
+	}
+}
+
+func TestUnpackObjects_ExplodesPackToLoose(t *testing.T) {
+	skipIfNoGit(t)
+	bare := makeRepoWithOneCommit(t)
+	tmp := t.TempDir()
+	prefix := filepath.Join(tmp, "p")
+	id, err := PackObjectsAll(context.Background(), bare, prefix)
+	if err != nil {
+		t.Fatalf("PackObjectsAll: %v", err)
+	}
+	// Init a fresh bare repo, then unpack the pack into it.
+	dst := t.TempDir()
+	if err := InitBare(context.Background(), dst); err != nil {
+		t.Fatalf("InitBare: %v", err)
+	}
+	packPath := prefix + "-" + id + ".pack"
+	if err := UnpackObjects(context.Background(), dst, packPath); err != nil {
+		t.Fatalf("UnpackObjects: %v", err)
+	}
+	// Loose objects appear under objects/<2-hex>/<38-hex>. Walk objects/
+	// and confirm at least one such file exists.
+	objectsDir := filepath.Join(dst, "objects")
+	var loose int
+	err = filepath.Walk(objectsDir, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		// Skip pack/, info/.
+		rel := p[len(objectsDir):]
+		if strings.Contains(rel, "/pack/") || strings.Contains(rel, "/info/") {
+			return nil
+		}
+		// Loose object filenames are 38 hex chars under a 2-hex parent.
+		if len(info.Name()) == 38 {
+			loose++
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	if loose == 0 {
+		t.Fatalf("expected ≥1 loose object after UnpackObjects, got 0")
+	}
+	if err := Fsck(context.Background(), dst, true); err != nil {
+		t.Fatalf("Fsck after UnpackObjects: %v", err)
+	}
+}
+
+func TestRunForTest_ReturnsCombinedOutput(t *testing.T) {
+	skipIfNoGit(t)
+	bare := makeRepoWithOneCommit(t)
+	out, err := RunForTest(bare, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("RunForTest: %v: %s", err, out)
+	}
+	got := strings.TrimSpace(string(out))
+	if len(got) != 40 {
+		t.Fatalf("rev-parse HEAD: got %q (len %d), want 40-char SHA", got, len(got))
 	}
 }
