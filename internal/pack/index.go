@@ -1,6 +1,7 @@
 package pack
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -86,6 +87,32 @@ func ParseIdx(r io.ReaderAt, size int64) (*Idx, error) {
 		return nil, fmt.Errorf("%w: read oid table: %v", ErrIdxCorrupt, err)
 	}
 	off += int64(idx.count * idxOIDSize)
+
+	// Validate: OID table is strictly ascending AND fanout is consistent
+	// with the OID first-bytes. Lookup correctness depends on both invariants.
+	if idx.count > 0 {
+		for k := 1; k < idx.count; k++ {
+			prev := idx.oids[(k-1)*idxOIDSize : k*idxOIDSize]
+			cur := idx.oids[k*idxOIDSize : (k+1)*idxOIDSize]
+			if bytes.Compare(prev, cur) >= 0 {
+				return nil, fmt.Errorf("%w: OIDs not strictly ascending at %d", ErrIdxCorrupt, k)
+			}
+		}
+		var firstBytes [256]uint32
+		for k := 0; k < idx.count; k++ {
+			firstBytes[idx.oids[k*idxOIDSize]]++
+		}
+		var recomputed [256]uint32
+		var cum uint32
+		for b := 0; b < 256; b++ {
+			cum += firstBytes[b]
+			recomputed[b] = cum
+		}
+		if recomputed != idx.fanout {
+			return nil, fmt.Errorf("%w: fanout/oid-table mismatch", ErrIdxCorrupt)
+		}
+	}
+
 	idx.crcs = make([]byte, idx.count*idxCRCSize)
 	if _, err := r.ReadAt(idx.crcs, off); err != nil {
 		return nil, fmt.Errorf("%w: read crc table: %v", ErrIdxCorrupt, err)

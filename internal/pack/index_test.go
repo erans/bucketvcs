@@ -236,3 +236,67 @@ func TestParseIdx_RejectsCountExceedingFileSize(t *testing.T) {
 		t.Fatalf("expected ParseIdx to reject count exceeding file size")
 	}
 }
+
+func TestParseIdx_RejectsUnsortedOIDs(t *testing.T) {
+	// Build a valid 2-entry idx, then swap the OIDs to violate ordering.
+	var buf bytes.Buffer
+	buf.Write([]byte{0xff, 0x74, 0x4f, 0x63})
+	binWrite32(&buf, 2)
+	for i := 0; i < 256; i++ {
+		// fanout: 0 for i < 0x10, 1 for 0x10 <= i < 0x42, 2 for i >= 0x42
+		switch {
+		case i < 0x10:
+			binWrite32(&buf, 0)
+		case i < 0x42:
+			binWrite32(&buf, 1)
+		default:
+			binWrite32(&buf, 2)
+		}
+	}
+	// OID table: write 0x42 first then 0x10 -- unsorted.
+	hi := make([]byte, 20)
+	hi[0] = 0x42
+	lo := make([]byte, 20)
+	lo[0] = 0x10
+	buf.Write(hi)
+	buf.Write(lo)
+	// CRCs (2 × 4 bytes)
+	binWrite32(&buf, 0)
+	binWrite32(&buf, 0)
+	// Offsets (2 × 4 bytes, no MSB)
+	binWrite32(&buf, 12)
+	binWrite32(&buf, 32)
+	// Trailer (40 bytes)
+	buf.Write(make([]byte, 40))
+
+	if _, err := ParseIdx(bytes.NewReader(buf.Bytes()), int64(buf.Len())); err == nil {
+		t.Fatalf("expected ParseIdx to reject unsorted OIDs")
+	}
+}
+
+func TestParseIdx_RejectsFanoutMismatch(t *testing.T) {
+	// Valid sorted 2-OID idx but with a bogus fanout that doesn't match.
+	var buf bytes.Buffer
+	buf.Write([]byte{0xff, 0x74, 0x4f, 0x63})
+	binWrite32(&buf, 2)
+	// Bogus fanout: claim 2 entries with first byte == 0, but actual entries
+	// have first bytes 0x10 and 0x42.
+	for i := 0; i < 256; i++ {
+		binWrite32(&buf, 2)
+	}
+	lo := make([]byte, 20)
+	lo[0] = 0x10
+	hi := make([]byte, 20)
+	hi[0] = 0x42
+	buf.Write(lo)
+	buf.Write(hi)
+	binWrite32(&buf, 0)
+	binWrite32(&buf, 0)
+	binWrite32(&buf, 12)
+	binWrite32(&buf, 32)
+	buf.Write(make([]byte, 40))
+
+	if _, err := ParseIdx(bytes.NewReader(buf.Bytes()), int64(buf.Len())); err == nil {
+		t.Fatalf("expected ParseIdx to reject fanout/oid-table mismatch")
+	}
+}
