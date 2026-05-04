@@ -45,14 +45,16 @@ func (s *StoreSource) ReadAt(p []byte, off int64) (int, error) {
 	if off >= s.size {
 		return 0, io.EOF
 	}
-	end := off + int64(len(p)) - 1
+	// Compute available bytes from off to end of object. Avoid
+	// overflow by deriving from s.size, not off+len(p).
+	avail := s.size - off
 	want := len(p)
 	atEOF := false
-	if end >= s.size {
-		end = s.size - 1
-		want = int(end - off + 1)
+	if int64(want) >= avail {
+		want = int(avail)
 		atEOF = true
 	}
+	end := off + int64(want) - 1
 	rc, err := s.store.GetRange(s.ctx, s.key, off, end)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
@@ -66,14 +68,12 @@ func (s *StoreSource) ReadAt(p []byte, off int64) (int, error) {
 		return n, fmt.Errorf("pack: StoreSource.ReadAt: ReadFull: %w", err)
 	}
 	if n < want {
-		// Short read: storage backend returned fewer bytes than the
-		// requested closed-interval range. Surface as a hard error
-		// regardless of EOF status; io.ReaderAt forbids n < len(p)
-		// without an error explaining it.
-		if atEOF {
-			return n, io.EOF
-		}
-		return n, fmt.Errorf("pack: StoreSource.ReadAt: short read %d/%d", n, want)
+		// `want` was already clipped to the known object size, so a
+		// short read here means the backend returned fewer bytes than
+		// the (clipped) requested range. Surface as a hard error in
+		// every case: this is corruption / truncation, not normal EOF.
+		return n, fmt.Errorf("pack: StoreSource.ReadAt: short read %d/%d (atEOF=%v): %w",
+			n, want, atEOF, io.ErrUnexpectedEOF)
 	}
 	if atEOF {
 		return n, io.EOF

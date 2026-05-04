@@ -136,6 +136,27 @@ func TestStoreSource_ShortReadNotAtEOF_Errors(t *testing.T) {
 	}
 }
 
+func TestStoreSource_ShortReadAtEOF_Errors(t *testing.T) {
+	base := newTestStore(t)
+	body := []byte("0123456789")
+	if _, err := base.PutIfAbsent(context.Background(), "k", strings.NewReader(string(body)), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	short := &shortStore{ObjectStore: base, missing: 1}
+	src := NewStoreSource(context.Background(), short, "k", int64(len(body)))
+	// Read 4 bytes starting 2 from the end (offset 8). Both at-EOF AND
+	// the backend drops 1 byte — should still surface as a hard error,
+	// not as io.EOF.
+	buf := make([]byte, 4)
+	n, err := src.ReadAt(buf, 8)
+	if err == nil {
+		t.Fatalf("expected short-read error at EOF, got nil (n=%d)", n)
+	}
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("expected io.ErrUnexpectedEOF in error chain, got %v", err)
+	}
+}
+
 func TestStoreSource_ZeroLengthRead(t *testing.T) {
 	store := newTestStore(t)
 	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader("hello"), nil); err != nil {
