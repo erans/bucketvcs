@@ -18,7 +18,8 @@ func (o OID) String() string {
 	return hex.EncodeToString(o[:])
 }
 
-// ParseOID parses a 40-char lowercase hex string into an OID.
+// ParseOID parses a 40-char hex string (case-insensitive) into an OID.
+// String always returns the lowercase form per Git convention.
 func ParseOID(s string) (OID, error) {
 	var o OID
 	if len(s) != 40 {
@@ -70,6 +71,11 @@ func (t ObjectType) String() string {
 }
 
 // Object is a fully-resolved Git object: deltas applied, payload inflated.
+//
+// Data ownership: callers MUST treat Object.Data as read-only. The bytes
+// may alias buffers owned by a Reader's internal cache (used to share
+// delta-base objects across Get calls). Copy before mutating or
+// retaining beyond a single call.
 type Object struct {
 	Type ObjectType
 	Size int64  // length of Data; matches `git cat-file -s` semantics
