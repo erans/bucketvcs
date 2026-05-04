@@ -392,6 +392,9 @@ func TestCommit_Scenario_ReadDuringWrite(t *testing.T) {
 	if writeOK.Load() == 0 {
 		t.Errorf("zero successful writes (writeErr=%d); test would be vacuous", writeErr.Load())
 	}
+	if readerOps.Load() == 0 {
+		t.Errorf("reader never ran an op while writers were active; scenario is vacuous")
+	}
 	view, err := r.ReadRoot(ctx)
 	if err != nil {
 		t.Fatal(err)
