@@ -62,8 +62,25 @@ func TestReadRootAndCASRoot_RoundTrip(t *testing.T) {
 	if gotHeader.RepoID != "b" || gotHeader.ManifestVersion != 1 {
 		t.Errorf("header round-trip wrong: %+v", gotHeader)
 	}
-	if !json.Valid(gotBody) {
-		t.Errorf("body not valid JSON: %s", gotBody)
+	var gotBodyMap map[string]json.RawMessage
+	if err := json.Unmarshal(gotBody, &gotBodyMap); err != nil {
+		t.Fatalf("body not valid JSON object: %v (%s)", err, gotBody)
+	}
+	for _, k := range []string{"refs", "packs", "default_branch"} {
+		if _, ok := gotBodyMap[k]; !ok {
+			t.Errorf("body missing expected key %q in %s", k, gotBody)
+		}
+	}
+	for _, k := range []string{
+		"schema_version", "min_reader_version", "repo_id", "repo_format",
+		"manifest_version", "latest_tx", "created_at", "updated_at",
+	} {
+		if _, ok := gotBodyMap[k]; ok {
+			t.Errorf("body must not contain reserved header key %q in %s", k, gotBody)
+		}
+	}
+	if string(gotBodyMap["default_branch"]) != `"refs/heads/main"` {
+		t.Errorf("default_branch lost or altered: %s", gotBodyMap["default_branch"])
 	}
 
 	header.ManifestVersion = 2
