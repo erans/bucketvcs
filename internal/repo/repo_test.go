@@ -410,10 +410,12 @@ func TestCommit_CtxCancelMidCommit(t *testing.T) {
 }
 
 func TestCommit_NoBackoffAfterFinalAttempt(t *testing.T) {
-	// With BackoffBase=10s and MaxRetries=2, if the loop backed off
-	// after the final attempt, this test would block for 10s. With
-	// the fix, total runtime is bounded by the time of the second
-	// failed CAS plus negligible overhead.
+	// With BackoffBase=200ms and MaxRetries=2, the only allowed
+	// backoff fires before attempt 2 (mult=2, jitter [0,400ms)). With
+	// the bug (backoff after the final attempt), attempt 2's failure
+	// would also trigger a sleep (mult=4, jitter [0,800ms)). The 800ms
+	// elapsed bound discriminates: pass-time is ~400ms, bug-time is
+	// ~1200ms+.
 	s := newLocalFS(t)
 	ctx := context.Background()
 	r, _ := repo.Create(ctx, s, "acme", "x", repo.CreateOptions{Actor: "u"})
@@ -427,18 +429,15 @@ func TestCommit_NoBackoffAfterFinalAttempt(t *testing.T) {
 				func(p2 *repo.RootView) ([]byte, error) { return p2.Body, nil })
 			return prev.Body, nil
 		},
-		repo.WithCommitPolicy(repo.CommitPolicy{MaxRetries: 2, BackoffBase: 10 * time.Second}),
+		repo.WithCommitPolicy(repo.CommitPolicy{MaxRetries: 2, BackoffBase: 200 * time.Millisecond}),
 	)
 	elapsed := time.Since(start)
 	var gaveUp *repo.CommitGaveUpError
 	if !errors.As(err, &gaveUp) {
 		t.Fatalf("want *CommitGaveUpError, got %v", err)
 	}
-	// Tolerance: one backoff (10s * 2^1 = up to 20s jittered) before
-	// the SECOND attempt is allowed. So elapsed should be < 25s. With
-	// the bug, elapsed would be ~40s+ (one extra final-attempt backoff).
-	if elapsed > 25*time.Second {
-		t.Errorf("elapsed %v exceeds 25s; final-attempt backoff likely fired", elapsed)
+	if elapsed > 800*time.Millisecond {
+		t.Errorf("elapsed %v exceeds 800ms; final-attempt backoff likely fired", elapsed)
 	}
 }
 

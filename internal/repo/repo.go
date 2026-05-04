@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	mathrand "math/rand"
 	"strings"
 	"time"
@@ -319,12 +320,36 @@ func (r *Repo) Commit(
 	}
 }
 
+// maxBackoffShift caps the exponential growth of the backoff multiplier
+// before any shift, so int64 cannot overflow. 1<<10 = 1024x base is
+// plenty of jitter range for realistic CAS contention.
+const maxBackoffShift = 10
+
 func sleepBackoff(ctx context.Context, base time.Duration, attempt int) error {
-	mult := int64(1) << attempt
-	if mult > 1<<10 {
-		mult = 1 << 10
+	if base <= 0 {
+		return nil
 	}
-	jitter := time.Duration(mathrand.Int63n(int64(base) * mult))
+	shift := attempt
+	if shift < 0 {
+		shift = 0
+	}
+	if shift > maxBackoffShift {
+		shift = maxBackoffShift
+	}
+	mult := int64(1) << uint(shift) // safe: shift <= 10
+	// Saturating multiply: clamp to MaxInt64 if base*mult would overflow.
+	upper := int64(base)
+	if upper > 0 && upper > math.MaxInt64/mult {
+		upper = math.MaxInt64
+	} else {
+		upper = upper * mult
+	}
+	if upper <= 0 {
+		// Pathological input (negative base shouldn't happen, base==0
+		// already returned above). Don't panic mathrand.Int63n.
+		return nil
+	}
+	jitter := time.Duration(mathrand.Int63n(upper))
 	t := time.NewTimer(jitter)
 	defer t.Stop()
 	select {
