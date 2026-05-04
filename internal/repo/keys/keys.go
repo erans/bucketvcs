@@ -74,3 +74,83 @@ func validID(s string) bool {
 	}
 	return true
 }
+
+// CanonicalPackKey returns the path for a canonical (.pack) object in the
+// canonical area. Used by M2.
+func (r *Repo) CanonicalPackKey(packHash string) string {
+	return r.prefix + "packs/canonical/" + packHash + ".pack"
+}
+
+// GeneratedPackKey returns the path for an on-the-fly generated pack.
+// Used by M2.
+func (r *Repo) GeneratedPackKey(packHash string) string {
+	return r.prefix + "packs/generated/" + packHash + ".pack"
+}
+
+// PackIdxKey returns the .idx path for a pack in the named area
+// ("canonical" or "generated"). Panics on unknown area to catch typos
+// at test time. Used by M2.
+func (r *Repo) PackIdxKey(packHash, area string) string {
+	checkPackArea(area)
+	return r.prefix + "packs/" + area + "/" + packHash + ".idx"
+}
+
+// PackBitmapKey returns the .bitmap path for a pack in the named area.
+// Used by M2.
+func (r *Repo) PackBitmapKey(packHash, area string) string {
+	checkPackArea(area)
+	return r.prefix + "packs/" + area + "/" + packHash + ".bitmap"
+}
+
+func checkPackArea(area string) {
+	if area != "canonical" && area != "generated" {
+		panic("keys: unknown pack area " + area + ` (want "canonical" or "generated")`)
+	}
+}
+
+// CommitGraphKey returns the path for a commit-graph index. Used by M2.
+func (r *Repo) CommitGraphKey(graphHash string) string {
+	return r.prefix + "indexes/commit-graphs/" + graphHash + ".graph"
+}
+
+// ReachabilityKey returns the path for a reachability index. Used by M2.
+func (r *Repo) ReachabilityKey(indexHash string) string {
+	return r.prefix + "indexes/reachability/" + indexHash + ".json"
+}
+
+// BundleKey returns the path for a bundle file. Used by M11.
+func (r *Repo) BundleKey(bundleID string) string {
+	return r.prefix + "bundles/" + bundleID + ".bundle"
+}
+
+// BundleManifestKey returns the path for a bundle's sidecar manifest.
+// Used by M11.
+func (r *Repo) BundleManifestKey(bundleID string) string {
+	return r.prefix + "bundles/" + bundleID + ".json"
+}
+
+// LFSObjectKey returns the path for an LFS object. Used by M13.
+func (r *Repo) LFSObjectKey(sha256 string) string {
+	return r.prefix + "lfs/objects/" + sha256
+}
+
+// HookKey returns the path for a server-side hook payload. Used by M14.
+func (r *Repo) HookKey(hookID, name string) string {
+	return r.prefix + "hooks/" + hookID + "/" + name
+}
+
+// GCMarkKey returns the path for a GC mark record. Used by M8.
+func (r *Repo) GCMarkKey(markID string) string {
+	return r.prefix + "gc/marks/" + markID + ".json"
+}
+
+// GCSweepKey returns the path for a GC sweep record. Used by M8.
+func (r *Repo) GCSweepKey(sweepID string) string {
+	return r.prefix + "gc/sweeps/" + sweepID + ".json"
+}
+
+// RefShardKey returns the path for a sharded-refs shard. Used by M12;
+// never written by M1.
+func (r *Repo) RefShardKey(shardHash string) string {
+	return r.prefix + "manifest/ref-shards/" + shardHash + ".json"
+}

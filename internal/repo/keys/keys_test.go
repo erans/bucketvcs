@@ -80,3 +80,51 @@ func repeatChar(c string, n int) string {
 	}
 	return string(out)
 }
+
+func TestPackKeys(t *testing.T) {
+	r, _ := keys.NewRepo("acme", "my-repo")
+	hash := "sha256-abc"
+	cases := []struct {
+		got, want string
+	}{
+		{r.CanonicalPackKey(hash), "tenants/acme/repos/my-repo/packs/canonical/" + hash + ".pack"},
+		{r.GeneratedPackKey(hash), "tenants/acme/repos/my-repo/packs/generated/" + hash + ".pack"},
+		{r.PackIdxKey(hash, "canonical"), "tenants/acme/repos/my-repo/packs/canonical/" + hash + ".idx"},
+		{r.PackBitmapKey(hash, "generated"), "tenants/acme/repos/my-repo/packs/generated/" + hash + ".bitmap"},
+	}
+	for _, c := range cases {
+		if c.got != c.want {
+			t.Errorf("want %q, got %q", c.want, c.got)
+		}
+	}
+}
+
+func TestIndexAndBundleKeys(t *testing.T) {
+	r, _ := keys.NewRepo("acme", "my-repo")
+	cases := []struct{ got, want string }{
+		{r.CommitGraphKey("g1"), "tenants/acme/repos/my-repo/indexes/commit-graphs/g1.graph"},
+		{r.ReachabilityKey("i1"), "tenants/acme/repos/my-repo/indexes/reachability/i1.json"},
+		{r.BundleKey("b1"), "tenants/acme/repos/my-repo/bundles/b1.bundle"},
+		{r.BundleManifestKey("b1"), "tenants/acme/repos/my-repo/bundles/b1.json"},
+		{r.LFSObjectKey("sha"), "tenants/acme/repos/my-repo/lfs/objects/sha"},
+		{r.HookKey("h1", "pre-receive"), "tenants/acme/repos/my-repo/hooks/h1/pre-receive"},
+		{r.GCMarkKey("m1"), "tenants/acme/repos/my-repo/gc/marks/m1.json"},
+		{r.GCSweepKey("s1"), "tenants/acme/repos/my-repo/gc/sweeps/s1.json"},
+		{r.RefShardKey("rs1"), "tenants/acme/repos/my-repo/manifest/ref-shards/rs1.json"},
+	}
+	for _, c := range cases {
+		if c.got != c.want {
+			t.Errorf("want %q, got %q", c.want, c.got)
+		}
+	}
+}
+
+func TestPackIdxKey_RejectsBadArea(t *testing.T) {
+	r, _ := keys.NewRepo("acme", "my-repo")
+	defer func() {
+		if recover() == nil {
+			t.Fatalf("expected panic for bad area")
+		}
+	}()
+	_ = r.PackIdxKey("h", "loose")
+}
