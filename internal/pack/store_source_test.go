@@ -157,6 +157,44 @@ func TestStoreSource_ShortReadAtEOF_Errors(t *testing.T) {
 	}
 }
 
+func TestStoreSource_ExactTailRead_NoEOF(t *testing.T) {
+	store := newTestStore(t)
+	body := []byte("hello world")
+	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader(string(body)), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	src := NewStoreSource(context.Background(), store, "k", int64(len(body)))
+	// Read the last 5 bytes ("world") with a buffer exactly that size.
+	buf := make([]byte, 5)
+	n, err := src.ReadAt(buf, 6)
+	if err != nil {
+		t.Fatalf("ReadAt(buf=5, off=6): err=%v (io.ReaderAt contract: n==len(p) implies nil err)", err)
+	}
+	if n != 5 {
+		t.Fatalf("n: got %d, want 5", n)
+	}
+	if string(buf) != "world" {
+		t.Fatalf("got %q, want %q", buf, "world")
+	}
+}
+
+func TestStoreSource_ExactWholeObject_NoEOF(t *testing.T) {
+	store := newTestStore(t)
+	body := []byte("abcdef")
+	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader(string(body)), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	src := NewStoreSource(context.Background(), store, "k", int64(len(body)))
+	buf := make([]byte, len(body))
+	n, err := src.ReadAt(buf, 0)
+	if err != nil {
+		t.Fatalf("ReadAt full object: err=%v", err)
+	}
+	if n != len(body) || string(buf) != string(body) {
+		t.Fatalf("got n=%d %q, want %d %q", n, buf, len(body), body)
+	}
+}
+
 func TestStoreSource_ZeroLengthRead(t *testing.T) {
 	store := newTestStore(t)
 	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader("hello"), nil); err != nil {

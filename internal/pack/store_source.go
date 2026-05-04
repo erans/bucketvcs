@@ -33,8 +33,9 @@ func NewStoreSource(ctx context.Context, store storage.ObjectStore, key string, 
 // Size returns the object's known content length.
 func (s *StoreSource) Size() int64 { return s.size }
 
-// ReadAt implements io.ReaderAt. Returns io.EOF when off+len(p) reaches
-// or exceeds the object's end, per the io.ReaderAt contract.
+// ReadAt implements io.ReaderAt. Returns io.EOF only when the read is
+// short (off+len(p) exceeds the object end). An exact-fit read that fills
+// p returns (len(p), nil), per the io.ReaderAt contract.
 func (s *StoreSource) ReadAt(p []byte, off int64) (int, error) {
 	if off < 0 {
 		return 0, fmt.Errorf("pack: StoreSource.ReadAt: negative offset %d", off)
@@ -50,7 +51,7 @@ func (s *StoreSource) ReadAt(p []byte, off int64) (int, error) {
 	avail := s.size - off
 	want := len(p)
 	atEOF := false
-	if int64(want) >= avail {
+	if int64(want) > avail {
 		want = int(avail)
 		atEOF = true
 	}
