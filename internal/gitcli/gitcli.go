@@ -162,3 +162,104 @@ func Fsck(ctx context.Context, dir string, strict bool) error {
 	_, err := run(ctx, dir, args...)
 	return err
 }
+
+// CloneBareMirror runs `git clone --bare --mirror <src> <dst>`. dst must
+// not already exist (git creates it).
+func CloneBareMirror(ctx context.Context, src, dst string) error {
+	_, err := run(ctx, "", "clone", "--bare", "--mirror", "--quiet", src, dst)
+	return err
+}
+
+// PackObjectsAll produces a single pack containing every reachable object
+// in dir, written as outPrefix + "-{pack_id}.pack" + ".idx". Returns the
+// pack_id (40-char hex SHA-1, the Git-native pack name from §3.2 of the
+// M2 design). The function pipes `git rev-list --all --objects` into
+// `git pack-objects` to keep behavior deterministic across git versions.
+func PackObjectsAll(ctx context.Context, dir, outPrefix string) (string, error) {
+	bin, err := resolveBinary()
+	if err != nil {
+		return "", err
+	}
+	revList := exec.CommandContext(ctx, bin, "-C", dir, "rev-list", "--all", "--objects")
+	revList.Env = scrubGitRepoEnv(os.Environ())
+	pipe, err := revList.StdoutPipe()
+	if err != nil {
+		return "", fmt.Errorf("gitcli: PackObjectsAll: rev-list pipe: %w", err)
+	}
+	var rlStderr bytes.Buffer
+	revList.Stderr = &rlStderr
+
+	pack := exec.CommandContext(ctx, bin, "-C", dir,
+		"pack-objects", "--quiet", outPrefix)
+	pack.Env = scrubGitRepoEnv(os.Environ())
+	pack.Stdin = pipe
+	var packStdout, packStderr bytes.Buffer
+	pack.Stdout = &packStdout
+	pack.Stderr = &packStderr
+
+	if err := pack.Start(); err != nil {
+		return "", fmt.Errorf("gitcli: PackObjectsAll: pack start: %w", err)
+	}
+	if err := revList.Run(); err != nil {
+		_ = pack.Wait()
+		return "", fmt.Errorf("gitcli: PackObjectsAll: rev-list: %w: stderr=%q",
+			err, rlStderr.String())
+	}
+	if err := pack.Wait(); err != nil {
+		return "", fmt.Errorf("gitcli: PackObjectsAll: pack-objects: %w: stderr=%q",
+			err, packStderr.String())
+	}
+	// pack-objects prints exactly one pack_id line on stdout when one
+	// pack is produced. The output may include trailing whitespace.
+	id := strings.TrimSpace(packStdout.String())
+	if len(id) != 40 {
+		return "", fmt.Errorf("gitcli: PackObjectsAll: unexpected pack-objects stdout %q",
+			packStdout.String())
+	}
+	return id, nil
+}
+
+// IndexPack runs `git index-pack` against an existing .pack file,
+// producing the corresponding .idx alongside it.
+func IndexPack(ctx context.Context, dir, packPath string) error {
+	_, err := run(ctx, dir, "index-pack", packPath)
+	return err
+}
+
+// UnpackObjects reads a pack from packPath and explodes it into loose
+// objects in dir's object database. dir must be a git repo.
+func UnpackObjects(ctx context.Context, dir, packPath string) error {
+	bin, err := resolveBinary()
+	if err != nil {
+		return err
+	}
+	f, err := os.Open(packPath)
+	if err != nil {
+		return fmt.Errorf("gitcli: UnpackObjects: open pack: %w", err)
+	}
+	defer f.Close()
+	cmd := exec.CommandContext(ctx, bin, "-C", dir, "unpack-objects", "-q")
+	cmd.Env = scrubGitRepoEnv(os.Environ())
+	cmd.Stdin = f
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("gitcli: UnpackObjects: %w: stderr=%q", err, stderr.String())
+	}
+	return nil
+}
+
+// RunForTest runs git in dir with the given args and returns combined
+// output. Tests pass GIT_AUTHOR/COMMITTER env identity inline via -c
+// flags. Production code should NOT use this; use the typed wrappers.
+func RunForTest(dir string, args ...string) ([]byte, error) {
+	bin, err := resolveBinary()
+	if err != nil {
+		return nil, err
+	}
+	full := append([]string{"-C", dir}, args...)
+	cmd := exec.Command(bin, full...)
+	cmd.Env = scrubGitRepoEnv(os.Environ())
+	out, err := cmd.CombinedOutput()
+	return out, err
+}

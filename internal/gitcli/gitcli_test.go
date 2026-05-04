@@ -3,6 +3,7 @@ package gitcli
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -134,5 +135,94 @@ func TestScrubGitRepoEnv_RemovesAllScopingVars(t *testing.T) {
 				t.Errorf("scrubGitRepoEnv kept scoping var %q", scoping)
 			}
 		}
+	}
+}
+
+func makeRepoWithOneCommit(t *testing.T) string {
+	t.Helper()
+	skipIfNoGit(t)
+	dir := t.TempDir()
+	if err := InitBare(context.Background(), dir); err != nil {
+		t.Fatalf("InitBare: %v", err)
+	}
+	// Use a non-bare working repo to author a commit, then clone --bare.
+	work := t.TempDir()
+	mustRun := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", work}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@e",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@e",
+		)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	mustRun("init", "--initial-branch=main")
+	if err := os.WriteFile(filepath.Join(work, "README"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	mustRun("add", "README")
+	mustRun("commit", "-m", "init")
+	// Clone --bare into dir-bare so the source dir has objects.
+	out := dir + "-bare"
+	if err := CloneBareMirror(context.Background(), work, out); err != nil {
+		t.Fatalf("CloneBareMirror: %v", err)
+	}
+	return out
+}
+
+func TestCloneBareMirror_PreservesRefs(t *testing.T) {
+	skipIfNoGit(t)
+	bare := makeRepoWithOneCommit(t)
+	if _, err := os.Stat(filepath.Join(bare, "HEAD")); err != nil {
+		t.Fatalf("expected HEAD: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(bare, "objects")); err != nil {
+		t.Fatalf("expected objects/: %v", err)
+	}
+}
+
+func TestPackObjectsAll_ProducesPackAndReturnsID(t *testing.T) {
+	skipIfNoGit(t)
+	bare := makeRepoWithOneCommit(t)
+	outDir := t.TempDir()
+	prefix := filepath.Join(outDir, "pack")
+	id, err := PackObjectsAll(context.Background(), bare, prefix)
+	if err != nil {
+		t.Fatalf("PackObjectsAll: %v", err)
+	}
+	if len(id) != 40 {
+		t.Fatalf("pack_id length: got %d, want 40 (%q)", len(id), id)
+	}
+	if _, err := os.Stat(prefix + "-" + id + ".pack"); err != nil {
+		t.Fatalf("expected pack file: %v", err)
+	}
+	if _, err := os.Stat(prefix + "-" + id + ".idx"); err != nil {
+		t.Fatalf("expected idx file: %v", err)
+	}
+}
+
+func TestIndexPack_ReindexesExistingPack(t *testing.T) {
+	skipIfNoGit(t)
+	bare := makeRepoWithOneCommit(t)
+	tmp := t.TempDir()
+	prefix := filepath.Join(tmp, "p")
+	id, err := PackObjectsAll(context.Background(), bare, prefix)
+	if err != nil {
+		t.Fatalf("PackObjectsAll: %v", err)
+	}
+	// Remove .idx, reindex with IndexPack.
+	idxPath := prefix + "-" + id + ".idx"
+	packPath := prefix + "-" + id + ".pack"
+	if err := os.Remove(idxPath); err != nil {
+		t.Fatalf("Remove idx: %v", err)
+	}
+	if err := IndexPack(context.Background(), tmp, packPath); err != nil {
+		t.Fatalf("IndexPack: %v", err)
+	}
+	if _, err := os.Stat(idxPath); err != nil {
+		t.Fatalf("expected idx after IndexPack: %v", err)
 	}
 }
