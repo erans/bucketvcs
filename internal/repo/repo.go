@@ -175,9 +175,11 @@ func newTxID() string {
 }
 
 // CommitPolicy controls retry behavior for a single Commit invocation.
+// Zero MaxRetries is normalized to 1 (at least one attempt always runs);
+// zero BackoffBase disables backoff between attempts.
 type CommitPolicy struct {
 	// MaxRetries is the maximum number of CAS attempts before
-	// returning *CommitGaveUpError. Default 8.
+	// returning *CommitGaveUpError. Default 8. Normalized to at least 1.
 	MaxRetries int
 
 	// BackoffBase is the base delay between retries. Actual delay is
@@ -222,6 +224,14 @@ func (r *Repo) Commit(
 	for _, o := range opts {
 		o(&policy)
 	}
+	// Normalize: a non-positive MaxRetries is degenerate (Commit would
+	// immediately return CommitGaveUpError with zero attempts), so
+	// silently raise to at least 1. Callers wanting the documented
+	// "disable backoff" semantics can set BackoffBase=0 without also
+	// zeroing MaxRetries.
+	if policy.MaxRetries < 1 {
+		policy.MaxRetries = 1
+	}
 
 	var (
 		orphans []string
@@ -236,6 +246,18 @@ func (r *Repo) Commit(
 		if err != nil {
 			return "", err
 		}
+		// Snapshot M1-owned fields BEFORE calling the user callback.
+		// A buggy or hostile callback could mutate view.Header or
+		// view.Version; downstream code uses these snapshots so any
+		// such mutation cannot corrupt the tx record's base_* fields,
+		// the next manifest header, or the CAS pre-image version.
+		snapHeader := view.Header
+		snapVersion := view.Version
+		// Defensively clone Compatibility slice header to prevent
+		// aliasing if a callback mutates the backing array.
+		if len(snapHeader.RepoFormat.Compatibility) > 0 {
+			snapHeader.RepoFormat.Compatibility = append([]string(nil), snapHeader.RepoFormat.Compatibility...)
+		}
 		newBody, err := buildBody(view)
 		if err != nil {
 			return "", fmt.Errorf("%w: %w", repoerrs.ErrCallbackFailed, err)
@@ -249,15 +271,15 @@ func (r *Repo) Commit(
 			SchemaVersion:             1,
 			TxID:                      txID,
 			RepoID:                    r.RepoID(),
-			BaseManifestVersion:       view.Header.ManifestVersion,
-			BaseManifestObjectVersion: view.Version.Token,
+			BaseManifestVersion:       snapHeader.ManifestVersion,
+			BaseManifestObjectVersion: snapVersion.Token,
 			StartedAt:                 time.Now().UTC().Truncate(time.Second),
 		}
 		if err := tx.Write(ctx, r.store, r.keys.TxRecordKey(txID), txHeader, txBody); err != nil {
 			return "", err
 		}
 
-		nextHeader := view.Header
+		nextHeader := snapHeader
 		nextHeader.ManifestVersion++
 		nextHeader.LatestTx = txID
 		nextHeader.UpdatedAt = time.Now().UTC().Truncate(time.Second)
@@ -273,7 +295,7 @@ func (r *Repo) Commit(
 			return "", err
 		}
 
-		if _, err := manifest.CASRoot(ctx, r.store, r.keys.RootManifestKey(), nextBytes, view.Version); err != nil {
+		if _, err := manifest.CASRoot(ctx, r.store, r.keys.RootManifestKey(), nextBytes, snapVersion); err != nil {
 			lastErr = err
 			orphans = append(orphans, txID)
 			if errors.Is(err, storage.ErrVersionMismatch) {

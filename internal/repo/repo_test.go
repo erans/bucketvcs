@@ -490,3 +490,50 @@ func TestCommit_CtxCancelInCallbackNoOrphan(t *testing.T) {
 	}
 }
 
+func TestCommit_CallbackCannotCorruptHeader(t *testing.T) {
+	s := newLocalFS(t)
+	ctx := context.Background()
+	r, _ := repo.Create(ctx, s, "acme", "x", repo.CreateOptions{Actor: "u"})
+
+	// Hostile callback: try to bump the header's ManifestVersion to
+	// 999 in hopes that the next CAS uses that as base. With the
+	// snapshot fix, the CAS uses the read-time version (1) and so the
+	// committed manifest_version becomes 2 (1+1), not 1000.
+	txID, err := r.Commit(ctx, txpkg.Body{Type: "push", Actor: "u"},
+		func(prev *repo.RootView) ([]byte, error) {
+			prev.Header.ManifestVersion = 999
+			prev.Header.LatestTx = "tx_hijack"
+			return prev.Body, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, _ := r.ReadRoot(ctx)
+	if v.Header.ManifestVersion != 2 {
+		t.Errorf("manifest_version: want 2 (snapshot used), got %d", v.Header.ManifestVersion)
+	}
+	if v.Header.LatestTx != txID {
+		t.Errorf("latest_tx hijacked: want %s, got %s", txID, v.Header.LatestTx)
+	}
+}
+
+func TestCommit_PolicyZeroMaxRetriesNormalized(t *testing.T) {
+	s := newLocalFS(t)
+	ctx := context.Background()
+	r, _ := repo.Create(ctx, s, "acme", "x", repo.CreateOptions{Actor: "u"})
+
+	// CommitPolicy with default MaxRetries=0 (the natural way to
+	// disable backoff via WithCommitPolicy(CommitPolicy{BackoffBase: 0}))
+	// should still get one attempt, not silent zero.
+	txID, err := r.Commit(ctx, txpkg.Body{Type: "push", Actor: "u"},
+		func(prev *repo.RootView) ([]byte, error) { return prev.Body, nil },
+		repo.WithCommitPolicy(repo.CommitPolicy{BackoffBase: 0}),
+	)
+	if err != nil {
+		t.Fatalf("zero MaxRetries should normalize to 1; got %v", err)
+	}
+	if txID == "" {
+		t.Errorf("expected a winning tx_id, got empty")
+	}
+}
