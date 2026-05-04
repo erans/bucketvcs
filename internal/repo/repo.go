@@ -240,6 +240,9 @@ func (r *Repo) Commit(
 		if err != nil {
 			return "", fmt.Errorf("%w: %w", repoerrs.ErrCallbackFailed, err)
 		}
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 
 		txID := newTxID()
 		txHeader := tx.Header{
@@ -274,8 +277,14 @@ func (r *Repo) Commit(
 			lastErr = err
 			orphans = append(orphans, txID)
 			if errors.Is(err, storage.ErrVersionMismatch) {
-				if policy.BackoffBase > 0 {
-					sleepBackoff(ctx, policy.BackoffBase, attempt)
+				// Only back off if there will be another attempt.
+				// Backoff after the final attempt is wasted and could
+				// turn a cancellation into a misleading
+				// CommitGaveUpError.
+				if attempt < policy.MaxRetries && policy.BackoffBase > 0 {
+					if berr := sleepBackoff(ctx, policy.BackoffBase, attempt); berr != nil {
+						return "", berr
+					}
 				}
 				continue
 			}
@@ -288,7 +297,7 @@ func (r *Repo) Commit(
 	}
 }
 
-func sleepBackoff(ctx context.Context, base time.Duration, attempt int) {
+func sleepBackoff(ctx context.Context, base time.Duration, attempt int) error {
 	mult := int64(1) << attempt
 	if mult > 1<<10 {
 		mult = 1 << 10
@@ -298,6 +307,8 @@ func sleepBackoff(ctx context.Context, base time.Duration, attempt int) {
 	defer t.Stop()
 	select {
 	case <-ctx.Done():
+		return ctx.Err()
 	case <-t.C:
+		return nil
 	}
 }

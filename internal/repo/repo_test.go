@@ -408,3 +408,85 @@ func TestCommit_CtxCancelMidCommit(t *testing.T) {
 		t.Errorf("manifest_version should remain 1, got %d", v.Header.ManifestVersion)
 	}
 }
+
+func TestCommit_NoBackoffAfterFinalAttempt(t *testing.T) {
+	// With BackoffBase=10s and MaxRetries=2, if the loop backed off
+	// after the final attempt, this test would block for 10s. With
+	// the fix, total runtime is bounded by the time of the second
+	// failed CAS plus negligible overhead.
+	s := newLocalFS(t)
+	ctx := context.Background()
+	r, _ := repo.Create(ctx, s, "acme", "x", repo.CreateOptions{Actor: "u"})
+
+	start := time.Now()
+	_, err := r.Commit(ctx,
+		txpkg.Body{Type: "push", Actor: "u"},
+		func(prev *repo.RootView) ([]byte, error) {
+			// Always race so the main commit never wins.
+			_, _ = r.Commit(ctx, txpkg.Body{Type: "push", Actor: "u_other"},
+				func(p2 *repo.RootView) ([]byte, error) { return p2.Body, nil })
+			return prev.Body, nil
+		},
+		repo.WithCommitPolicy(repo.CommitPolicy{MaxRetries: 2, BackoffBase: 10 * time.Second}),
+	)
+	elapsed := time.Since(start)
+	var gaveUp *repo.CommitGaveUpError
+	if !errors.As(err, &gaveUp) {
+		t.Fatalf("want *CommitGaveUpError, got %v", err)
+	}
+	// Tolerance: one backoff (10s * 2^1 = up to 20s jittered) before
+	// the SECOND attempt is allowed. So elapsed should be < 25s. With
+	// the bug, elapsed would be ~40s+ (one extra final-attempt backoff).
+	if elapsed > 25*time.Second {
+		t.Errorf("elapsed %v exceeds 25s; final-attempt backoff likely fired", elapsed)
+	}
+}
+
+func TestCommit_CtxCancelDuringBackoffPropagates(t *testing.T) {
+	s := newLocalFS(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	r, _ := repo.Create(context.Background(), s, "acme", "x", repo.CreateOptions{Actor: "u"})
+
+	// Cancel after a brief delay so the first CAS conflict triggers
+	// the backoff sleep, then cancel propagates from sleepBackoff.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := r.Commit(ctx,
+		txpkg.Body{Type: "push", Actor: "u"},
+		func(prev *repo.RootView) ([]byte, error) {
+			// Side-channel commit invalidates prev.Version, forcing a
+			// CAS conflict and entering the backoff path.
+			_, _ = r.Commit(context.Background(), txpkg.Body{Type: "push", Actor: "u_other"},
+				func(p2 *repo.RootView) ([]byte, error) { return p2.Body, nil })
+			return prev.Body, nil
+		},
+		repo.WithCommitPolicy(repo.CommitPolicy{MaxRetries: 5, BackoffBase: 5 * time.Second}),
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("want context.Canceled (propagated through sleepBackoff), got %v", err)
+	}
+}
+
+func TestCommit_CtxCancelInCallbackNoOrphan(t *testing.T) {
+	s := newLocalFS(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	r, _ := repo.Create(context.Background(), s, "acme", "x", repo.CreateOptions{Actor: "u"})
+
+	_, err := r.Commit(ctx, txpkg.Body{Type: "push", Actor: "u"},
+		func(prev *repo.RootView) ([]byte, error) {
+			cancel() // cancel during callback
+			return prev.Body, nil
+		},
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("want context.Canceled, got %v", err)
+	}
+	page, _ := s.List(context.Background(), "tenants/acme/repos/x/tx/", nil)
+	if len(page.Objects) != 1 {
+		t.Errorf("want 1 tx record (only the create) — callback cancel should leave no orphan; got %d", len(page.Objects))
+	}
+}
+
