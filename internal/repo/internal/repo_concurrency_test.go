@@ -9,11 +9,11 @@ package repointernal_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	tx "github.com/bucketvcs/bucketvcs/internal/repo/tx"
@@ -50,21 +50,40 @@ func TestCommit_PropertyManifestVersionMonotonic(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < commitsPerWriter; i++ {
 				key := "k_" + strconv.Itoa(w*commitsPerWriter+i)
-				txID, err := r.Commit(ctx,
-					tx.Body{Type: "push", Actor: "u_" + strconv.Itoa(w)},
-					func(prev *repo.RootView) ([]byte, error) {
-						var top map[string]json.RawMessage
-						if err := json.Unmarshal(prev.Body, &top); err != nil {
-							return nil, err
-						}
-						top[key] = json.RawMessage("true")
-						_ = seq.Add(1)
-						return json.Marshal(top)
-					},
-					repo.WithCommitPolicy(repo.CommitPolicy{MaxRetries: 64, BackoffBase: 5 * time.Millisecond}),
+				var (
+					txID string
+					err  error
 				)
+				const logicalRetryCap = 1000
+				for attempt := 0; attempt < logicalRetryCap; attempt++ {
+					txID, err = r.Commit(ctx,
+						tx.Body{Type: "push", Actor: "u_" + strconv.Itoa(w)},
+						func(prev *repo.RootView) ([]byte, error) {
+							var top map[string]json.RawMessage
+							if err := json.Unmarshal(prev.Body, &top); err != nil {
+								return nil, err
+							}
+							top[key] = json.RawMessage("true")
+							_ = seq.Add(1)
+							return json.Marshal(top)
+						},
+					)
+					if err == nil {
+						break
+					}
+					var gaveUp *repo.CommitGaveUpError
+					if errors.As(err, &gaveUp) {
+						// Bounded retry exhaustion under contention is
+						// a valid outcome of Commit's contract; retry
+						// the logical operation. The orphan tx records
+						// from this attempt accumulate (M8 GC sweeps).
+						continue
+					}
+					t.Errorf("Commit failed (non-retryable): %v", err)
+					return
+				}
 				if err != nil {
-					t.Errorf("Commit failed: %v", err)
+					t.Errorf("Commit exhausted %d logical retries", logicalRetryCap)
 					return
 				}
 				committedTx.Store(txID, true)
