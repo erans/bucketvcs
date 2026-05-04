@@ -204,25 +204,38 @@ func TestCommit_Scenario_TwoWritersOneWins(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Barrier ensures both callbacks see the same prev root before
+	// either returns. Without this, the two commits could run serially
+	// (one observing the other's result) and never exercise the CAS
+	// conflict path. The barrier only fires on the FIRST attempt of
+	// each goroutine — subsequent retries proceed without waiting.
 	type result struct {
 		txID string
 		err  error
 	}
-	gate := make(chan struct{})
+	var (
+		barrier        sync.WaitGroup
+		firstAttemptDone [2]atomic.Bool
+	)
+	barrier.Add(2)
 	results := make(chan result, 2)
 	for i := 0; i < 2; i++ {
 		i := i
 		go func() {
-			<-gate
-			id, err := r.Commit(ctx,
+			id, cerr := r.Commit(ctx,
 				tx.Body{Type: "push", Actor: "u_" + strconv.Itoa(i)},
-				func(prev *repo.RootView) ([]byte, error) { return prev.Body, nil },
+				func(prev *repo.RootView) ([]byte, error) {
+					if firstAttemptDone[i].CompareAndSwap(false, true) {
+						barrier.Done()
+						barrier.Wait() // both callbacks observed prev
+					}
+					return prev.Body, nil
+				},
 				repo.WithCommitPolicy(repo.CommitPolicy{MaxRetries: 16, BackoffBase: 0}),
 			)
-			results <- result{id, err}
+			results <- result{id, cerr}
 		}()
 	}
-	close(gate)
 	r1, r2 := <-results, <-results
 	if r1.err != nil || r2.err != nil {
 		t.Fatalf("both commits should eventually succeed: %v / %v", r1.err, r2.err)
