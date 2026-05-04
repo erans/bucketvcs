@@ -60,3 +60,16 @@ func TestRootHeader_TopLevelKeys(t *testing.T) {
 		}
 	}
 }
+
+func TestHeaderKeyList_ReturnsCopy(t *testing.T) {
+	a := manifest.HeaderKeyList()
+	if len(a) == 0 {
+		t.Fatal("HeaderKeyList must not be empty")
+	}
+	original := a[0]
+	a[0] = "HIJACK"
+	b := manifest.HeaderKeyList()
+	if b[0] != original {
+		t.Errorf("mutation of one slice leaked into another: got %q, want %q", b[0], original)
+	}
+}

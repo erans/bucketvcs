@@ -26,10 +26,16 @@ type Format struct {
 	Compatibility []string `json:"compatibility,omitempty"`
 }
 
-// HeaderKeys lists the JSON field names M1 owns at the top level of the
-// root manifest. Used by the body-merge helper to ensure callers do not
-// emit duplicate or conflicting header fields in their body bytes.
-var HeaderKeys = []string{
+// headerKeys lists the JSON field names M1 owns at the top level of the
+// root manifest. It is unexported and accessed via HeaderKeyList().
+var headerKeys = []string{
 	"schema_version", "min_reader_version", "repo_id", "repo_format",
 	"manifest_version", "latest_tx", "created_at", "updated_at",
+}
+
+// HeaderKeyList returns a fresh copy of the M1-owned header field names.
+// Use this as the public read-only accessor to prevent accidental mutation
+// of the package-level list.
+func HeaderKeyList() []string {
+	return append([]string(nil), headerKeys...)
 }
