@@ -10,6 +10,7 @@ import (
 
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	"github.com/bucketvcs/bucketvcs/internal/repo/repoerrs"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 )
@@ -155,5 +156,32 @@ func TestReadRoot_FutureSchemaRejected(t *testing.T) {
 	_, _, _, err = manifest.ReadRoot(ctx, s, key)
 	if !errors.Is(err, repo.ErrUnsupportedSchema) {
 		t.Errorf("want ErrUnsupportedSchema, got %v", err)
+	}
+}
+
+func TestReadRoot_FutureSchemaWithIncompatibleFieldShape(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	key := "tenants/a/repos/b/manifest/root.json"
+
+	// Synthetic v999 manifest with manifest_version as a string (would
+	// be a v2+ schema change). Without the gate-first design, this
+	// returns a parse error; with it, it returns ErrUnsupportedSchema.
+	bad := []byte(`{
+		"schema_version": 999,
+		"min_reader_version": "0.1.0",
+		"repo_id": "b",
+		"repo_format": {"object_format": "sha1"},
+		"manifest_version": "two",
+		"latest_tx": "tx",
+		"created_at": "2026-05-03T20:00:00Z",
+		"updated_at": "2026-05-03T20:00:00Z"
+	}`)
+	if _, err := s.PutIfAbsent(ctx, key, strings.NewReader(string(bad)), nil); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, err := manifest.ReadRoot(ctx, s, key)
+	if !errors.Is(err, repoerrs.ErrUnsupportedSchema) {
+		t.Errorf("want ErrUnsupportedSchema (gate-first), got %v", err)
 	}
 }

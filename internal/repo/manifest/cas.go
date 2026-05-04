@@ -49,13 +49,26 @@ func ReadRoot(ctx context.Context, s storage.ObjectStore, key string) (
 	if err != nil {
 		return RootHeader{}, nil, storage.ObjectVersion{}, err
 	}
+
+	// Per §43.7, run the schema gate on a minimal compatibility header
+	// BEFORE parsing the full RootHeader. This way a future-schema
+	// manifest whose other header fields changed type (e.g.
+	// manifest_version uint64 → string) still fails with
+	// ErrUnsupportedSchema, not a generic parse error.
+	var compat compatHeader
+	if err := json.Unmarshal(headerJSON, &compat); err != nil {
+		return RootHeader{}, nil, storage.ObjectVersion{}, fmt.Errorf("repo: parse compat header: %w", err)
+	}
+	if err := SchemaGate(RootHeader{
+		SchemaVersion:    compat.SchemaVersion,
+		MinReaderVersion: compat.MinReaderVersion,
+	}); err != nil {
+		return RootHeader{}, nil, storage.ObjectVersion{}, err
+	}
+
 	var header RootHeader
 	if err := json.Unmarshal(headerJSON, &header); err != nil {
 		return RootHeader{}, nil, storage.ObjectVersion{}, fmt.Errorf("repo: parse root header: %w", err)
-	}
-
-	if err := SchemaGate(header); err != nil {
-		return RootHeader{}, nil, storage.ObjectVersion{}, err
 	}
 
 	for _, k := range headerKeys {
@@ -124,4 +137,13 @@ func pickHeader(top map[string]json.RawMessage) (json.RawMessage, error) {
 		out[k] = v
 	}
 	return json.Marshal(out)
+}
+
+// compatHeader is the minimal subset of RootHeader needed to run the
+// §43.7 schema gate. Parsing this first lets ReadRoot return
+// repo.ErrUnsupportedSchema rather than a generic parse error when a
+// future schema changes the type of any other header field.
+type compatHeader struct {
+	SchemaVersion    int    `json:"schema_version"`
+	MinReaderVersion string `json:"min_reader_version"`
 }
