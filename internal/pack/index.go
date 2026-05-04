@@ -70,6 +70,16 @@ func ParseIdx(r io.ReaderAt, size int64) (*Idx, error) {
 			return nil, fmt.Errorf("%w: fanout non-monotonic at %d", ErrIdxCorrupt, i)
 		}
 	}
+
+	// Sanity: file must be at least header + fanout + 28*count + trailer.
+	// (count*20 oid + count*4 crc + count*4 offset = 28*count.)
+	needed := int64(idxHeaderBytes+idxFanoutBytes) +
+		int64(idx.count)*int64(idxOIDSize+idxCRCSize+idxOffsetSize) +
+		int64(idxTrailerSize)
+	if needed > size {
+		return nil, fmt.Errorf("%w: count %d exceeds file size %d (needs ≥%d)",
+			ErrIdxCorrupt, idx.count, size, needed)
+	}
 	off := int64(idxHeaderBytes + idxFanoutBytes)
 	idx.oids = make([]byte, idx.count*idxOIDSize)
 	if _, err := r.ReadAt(idx.oids, off); err != nil {
@@ -102,11 +112,28 @@ func ParseIdx(r io.ReaderAt, size int64) (*Idx, error) {
 		}
 		off += largeBytes
 	}
+
+	// Validate every offset that points into largeOffs is in bounds.
+	for k := 0; k < idx.count; k++ {
+		raw := binary.BigEndian.Uint32(idx.offsets[k*idxOffsetSize:])
+		if raw&idxOffsetMSB != 0 {
+			li := int(raw &^ idxOffsetMSB)
+			if li >= len(idx.largeOffs) {
+				return nil, fmt.Errorf("%w: offset %d points to large-index %d (have %d)",
+					ErrIdxCorrupt, k, li, len(idx.largeOffs))
+			}
+		}
+	}
 	trailer := make([]byte, idxTrailerSize)
 	if _, err := r.ReadAt(trailer, off); err != nil {
 		return nil, fmt.Errorf("%w: read trailer: %v", ErrIdxCorrupt, err)
 	}
 	copy(idx.packTrailer[:], trailer[:20])
+	// idxSelfSHA: stored for completeness but not verified at M2. The
+	// idx file is read from a content-addressed bucket adapter (M0
+	// conformance) which performs its own integrity checks; verifying
+	// SHA-1 here would duplicate that work. M9 may revisit if hashing
+	// during read becomes valuable for diagnostic purposes.
 	copy(idx.idxSelfSHA[:], trailer[20:])
 	return idx, nil
 }
@@ -134,8 +161,8 @@ func (i *Idx) OffsetAt(n int) uint64 {
 	if raw&idxOffsetMSB == 0 {
 		return uint64(raw)
 	}
-	idx := int(raw &^ idxOffsetMSB)
-	return i.largeOffs[idx]
+	largeIdx := int(raw &^ idxOffsetMSB)
+	return i.largeOffs[largeIdx]
 }
 
 // Lookup returns the pack-file offset for oid, or false if absent.
