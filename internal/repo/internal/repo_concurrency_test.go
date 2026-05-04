@@ -16,6 +16,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	tx "github.com/bucketvcs/bucketvcs/internal/repo/tx"
@@ -317,21 +318,27 @@ func TestCommit_Scenario_ReadDuringWrite(t *testing.T) {
 
 	const (
 		writers          = 4
-		commitsPerWriter = 25 // 100 total commits — small enough to be fast
+		commitsPerWriter = 25
 	)
 
 	stop := make(chan struct{})
+	readerStarted := make(chan struct{}) // closed after reader's first successful read
 	var (
-		readerErrs atomic.Int64
-		readerOps  atomic.Int64
-		writeOK    atomic.Int64
-		writeErr   atomic.Int64
+		readerErrs           atomic.Int64
+		readerOpsDuringWrite atomic.Int64
+		writeOK              atomic.Int64
+		writeErr             atomic.Int64
+		writesActive         atomic.Bool
 	)
 
-	// Reader goroutine: spins on ReadRoot until stop closes.
+	// Reader goroutine: spins on ReadRoot until stop closes. Signals
+	// readerStarted after the first successful read so writers can
+	// start with confidence the reader is live. Counts only reads
+	// that happen while writesActive is true (the relevant window).
 	readerDone := make(chan struct{})
 	go func() {
 		defer close(readerDone)
+		startedSignaled := false
 		for {
 			select {
 			case <-stop:
@@ -339,7 +346,6 @@ func TestCommit_Scenario_ReadDuringWrite(t *testing.T) {
 			default:
 			}
 			v, rerr := r.ReadRoot(ctx)
-			readerOps.Add(1)
 			if rerr != nil {
 				readerErrs.Add(1)
 				return
@@ -348,10 +354,25 @@ func TestCommit_Scenario_ReadDuringWrite(t *testing.T) {
 				readerErrs.Add(1)
 				return
 			}
+			if !startedSignaled {
+				close(readerStarted)
+				startedSignaled = true
+			}
+			if writesActive.Load() {
+				readerOpsDuringWrite.Add(1)
+			}
 		}
 	}()
 
-	// Writers commit a fixed number each, then exit.
+	// Wait for reader to confirm it's running (one successful read).
+	select {
+	case <-readerStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reader did not start within 2s")
+	}
+
+	// Mark write phase active and launch writers.
+	writesActive.Store(true)
 	var wg sync.WaitGroup
 	for w := 0; w < writers; w++ {
 		w := w
@@ -369,8 +390,6 @@ func TestCommit_Scenario_ReadDuringWrite(t *testing.T) {
 				} else {
 					var gaveUp *repo.CommitGaveUpError
 					if errors.As(cerr, &gaveUp) {
-						// Bounded retry exhaustion is expected under
-						// heavy contention; not a test failure.
 						writeErr.Add(1)
 					} else {
 						t.Errorf("unexpected non-retryable commit error: %v", cerr)
@@ -381,25 +400,23 @@ func TestCommit_Scenario_ReadDuringWrite(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+	writesActive.Store(false)
 	close(stop)
 	<-readerDone
 
 	if readerErrs.Load() != 0 {
-		t.Errorf("reader saw %d invalid snapshots over %d ops", readerErrs.Load(), readerOps.Load())
+		t.Errorf("reader saw %d invalid snapshots", readerErrs.Load())
 	}
-	// Some commits must have succeeded; otherwise the reader's
-	// "valid snapshot" assertion is vacuous.
 	if writeOK.Load() == 0 {
 		t.Errorf("zero successful writes (writeErr=%d); test would be vacuous", writeErr.Load())
 	}
-	if readerOps.Load() == 0 {
-		t.Errorf("reader never ran an op while writers were active; scenario is vacuous")
+	if readerOpsDuringWrite.Load() == 0 {
+		t.Errorf("reader performed zero reads during the write window; scenario is vacuous")
 	}
 	view, err := r.ReadRoot(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// manifest_version must equal 1 + writeOK.Load().
 	if got, want := view.Header.ManifestVersion, uint64(1)+uint64(writeOK.Load()); got != want {
 		t.Errorf("manifest_version: want %d (1 create + %d successful writes), got %d", want, writeOK.Load(), got)
 	}
