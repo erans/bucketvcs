@@ -22,8 +22,10 @@ var (
 )
 
 // SetBinaryForTest overrides the resolved git binary path. Returns the
-// previous value so tests can restore it. Production code should not
-// call this.
+// previous value so tests can restore it. The override is process-global
+// and lasts until the next call. Pass "" to clear the cache so the next
+// call re-resolves from $GIT_BINARY then $PATH. Production code should
+// not call this.
 func SetBinaryForTest(path string) string {
 	binMu.Lock()
 	defer binMu.Unlock()

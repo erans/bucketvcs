@@ -149,7 +149,7 @@ func TestFsck_DetectsCorruption(t *testing.T) {
 	if err := os.MkdirAll(bogus, 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(bogus, "cdef0123456789012345678901234567890"), []byte("not-a-git-object"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(bogus, "cdef0123456789012345678901234567890123"), []byte("not-a-git-object"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if err := Fsck(context.Background(), dir, true); err == nil {
