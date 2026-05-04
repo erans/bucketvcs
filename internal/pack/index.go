@@ -2,6 +2,7 @@ package pack
 
 import (
 	"bytes"
+	"crypto/sha1"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -124,16 +125,30 @@ func ParseIdx(r io.ReaderAt, size int64) (*Idx, error) {
 	}
 	off += int64(idx.count * idxOffsetSize)
 
+	// Determine required large-offset table size from MSB-set entries.
+	requiredLargeCount := 0
+	for k := 0; k < idx.count; k++ {
+		raw := binary.BigEndian.Uint32(idx.offsets[k*idxOffsetSize:])
+		if raw&idxOffsetMSB != 0 {
+			li := int(raw &^ idxOffsetMSB)
+			if li+1 > requiredLargeCount {
+				requiredLargeCount = li + 1
+			}
+		}
+	}
+	requiredLargeBytes := int64(requiredLargeCount) * int64(idxLargeOffsetSize)
+
 	largeBytes := size - off - int64(idxTrailerSize)
-	if largeBytes < 0 || largeBytes%int64(idxLargeOffsetSize) != 0 {
-		return nil, fmt.Errorf("%w: large-offset section size %d", ErrIdxCorrupt, largeBytes)
+	if largeBytes != requiredLargeBytes {
+		return nil, fmt.Errorf("%w: large-offset section %d bytes, expected %d (from %d MSB-set offsets)",
+			ErrIdxCorrupt, largeBytes, requiredLargeBytes, requiredLargeCount)
 	}
 	if largeBytes > 0 {
 		raw := make([]byte, largeBytes)
 		if _, err := r.ReadAt(raw, off); err != nil {
 			return nil, fmt.Errorf("%w: read large offsets: %v", ErrIdxCorrupt, err)
 		}
-		idx.largeOffs = make([]uint64, largeBytes/int64(idxLargeOffsetSize))
+		idx.largeOffs = make([]uint64, requiredLargeCount)
 		for i := range idx.largeOffs {
 			idx.largeOffs[i] = binary.BigEndian.Uint64(raw[i*idxLargeOffsetSize:])
 		}
@@ -156,12 +171,31 @@ func ParseIdx(r io.ReaderAt, size int64) (*Idx, error) {
 		return nil, fmt.Errorf("%w: read trailer: %v", ErrIdxCorrupt, err)
 	}
 	copy(idx.packTrailer[:], trailer[:20])
-	// idxSelfSHA: stored for completeness but not verified at M2. The
-	// idx file is read from a content-addressed bucket adapter (M0
-	// conformance) which performs its own integrity checks; verifying
-	// SHA-1 here would duplicate that work. M9 may revisit if hashing
-	// during read becomes valuable for diagnostic purposes.
 	copy(idx.idxSelfSHA[:], trailer[20:])
+	// Verify the stored idx_sha1 covers everything before it (bytes
+	// [0, size-20)). Catches same-size corruption in the oid/crc/offset
+	// tables that structural checks miss.
+	hashLen := size - 20
+	h := sha1.New()
+	const chunkSize = 64 * 1024
+	chunk := make([]byte, chunkSize)
+	hashed := int64(0)
+	for hashed < hashLen {
+		want := int64(chunkSize)
+		if hashLen-hashed < want {
+			want = hashLen - hashed
+		}
+		if _, err := r.ReadAt(chunk[:want], hashed); err != nil {
+			return nil, fmt.Errorf("%w: read for trailer hash: %v", ErrIdxCorrupt, err)
+		}
+		h.Write(chunk[:want])
+		hashed += want
+	}
+	var got [20]byte
+	copy(got[:], h.Sum(nil))
+	if got != idx.idxSelfSHA {
+		return nil, fmt.Errorf("%w: idx trailer SHA-1 mismatch", ErrIdxCorrupt)
+	}
 	return idx, nil
 }
 
