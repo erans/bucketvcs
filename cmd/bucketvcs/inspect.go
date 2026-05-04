@@ -12,6 +12,25 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 )
 
+// classifyOpenErr returns the canonical exit code (2/3/1) and writes a
+// uniform message for errors from repo.Open or repo.Repo.ReadRoot in
+// inspect-manifest. Returns 0 if err == nil.
+func classifyOpenErr(err error, tenantID, repoID string, stderr io.Writer) int {
+	switch {
+	case err == nil:
+		return 0
+	case errors.Is(err, repo.ErrRepoNotFound):
+		fmt.Fprintf(stderr, "inspect-manifest: repo %s/%s not found\n", tenantID, repoID)
+		return 2
+	case errors.Is(err, repo.ErrUnsupportedSchema):
+		fmt.Fprintln(stderr, "inspect-manifest:", err)
+		return 3
+	default:
+		fmt.Fprintln(stderr, "inspect-manifest:", err)
+		return 1
+	}
+}
+
 // runInspect is the body of `bucketvcs inspect-manifest`.
 func runInspect(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("inspect-manifest", flag.ContinueOnError)
@@ -40,23 +59,12 @@ func runInspect(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	defer closeStore(store)
 
 	r, err := repo.Open(ctx, store, tenantID, repoID)
-	if err != nil {
-		switch {
-		case errors.Is(err, repo.ErrRepoNotFound):
-			fmt.Fprintf(stderr, "inspect-manifest: repo %s/%s not found\n", tenantID, repoID)
-			return 2
-		case errors.Is(err, repo.ErrUnsupportedSchema):
-			fmt.Fprintln(stderr, "inspect-manifest:", err)
-			return 3
-		default:
-			fmt.Fprintln(stderr, "inspect-manifest:", err)
-			return 1
-		}
+	if code := classifyOpenErr(err, tenantID, repoID, stderr); code != 0 {
+		return code
 	}
 	view, err := r.ReadRoot(ctx)
-	if err != nil {
-		fmt.Fprintln(stderr, "inspect-manifest:", err)
-		return 1
+	if code := classifyOpenErr(err, tenantID, repoID, stderr); code != 0 {
+		return code
 	}
 
 	if *asJSON {
