@@ -164,11 +164,23 @@ func (r *Repo) ReadRoot(ctx context.Context) (*RootView, error) {
 	}, nil
 }
 
-// txEntropy is a goroutine-safe entropy source for ulid.MustNew. ulid's
-// monotonic entropy reader keeps IDs lexicographically sortable within
-// a millisecond and avoids ID collisions across goroutines.
-var txEntropy = ulid.Monotonic(mathrand.New(mathrand.NewSource(time.Now().UnixNano())), 0)
+// txEntropy is the goroutine-safe entropy source for ulid.MustNew.
+// ulid.Monotonic alone is NOT safe under concurrent calls (it mutates
+// internal state without locking); LockedMonotonicReader wraps it with
+// the sync.Mutex required for concurrent ID minting from Commit
+// retries and parallel Create/Commit calls.
+var txEntropy = &ulid.LockedMonotonicReader{
+	MonotonicReader: ulid.Monotonic(mathrand.New(mathrand.NewSource(time.Now().UnixNano())), 0),
+}
 
 func newTxID() string {
 	return "tx_" + ulid.MustNew(ulid.Timestamp(time.Now()), txEntropy).String()
 }
+
+// NewTxIDForTest exposes newTxID for the package's external _test.go
+// files (and only those). Production code calls the unexported newTxID.
+//
+// The exposed function exists so the concurrency smoke test in
+// repo_test.go can verify the LockedMonotonicReader wrapping without
+// needing to import internal/repo's private symbols.
+func NewTxIDForTest() string { return newTxID() }

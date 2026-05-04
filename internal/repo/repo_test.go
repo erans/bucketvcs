@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -225,5 +226,37 @@ func TestCreate_TxRecordHasCreateType(t *testing.T) {
 	}
 	if string(tx["actor"]) != `"u_creator"` {
 		t.Errorf("tx actor want \"u_creator\", got %s", tx["actor"])
+	}
+}
+
+func TestNewTxID_ConcurrentlyUnique(t *testing.T) {
+	// Verify ulid.LockedMonotonicReader produces distinct IDs under
+	// concurrent callers. The full concurrency suite lives at
+	// internal/repo/internal in Task 17; this is a fast smoke test
+	// against the minting primitive itself.
+	const goroutines, perGoroutine = 16, 500
+	ids := make(chan string, goroutines*perGoroutine)
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < perGoroutine; i++ {
+				ids <- repo.NewTxIDForTest()
+			}
+		}()
+	}
+	wg.Wait()
+	close(ids)
+
+	seen := make(map[string]struct{}, goroutines*perGoroutine)
+	for id := range ids {
+		if _, dup := seen[id]; dup {
+			t.Fatalf("duplicate tx_id minted: %q", id)
+		}
+		seen[id] = struct{}{}
+	}
+	if len(seen) != goroutines*perGoroutine {
+		t.Errorf("want %d unique ids, got %d", goroutines*perGoroutine, len(seen))
 	}
 }
