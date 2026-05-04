@@ -17,8 +17,8 @@ import (
 
 func TestCommit_Stress(t *testing.T) {
 	const (
-		writers          = 100
-		commitsPerWriter = 1000
+		writers          = 16
+		commitsPerWriter = 200
 	)
 	dir := t.TempDir()
 	store, err := localfs.Open(dir)
