@@ -449,6 +449,15 @@ func TestCatFileSize_Commit(t *testing.T) {
 	}
 }
 
+func TestCatFileSize_RejectsBadOID(t *testing.T) {
+	skipIfNoGit(t)
+	bare := makeRepoWithOneCommit(t)
+	if _, err := CatFileSize(context.Background(), bare,
+		"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"); err == nil {
+		t.Fatalf("expected error for nonexistent oid")
+	}
+}
+
 func TestUpdateRef_CreatesBranch(t *testing.T) {
 	skipIfNoGit(t)
 	bare := makeRepoWithOneCommit(t)

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -299,6 +300,10 @@ func ShowRef(ctx context.Context, dir string) (map[string]string, error) {
 		// stderr is empty in that case (modern git); older versions
 		// may emit nothing as well. Treat exit==1 with empty stderr
 		// as "no refs."
+		//
+		// TODO(M-later): consider migrating to `git for-each-ref` which
+		// exits 0 with empty stdout on no refs and is documented to
+		// never warn — would side-step this heuristic entirely.
 		var rerr *runError
 		if errors.As(err, &rerr) && rerr.exit == 1 && rerr.stderr == "" {
 			return map[string]string{}, nil
@@ -332,7 +337,8 @@ func RevListAllObjects(ctx context.Context, dir string) ([]string, error) {
 		if line == "" {
 			continue
 		}
-		// Each line starts with the OID; for trees/blobs/tags, a path follows.
+		// Each line is "<oid>" or "<oid> <path-or-tagname>" (root tree
+		// has empty path; first-space split still yields the OID).
 		oid := line
 		if sp := strings.IndexByte(line, ' '); sp != -1 {
 			oid = line[:sp]
@@ -368,9 +374,13 @@ func CatFileSize(ctx context.Context, dir, oid string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	var n int64
-	if _, err := fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &n); err != nil {
-		return 0, fmt.Errorf("gitcli: CatFileSize: parse %q: %w", out, err)
+	s := strings.TrimSpace(string(out))
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("gitcli: CatFileSize: parse %q: %w", s, err)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("gitcli: CatFileSize: negative size %d", n)
 	}
 	return n, nil
 }
