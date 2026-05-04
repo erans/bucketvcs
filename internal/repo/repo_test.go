@@ -12,6 +12,7 @@ import (
 
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	txpkg "github.com/bucketvcs/bucketvcs/internal/repo/tx"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 )
@@ -258,5 +259,152 @@ func TestNewTxID_ConcurrentlyUnique(t *testing.T) {
 	}
 	if len(seen) != goroutines*perGoroutine {
 		t.Errorf("want %d unique ids, got %d", goroutines*perGoroutine, len(seen))
+	}
+}
+
+func TestCommit_HappyPath(t *testing.T) {
+	s := newLocalFS(t)
+	ctx := context.Background()
+	r, _ := repo.Create(ctx, s, "acme", "x", repo.CreateOptions{Actor: "u"})
+
+	txID, err := r.Commit(ctx,
+		txpkg.Body{Type: "push", Actor: "u_pusher"},
+		func(prev *repo.RootView) ([]byte, error) {
+			var top map[string]json.RawMessage
+			if err := json.Unmarshal(prev.Body, &top); err != nil {
+				return nil, err
+			}
+			top["refs"] = json.RawMessage(`{"refs/heads/main":{"target":"abc"}}`)
+			return json.Marshal(top)
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if txID == "" || !strings.HasPrefix(txID, "tx_") {
+		t.Errorf("bad tx id: %q", txID)
+	}
+
+	v, _ := r.ReadRoot(ctx)
+	if v.Header.ManifestVersion != 2 {
+		t.Errorf("want manifest_version=2 after one Commit, got %d", v.Header.ManifestVersion)
+	}
+	if v.Header.LatestTx != txID {
+		t.Errorf("LatestTx mismatch: want %s, got %s", txID, v.Header.LatestTx)
+	}
+	if !strings.Contains(string(v.Body), "refs/heads/main") {
+		t.Errorf("body did not record the ref: %s", v.Body)
+	}
+}
+
+func TestCommit_CallbackError(t *testing.T) {
+	s := newLocalFS(t)
+	ctx := context.Background()
+	r, _ := repo.Create(ctx, s, "acme", "x", repo.CreateOptions{})
+	sentinel := errors.New("callback returned this")
+
+	_, err := r.Commit(ctx, txpkg.Body{Type: "push", Actor: "u"}, func(*repo.RootView) ([]byte, error) {
+		return nil, sentinel
+	})
+	if !errors.Is(err, repo.ErrCallbackFailed) {
+		t.Errorf("want ErrCallbackFailed, got %v", err)
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("err should also unwrap to caller's sentinel, got %v", err)
+	}
+	// No new tx record (callback runs BEFORE PutIfAbsent).
+	page, _ := s.List(ctx, "tenants/acme/repos/x/tx/", nil)
+	if len(page.Objects) != 1 {
+		t.Errorf("want 1 tx record (the create), got %d", len(page.Objects))
+	}
+	v, _ := r.ReadRoot(ctx)
+	if v.Header.ManifestVersion != 1 {
+		t.Errorf("want manifest_version=1, got %d", v.Header.ManifestVersion)
+	}
+}
+
+func TestCommit_PerAttemptFreshTxID(t *testing.T) {
+	s := newLocalFS(t)
+	ctx := context.Background()
+	r, _ := repo.Create(ctx, s, "acme", "x", repo.CreateOptions{Actor: "u"})
+
+	calls := 0
+	txID, err := r.Commit(ctx, txpkg.Body{Type: "push", Actor: "u"}, func(prev *repo.RootView) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			// Race: do a side-channel commit to invalidate prev.Version
+			_, err := r.Commit(ctx, txpkg.Body{Type: "push", Actor: "u_other"}, func(p2 *repo.RootView) ([]byte, error) {
+				return p2.Body, nil
+			})
+			if err != nil {
+				return nil, err
+			}
+		}
+		return prev.Body, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls < 2 {
+		t.Errorf("expected callback re-invoked on conflict; called %d times", calls)
+	}
+	v, _ := r.ReadRoot(ctx)
+	if v.Header.LatestTx != txID {
+		t.Errorf("LatestTx mismatch")
+	}
+	if v.Header.ManifestVersion != 3 {
+		t.Errorf("want manifest_version=3, got %d", v.Header.ManifestVersion)
+	}
+	// Tx records on disk: 1 create + 1 orphan (from the first attempt
+	// that lost CAS) + 2 winners (side-channel + outer) = 4.
+	page, _ := s.List(ctx, "tenants/acme/repos/x/tx/", nil)
+	if len(page.Objects) != 4 {
+		t.Errorf("want 4 tx records (1 create + 1 orphan + 2 committed); got %d", len(page.Objects))
+	}
+}
+
+func TestCommit_RetryBudgetExhausted(t *testing.T) {
+	s := newLocalFS(t)
+	ctx := context.Background()
+	r, _ := repo.Create(ctx, s, "acme", "x", repo.CreateOptions{Actor: "u"})
+
+	_, err := r.Commit(ctx, txpkg.Body{Type: "push", Actor: "u"},
+		func(prev *repo.RootView) ([]byte, error) {
+			// Always race: side-channel commit so the main commit never wins.
+			_, _ = r.Commit(ctx, txpkg.Body{Type: "push", Actor: "u_other"},
+				func(p2 *repo.RootView) ([]byte, error) { return p2.Body, nil })
+			return prev.Body, nil
+		},
+		repo.WithCommitPolicy(repo.CommitPolicy{MaxRetries: 3, BackoffBase: 0}),
+	)
+	var gaveUp *repo.CommitGaveUpError
+	if !errors.As(err, &gaveUp) {
+		t.Fatalf("want *CommitGaveUpError, got %v", err)
+	}
+	if gaveUp.Attempts != 3 {
+		t.Errorf("want Attempts=3, got %d", gaveUp.Attempts)
+	}
+	if len(gaveUp.OrphanTxIDs) != 3 {
+		t.Errorf("want 3 orphan tx ids, got %d", len(gaveUp.OrphanTxIDs))
+	}
+}
+
+func TestCommit_CtxCancelMidCommit(t *testing.T) {
+	s := newLocalFS(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	r, _ := repo.Create(context.Background(), s, "acme", "x", repo.CreateOptions{Actor: "u"})
+
+	_, err := r.Commit(ctx, txpkg.Body{Type: "push", Actor: "u"},
+		func(prev *repo.RootView) ([]byte, error) {
+			cancel() // cancel after callback runs but before CAS
+			return prev.Body, nil
+		},
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("want context.Canceled, got %v", err)
+	}
+	v, _ := r.ReadRoot(context.Background())
+	if v.Header.ManifestVersion != 1 {
+		t.Errorf("manifest_version should remain 1, got %d", v.Header.ManifestVersion)
 	}
 }

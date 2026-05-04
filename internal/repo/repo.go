@@ -173,3 +173,131 @@ var txEntropy = &ulid.LockedMonotonicReader{
 func newTxID() string {
 	return "tx_" + ulid.MustNew(ulid.Timestamp(time.Now()), txEntropy).String()
 }
+
+// CommitPolicy controls retry behavior for a single Commit invocation.
+type CommitPolicy struct {
+	// MaxRetries is the maximum number of CAS attempts before
+	// returning *CommitGaveUpError. Default 8.
+	MaxRetries int
+
+	// BackoffBase is the base delay between retries. Actual delay is
+	// jittered uniformly in [0, BackoffBase * 2^attempt). Default 5ms.
+	// Set to 0 to disable backoff (useful in tests).
+	BackoffBase time.Duration
+}
+
+// CommitOption configures one Commit invocation.
+type CommitOption func(*CommitPolicy)
+
+// WithCommitPolicy overrides the default CommitPolicy for one Commit.
+func WithCommitPolicy(p CommitPolicy) CommitOption {
+	return func(out *CommitPolicy) { *out = p }
+}
+
+const (
+	defaultMaxRetries  = 8
+	defaultBackoffBase = 5 * time.Millisecond
+)
+
+// Commit performs the §8 atomic-pair (write tx record, then CAS root)
+// with bounded retry on CAS conflict. Each attempt mints a fresh tx_id
+// so every tx record on disk has accurate base_manifest_* fields. The
+// returned tx_id is the *winning* one (referenced by the new root).
+// Lost attempts leave orphan tx records on disk for M8 GC.
+//
+// Errors:
+//   - context.Canceled / DeadlineExceeded if ctx cancels.
+//   - ErrRepoNotFound if the root has been deleted out from under us.
+//   - ErrUnsupportedSchema if a future-schema manifest landed.
+//   - wrapped ErrCallbackFailed if buildBody returns an error.
+//   - *CommitGaveUpError if the retry budget exhausts on CAS conflicts.
+//   - other wrapped storage errors otherwise.
+func (r *Repo) Commit(
+	ctx context.Context,
+	txBody tx.Body,
+	buildBody func(prev *RootView) (newBody []byte, err error),
+	opts ...CommitOption,
+) (string, error) {
+	policy := CommitPolicy{MaxRetries: defaultMaxRetries, BackoffBase: defaultBackoffBase}
+	for _, o := range opts {
+		o(&policy)
+	}
+
+	var (
+		orphans []string
+		lastErr error
+	)
+	for attempt := 1; attempt <= policy.MaxRetries; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+
+		view, err := r.ReadRoot(ctx)
+		if err != nil {
+			return "", err
+		}
+		newBody, err := buildBody(view)
+		if err != nil {
+			return "", fmt.Errorf("%w: %w", repoerrs.ErrCallbackFailed, err)
+		}
+
+		txID := newTxID()
+		txHeader := tx.Header{
+			SchemaVersion:             1,
+			TxID:                      txID,
+			RepoID:                    r.RepoID(),
+			BaseManifestVersion:       view.Header.ManifestVersion,
+			BaseManifestObjectVersion: view.Version.Token,
+			StartedAt:                 time.Now().UTC().Truncate(time.Second),
+		}
+		if err := tx.Write(ctx, r.store, r.keys.TxRecordKey(txID), txHeader, txBody); err != nil {
+			return "", err
+		}
+
+		nextHeader := view.Header
+		nextHeader.ManifestVersion++
+		nextHeader.LatestTx = txID
+		nextHeader.UpdatedAt = time.Now().UTC().Truncate(time.Second)
+
+		nextBytes, err := manifest.WrapHeaderInBody(nextHeader, newBody)
+		if err != nil {
+			orphans = append(orphans, txID)
+			return "", err
+		}
+
+		if err := ctx.Err(); err != nil {
+			orphans = append(orphans, txID)
+			return "", err
+		}
+
+		if _, err := manifest.CASRoot(ctx, r.store, r.keys.RootManifestKey(), nextBytes, view.Version); err != nil {
+			lastErr = err
+			orphans = append(orphans, txID)
+			if errors.Is(err, storage.ErrVersionMismatch) {
+				if policy.BackoffBase > 0 {
+					sleepBackoff(ctx, policy.BackoffBase, attempt)
+				}
+				continue
+			}
+			return "", err
+		}
+		return txID, nil
+	}
+	return "", &repoerrs.CommitGaveUpError{
+		Attempts: policy.MaxRetries, OrphanTxIDs: orphans, LastErr: lastErr,
+	}
+}
+
+func sleepBackoff(ctx context.Context, base time.Duration, attempt int) {
+	mult := int64(1) << attempt
+	if mult > 1<<10 {
+		mult = 1 << 10
+	}
+	jitter := time.Duration(mathrand.Int63n(int64(base) * mult))
+	t := time.NewTimer(jitter)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+	case <-t.C:
+	}
+}
