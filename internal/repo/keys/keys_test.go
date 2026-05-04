@@ -128,3 +128,15 @@ func TestPackIdxKey_RejectsBadArea(t *testing.T) {
 	}()
 	_ = r.PackIdxKey("h", "loose")
 }
+
+func TestObjectMapKey(t *testing.T) {
+	r, err := keys.NewRepo("acme", "x")
+	if err != nil {
+		t.Fatalf("NewRepo: %v", err)
+	}
+	got := r.ObjectMapKey("deadbeef")
+	want := "tenants/acme/repos/x/indexes/object-map/deadbeef.bvom"
+	if got != want {
+		t.Fatalf("ObjectMapKey: got %q, want %q", got, want)
+	}
+}

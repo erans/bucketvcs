@@ -112,6 +112,12 @@ func (r *Repo) CommitGraphKey(graphHash string) string {
 	return r.prefix + "indexes/commit-graphs/" + graphHash + ".graph"
 }
 
+// ObjectMapKey returns the path for an M2 object-to-pack map (.bvom).
+// Used by M2.
+func (r *Repo) ObjectMapKey(hash string) string {
+	return r.prefix + "indexes/object-map/" + hash + ".bvom"
+}
+
 // ReachabilityKey returns the path for a reachability index. Used by M2.
 func (r *Repo) ReachabilityKey(indexHash string) string {
 	return r.prefix + "indexes/reachability/" + indexHash + ".json"
