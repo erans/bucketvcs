@@ -74,3 +74,65 @@ func TestSetBinaryForTest_Override(t *testing.T) {
 		t.Fatalf("expected error when binary path is bogus")
 	}
 }
+
+// TestRun_ScrubsRepoScopingEnv verifies that GIT_DIR set in the environment
+// does not redirect InitBare away from the real target directory.
+func TestRun_ScrubsRepoScopingEnv(t *testing.T) {
+	skipIfNoGit(t)
+	t.Setenv("GIT_DIR", "/some/bogus/path")
+	dir := t.TempDir()
+	if err := InitBare(context.Background(), dir); err != nil {
+		t.Fatalf("InitBare with GIT_DIR set to bogus path: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "objects")); err != nil {
+		t.Fatalf("expected objects/ dir in real dir after InitBare: %v", err)
+	}
+}
+
+// TestScrubGitRepoEnv_RemovesAllScopingVars verifies that the helper strips
+// all 9 repo-scoping variables and leaves non-scoping variables intact.
+func TestScrubGitRepoEnv_RemovesAllScopingVars(t *testing.T) {
+	input := []string{
+		"PATH=/usr/bin:/bin",
+		"HOME=/root",
+		"GIT_AUTHOR_NAME=Alice",
+		"GIT_DIR=/some/dir",
+		"GIT_WORK_TREE=/work",
+		"GIT_INDEX_FILE=/idx",
+		"GIT_OBJECT_DIRECTORY=/obj",
+		"GIT_ALTERNATE_OBJECT_DIRECTORIES=/alt",
+		"GIT_COMMON_DIR=/common",
+		"GIT_NAMESPACE=ns",
+		"GIT_CEILING_DIRECTORIES=/ceiling",
+		"GIT_DISCOVERY_ACROSS_FILESYSTEM=1",
+	}
+	got := scrubGitRepoEnv(input)
+
+	// Non-scoping vars must survive.
+	keep := []string{"PATH=/usr/bin:/bin", "HOME=/root", "GIT_AUTHOR_NAME=Alice"}
+	for _, want := range keep {
+		found := false
+		for _, g := range got {
+			if g == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("scrubGitRepoEnv removed %q but should have kept it", want)
+		}
+	}
+
+	// Scoping vars must be absent.
+	for _, scoping := range gitRepoScopingVars {
+		for _, g := range got {
+			key := g
+			if idx := strings.Index(g, "="); idx >= 0 {
+				key = g[:idx]
+			}
+			if key == scoping {
+				t.Errorf("scrubGitRepoEnv kept scoping var %q", scoping)
+			}
+		}
+	}
+}

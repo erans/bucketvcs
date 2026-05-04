@@ -21,6 +21,43 @@ var (
 	binVal string
 )
 
+// gitRepoScopingVars is the ordered list of Git environment variables that
+// scope the repository location. Any of these inherited from the caller can
+// redirect git away from cmd.Dir, so they are stripped before every invocation.
+// Sourced from `git help environment` — "The Git Repository" section.
+var gitRepoScopingVars = []string{
+	"GIT_DIR",
+	"GIT_WORK_TREE",
+	"GIT_INDEX_FILE",
+	"GIT_OBJECT_DIRECTORY",
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+	"GIT_COMMON_DIR",
+	"GIT_NAMESPACE",
+	"GIT_CEILING_DIRECTORIES",
+	"GIT_DISCOVERY_ACROSS_FILESYSTEM",
+}
+
+// scrubGitRepoEnv returns a copy of env with all entries whose key matches one
+// of the repo-scoping variables removed. Comparison is case-sensitive (env
+// keys on Linux are case-sensitive). All other variables are preserved.
+func scrubGitRepoEnv(env []string) []string {
+	deny := make(map[string]struct{}, len(gitRepoScopingVars))
+	for _, k := range gitRepoScopingVars {
+		deny[k] = struct{}{}
+	}
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		key := entry
+		if idx := strings.Index(entry, "="); idx >= 0 {
+			key = entry[:idx]
+		}
+		if _, blocked := deny[key]; !blocked {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
 // SetBinaryForTest overrides the resolved git binary path. Returns the
 // previous value so tests can restore it. The override is process-global
 // and lasts until the next call. Pass "" to clear the cache so the next
@@ -83,6 +120,7 @@ func run(ctx context.Context, dir string, args ...string) ([]byte, error) {
 	if dir != "" {
 		cmd.Dir = dir
 	}
+	cmd.Env = scrubGitRepoEnv(os.Environ())
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
