@@ -173,15 +173,15 @@ func TestCreate_AlreadyExists(t *testing.T) {
 	if !errors.Is(err, repo.ErrRepoExists) {
 		t.Errorf("want ErrRepoExists, got %v", err)
 	}
-	// Verify §4.3 carve-out: no orphan tx record from the failed create
-	// (Create checks root.json existence FIRST via PutIfAbsent, only
-	// writes the create-tx record on success).
+	// With reversed ordering (tx-first, then root PutIfAbsent), a duplicate
+	// Create attempt writes a tx record before discovering the root exists.
+	// That orphan tx record is acceptable; M8 GC sweeps it.
 	page, err := s.List(ctx, "tenants/acme/repos/my-repo/tx/", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Objects) != 1 {
-		t.Errorf("want 1 tx record (only the original create), got %d", len(page.Objects))
+	if len(page.Objects) != 2 {
+		t.Errorf("want 2 tx records (original create + orphan from duplicate attempt), got %d", len(page.Objects))
 	}
 }
 
