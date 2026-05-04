@@ -320,3 +320,10 @@ are server-side.
 `github.com/bucketvcs/bucketvcs` is a placeholder pending governance
 gate G1 (license + repo host). Substitute the real path once G1 is
 settled; the contract and behavior are unchanged.
+
+## Consumers
+
+- [`internal/repo`](../repo) — M1 transaction kernel; the only
+  consumer of `PutIfVersionMatches` / `PutIfAbsent` for repository
+  state. New consumers of `ObjectStore` should not write directly to
+  `manifest/root.json` or `tx/*.json`; go through `internal/repo`.
