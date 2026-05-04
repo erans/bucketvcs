@@ -14,7 +14,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	tx "github.com/bucketvcs/bucketvcs/internal/repo/tx"
@@ -187,4 +189,187 @@ func TestCommit_PropertyManifestVersionMonotonic(t *testing.T) {
 		}
 		return s, func() { _ = s.Close() }
 	})
+}
+
+func TestCommit_Scenario_TwoWritersOneWins(t *testing.T) {
+	dir := t.TempDir()
+	store, err := localfs.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	r, err := repo.Create(ctx, store, "acme", "race", repo.CreateOptions{Actor: "u"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type result struct {
+		txID string
+		err  error
+	}
+	gate := make(chan struct{})
+	results := make(chan result, 2)
+	for i := 0; i < 2; i++ {
+		i := i
+		go func() {
+			<-gate
+			id, err := r.Commit(ctx,
+				tx.Body{Type: "push", Actor: "u_" + strconv.Itoa(i)},
+				func(prev *repo.RootView) ([]byte, error) { return prev.Body, nil },
+				repo.WithCommitPolicy(repo.CommitPolicy{MaxRetries: 16, BackoffBase: 0}),
+			)
+			results <- result{id, err}
+		}()
+	}
+	close(gate)
+	r1, r2 := <-results, <-results
+	if r1.err != nil || r2.err != nil {
+		t.Fatalf("both commits should eventually succeed: %v / %v", r1.err, r2.err)
+	}
+	if r1.txID == r2.txID {
+		t.Fatalf("tx ids should differ: %q == %q", r1.txID, r2.txID)
+	}
+	view, err := r.ReadRoot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Header.ManifestVersion != 3 {
+		t.Errorf("want manifest_version=3 (1 create + 2 commits), got %d", view.Header.ManifestVersion)
+	}
+	// Final LatestTx must be one of the two winners.
+	if view.Header.LatestTx != r1.txID && view.Header.LatestTx != r2.txID {
+		t.Errorf("LatestTx %q matches neither %q nor %q", view.Header.LatestTx, r1.txID, r2.txID)
+	}
+}
+
+func TestCommit_Scenario_CtxCancelMidCommit(t *testing.T) {
+	dir := t.TempDir()
+	store, err := localfs.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	r, err := repo.Create(context.Background(), store, "acme", "x", repo.CreateOptions{Actor: "u"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = r.Commit(ctx, tx.Body{Type: "push", Actor: "u"},
+		func(prev *repo.RootView) ([]byte, error) {
+			cancel() // cancel after callback runs but before CAS
+			return prev.Body, nil
+		},
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("want context.Canceled, got %v", err)
+	}
+	view, err := r.ReadRoot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Header.ManifestVersion != 1 {
+		t.Errorf("manifest_version should remain 1, got %d", view.Header.ManifestVersion)
+	}
+}
+
+func TestCommit_Scenario_CallbackErrorAborts(t *testing.T) {
+	dir := t.TempDir()
+	store, err := localfs.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	r, err := repo.Create(ctx, store, "acme", "x", repo.CreateOptions{Actor: "u"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sentinel := errors.New("nope")
+	_, err = r.Commit(ctx, tx.Body{Type: "push", Actor: "u"},
+		func(*repo.RootView) ([]byte, error) { return nil, sentinel })
+	if !errors.Is(err, repo.ErrCallbackFailed) || !errors.Is(err, sentinel) {
+		t.Errorf("want ErrCallbackFailed wrapping sentinel, got %v", err)
+	}
+
+	page, err := store.List(ctx, "tenants/acme/repos/x/tx/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Objects) != 1 {
+		t.Errorf("want 1 tx record (only the create), got %d", len(page.Objects))
+	}
+}
+
+func TestCommit_Scenario_ReadDuringWrite(t *testing.T) {
+	dir := t.TempDir()
+	store, err := localfs.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	r, err := repo.Create(ctx, store, "acme", "x", repo.CreateOptions{Actor: "u"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var (
+		readerErrs atomic.Int64
+		readerOps  atomic.Int64
+		readerDone sync.WaitGroup
+	)
+	readerDone.Add(1)
+	readerCtx, readerCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer readerCancel()
+	go func() {
+		defer readerDone.Done()
+		for {
+			select {
+			case <-readerCtx.Done():
+				return
+			default:
+			}
+			v, rerr := r.ReadRoot(readerCtx)
+			readerOps.Add(1)
+			if rerr != nil {
+				if !errors.Is(rerr, context.DeadlineExceeded) {
+					readerErrs.Add(1)
+				}
+				return
+			}
+			if v.Header.SchemaVersion != 1 {
+				readerErrs.Add(1)
+				return
+			}
+		}
+	}()
+
+	deadline := time.After(5 * time.Second)
+	var wg sync.WaitGroup
+	for w := 0; w < 2; w++ {
+		w := w
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 10; i++ {
+				select {
+				case <-deadline:
+					return
+				default:
+				}
+				_, _ = r.Commit(ctx, tx.Body{Type: "push", Actor: "u_" + strconv.Itoa(w)},
+					func(prev *repo.RootView) ([]byte, error) { return prev.Body, nil },
+					repo.WithCommitPolicy(repo.CommitPolicy{MaxRetries: 16, BackoffBase: 0}),
+				)
+			}
+		}()
+	}
+	wg.Wait()
+	readerDone.Wait()
+	if readerErrs.Load() != 0 {
+		t.Errorf("reader saw %d invalid snapshots over %d ops", readerErrs.Load(), readerOps.Load())
+	}
 }
