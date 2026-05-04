@@ -1,6 +1,7 @@
 package gitcli
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -289,5 +290,161 @@ func TestRunForTest_ReturnsCombinedOutput(t *testing.T) {
 	got := strings.TrimSpace(string(out))
 	if len(got) != 40 {
 		t.Fatalf("rev-parse HEAD: got %q (len %d), want 40-char SHA", got, len(got))
+	}
+}
+
+func TestShowRef_AfterCommit(t *testing.T) {
+	skipIfNoGit(t)
+	bare := makeRepoWithOneCommit(t)
+	refs, err := ShowRef(context.Background(), bare)
+	if err != nil {
+		t.Fatalf("ShowRef: %v", err)
+	}
+	if len(refs) == 0 {
+		t.Fatalf("expected at least one ref, got none")
+	}
+	for ref, oid := range refs {
+		if !strings.HasPrefix(ref, "refs/") {
+			t.Fatalf("ref does not start with refs/: %q", ref)
+		}
+		if len(oid) != 40 {
+			t.Fatalf("oid length: got %d for %q", len(oid), ref)
+		}
+	}
+}
+
+func TestShowRef_EmptyRepo(t *testing.T) {
+	skipIfNoGit(t)
+	dir := t.TempDir()
+	if err := InitBare(context.Background(), dir); err != nil {
+		t.Fatalf("InitBare: %v", err)
+	}
+	refs, err := ShowRef(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("ShowRef on empty repo: %v", err)
+	}
+	if len(refs) != 0 {
+		t.Fatalf("expected 0 refs on empty repo, got %d", len(refs))
+	}
+}
+
+func TestSymbolicRef_HEAD(t *testing.T) {
+	skipIfNoGit(t)
+	bare := makeRepoWithOneCommit(t)
+	target, err := SymbolicRef(context.Background(), bare, "HEAD")
+	if err != nil {
+		t.Fatalf("SymbolicRef: %v", err)
+	}
+	if !strings.HasPrefix(target, "refs/heads/") {
+		t.Fatalf("HEAD target unexpected: %q", target)
+	}
+}
+
+func TestSymbolicRefSet_PointsHEADAtBranch(t *testing.T) {
+	skipIfNoGit(t)
+	bare := makeRepoWithOneCommit(t)
+	// Create a second branch via update-ref against the existing main tip.
+	refs, err := ShowRef(context.Background(), bare)
+	if err != nil {
+		t.Fatalf("ShowRef: %v", err)
+	}
+	var tip string
+	for _, v := range refs {
+		tip = v
+		break
+	}
+	if err := UpdateRef(context.Background(), bare, "refs/heads/dev", tip); err != nil {
+		t.Fatalf("UpdateRef: %v", err)
+	}
+	if err := SymbolicRefSet(context.Background(), bare, "HEAD", "refs/heads/dev"); err != nil {
+		t.Fatalf("SymbolicRefSet: %v", err)
+	}
+	got, err := SymbolicRef(context.Background(), bare, "HEAD")
+	if err != nil {
+		t.Fatalf("SymbolicRef: %v", err)
+	}
+	if got != "refs/heads/dev" {
+		t.Fatalf("HEAD: got %q, want refs/heads/dev", got)
+	}
+}
+
+func TestRevListAllObjects_NonEmpty(t *testing.T) {
+	skipIfNoGit(t)
+	bare := makeRepoWithOneCommit(t)
+	oids, err := RevListAllObjects(context.Background(), bare)
+	if err != nil {
+		t.Fatalf("RevListAllObjects: %v", err)
+	}
+	// Single-commit repo: one commit, one tree, one blob => 3 objects.
+	if len(oids) < 3 {
+		t.Fatalf("expected ≥3 reachable objects, got %d: %v", len(oids), oids)
+	}
+	for _, oid := range oids {
+		if len(oid) != 40 {
+			t.Fatalf("oid length: got %d for %q", len(oid), oid)
+		}
+	}
+}
+
+func TestCatFilePretty_Commit(t *testing.T) {
+	skipIfNoGit(t)
+	bare := makeRepoWithOneCommit(t)
+	refs, err := ShowRef(context.Background(), bare)
+	if err != nil {
+		t.Fatalf("ShowRef: %v", err)
+	}
+	var oid string
+	for _, v := range refs {
+		oid = v
+		break
+	}
+	out, err := CatFilePretty(context.Background(), bare, oid)
+	if err != nil {
+		t.Fatalf("CatFilePretty: %v", err)
+	}
+	if !bytes.Contains(out, []byte("tree ")) {
+		t.Fatalf("commit pretty output missing tree line: %q", out)
+	}
+}
+
+func TestCatFileType_Commit(t *testing.T) {
+	skipIfNoGit(t)
+	bare := makeRepoWithOneCommit(t)
+	refs, err := ShowRef(context.Background(), bare)
+	if err != nil {
+		t.Fatalf("ShowRef: %v", err)
+	}
+	var oid string
+	for _, v := range refs {
+		oid = v
+		break
+	}
+	got, err := CatFileType(context.Background(), bare, oid)
+	if err != nil {
+		t.Fatalf("CatFileType: %v", err)
+	}
+	if got != "commit" {
+		t.Fatalf("type: got %q, want commit", got)
+	}
+}
+
+func TestCatFileSize_Commit(t *testing.T) {
+	skipIfNoGit(t)
+	bare := makeRepoWithOneCommit(t)
+	refs, err := ShowRef(context.Background(), bare)
+	if err != nil {
+		t.Fatalf("ShowRef: %v", err)
+	}
+	var oid string
+	for _, v := range refs {
+		oid = v
+		break
+	}
+	n, err := CatFileSize(context.Background(), bare, oid)
+	if err != nil {
+		t.Fatalf("CatFileSize: %v", err)
+	}
+	if n <= 0 {
+		t.Fatalf("size: got %d, want > 0", n)
 	}
 }

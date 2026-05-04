@@ -266,3 +266,111 @@ func RunForTest(dir string, args ...string) ([]byte, error) {
 	out, err := cmd.CombinedOutput()
 	return out, err
 }
+
+// UpdateRef runs `git update-ref <ref> <oid>` in dir.
+func UpdateRef(ctx context.Context, dir, ref, oid string) error {
+	_, err := run(ctx, dir, "update-ref", ref, oid)
+	return err
+}
+
+// SymbolicRef returns the target of a symbolic ref (e.g. "HEAD").
+func SymbolicRef(ctx context.Context, dir, name string) (string, error) {
+	out, err := run(ctx, dir, "symbolic-ref", name)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// SymbolicRefSet sets the target of a symbolic ref (e.g. HEAD ->
+// refs/heads/main). target must be a full ref name.
+func SymbolicRefSet(ctx context.Context, dir, name, target string) error {
+	_, err := run(ctx, dir, "symbolic-ref", name, target)
+	return err
+}
+
+// ShowRef returns the map of full ref name -> 40-char hex OID for every
+// ref under refs/. HEAD and other symbolic refs are not included; use
+// SymbolicRef separately.
+func ShowRef(ctx context.Context, dir string) (map[string]string, error) {
+	out, err := run(ctx, dir, "show-ref")
+	if err != nil {
+		// `git show-ref` exits non-zero on a repo with no refs. The
+		// stderr is empty in that case (modern git); older versions
+		// may emit nothing as well. Treat exit==1 with empty stderr
+		// as "no refs."
+		var rerr *runError
+		if errors.As(err, &rerr) && rerr.exit == 1 && rerr.stderr == "" {
+			return map[string]string{}, nil
+		}
+		return nil, err
+	}
+	refs := make(map[string]string)
+	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, " ", 2)
+		if len(parts) != 2 || len(parts[0]) != 40 {
+			return nil, fmt.Errorf("gitcli: ShowRef: malformed line %q", line)
+		}
+		refs[parts[1]] = parts[0]
+	}
+	return refs, nil
+}
+
+// RevListAllObjects returns every reachable object ID in dir, as 40-char
+// hex strings. Equivalent to `git rev-list --all --objects` but stripped
+// of trailing path metadata.
+func RevListAllObjects(ctx context.Context, dir string) ([]string, error) {
+	out, err := run(ctx, dir, "rev-list", "--all", "--objects")
+	if err != nil {
+		return nil, err
+	}
+	var oids []string
+	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		// Each line starts with the OID; for trees/blobs/tags, a path follows.
+		oid := line
+		if sp := strings.IndexByte(line, ' '); sp != -1 {
+			oid = line[:sp]
+		}
+		if len(oid) != 40 {
+			return nil, fmt.Errorf("gitcli: RevListAllObjects: bad oid %q", oid)
+		}
+		oids = append(oids, oid)
+	}
+	return oids, nil
+}
+
+// CatFilePretty returns the pretty-printed bytes for an object, matching
+// `git cat-file -p <oid>`.
+func CatFilePretty(ctx context.Context, dir, oid string) ([]byte, error) {
+	return run(ctx, dir, "cat-file", "-p", oid)
+}
+
+// CatFileType returns the type ("commit", "tree", "blob", "tag") for an
+// object, matching `git cat-file -t <oid>`.
+func CatFileType(ctx context.Context, dir, oid string) (string, error) {
+	out, err := run(ctx, dir, "cat-file", "-t", oid)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// CatFileSize returns the size of an object's content, matching
+// `git cat-file -s <oid>`.
+func CatFileSize(ctx context.Context, dir, oid string) (int64, error) {
+	out, err := run(ctx, dir, "cat-file", "-s", oid)
+	if err != nil {
+		return 0, err
+	}
+	var n int64
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &n); err != nil {
+		return 0, fmt.Errorf("gitcli: CatFileSize: parse %q: %w", out, err)
+	}
+	return n, nil
+}
