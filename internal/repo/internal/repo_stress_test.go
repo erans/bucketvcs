@@ -84,4 +84,27 @@ func TestCommit_Stress(t *testing.T) {
 	if want := uint64(1 + writers*commitsPerWriter); v.Header.ManifestVersion != want {
 		t.Errorf("manifest_version: want %d, got %d", want, v.Header.ManifestVersion)
 	}
+	// Validate every expected key is present in the final body. This
+	// makes the per-commit body growth (and the resulting reparse cost)
+	// meaningful: a commit that silently dropped its key would surface
+	// here even though manifest_version stayed correct.
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(v.Body, &top); err != nil {
+		t.Fatal(err)
+	}
+	missing := 0
+	for w := 0; w < writers; w++ {
+		for i := 0; i < commitsPerWriter; i++ {
+			k := "k_" + strconv.Itoa(w*commitsPerWriter+i)
+			if _, ok := top[k]; !ok {
+				missing++
+				if missing <= 5 {
+					t.Errorf("body missing key %q", k)
+				}
+			}
+		}
+	}
+	if missing > 5 {
+		t.Errorf("body missing %d keys total (first 5 above)", missing)
+	}
 }
