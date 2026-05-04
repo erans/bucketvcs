@@ -150,11 +150,17 @@ func makeRepoWithOneCommit(t *testing.T) string {
 	work := t.TempDir()
 	mustRun := func(args ...string) {
 		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", work}, args...)...)
-		cmd.Env = append(os.Environ(),
+		bin, err := resolveBinary()
+		if err != nil {
+			t.Fatalf("resolveBinary: %v", err)
+		}
+		cmd := exec.Command(bin, append([]string{"-C", work}, args...)...)
+		env := scrubGitRepoEnv(os.Environ())
+		env = append(env,
 			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@e",
 			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@e",
 		)
+		cmd.Env = env
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)

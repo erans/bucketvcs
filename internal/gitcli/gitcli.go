@@ -167,7 +167,7 @@ func Fsck(ctx context.Context, dir string, strict bool) error {
 // CloneBareMirror runs `git clone --bare --mirror <src> <dst>`. dst must
 // not already exist (git creates it).
 func CloneBareMirror(ctx context.Context, src, dst string) error {
-	_, err := run(ctx, "", "clone", "--bare", "--mirror", "--quiet", src, dst)
+	_, err := run(ctx, "", "clone", "--bare", "--mirror", "--quiet", "--", src, dst)
 	return err
 }
 
