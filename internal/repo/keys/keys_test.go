@@ -103,6 +103,7 @@ func TestIndexAndBundleKeys(t *testing.T) {
 	r, _ := keys.NewRepo("acme", "my-repo")
 	cases := []struct{ got, want string }{
 		{r.CommitGraphKey("g1"), "tenants/acme/repos/my-repo/indexes/commit-graphs/g1.graph"},
+		{r.ObjectMapKey("o1"), "tenants/acme/repos/my-repo/indexes/object-map/o1.bvom"},
 		{r.ReachabilityKey("i1"), "tenants/acme/repos/my-repo/indexes/reachability/i1.json"},
 		{r.BundleKey("b1"), "tenants/acme/repos/my-repo/bundles/b1.bundle"},
 		{r.BundleManifestKey("b1"), "tenants/acme/repos/my-repo/bundles/b1.json"},
@@ -127,16 +128,4 @@ func TestPackIdxKey_RejectsBadArea(t *testing.T) {
 		}
 	}()
 	_ = r.PackIdxKey("h", "loose")
-}
-
-func TestObjectMapKey(t *testing.T) {
-	r, err := keys.NewRepo("acme", "x")
-	if err != nil {
-		t.Fatalf("NewRepo: %v", err)
-	}
-	got := r.ObjectMapKey("deadbeef")
-	want := "tenants/acme/repos/x/indexes/object-map/deadbeef.bvom"
-	if got != want {
-		t.Fatalf("ObjectMapKey: got %q, want %q", got, want)
-	}
 }
