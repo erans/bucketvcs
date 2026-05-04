@@ -46,6 +46,23 @@ func (r *Repo) TenantID() string { return r.tenantID }
 // RepoID returns the repo identifier this Repo was constructed with.
 func (r *Repo) RepoID() string { return r.repoID }
 
+// RootManifestKey returns the durable key for the §7 root manifest.
+func (r *Repo) RootManifestKey() string {
+	return r.prefix + "manifest/root.json"
+}
+
+// TxRecordKey returns the durable key for one §8 immutable transaction
+// record identified by txID (a ULID minted by Commit).
+func (r *Repo) TxRecordKey(txID string) string {
+	return r.prefix + "tx/" + txID + ".json"
+}
+
+// TxPrefix returns the prefix for listing all tx records in this repo.
+// Used by M8 GC for orphan sweeps; not used by M1 itself.
+func (r *Repo) TxPrefix() string {
+	return r.prefix + "tx/"
+}
+
 func validID(s string) bool {
 	if !idPattern.MatchString(s) {
 		return false

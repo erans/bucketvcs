@@ -50,6 +50,29 @@ func TestRepoPrefix(t *testing.T) {
 	}
 }
 
+func TestRootManifestKey(t *testing.T) {
+	r, _ := keys.NewRepo("acme", "my-repo")
+	if got, want := r.RootManifestKey(), "tenants/acme/repos/my-repo/manifest/root.json"; got != want {
+		t.Errorf("RootManifestKey: want %q, got %q", want, got)
+	}
+}
+
+func TestTxRecordKey(t *testing.T) {
+	r, _ := keys.NewRepo("acme", "my-repo")
+	id := "01HW7JSXEMABCDEF0123456789"
+	want := "tenants/acme/repos/my-repo/tx/" + id + ".json"
+	if got := r.TxRecordKey(id); got != want {
+		t.Errorf("TxRecordKey: want %q, got %q", want, got)
+	}
+}
+
+func TestTxPrefix(t *testing.T) {
+	r, _ := keys.NewRepo("acme", "my-repo")
+	if got, want := r.TxPrefix(), "tenants/acme/repos/my-repo/tx/"; got != want {
+		t.Errorf("TxPrefix: want %q, got %q", want, got)
+	}
+}
+
 func repeatChar(c string, n int) string {
 	out := make([]byte, n)
 	for i := range out {
