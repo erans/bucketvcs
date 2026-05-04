@@ -448,3 +448,34 @@ func TestCatFileSize_Commit(t *testing.T) {
 		t.Fatalf("size: got %d, want > 0", n)
 	}
 }
+
+func TestUpdateRef_CreatesBranch(t *testing.T) {
+	skipIfNoGit(t)
+	bare := makeRepoWithOneCommit(t)
+	refs, err := ShowRef(context.Background(), bare)
+	if err != nil {
+		t.Fatalf("ShowRef: %v", err)
+	}
+	var tip string
+	for _, v := range refs {
+		tip = v
+		break
+	}
+	if tip == "" {
+		t.Fatalf("expected at least one ref tip in fixture")
+	}
+	if err := UpdateRef(context.Background(), bare, "refs/heads/dev", tip); err != nil {
+		t.Fatalf("UpdateRef: %v", err)
+	}
+	got, err := ShowRef(context.Background(), bare)
+	if err != nil {
+		t.Fatalf("ShowRef: %v", err)
+	}
+	devOID, ok := got["refs/heads/dev"]
+	if !ok {
+		t.Fatalf("refs/heads/dev not present after UpdateRef")
+	}
+	if devOID != tip {
+		t.Fatalf("refs/heads/dev: got %s, want %s", devOID, tip)
+	}
+}
