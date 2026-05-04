@@ -91,6 +91,9 @@ func WrapHeaderInBody(h RootHeader, body json.RawMessage) ([]byte, error) {
 		if err := json.Unmarshal(body, &top); err != nil {
 			return nil, fmt.Errorf("repo: body must be a JSON object: %w", err)
 		}
+		if top == nil {
+			return nil, fmt.Errorf("repo: body must be a JSON object, got null")
+		}
 	}
 	for _, k := range headerKeys {
 		if _, ok := top[k]; ok {

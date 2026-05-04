@@ -105,6 +105,13 @@ func TestWrapHeaderInBody_RejectsHeaderKeysInBody(t *testing.T) {
 	}
 }
 
+func TestWrapHeaderInBody_RejectsNullBody(t *testing.T) {
+	header := manifest.RootHeader{SchemaVersion: 1}
+	if _, err := manifest.WrapHeaderInBody(header, []byte("null")); err == nil {
+		t.Fatal("expected error when body is JSON null")
+	}
+}
+
 func TestReadRoot_FutureSchemaRejected(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
