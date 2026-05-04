@@ -100,8 +100,9 @@ func Marshal(h Header, b Body) ([]byte, error) {
 		if extraMap == nil {
 			return nil, fmt.Errorf("tx: Extra must be a JSON object, got null")
 		}
+		reserved := reservedKeySet()
 		for k, v := range extraMap {
-			if _, dup := top[k]; dup {
+			if _, isReserved := reserved[k]; isReserved {
 				return nil, fmt.Errorf("tx: extra key %q collides with header or known body key", k)
 			}
 			top[k] = v
@@ -109,3 +110,18 @@ func Marshal(h Header, b Body) ([]byte, error) {
 	}
 	return json.Marshal(top)
 }
+
+// reservedKeySet returns a fresh map of every JSON field name M1 owns
+// at the top level of a tx record (headerKeys ∪ bodyKnownKeys). Built
+// per call to keep callers from mutating shared state.
+func reservedKeySet() map[string]struct{} {
+	out := make(map[string]struct{}, len(headerKeys)+len(bodyKnownKeys))
+	for _, k := range headerKeys {
+		out[k] = struct{}{}
+	}
+	for _, k := range bodyKnownKeys {
+		out[k] = struct{}{}
+	}
+	return out
+}
+

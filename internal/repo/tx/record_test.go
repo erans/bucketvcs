@@ -79,6 +79,21 @@ func TestMarshal_RejectsNonObjectExtra(t *testing.T) {
 	}
 }
 
+func TestMarshal_RejectsExtraKnownBodyKeyEvenWhenBodyFieldOmitted(t *testing.T) {
+	// Body.RefUpdates is nil/omitted, but caller smuggles it via Extra.
+	// Marshal must reject — Extra cannot supply known body fields.
+	header := tx.Header{SchemaVersion: 1, TxID: "x", RepoID: "r"}
+	body := tx.Body{
+		Type:  "push",
+		Actor: "u",
+		Extra: json.RawMessage(`{"ref_updates":[{"smuggled":true}]}`),
+	}
+	if _, err := tx.Marshal(header, body); err == nil {
+		t.Fatal("expected error: ref_updates is a known body key, must not be supplied via Extra even when body field is omitted")
+	}
+}
+
+
 func TestWrite_PutIfAbsentSemantics(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
