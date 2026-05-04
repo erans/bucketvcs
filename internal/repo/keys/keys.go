@@ -95,11 +95,10 @@ func (r *Repo) PackIdxKey(packHash, area string) string {
 	return r.prefix + "packs/" + area + "/" + packHash + ".idx"
 }
 
-// PackBitmapKey returns the .bitmap path for a pack in the named area.
-// Used by M2.
-func (r *Repo) PackBitmapKey(packHash, area string) string {
-	checkPackArea(area)
-	return r.prefix + "packs/" + area + "/" + packHash + ".bitmap"
+// PackBitmapKey returns the .bitmap path for a canonical pack. Per spec §6,
+// bitmap sidecars exist only under packs/canonical/. Used by M2.
+func (r *Repo) PackBitmapKey(packHash string) string {
+	return r.prefix + "packs/canonical/" + packHash + ".bitmap"
 }
 
 func checkPackArea(area string) {

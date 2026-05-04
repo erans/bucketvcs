@@ -90,7 +90,7 @@ func TestPackKeys(t *testing.T) {
 		{r.CanonicalPackKey(hash), "tenants/acme/repos/my-repo/packs/canonical/" + hash + ".pack"},
 		{r.GeneratedPackKey(hash), "tenants/acme/repos/my-repo/packs/generated/" + hash + ".pack"},
 		{r.PackIdxKey(hash, "canonical"), "tenants/acme/repos/my-repo/packs/canonical/" + hash + ".idx"},
-		{r.PackBitmapKey(hash, "generated"), "tenants/acme/repos/my-repo/packs/generated/" + hash + ".bitmap"},
+		{r.PackBitmapKey(hash), "tenants/acme/repos/my-repo/packs/canonical/" + hash + ".bitmap"},
 	}
 	for _, c := range cases {
 		if c.got != c.want {
