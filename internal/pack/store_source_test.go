@@ -135,3 +135,29 @@ func TestStoreSource_ShortReadNotAtEOF_Errors(t *testing.T) {
 		t.Fatalf("expected short-read error, got nil")
 	}
 }
+
+func TestStoreSource_ZeroLengthRead(t *testing.T) {
+	store := newTestStore(t)
+	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader("hello"), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	src := NewStoreSource(context.Background(), store, "k", 5)
+	// Zero-length read at every interesting offset returns (0, nil).
+	for _, off := range []int64{0, 2, 5, 100} {
+		n, err := src.ReadAt(nil, off)
+		if err != nil {
+			t.Fatalf("ReadAt(nil, %d): err=%v", off, err)
+		}
+		if n != 0 {
+			t.Fatalf("ReadAt(nil, %d): n=%d, want 0", off, n)
+		}
+		// Same for an empty (but non-nil) slice.
+		n, err = src.ReadAt([]byte{}, off)
+		if err != nil {
+			t.Fatalf("ReadAt([]byte{}, %d): err=%v", off, err)
+		}
+		if n != 0 {
+			t.Fatalf("ReadAt([]byte{}, %d): n=%d, want 0", off, n)
+		}
+	}
+}

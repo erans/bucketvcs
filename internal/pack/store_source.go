@@ -39,6 +39,9 @@ func (s *StoreSource) ReadAt(p []byte, off int64) (int, error) {
 	if off < 0 {
 		return 0, fmt.Errorf("pack: StoreSource.ReadAt: negative offset %d", off)
 	}
+	if len(p) == 0 {
+		return 0, nil
+	}
 	if off >= s.size {
 		return 0, io.EOF
 	}
