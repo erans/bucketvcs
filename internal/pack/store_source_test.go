@@ -3,6 +3,7 @@ package pack
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -24,13 +25,13 @@ func newTestStore(t *testing.T) storage.ObjectStore {
 func TestStoreSource_ReadsRange(t *testing.T) {
 	store := newTestStore(t)
 	body := []byte("0123456789abcdef")
-	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader(string(body)), nil); err != nil {
+	if _, err := store.PutIfAbsent(context.Background(), "k", bytes.NewReader(body), nil); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	src := NewStoreSource(context.Background(), store, "k", int64(len(body)))
 	buf := make([]byte, 4)
 	n, err := src.ReadAt(buf, 6)
-	if err != nil && err != io.EOF {
+	if err != nil && !errors.Is(err, io.EOF) {
 		t.Fatalf("ReadAt: %v", err)
 	}
 	if n != 4 {
@@ -44,7 +45,7 @@ func TestStoreSource_ReadsRange(t *testing.T) {
 func TestStoreSource_ReadAtTail_ReturnsEOF(t *testing.T) {
 	store := newTestStore(t)
 	body := []byte("hello")
-	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader(string(body)), nil); err != nil {
+	if _, err := store.PutIfAbsent(context.Background(), "k", bytes.NewReader(body), nil); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	src := NewStoreSource(context.Background(), store, "k", int64(len(body)))
@@ -90,5 +91,47 @@ func TestStoreSource_Size(t *testing.T) {
 	src := NewStoreSource(context.Background(), store, "k", 1234)
 	if got := src.Size(); got != 1234 {
 		t.Fatalf("Size: got %d, want 1234", got)
+	}
+}
+
+// shortStore wraps a store but returns a body shorter than the
+// requested range, simulating a misbehaving backend.
+type shortStore struct {
+	storage.ObjectStore
+	missing int64
+}
+
+func (s *shortStore) GetRange(ctx context.Context, key string, start, end int64) (io.ReadCloser, error) {
+	rc, err := s.ObjectStore.GetRange(ctx, key, start, end)
+	if err != nil {
+		return nil, err
+	}
+	want := end - start + 1 - s.missing
+	if want < 0 {
+		want = 0
+	}
+	all, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(all)) > want {
+		all = all[:want]
+	}
+	return io.NopCloser(bytes.NewReader(all)), nil
+}
+
+func TestStoreSource_ShortReadNotAtEOF_Errors(t *testing.T) {
+	base := newTestStore(t)
+	body := []byte("0123456789abcdef")
+	if _, err := base.PutIfAbsent(context.Background(), "k", bytes.NewReader(body), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	short := &shortStore{ObjectStore: base, missing: 2}
+	src := NewStoreSource(context.Background(), short, "k", int64(len(body)))
+	buf := make([]byte, 4)
+	// Not at EOF: read at offset 0, 4 bytes, but the backend returns 2.
+	if _, err := src.ReadAt(buf, 0); err == nil {
+		t.Fatalf("expected short-read error, got nil")
 	}
 }
