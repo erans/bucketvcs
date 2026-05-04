@@ -144,8 +144,9 @@ func RunPropertyManifestVersionMonotonic(t *testing.T, factory StoreFactory) {
 // parses it, and asserts:
 //   - the file exists at the predicted key
 //   - the parsed tx_id equals txID
-//   - the parsed base_manifest_version is < finalVersion (cannot equal
-//     or exceed; the LatestTx attempt's base must precede the final)
+//   - the parsed base_manifest_version equals finalVersion - 1 (the
+//     LatestTx is the attempt that advanced the manifest from N-1 to
+//     N, so its recorded base must be exactly one less)
 func assertTxRecordIntegrity(t *testing.T, store storage.ObjectStore, txID string, finalVersion uint64) error {
 	t.Helper()
 	key := "tenants/acme/repos/stress/tx/" + txID + ".json"
@@ -169,8 +170,8 @@ func assertTxRecordIntegrity(t *testing.T, store storage.ObjectStore, txID strin
 	if err := json.Unmarshal(rec["base_manifest_version"], &base); err != nil {
 		return err
 	}
-	if base >= finalVersion {
-		t.Errorf("LatestTx base_manifest_version=%d is not < finalVersion=%d", base, finalVersion)
+	if base != finalVersion-1 {
+		t.Errorf("LatestTx base_manifest_version=%d, want exactly finalVersion-1=%d", base, finalVersion-1)
 	}
 	return nil
 }
