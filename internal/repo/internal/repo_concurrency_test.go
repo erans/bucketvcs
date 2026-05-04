@@ -20,6 +20,12 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 )
 
+// TestCommit_PropertyManifestVersionMonotonic stresses the commit
+// kernel with 8 goroutines × 200 commits each on a single repo.
+// Per-commit retry budget: inner = 16 (BackoffBase=0 for speed),
+// outer = 100 logical attempts. Total worst case = 1600 attempts per
+// commit, all without sleep, so a regression surfaces in seconds, not
+// minutes.
 func TestCommit_PropertyManifestVersionMonotonic(t *testing.T) {
 	const (
 		writers          = 8
@@ -54,7 +60,7 @@ func TestCommit_PropertyManifestVersionMonotonic(t *testing.T) {
 					txID string
 					err  error
 				)
-				const logicalRetryCap = 1000
+				const logicalRetryCap = 100
 				for attempt := 0; attempt < logicalRetryCap; attempt++ {
 					txID, err = r.Commit(ctx,
 						tx.Body{Type: "push", Actor: "u_" + strconv.Itoa(w)},
@@ -67,6 +73,10 @@ func TestCommit_PropertyManifestVersionMonotonic(t *testing.T) {
 							_ = seq.Add(1)
 							return json.Marshal(top)
 						},
+						repo.WithCommitPolicy(repo.CommitPolicy{
+							MaxRetries:  16,
+							BackoffBase: 0, // no sleep — keeps test fast under contention
+						}),
 					)
 					if err == nil {
 						break
