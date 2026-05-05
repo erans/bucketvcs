@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -41,6 +42,49 @@ func makeOnePackRepo(t *testing.T) (prefix, packID, bareDir string) {
 		mustGit("add", "f")
 		mustGit("-c", "user.name=t", "-c", "user.email=t@e",
 			"commit", "-m", msg)
+	}
+	bareDir = filepath.Join(t.TempDir(), "bare")
+	if err := gitcli.CloneBareMirror(context.Background(), work, bareDir); err != nil {
+		t.Fatalf("CloneBareMirror: %v", err)
+	}
+	out := t.TempDir()
+	prefix = filepath.Join(out, "pack")
+	id, err := gitcli.PackObjectsAll(context.Background(), bareDir, prefix)
+	if err != nil {
+		t.Fatalf("PackObjectsAll: %v", err)
+	}
+	return prefix, id, bareDir
+}
+
+// makeDeltaPackRepo authors a repo whose history forces git pack-objects
+// to emit OFS_DELTA objects: the same large-ish blob is mutated across
+// several commits so the deltifier picks it up. Returns the same triple
+// as makeOnePackRepo. Asserts at least one OFS_DELTA appears in the
+// resulting pack — if a future git release changes deltification
+// heuristics enough to break this, the fixture should fail loudly.
+func makeDeltaPackRepo(t *testing.T) (prefix, packID, bareDir string) {
+	t.Helper()
+	skipIfNoGit(t)
+	work := t.TempDir()
+	mustGit := func(args ...string) {
+		t.Helper()
+		out, err := gitcli.RunForTest(work, args...)
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	mustGit("init", "--initial-branch=main")
+	// Build a 4 KiB ASCII blob that's deltifiable.
+	base := bytes.Repeat([]byte("the quick brown fox jumps over the lazy dog\n"), 100)
+	for i, perturb := range []string{"", "FOO\n", "BAR\n", "BAZ\n", "QUX\n"} {
+		body := append([]byte(nil), base...)
+		body = append(body, []byte(perturb)...)
+		if err := os.WriteFile(filepath.Join(work, "f"), body, 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		mustGit("add", "f")
+		mustGit("-c", "user.name=t", "-c", "user.email=t@e",
+			"commit", "-m", fmt.Sprintf("c%d", i))
 	}
 	bareDir = filepath.Join(t.TempDir(), "bare")
 	if err := gitcli.CloneBareMirror(context.Background(), work, bareDir); err != nil {

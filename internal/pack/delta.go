@@ -2,7 +2,6 @@ package pack
 
 import (
 	"bytes"
-	"crypto/sha1"
 	"errors"
 	"fmt"
 	"io"
@@ -32,12 +31,19 @@ func applyDelta(base, delta []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("delta: read base size: %w", err)
 	}
+	const maxDeltaResult = 1 << 30 // 1 GiB; cap delta sizes to avoid attacker-controlled allocations.
+	if baseSize > maxDeltaResult {
+		return nil, fmt.Errorf("delta: declared base size %d exceeds bound %d", baseSize, maxDeltaResult)
+	}
 	if int64(baseSize) != int64(len(base)) {
 		return nil, fmt.Errorf("delta: declared base size %d != actual %d", baseSize, len(base))
 	}
 	resultSize, err := readSizeVarint(r)
 	if err != nil {
 		return nil, fmt.Errorf("delta: read result size: %w", err)
+	}
+	if resultSize > maxDeltaResult {
+		return nil, fmt.Errorf("delta: declared result size %d exceeds bound %d", resultSize, maxDeltaResult)
 	}
 	out := make([]byte, 0, resultSize)
 	for {
@@ -120,10 +126,19 @@ func readSizeVarint(r io.ByteReader) (uint64, error) {
 }
 
 // resolveObject reads, decompresses, and (recursively) un-deltas the
-// object at off in the pack. maxDepth bounds the chain length.
+// object at off in the pack. maxDepth bounds the chain length; visited
+// detects cycles so that pathological packs surface as ErrPackCorrupt
+// rather than ErrDeltaChainTooDeep.
 func resolveObject(r io.ReaderAt, idx *Idx, off uint64, maxDepth int) (*Object, error) {
+	return resolveObjectRec(r, idx, off, maxDepth, nil)
+}
+
+func resolveObjectRec(r io.ReaderAt, idx *Idx, off uint64, maxDepth int, visited map[uint64]struct{}) (*Object, error) {
 	if maxDepth <= 0 {
 		return nil, ErrDeltaChainTooDeep
+	}
+	if _, seen := visited[off]; seen {
+		return nil, fmt.Errorf("%w: delta cycle at offset %d", ErrPackCorrupt, off)
 	}
 	hdr, err := readObjectHeader(r, int64(off))
 	if err != nil {
@@ -137,7 +152,12 @@ func resolveObject(r io.ReaderAt, idx *Idx, off uint64, maxDepth int) (*Object, 
 		}
 		return &Object{Type: hdr.Type, Size: int64(len(body)), Data: body}, nil
 	case typeOFSDelta:
-		base, err := resolveObject(r, idx, uint64(hdr.BaseOffset), maxDepth-1)
+		// Lazily allocate the visited map only when we recurse.
+		if visited == nil {
+			visited = make(map[uint64]struct{})
+		}
+		visited[off] = struct{}{}
+		base, err := resolveObjectRec(r, idx, uint64(hdr.BaseOffset), maxDepth-1, visited)
 		if err != nil {
 			return nil, err
 		}
@@ -147,7 +167,7 @@ func resolveObject(r io.ReaderAt, idx *Idx, off uint64, maxDepth int) (*Object, 
 		}
 		out, err := applyDelta(base.Data, deltaBody)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w: %v", ErrPackCorrupt, err)
 		}
 		return &Object{Type: base.Type, Size: int64(len(out)), Data: out}, nil
 	case typeREFDelta:
@@ -155,7 +175,14 @@ func resolveObject(r io.ReaderAt, idx *Idx, off uint64, maxDepth int) (*Object, 
 		if !ok {
 			return nil, fmt.Errorf("%w: ref-delta base %s not in pack", ErrPackCorrupt, hdr.BaseOID)
 		}
-		base, err := resolveObject(r, idx, baseOff, maxDepth-1)
+		if baseOff == off {
+			return nil, fmt.Errorf("%w: ref-delta self-reference at offset %d", ErrPackCorrupt, off)
+		}
+		if visited == nil {
+			visited = make(map[uint64]struct{})
+		}
+		visited[off] = struct{}{}
+		base, err := resolveObjectRec(r, idx, baseOff, maxDepth-1, visited)
 		if err != nil {
 			return nil, err
 		}
@@ -165,22 +192,10 @@ func resolveObject(r io.ReaderAt, idx *Idx, off uint64, maxDepth int) (*Object, 
 		}
 		out, err := applyDelta(base.Data, deltaBody)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w: %v", ErrPackCorrupt, err)
 		}
 		return &Object{Type: base.Type, Size: int64(len(out)), Data: out}, nil
 	default:
 		return nil, fmt.Errorf("%w: bad type %v", ErrPackCorrupt, hdr.Type)
 	}
-}
-
-// hashObject returns the SHA-1 of (typeName SP size NUL body).
-// Used by tests to verify resolveObject correctness.
-func hashObject(typ ObjectType, body []byte) OID {
-	h := sha1.New()
-	fmt.Fprintf(h, "%s %d", typ.String(), len(body))
-	h.Write([]byte{0})
-	h.Write(body)
-	var o OID
-	copy(o[:], h.Sum(nil))
-	return o
 }

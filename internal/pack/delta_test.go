@@ -8,6 +8,18 @@ import (
 	"testing"
 )
 
+// hashObject returns the SHA-1 of (typeName SP size NUL body).
+// Used by tests to verify resolveObject correctness.
+func hashObject(typ ObjectType, body []byte) OID {
+	h := sha1.New()
+	fmt.Fprintf(h, "%s %d", typ.String(), len(body))
+	h.Write([]byte{0})
+	h.Write(body)
+	var o OID
+	copy(o[:], h.Sum(nil))
+	return o
+}
+
 func TestApplyDelta_InsertOnly(t *testing.T) {
 	base := []byte("the quick brown fox")
 	result := []byte("the lazy dog")
@@ -101,8 +113,8 @@ func TestResolveObject_AllPackObjectsHashMatch(t *testing.T) {
 	}
 }
 
-func TestResolveObject_DepthBound(t *testing.T) {
-	prefix, id, _ := makeOnePackRepo(t)
+func TestResolveObject_AllPackObjectsHashMatch_DeltaFixture(t *testing.T) {
+	prefix, id, _ := makeDeltaPackRepo(t)
 	packBytes, err := os.ReadFile(prefix + "-" + id + ".pack")
 	if err != nil {
 		t.Fatalf("ReadFile pack: %v", err)
@@ -115,8 +127,57 @@ func TestResolveObject_DepthBound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseIdx: %v", err)
 	}
-	// Find a delta object (if any). If none in this fixture, skip.
 	r := bytes.NewReader(packBytes)
+	// Track that we actually exercised the delta path.
+	deltaCount := 0
+	for i := 0; i < idx.Count(); i++ {
+		oid := idx.OIDAt(i)
+		off := idx.OffsetAt(i)
+		hdr, err := readObjectHeader(r, int64(off))
+		if err != nil {
+			t.Fatalf("readObjectHeader: %v", err)
+		}
+		if hdr.Type == typeOFSDelta || hdr.Type == typeREFDelta {
+			deltaCount++
+		}
+		obj, err := resolveObject(r, idx, off, 64)
+		if err != nil {
+			t.Fatalf("resolveObject %s: %v", oid, err)
+		}
+		// Verify SHA-1 of (typeStr SP size NUL body) matches the OID.
+		h := sha1.New()
+		fmt.Fprintf(h, "%s %d", obj.Type.String(), obj.Size)
+		h.Write([]byte{0})
+		h.Write(obj.Data)
+		var got OID
+		copy(got[:], h.Sum(nil))
+		if got != oid {
+			t.Fatalf("hash mismatch oid=%s type=%s size=%d got=%s",
+				oid, obj.Type, obj.Size, got)
+		}
+	}
+	if deltaCount == 0 {
+		t.Fatalf("expected delta-producing fixture but pack has 0 OFS/REF_DELTA objects (git heuristics changed?)")
+	}
+	t.Logf("exercised %d delta objects out of %d total", deltaCount, idx.Count())
+}
+
+func TestResolveObject_DepthBound(t *testing.T) {
+	prefix, id, _ := makeDeltaPackRepo(t)
+	packBytes, err := os.ReadFile(prefix + "-" + id + ".pack")
+	if err != nil {
+		t.Fatalf("ReadFile pack: %v", err)
+	}
+	idxBytes, err := os.ReadFile(prefix + "-" + id + ".idx")
+	if err != nil {
+		t.Fatalf("ReadFile idx: %v", err)
+	}
+	idx, err := ParseIdx(bytes.NewReader(idxBytes), int64(len(idxBytes)))
+	if err != nil {
+		t.Fatalf("ParseIdx: %v", err)
+	}
+	r := bytes.NewReader(packBytes)
+	// Find any delta object and verify depth=0 fails.
 	var deltaOID OID
 	found := false
 	for i := 0; i < idx.Count(); i++ {
@@ -131,7 +192,7 @@ func TestResolveObject_DepthBound(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Skip("no delta objects in fixture pack")
+		t.Fatalf("delta fixture produced no delta objects")
 	}
 	off, _ := idx.Lookup(deltaOID)
 	if _, err := resolveObject(r, idx, off, 0); err == nil {
