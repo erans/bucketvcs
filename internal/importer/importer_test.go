@@ -622,3 +622,29 @@ func TestImport_RejectsDefaultBranchWithBackslash(t *testing.T) {
 		t.Fatalf("expected rejection of default_branch with backslash")
 	}
 }
+
+func TestImport_FailsFastOnExistingRepoBeforePrep(t *testing.T) {
+	skipIfNoGit(t)
+	store := newTestStore(t)
+	// Pre-create the repo so the pre-check fires.
+	if _, err := repo.Create(context.Background(), store, "acme", "x", repo.CreateOptions{
+		DefaultBranch: "refs/heads/main",
+		ObjectFormat:  "sha1",
+		Actor:         "test",
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Now Import with a NONEXISTENT source. Pre-check should fire and
+	// return ErrRepoExists before prepareLocalPack tries to clone.
+	_, err := Import(context.Background(), store, Options{
+		SourceDir: "/nonexistent/path/to/source",
+		Tenant:    "acme", Repo: "x",
+		DefaultBranch: "refs/heads/main",
+	})
+	if err == nil {
+		t.Fatalf("expected ErrRepoExists from pre-check")
+	}
+	if !errors.Is(err, repoerrs.ErrRepoExists) {
+		t.Fatalf("expected ErrRepoExists, got %v", err)
+	}
+}

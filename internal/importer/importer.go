@@ -23,6 +23,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	"github.com/bucketvcs/bucketvcs/internal/repo/repoerrs"
 	"github.com/bucketvcs/bucketvcs/internal/repo/tx"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
@@ -306,6 +307,16 @@ func tagTarget(body []byte) (pack.OID, error) {
 func Import(ctx context.Context, store storage.ObjectStore, opts Options) (*Result, error) {
 	if opts.SourceDir == "" || opts.Tenant == "" || opts.Repo == "" {
 		return nil, fmt.Errorf("importer: SourceDir, Tenant, Repo required")
+	}
+	// Cheap pre-check: if the repo already exists, fail early before
+	// paying the local clone+pack cost. The later repo.Create still
+	// handles the race where the repo is created between this check
+	// and our claim.
+	if _, err := repo.Open(ctx, store, opts.Tenant, opts.Repo); err == nil {
+		return nil, repoerrs.ErrRepoExists
+	} else if !errors.Is(err, repoerrs.ErrRepoNotFound) {
+		// Real storage error; surface it.
+		return nil, fmt.Errorf("importer: pre-check open: %w", err)
 	}
 	prep, err := prepareLocalPack(ctx, opts.SourceDir, opts.DefaultBranch)
 	if err != nil {
