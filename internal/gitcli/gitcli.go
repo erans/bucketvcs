@@ -235,7 +235,7 @@ func PackObjectsAll(ctx context.Context, dir, outPrefix string) (string, error) 
 	var rlStderr bytes.Buffer
 	revList.Stderr = &rlStderr
 
-	pack := exec.CommandContext(ctx, bin, "-C", dir, "pack-objects", "--quiet", outPrefix)
+	pack := exec.CommandContext(ctx, bin, "-C", dir, "--no-replace-objects", "pack-objects", "--quiet", outPrefix)
 	pack.Env = scrubGitRepoEnv(os.Environ())
 	pack.Stdin = pr
 	var packStdout, packStderr bytes.Buffer
