@@ -26,6 +26,11 @@ const DefaultObjectCacheEntries = 256
 // trigger memory pressure when the LRU fills up.
 const DefaultObjectCacheBytes = int64(4 * 1024 * 1024)
 
+// DefaultObjectCacheTotalBytes bounds the total memory held by the
+// delta-base LRU. With per-object cap (DefaultObjectCacheBytes) of
+// 4 MiB and entry cap of 256, this gives a defense-in-depth ceiling.
+const DefaultObjectCacheTotalBytes = int64(64 * 1024 * 1024)
+
 // Reader is a pure-Go random-access pack reader.
 type Reader struct {
 	idx      *Idx
@@ -63,6 +68,15 @@ func Open(ctx context.Context, store storage.ObjectStore, packKey, idxKey string
 	if bodyEnd < 12 {
 		return nil, fmt.Errorf("%w: pack too small (%d bytes)", ErrPackCorrupt, packMeta.Size)
 	}
+	// Validate idx offsets fall within the pack object area (between
+	// the 12-byte pack header and the 20-byte trailer).
+	for k := 0; k < idx.Count(); k++ {
+		off := idx.OffsetAt(k)
+		if off < 12 || int64(off) >= bodyEnd {
+			return nil, fmt.Errorf("%w: idx offset %d (entry %d) outside pack body [%d, %d)",
+				ErrPackCorrupt, off, k, 12, bodyEnd)
+		}
+	}
 	h := sha1.New()
 	const chunk = 64 * 1024
 	buf := make([]byte, chunk)
@@ -96,7 +110,7 @@ func Open(ctx context.Context, store storage.ObjectStore, packKey, idxKey string
 	return &Reader{
 		idx: idx, packKey: packKey, idxKey: idxKey, store: store,
 		chainCap: DefaultDeltaChainDepth,
-		objCache: newObjectCache(DefaultObjectCacheEntries, DefaultObjectCacheBytes),
+		objCache: newObjectCache(DefaultObjectCacheEntries, DefaultObjectCacheBytes, DefaultObjectCacheTotalBytes),
 		packSize: packMeta.Size,
 	}, nil
 }

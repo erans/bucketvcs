@@ -360,7 +360,7 @@ func TestReader_GetCacheImmuneToCallerMutation(t *testing.T) {
 }
 
 func TestObjectCache_SkipsLargeObjects(t *testing.T) {
-	c := newObjectCache(10, 100) // max 100 bytes per entry
+	c := newObjectCache(10, 100, 0) // max 100 bytes per entry, no total limit
 	// Object below threshold caches.
 	small := &Object{Type: TypeBlob, Size: 50, Data: make([]byte, 50)}
 	c.put(1, small)
@@ -436,4 +436,76 @@ func buildIdxLiar(t *testing.T, oid OID, offset uint32, packSHA [20]byte) []byte
 	h.Write(packSHA[:])
 	buf.Write(h.Sum(nil))
 	return buf.Bytes()
+}
+
+func TestReader_Open_RejectsIDXOffsetOutOfBounds(t *testing.T) {
+	prefix, id, _ := makeOnePackRepo(t)
+	packBytes, err := os.ReadFile(prefix + "-" + id + ".pack")
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	idxBytes, err := os.ReadFile(prefix + "-" + id + ".idx")
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	idx, err := ParseIdx(bytes.NewReader(idxBytes), int64(len(idxBytes)))
+	if err != nil {
+		t.Fatalf("ParseIdx: %v", err)
+	}
+	if idx.Count() == 0 {
+		t.Skip("empty fixture")
+	}
+	// Mutate the first offset in the idx to point past the pack body.
+	// idx layout: header(8) + fanout(1024) + oids(count*20) + crcs(count*4) + offsets(count*4) ...
+	count := idx.Count()
+	offsetTableStart := 8 + 1024 + count*20 + count*4
+	bigOffset := uint32(len(packBytes) + 1000)
+	tampered := append([]byte(nil), idxBytes...)
+	binary.BigEndian.PutUint32(tampered[offsetTableStart:offsetTableStart+4], bigOffset)
+	// Re-trailer.
+	pre := tampered[:len(tampered)-40]
+	idxSelfSHA := sha1.Sum(pre)
+	copy(tampered[len(tampered)-20:], idxSelfSHA[:])
+
+	store := newTestStore(t)
+	if _, err := store.PutIfAbsent(context.Background(), "p.pack", bytes.NewReader(packBytes), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := store.PutIfAbsent(context.Background(), "p.idx", bytes.NewReader(tampered), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := Open(context.Background(), store, "p.pack", "p.idx"); err == nil {
+		t.Fatalf("expected Open to reject idx offset outside pack body")
+	}
+}
+
+func TestObjectCache_TotalByteBudget(t *testing.T) {
+	// 10 entries max, 1000 bytes per object, 5000 bytes total budget.
+	c := newObjectCache(10, 1000, 5000)
+	mk := func(size int) *Object {
+		return &Object{Type: TypeBlob, Size: int64(size), Data: make([]byte, size)}
+	}
+	for i := uint64(0); i < 7; i++ {
+		c.put(i, mk(1000))
+	}
+	// 7 × 1000 = 7000 bytes attempted, but budget is 5000, so cache should
+	// hold at most 5 entries (oldest 2 evicted).
+	c.mu.Lock()
+	count := c.order.Len()
+	totalBytes := c.totalBytes
+	c.mu.Unlock()
+	if totalBytes > 5000 {
+		t.Fatalf("totalBytes: got %d, exceeds budget 5000", totalBytes)
+	}
+	if count > 5 {
+		t.Fatalf("entries: got %d, want <=5 given budget", count)
+	}
+	// Oldest entries (off 0, 1) must have been evicted.
+	if _, hit := c.get(0); hit {
+		t.Fatalf("offset 0 should have been evicted")
+	}
+	// Most-recent must still be present.
+	if _, hit := c.get(6); !hit {
+		t.Fatalf("offset 6 should still be cached")
+	}
 }
