@@ -517,3 +517,58 @@ func TestObjectCache_TotalByteBudget(t *testing.T) {
 		t.Fatalf("offset 6 should still be cached")
 	}
 }
+
+func TestReader_Open_RejectsIDXOffsetAboveMaxInt64(t *testing.T) {
+	prefix, id, _ := makeOnePackRepo(t)
+	packBytes, err := os.ReadFile(prefix + "-" + id + ".pack")
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	idxBytes, err := os.ReadFile(prefix + "-" + id + ".idx")
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	idx, err := ParseIdx(bytes.NewReader(idxBytes), int64(len(idxBytes)))
+	if err != nil {
+		t.Fatalf("ParseIdx: %v", err)
+	}
+	if idx.Count() == 0 {
+		t.Skip("empty fixture")
+	}
+	// idx v2 offsets are 32-bit. To fake a huge offset we promote entry 0
+	// to use the large-offset table by setting its MSB, then insert a
+	// large-offset entry with a value above MaxInt64.
+	count := idx.Count()
+	offsetTableStart := 8 + 1024 + count*20 + count*4
+
+	tampered := append([]byte(nil), idxBytes...)
+	// Set offset[0]'s MSB → index 0 into the large-offset table.
+	binary.BigEndian.PutUint32(tampered[offsetTableStart:offsetTableStart+4], 1<<31)
+
+	// Inject a large-offset table entry (8 bytes) between the end of the
+	// offset table and the 40-byte trailer (packSHA + idxSelfSHA).
+	trailerStart := len(tampered) - 40
+	hugeOffset := uint64(1) << 62 // well above MaxInt64
+	hugeBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(hugeBytes, hugeOffset)
+	tampered = append(tampered[:trailerStart], append(hugeBytes, tampered[trailerStart:]...)...)
+
+	// Recompute idx self-SHA over everything except the last 20 bytes.
+	pre := tampered[:len(tampered)-20]
+	idxSelfSHA := sha1.Sum(pre)
+	copy(tampered[len(tampered)-20:], idxSelfSHA[:])
+
+	store := newTestStore(t)
+	if _, err := store.PutIfAbsent(context.Background(), "p.pack", bytes.NewReader(packBytes), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := store.PutIfAbsent(context.Background(), "p.idx", bytes.NewReader(tampered), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	// We expect Open (or ParseIdx) to reject this: either the strict
+	// large-offset section sizing check fires in ParseIdx, or Open's
+	// uint64 range check rejects the huge offset. Either way, err != nil.
+	if _, err := Open(context.Background(), store, "p.pack", "p.idx"); err == nil {
+		t.Fatalf("expected rejection of idx with huge large-offset (above MaxInt64)")
+	}
+}

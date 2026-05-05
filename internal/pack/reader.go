@@ -69,10 +69,13 @@ func Open(ctx context.Context, store storage.ObjectStore, packKey, idxKey string
 		return nil, fmt.Errorf("%w: pack too small (%d bytes)", ErrPackCorrupt, packMeta.Size)
 	}
 	// Validate idx offsets fall within the pack object area (between
-	// the 12-byte pack header and the 20-byte trailer).
+	// the 12-byte pack header and the 20-byte trailer). Compare in
+	// uint64 space: casting a uint64 > MaxInt64 to int64 wraps negative
+	// and would bypass the >= bodyEnd check.
+	bodyEndU := uint64(bodyEnd)
 	for k := 0; k < idx.Count(); k++ {
 		off := idx.OffsetAt(k)
-		if off < 12 || int64(off) >= bodyEnd {
+		if off < 12 || off >= bodyEndU {
 			return nil, fmt.Errorf("%w: idx offset %d (entry %d) outside pack body [%d, %d)",
 				ErrPackCorrupt, off, k, 12, bodyEnd)
 		}
