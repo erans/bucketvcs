@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"sort"
 
 	"github.com/bucketvcs/bucketvcs/internal/pack"
@@ -50,19 +51,28 @@ func Open(ctx context.Context, store storage.ObjectStore, key string) (*Map, err
 		return nil, fmt.Errorf("%w: version %d", ErrCorrupt, v)
 	}
 	count := binary.BigEndian.Uint64(all[8:16])
+	// Bound count to a value that cannot overflow when multiplied by
+	// recordSize and that fits in int (Lookup uses int via sort.Search).
+	maxRecords := uint64(len(all)-headerSize-trailerSize) / uint64(recordSize)
+	if count > maxRecords {
+		return nil, fmt.Errorf("%w: count %d exceeds file capacity %d records",
+			ErrCorrupt, count, maxRecords)
+	}
+	if count > uint64(math.MaxInt32) {
+		return nil, fmt.Errorf("%w: count %d exceeds MaxInt32", ErrCorrupt, count)
+	}
 	packTblOff := binary.BigEndian.Uint64(all[16:24])
-	expectedRecBytes := uint64(headerSize) + count*recordSize
+	expectedRecBytes := uint64(headerSize) + count*uint64(recordSize)
 	if packTblOff != expectedRecBytes {
 		return nil, fmt.Errorf("%w: pack_tbl offset mismatch (got %d, want %d)",
 			ErrCorrupt, packTblOff, expectedRecBytes)
 	}
-	if uint64(len(all)) < packTblOff+2+uint64(trailerSize) {
-		return nil, fmt.Errorf("%w: truncated pack table", ErrCorrupt)
-	}
 	nPacks := binary.BigEndian.Uint16(all[packTblOff : packTblOff+2])
 	tblBytes := uint64(nPacks) * uint64(packIDSize)
-	if uint64(len(all)) < packTblOff+2+tblBytes+uint64(trailerSize) {
-		return nil, fmt.Errorf("%w: truncated pack table body", ErrCorrupt)
+	expectedTotal := packTblOff + 2 + tblBytes + uint64(trailerSize)
+	if uint64(len(all)) != expectedTotal {
+		return nil, fmt.Errorf("%w: file size %d != expected %d (count=%d nPacks=%d)",
+			ErrCorrupt, len(all), expectedTotal, count, nPacks)
 	}
 	packs := make([]string, nPacks)
 	for i := 0; i < int(nPacks); i++ {

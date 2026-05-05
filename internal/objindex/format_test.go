@@ -237,3 +237,51 @@ func TestOpen_RejectsBadVersion(t *testing.T) {
 		t.Fatalf("expected version mismatch error")
 	}
 }
+
+func TestOpen_RejectsCountTooLarge(t *testing.T) {
+	// Build a valid 1-record idx, then rewrite the count field to a huge value.
+	a := oidOf(t, "0000000000000000000000000000000000000001")
+	pid := strings.Repeat("a", 40)
+	out, err := build([]Entry{{OID: a, PackID: pid, Offset: 1}})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	// count is at bytes [8:16].
+	binary.BigEndian.PutUint64(out[8:16], 1<<40)
+	// Re-trailer to bypass trailer check.
+	pre := out[:len(out)-trailerSize]
+	want := sha256.Sum256(pre)
+	copy(out[len(out)-trailerSize:], want[:])
+	store := newTestStore(t)
+	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader(string(out)), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := Open(context.Background(), store, "k"); err == nil {
+		t.Fatalf("expected count-too-large rejection")
+	}
+}
+
+func TestOpen_RejectsSurplusBytesBeforeTrailer(t *testing.T) {
+	a := oidOf(t, "0000000000000000000000000000000000000001")
+	pid := strings.Repeat("a", 40)
+	out, err := build([]Entry{{OID: a, PackID: pid, Offset: 1}})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	// Insert 8 surplus bytes between pack-table body and trailer.
+	trailerStart := len(out) - trailerSize
+	tampered := append([]byte(nil), out[:trailerStart]...)
+	tampered = append(tampered, make([]byte, 8)...)
+	tampered = append(tampered, out[trailerStart:]...)
+	// Re-trailer.
+	pre := tampered[:len(tampered)-trailerSize]
+	want := sha256.Sum256(pre)
+	copy(tampered[len(tampered)-trailerSize:], want[:])
+	store := newTestStore(t)
+	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader(string(tampered)), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := Open(context.Background(), store, "k"); err == nil {
+		t.Fatalf("expected surplus-bytes rejection")
+	}
+}
