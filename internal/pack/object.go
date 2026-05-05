@@ -14,6 +14,8 @@ import (
 type ObjectHeader struct {
 	Type      ObjectType
 	Size      int64
+	// HeaderLen is the number of bytes consumed by the variable-length header
+	// itself, including OFS_DELTA negOff varint or REF_DELTA OID.
 	HeaderLen int64
 	// For ofs_delta: BaseOffset is set to the absolute pack offset of
 	// the base object. For ref_delta: BaseOID is set.
@@ -56,6 +58,9 @@ func readObjectHeader(r io.ReaderAt, off int64) (ObjectHeader, error) {
 		}
 	}
 	hdr.Size = size
+	if hdr.Size < 0 {
+		return hdr, fmt.Errorf("%w: size varint produced negative value", ErrPackCorrupt)
+	}
 
 	switch hdr.Type {
 	case typeOFSDelta:
@@ -65,7 +70,11 @@ func readObjectHeader(r io.ReaderAt, off int64) (ObjectHeader, error) {
 		}
 		read++
 		negOff := int64(b[0] & 0x7f)
+		ofsShift := uint(7) // first byte already consumed 7 bits
 		for b[0]&0x80 != 0 {
+			if ofsShift >= 63 {
+				return hdr, fmt.Errorf("%w: ofs varint too long", ErrPackCorrupt)
+			}
 			negOff++ // implicit +1 between continuation bytes
 			negOff <<= 7
 			if _, err := r.ReadAt(b[:], off+read); err != nil {
@@ -76,10 +85,15 @@ func readObjectHeader(r io.ReaderAt, off int64) (ObjectHeader, error) {
 			if negOff < 0 {
 				return hdr, fmt.Errorf("%w: ofs varint overflow", ErrPackCorrupt)
 			}
+			ofsShift += 7
 		}
 		hdr.BaseOffset = off - negOff
-		if hdr.BaseOffset < 0 {
-			return hdr, fmt.Errorf("%w: ofs base before pack start", ErrPackCorrupt)
+		// Pack header is 12 bytes (PACK + version u32 + count u32);
+		// no real object can live there or before, and BaseOffset must
+		// strictly precede `off` (the current object).
+		if hdr.BaseOffset < 12 || hdr.BaseOffset >= off {
+			return hdr, fmt.Errorf("%w: ofs_delta base offset %d invalid (this=%d)",
+				ErrPackCorrupt, hdr.BaseOffset, off)
 		}
 	case typeREFDelta:
 		var oidBuf [20]byte
@@ -88,6 +102,10 @@ func readObjectHeader(r io.ReaderAt, off int64) (ObjectHeader, error) {
 		}
 		read += 20
 		copy(hdr.BaseOID[:], oidBuf[:])
+	case TypeCommit, TypeTree, TypeBlob, TypeTag:
+		// No additional bytes after size header for non-delta types.
+	default:
+		return hdr, fmt.Errorf("%w: unknown object type %d", ErrPackCorrupt, hdr.Type)
 	}
 	hdr.HeaderLen = read
 	return hdr, nil
@@ -97,19 +115,30 @@ func readObjectHeader(r io.ReaderAt, off int64) (ObjectHeader, error) {
 func inflateAt(r io.ReaderAt, off int64, want int64) ([]byte, error) {
 	// We don't know the compressed size, so wrap the ReaderAt in a section
 	// reader that extends to EOF; zlib stops at the first stream end.
+	// slack: cap on inflate input bytes from this offset. 1 GiB is well
+	// above any plausible compressed Git object size; if a real stream
+	// exceeds this, zlib will surface ErrUnexpectedEOF on Read.
 	const slack = int64(1 << 30)
 	sr := io.NewSectionReader(r, off, slack)
 	zr, err := zlib.NewReader(sr)
 	if err != nil {
 		return nil, fmt.Errorf("%w: zlib: %v", ErrPackCorrupt, err)
 	}
-	defer zr.Close()
 	out := bytes.NewBuffer(make([]byte, 0, want))
 	if _, err := io.CopyN(out, zr, want); err != nil {
 		return nil, fmt.Errorf("%w: inflate copy: %v", ErrPackCorrupt, err)
 	}
-	if out.Len() != int(want) {
+	if int64(out.Len()) != want {
 		return nil, fmt.Errorf("%w: inflated %d, want %d", ErrPackCorrupt, out.Len(), want)
+	}
+	// Drain to EOF so zlib reads its Adler-32 trailer, then validate
+	// via Close. This catches checksum-corrupted streams that the
+	// known-size CopyN would otherwise let through.
+	if _, err := io.Copy(io.Discard, zr); err != nil {
+		return nil, fmt.Errorf("%w: zlib drain: %v", ErrPackCorrupt, err)
+	}
+	if err := zr.Close(); err != nil {
+		return nil, fmt.Errorf("%w: zlib close: %v", ErrPackCorrupt, err)
 	}
 	return out.Bytes(), nil
 }
