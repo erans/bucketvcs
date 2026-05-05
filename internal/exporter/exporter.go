@@ -165,10 +165,17 @@ func downloadAndIndexPack(ctx context.Context, store storage.ObjectStore, p mani
 	return p.ObjectCount, nil
 }
 
-// validOID reports whether s is a 40-character lowercase hex Git OID.
-// Used to validate manifest-supplied OIDs before passing to git CLI.
+const nullOID = "0000000000000000000000000000000000000000"
+
+// validOID reports whether s is a 40-character lowercase hex Git OID
+// other than the null OID. Used to validate manifest-supplied OIDs
+// before passing to git CLI. The null OID is forbidden because passing
+// it to `git update-ref` deletes the ref rather than setting it.
 func validOID(s string) bool {
 	if len(s) != 40 {
+		return false
+	}
+	if s == nullOID {
 		return false
 	}
 	for i := 0; i < len(s); i++ {

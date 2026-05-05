@@ -201,6 +201,39 @@ func TestExport_RejectsMalformedPackID(t *testing.T) {
 	}
 }
 
+func TestExport_RejectsNullRefOID(t *testing.T) {
+	store := newTestStore(t)
+	r, err := repo.Create(context.Background(), store, "t", "r", repo.CreateOptions{
+		DefaultBranch: "refs/heads/main",
+		ObjectFormat:  "sha1",
+		Actor:         "test",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	body := manifest.Body{
+		DefaultBranch: "refs/heads/main",
+		Refs:          map[string]string{"refs/heads/main": "0000000000000000000000000000000000000000"},
+		Packs:         []manifest.PackEntry{},
+		Indexes:       manifest.Indexes{},
+	}
+	bodyBytes, err := manifest.MarshalBody(body)
+	if err != nil {
+		t.Fatalf("MarshalBody: %v", err)
+	}
+	if _, err := r.Commit(context.Background(), tx.Body{Type: "test", Actor: "test"},
+		func(prev *repo.RootView) ([]byte, error) { return bodyBytes, nil }); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	dst := filepath.Join(t.TempDir(), "out")
+	_, err = Export(context.Background(), store, Options{
+		Tenant: "t", Repo: "r", DestDir: dst, SkipFsck: true,
+	})
+	if err == nil {
+		t.Fatalf("expected rejection of null OID ref")
+	}
+}
+
 func TestExport_RejectsMalformedRefOID(t *testing.T) {
 	store := newTestStore(t)
 	r, err := repo.Create(context.Background(), store, "t", "r", repo.CreateOptions{
