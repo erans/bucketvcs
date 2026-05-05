@@ -531,3 +531,34 @@ func TestImport_RejectsDefaultBranchMissingFromRefs(t *testing.T) {
 		t.Fatalf("expected rejection of default_branch not in refs")
 	}
 }
+
+func TestImport_DetachedHEADRefAlreadyAtSameOID(t *testing.T) {
+	skipIfNoGit(t)
+	src := makeSrcRepo(t)
+	// Find the existing ref OID, set HEAD to that OID (raw), keep the
+	// existing ref. Now HEAD is "detached" but pointing at refs/heads/main.
+	refs, err := gitcli.ShowRef(context.Background(), src)
+	if err != nil {
+		t.Fatalf("ShowRef: %v", err)
+	}
+	var oid string
+	for _, v := range refs {
+		oid = v
+		break
+	}
+	headPath := filepath.Join(src, "HEAD")
+	if err := os.WriteFile(headPath, []byte(oid+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile HEAD: %v", err)
+	}
+	store := newTestStore(t)
+	res, err := Import(context.Background(), store, Options{
+		SourceDir: src, Tenant: "t", Repo: "r",
+		DefaultBranch: "refs/heads/main", // matches the existing ref + same OID
+	})
+	if err != nil {
+		t.Fatalf("Import detached-HEAD with already-pointing branch: %v", err)
+	}
+	if res.PackID == "" {
+		t.Fatalf("expected pack")
+	}
+}

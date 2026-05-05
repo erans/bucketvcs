@@ -78,6 +78,9 @@ func Export(ctx context.Context, store storage.ObjectStore, opts Options) (*Resu
 	}
 
 	for ref, oid := range body.Refs {
+		if !validOID(oid) {
+			return nil, fmt.Errorf("exporter: ref %s has invalid OID %q", ref, oid)
+		}
 		if err := gitcli.UpdateRef(ctx, opts.DestDir, ref, oid); err != nil {
 			return nil, fmt.Errorf("exporter: update-ref %s: %w", ref, err)
 		}
@@ -122,7 +125,7 @@ func requireEmptyDir(p string) error {
 // downloadAndIndexPack copies the .pack from store into dest's objects/pack/
 // and runs git index-pack to (re)build the .idx.
 func downloadAndIndexPack(ctx context.Context, store storage.ObjectStore, p manifest.PackEntry, destDir string) (int, error) {
-	if !validPackID(p.PackID) {
+	if !validOID(p.PackID) {
 		return 0, fmt.Errorf("exporter: invalid PackID %q (want 40-char lowercase hex)", p.PackID)
 	}
 	packDir := filepath.Join(destDir, "objects", "pack")
@@ -162,8 +165,9 @@ func downloadAndIndexPack(ctx context.Context, store storage.ObjectStore, p mani
 	return p.ObjectCount, nil
 }
 
-// validPackID reports whether s is a 40-character lowercase hex string.
-func validPackID(s string) bool {
+// validOID reports whether s is a 40-character lowercase hex Git OID.
+// Used to validate manifest-supplied OIDs before passing to git CLI.
+func validOID(s string) bool {
 	if len(s) != 40 {
 		return false
 	}

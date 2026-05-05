@@ -93,19 +93,20 @@ func prepareLocalPack(ctx context.Context, sourceDir, wantDefaultBranch string) 
 		// PackObjectsAll's rev-list sees the commit.
 		headOID, rpErr := gitcli.RevParse(ctx, bare, "HEAD")
 		if rpErr == nil {
-			// Check whether wantDefaultBranch already exists; if so,
-			// don't overwrite. The user can re-run with a different
-			// DefaultBranch.
 			existingRefs, sErr := gitcli.ShowRef(ctx, bare)
 			if sErr != nil {
 				return nil, fmt.Errorf("importer: pre-synth show-ref: %w", sErr)
 			}
-			if _, exists := existingRefs[wantDefaultBranch]; exists {
-				return nil, fmt.Errorf("importer: detached HEAD synthesis: %s already exists in source",
-					wantDefaultBranch)
-			}
-			if err := gitcli.UpdateRef(ctx, bare, wantDefaultBranch, headOID); err != nil {
-				return nil, fmt.Errorf("importer: synthesize ref %s -> %s: %w", wantDefaultBranch, headOID, err)
+			if existingOID, exists := existingRefs[wantDefaultBranch]; exists {
+				if existingOID != headOID {
+					return nil, fmt.Errorf("importer: detached HEAD synthesis: %s exists at %s, want %s",
+						wantDefaultBranch, existingOID, headOID)
+				}
+				// Already exists pointing at HEAD; nothing to do.
+			} else {
+				if err := gitcli.UpdateRef(ctx, bare, wantDefaultBranch, headOID); err != nil {
+					return nil, fmt.Errorf("importer: synthesize ref %s -> %s: %w", wantDefaultBranch, headOID, err)
+				}
 			}
 		}
 		// If rpErr != nil, HEAD doesn't resolve (truly-empty repo).
