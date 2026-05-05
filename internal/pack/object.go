@@ -111,8 +111,20 @@ func readObjectHeader(r io.ReaderAt, off int64) (ObjectHeader, error) {
 	return hdr, nil
 }
 
+// maxObjectSize is the upper bound on any single inflated object or delta
+// result. 1 GiB is well above any plausible Git object; anything larger
+// is treated as a corrupt-pack indicator. Used by both inflateAt and
+// applyDelta so the limit is consistent across the package.
+const maxObjectSize = int64(1 << 30)
+
 // inflateAt zlib-inflates exactly want bytes from the given offset.
 func inflateAt(r io.ReaderAt, off int64, want int64) ([]byte, error) {
+	if want < 0 {
+		return nil, fmt.Errorf("%w: negative inflate size %d", ErrPackCorrupt, want)
+	}
+	if want > maxObjectSize {
+		return nil, fmt.Errorf("%w: inflate size %d exceeds bound %d", ErrPackCorrupt, want, maxObjectSize)
+	}
 	// We don't know the compressed size, so wrap the ReaderAt in a section
 	// reader that extends to EOF; zlib stops at the first stream end.
 	// slack: cap on inflate input bytes from this offset. 1 GiB is well

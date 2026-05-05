@@ -31,7 +31,7 @@ func applyDelta(base, delta []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("delta: read base size: %w", err)
 	}
-	const maxDeltaResult = 1 << 30 // 1 GiB; cap delta sizes to avoid attacker-controlled allocations.
+	const maxDeltaResult = uint64(maxObjectSize) // 1 GiB; matches inflateAt bound.
 	if baseSize > maxDeltaResult {
 		return nil, fmt.Errorf("delta: declared base size %d exceeds bound %d", baseSize, maxDeltaResult)
 	}
@@ -85,12 +85,20 @@ func applyDelta(base, delta []byte) ([]byte, error) {
 				return nil, fmt.Errorf("delta: copy out of range off=%d sz=%d base=%d",
 					off, sz, len(base))
 			}
+			if uint64(len(out))+uint64(sz) > resultSize {
+				return nil, fmt.Errorf("delta: copy at pos=%d sz=%d would exceed result_size=%d",
+					len(out), sz, resultSize)
+			}
 			out = append(out, base[off:off+sz]...)
 		case op == 0:
 			return nil, fmt.Errorf("delta: reserved opcode 0")
 		default:
 			// INSERT N literal bytes.
 			n := int(op & 0x7f)
+			if uint64(len(out))+uint64(n) > resultSize {
+				return nil, fmt.Errorf("delta: insert n=%d at pos=%d would exceed result_size=%d",
+					n, len(out), resultSize)
+			}
 			buf := make([]byte, n)
 			if _, err := io.ReadFull(r, buf); err != nil {
 				return nil, fmt.Errorf("delta: insert read: %w", err)
@@ -152,6 +160,10 @@ func resolveObjectRec(r io.ReaderAt, idx *Idx, off uint64, maxDepth int, visited
 		}
 		return &Object{Type: hdr.Type, Size: int64(len(body)), Data: body}, nil
 	case typeOFSDelta:
+		if !idx.HasOffset(uint64(hdr.BaseOffset)) {
+			return nil, fmt.Errorf("%w: ofs-delta base offset %d not an object in idx",
+				ErrPackCorrupt, hdr.BaseOffset)
+		}
 		// Lazily allocate the visited map only when we recurse.
 		if visited == nil {
 			visited = make(map[uint64]struct{})

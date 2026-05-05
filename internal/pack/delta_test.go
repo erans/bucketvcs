@@ -295,3 +295,57 @@ func writeSizeVarint(w *bytes.Buffer, n uint64) {
 		}
 	}
 }
+
+func TestApplyDelta_RejectsCopyExceedingResultSize(t *testing.T) {
+	// Declare result_size=4 (the length of "xxxx"), but issue a COPY that
+	// would write 10 bytes. The per-instruction check must fire.
+	base := []byte("0123456789ABCDEFGHIJ")
+	delta := buildCopyAndInsertDelta(t, base, []byte("xxxx"), []deltaOp{
+		{copyFrom: 0, copyLen: 10},
+	})
+	if _, err := applyDelta(base, delta); err == nil {
+		t.Fatalf("expected applyDelta to reject copy that exceeds result_size")
+	}
+}
+
+func TestApplyDelta_RejectsInsertExceedingResultSize(t *testing.T) {
+	// Declare result_size=2 but emit 5 bytes of INSERT. The per-instruction
+	// check must fire before appending.
+	var buf bytes.Buffer
+	writeSizeVarint(&buf, 4) // base_size = 4
+	writeSizeVarint(&buf, 2) // result_size = 2
+	buf.WriteByte(5)         // INSERT 5 bytes
+	buf.WriteString("hello")
+	if _, err := applyDelta([]byte("base"), buf.Bytes()); err == nil {
+		t.Fatalf("expected applyDelta to reject insert that exceeds result_size")
+	}
+}
+
+func TestResolveObject_RejectsOfsDeltaBaseNotInIdx(t *testing.T) {
+	// Build a synthetic pack buffer with an OFS_DELTA at offset 50 whose
+	// BaseOffset points to offset 37 — a location that won't be in the idx
+	// of our real delta fixture. resolveObjectRec must reject it.
+	prefix, id, _ := makeDeltaPackRepo(t)
+	idxBytes, err := os.ReadFile(prefix + "-" + id + ".idx")
+	if err != nil {
+		t.Fatalf("ReadFile idx: %v", err)
+	}
+	idx, err := ParseIdx(bytes.NewReader(idxBytes), int64(len(idxBytes)))
+	if err != nil {
+		t.Fatalf("ParseIdx: %v", err)
+	}
+
+	// Build a minimal synthetic pack: 200 zero bytes, then plant an
+	// OFS_DELTA header at offset 50.
+	//   byte 50: 0x60  — MSB clear (size=0), type=ofs_delta (6<<4), size_low=0
+	//   byte 51: 13    — negOff varint (single byte, MSB clear): base = 50-13 = 37
+	// Offset 37 is > 12 (pack header bound) and < 50 (self), so
+	// readObjectHeader will accept it — but 37 is not in the real idx,
+	// so HasOffset must reject it.
+	syn := make([]byte, 200)
+	syn[50] = 0x60
+	syn[51] = 13
+	if _, err := resolveObjectRec(bytes.NewReader(syn), idx, 50, 64, nil); err == nil {
+		t.Fatalf("expected ofs-delta base-not-in-idx rejection")
+	}
+}

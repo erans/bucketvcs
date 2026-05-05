@@ -226,6 +226,19 @@ func (i *Idx) OffsetAt(n int) uint64 {
 	return i.largeOffs[largeIdx]
 }
 
+// HasOffset reports whether off is recorded as an object offset in the idx.
+// Used by delta resolution to validate OFS_DELTA bases against the idx's
+// object set. Linear scan is acceptable for now; M9 may build a sorted
+// offsets table for O(log n) lookups if performance demands it.
+func (i *Idx) HasOffset(off uint64) bool {
+	for k := 0; k < i.count; k++ {
+		if i.OffsetAt(k) == off {
+			return true
+		}
+	}
+	return false
+}
+
 // Lookup returns the pack-file offset for oid, or false if absent.
 func (i *Idx) Lookup(oid OID) (uint64, bool) {
 	first := oid[0]

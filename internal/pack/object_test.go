@@ -158,3 +158,11 @@ func TestReadObjectHeader_RejectsOfsDeltaBaseAtOrAfterSelf(t *testing.T) {
 		t.Fatalf("expected rejection of ofs_delta with base == this offset")
 	}
 }
+
+func TestInflateAt_RejectsExcessiveSize(t *testing.T) {
+	// inflateAt with want > maxObjectSize must error before allocating.
+	_, err := inflateAt(bytes.NewReader([]byte{}), 0, maxObjectSize+1)
+	if err == nil {
+		t.Fatalf("expected error for excessive inflate size")
+	}
+}
