@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"math"
@@ -13,6 +14,27 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/pack"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
+
+const maxIndexSize = int64(1 << 30) // 1 GiB
+
+// readBounded reads from an ObjectStore object up to maxIndexSize bytes,
+// returning ErrCorrupt if the source exceeds the cap (which signals a
+// crafted oversize manifest reference rather than a legitimate index).
+func readBounded(ctx context.Context, store storage.ObjectStore, key string) ([]byte, error) {
+	obj, err := store.Get(ctx, key, nil)
+	if err != nil {
+		return nil, fmt.Errorf("objindex: get %s: %w", key, err)
+	}
+	defer obj.Body.Close()
+	all, err := io.ReadAll(io.LimitReader(obj.Body, maxIndexSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("objindex: read %s: %w", key, err)
+	}
+	if int64(len(all)) > maxIndexSize {
+		return nil, fmt.Errorf("%w: index size > %d bytes", ErrCorrupt, maxIndexSize)
+	}
+	return all, nil
+}
 
 // Map is a parsed .bvom file held in memory. Lookup is O(log n) via
 // binary search on the sorted-by-OID record table.
@@ -25,15 +47,33 @@ type Map struct {
 // Open reads the entire .bvom from store, validates structure + trailer
 // hash, and returns a Map.
 func Open(ctx context.Context, store storage.ObjectStore, key string) (*Map, error) {
-	rc, err := getReader(ctx, store, key)
+	all, err := readBounded(ctx, store, key)
 	if err != nil {
-		return nil, fmt.Errorf("objindex: get %s: %w", key, err)
+		return nil, err
 	}
-	defer rc.Close()
-	all, err := io.ReadAll(rc)
+	return openFromBytes(all)
+}
+
+// OpenWithExpectedHash is like Open, but additionally verifies that the
+// SHA-256 of the file bytes matches expectedHashHex. Used by callers
+// that have a manifest-level hash to assert against, defending against
+// storage-level swap of the indexed object.
+func OpenWithExpectedHash(ctx context.Context, store storage.ObjectStore, key, expectedHashHex string) (*Map, error) {
+	all, err := readBounded(ctx, store, key)
 	if err != nil {
-		return nil, fmt.Errorf("objindex: read %s: %w", key, err)
+		return nil, err
 	}
+	got := sha256.Sum256(all)
+	gotHex := hex.EncodeToString(got[:])
+	if gotHex != expectedHashHex {
+		return nil, fmt.Errorf("%w: object_map hash mismatch (got %s, want %s)",
+			ErrCorrupt, gotHex, expectedHashHex)
+	}
+	return openFromBytes(all)
+}
+
+// openFromBytes parses a .bvom from an already-loaded byte slice.
+func openFromBytes(all []byte) (*Map, error) {
 	if len(all) < headerSize+trailerSize {
 		return nil, fmt.Errorf("%w: file too small (%d)", ErrCorrupt, len(all))
 	}
@@ -111,15 +151,6 @@ func Open(ctx context.Context, store storage.ObjectStore, key string) (*Map, err
 		}
 	}
 	return &Map{count: int(count), records: records, packTable: packs}, nil
-}
-
-// getReader fetches an object from store as an io.ReadCloser.
-func getReader(ctx context.Context, store storage.ObjectStore, key string) (io.ReadCloser, error) {
-	obj, err := store.Get(ctx, key, nil)
-	if err != nil {
-		return nil, err
-	}
-	return obj.Body, nil
 }
 
 // Count returns the number of indexed objects.

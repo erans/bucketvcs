@@ -119,12 +119,20 @@ func Open(ctx context.Context, store storage.ObjectStore, packKey, idxKey string
 }
 
 func readAll(ctx context.Context, s storage.ObjectStore, key string) ([]byte, error) {
+	const maxIdxSize = int64(1 << 30) // 1 GiB
 	obj, err := s.Get(ctx, key, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer obj.Body.Close()
-	return io.ReadAll(obj.Body)
+	all, err := io.ReadAll(io.LimitReader(obj.Body, maxIdxSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(all)) > maxIdxSize {
+		return nil, fmt.Errorf("%w: idx size > %d bytes", ErrPackCorrupt, maxIdxSize)
+	}
+	return all, nil
 }
 
 // validatePackHeader checks the 12-byte pack header: magic "PACK", version

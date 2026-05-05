@@ -14,6 +14,27 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
 
+const maxIndexSize = int64(1 << 30) // 1 GiB
+
+// readBounded reads from an ObjectStore object up to maxIndexSize bytes,
+// returning ErrCorrupt if the source exceeds the cap (which signals a
+// crafted oversize manifest reference rather than a legitimate index).
+func readBounded(ctx context.Context, store storage.ObjectStore, key string) ([]byte, error) {
+	obj, err := store.Get(ctx, key, nil)
+	if err != nil {
+		return nil, fmt.Errorf("commitgraph: get %s: %w", key, err)
+	}
+	defer obj.Body.Close()
+	all, err := io.ReadAll(io.LimitReader(obj.Body, maxIndexSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("commitgraph: read %s: %w", key, err)
+	}
+	if int64(len(all)) > maxIndexSize {
+		return nil, fmt.Errorf("%w: index size > %d bytes", ErrCorrupt, maxIndexSize)
+	}
+	return all, nil
+}
+
 // Graph holds a parsed .bvcg in memory. Parents lookup is O(log n)
 // via binary search on the sorted-by-OID commit records.
 type Graph struct {
@@ -24,14 +45,9 @@ type Graph struct {
 
 // Open reads the entire .bvcg from store, validates trailer, parses.
 func Open(ctx context.Context, store storage.ObjectStore, key string) (*Graph, error) {
-	obj, err := store.Get(ctx, key, nil)
+	all, err := readBounded(ctx, store, key)
 	if err != nil {
-		return nil, fmt.Errorf("commitgraph: get %s: %w", key, err)
-	}
-	defer obj.Body.Close()
-	all, err := io.ReadAll(obj.Body)
-	if err != nil {
-		return nil, fmt.Errorf("commitgraph: read %s: %w", key, err)
+		return nil, err
 	}
 	if len(all) < headerSize+trailerSize {
 		return nil, fmt.Errorf("%w: too small (%d bytes)", ErrCorrupt, len(all))

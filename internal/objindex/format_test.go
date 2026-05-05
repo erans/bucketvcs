@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -447,5 +448,40 @@ func TestBuild_MultiPack_DeterministicAcrossInputOrder(t *testing.T) {
 	})
 	if !bytes.Equal(out1, out2) || !bytes.Equal(out2, out3) {
 		t.Fatalf("multi-pack build is not deterministic across input orderings")
+	}
+}
+
+func TestOpenWithExpectedHash_RejectsMismatch(t *testing.T) {
+	a := oidOf(t, "0000000000000000000000000000000000000001")
+	pid := strings.Repeat("a", 40)
+	out, err := build([]Entry{{OID: a, PackID: pid, Offset: 1}})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	store := newTestStore(t)
+	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader(string(out)), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	bogus := strings.Repeat("e", 64)
+	if _, err := OpenWithExpectedHash(context.Background(), store, "k", bogus); err == nil {
+		t.Fatalf("expected hash mismatch error")
+	}
+}
+
+func TestOpenWithExpectedHash_AcceptsMatch(t *testing.T) {
+	a := oidOf(t, "0000000000000000000000000000000000000001")
+	pid := strings.Repeat("a", 40)
+	out, err := build([]Entry{{OID: a, PackID: pid, Offset: 1}})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	store := newTestStore(t)
+	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader(string(out)), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	sum := sha256.Sum256(out)
+	hexHash := fmt.Sprintf("%x", sum)
+	if _, err := OpenWithExpectedHash(context.Background(), store, "k", hexHash); err != nil {
+		t.Fatalf("OpenWithExpectedHash: %v", err)
 	}
 }

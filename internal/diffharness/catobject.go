@@ -48,7 +48,7 @@ func CatObject(ctx context.Context, store storage.ObjectStore,
 	if body.Indexes.ObjectMap == nil {
 		return nil, fmt.Errorf("repo has no object_map")
 	}
-	mp, err := objindex.Open(ctx, store, body.Indexes.ObjectMap.Key)
+	mp, err := objindex.OpenWithExpectedHash(ctx, store, body.Indexes.ObjectMap.Key, body.Indexes.ObjectMap.Hash)
 	if err != nil {
 		return nil, err
 	}
