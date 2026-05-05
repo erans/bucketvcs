@@ -310,6 +310,17 @@ func Import(ctx context.Context, store storage.ObjectStore, opts Options) (*Resu
 	if defaultBranch == "" {
 		defaultBranch = "refs/heads/main"
 	}
+
+	// Validate default_branch points at a known ref. Empty repos (no
+	// refs) are exempt — there's nothing to point at, and the field is
+	// effectively a placeholder for future commits.
+	if len(prep.Refs) > 0 {
+		if _, ok := prep.Refs[defaultBranch]; !ok {
+			return nil, fmt.Errorf("importer: default_branch %q not present in source refs (have %d refs)",
+				defaultBranch, len(prep.Refs))
+		}
+	}
+
 	r, err := repo.Create(ctx, store, opts.Tenant, opts.Repo, repo.CreateOptions{
 		DefaultBranch: defaultBranch,
 		ObjectFormat:  "sha1",

@@ -340,11 +340,11 @@ func TestImport_DetachedHEADWithExplicitDefaultBranch(t *testing.T) {
 	skipIfNoGit(t)
 	src := makeSrcRepo(t)
 	store := newTestStore(t)
-	// Even though the source HEAD resolves to refs/heads/main, the
-	// caller-supplied DefaultBranch must be used in the manifest.
+	// The caller-supplied DefaultBranch must be a ref present in the source.
+	// makeSrcRepo produces refs/heads/main; explicitly naming it must succeed.
 	res, err := Import(context.Background(), store, Options{
 		SourceDir: src, Tenant: "t", Repo: "r",
-		DefaultBranch: "refs/heads/custom",
+		DefaultBranch: "refs/heads/main",
 	})
 	if err != nil {
 		t.Fatalf("Import with explicit DefaultBranch: %v", err)
@@ -365,8 +365,8 @@ func TestImport_DetachedHEADWithExplicitDefaultBranch(t *testing.T) {
 	if err := json.Unmarshal(view.Body, &body); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	if body.DefaultBranch != "refs/heads/custom" {
-		t.Fatalf("DefaultBranch: got %q, want refs/heads/custom", body.DefaultBranch)
+	if body.DefaultBranch != "refs/heads/main" {
+		t.Fatalf("DefaultBranch: got %q, want refs/heads/main", body.DefaultBranch)
 	}
 }
 
@@ -401,7 +401,7 @@ func TestPrepareLocalPack_SymbolicRefFailToleratedWithDefaultBranch(t *testing.T
 		SourceDir:     src,
 		Tenant:        "t",
 		Repo:          "r",
-		DefaultBranch: "refs/heads/override",
+		DefaultBranch: "refs/heads/main",
 	})
 	if err != nil {
 		t.Fatalf("Import with DefaultBranch override: %v", err)
@@ -418,8 +418,8 @@ func TestPrepareLocalPack_SymbolicRefFailToleratedWithDefaultBranch(t *testing.T
 	if err := json.Unmarshal(view.Body, &body); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	if body.DefaultBranch != "refs/heads/override" {
-		t.Fatalf("DefaultBranch: got %q, want refs/heads/override", body.DefaultBranch)
+	if body.DefaultBranch != "refs/heads/main" {
+		t.Fatalf("DefaultBranch: got %q, want refs/heads/main", body.DefaultBranch)
 	}
 	_ = res
 }
@@ -516,5 +516,18 @@ func TestImport_DetachedHEADSynthesizesRef(t *testing.T) {
 	}
 	if body.Refs["refs/heads/synthesized"] != oid {
 		t.Fatalf("synthesized ref: got %v, want %s", body.Refs, oid)
+	}
+}
+
+func TestImport_RejectsDefaultBranchMissingFromRefs(t *testing.T) {
+	skipIfNoGit(t)
+	src := makeSrcRepo(t) // has refs/heads/main
+	store := newTestStore(t)
+	_, err := Import(context.Background(), store, Options{
+		SourceDir: src, Tenant: "t", Repo: "r",
+		DefaultBranch: "refs/heads/nonexistent",
+	})
+	if err == nil {
+		t.Fatalf("expected rejection of default_branch not in refs")
 	}
 }
