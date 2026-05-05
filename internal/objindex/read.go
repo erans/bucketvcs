@@ -1,0 +1,115 @@
+package objindex
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"fmt"
+	"io"
+	"sort"
+
+	"github.com/bucketvcs/bucketvcs/internal/pack"
+	"github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+// Map is a parsed .bvom file held in memory. Lookup is O(log n) via
+// binary search on the sorted-by-OID record table.
+type Map struct {
+	count     int
+	records   []byte // count * recordSize
+	packTable []string
+}
+
+// Open reads the entire .bvom from store, validates structure + trailer
+// hash, and returns a Map.
+func Open(ctx context.Context, store storage.ObjectStore, key string) (*Map, error) {
+	rc, err := getReader(ctx, store, key)
+	if err != nil {
+		return nil, fmt.Errorf("objindex: get %s: %w", key, err)
+	}
+	defer rc.Close()
+	all, err := io.ReadAll(rc)
+	if err != nil {
+		return nil, fmt.Errorf("objindex: read %s: %w", key, err)
+	}
+	if len(all) < headerSize+trailerSize {
+		return nil, fmt.Errorf("%w: file too small (%d)", ErrCorrupt, len(all))
+	}
+	// Validate trailer BEFORE any parsing — defends against header-tampering
+	// attacks where magic/version look right but the body is wrong.
+	want := sha256.Sum256(all[:len(all)-trailerSize])
+	if !bytes.Equal(want[:], all[len(all)-trailerSize:]) {
+		return nil, fmt.Errorf("%w: trailer hash mismatch", ErrCorrupt)
+	}
+	// Parse header.
+	if !bytes.Equal(all[:4], magic) {
+		return nil, fmt.Errorf("%w: bad magic %x", ErrCorrupt, all[:4])
+	}
+	if v := binary.BigEndian.Uint32(all[4:8]); v != currentVer {
+		return nil, fmt.Errorf("%w: version %d", ErrCorrupt, v)
+	}
+	count := binary.BigEndian.Uint64(all[8:16])
+	packTblOff := binary.BigEndian.Uint64(all[16:24])
+	expectedRecBytes := uint64(headerSize) + count*recordSize
+	if packTblOff != expectedRecBytes {
+		return nil, fmt.Errorf("%w: pack_tbl offset mismatch (got %d, want %d)",
+			ErrCorrupt, packTblOff, expectedRecBytes)
+	}
+	if uint64(len(all)) < packTblOff+2+uint64(trailerSize) {
+		return nil, fmt.Errorf("%w: truncated pack table", ErrCorrupt)
+	}
+	nPacks := binary.BigEndian.Uint16(all[packTblOff : packTblOff+2])
+	tblBytes := uint64(nPacks) * uint64(packIDSize)
+	if uint64(len(all)) < packTblOff+2+tblBytes+uint64(trailerSize) {
+		return nil, fmt.Errorf("%w: truncated pack table body", ErrCorrupt)
+	}
+	packs := make([]string, nPacks)
+	for i := 0; i < int(nPacks); i++ {
+		off := packTblOff + 2 + uint64(i)*uint64(packIDSize)
+		packs[i] = string(all[off : off+uint64(packIDSize)])
+	}
+	records := all[headerSize : headerSize+count*recordSize]
+	// Sanity: records sorted ascending; reject duplicates.
+	for i := 1; i < int(count); i++ {
+		prev := records[(i-1)*recordSize : (i-1)*recordSize+20]
+		cur := records[i*recordSize : i*recordSize+20]
+		if bytes.Compare(prev, cur) >= 0 {
+			return nil, fmt.Errorf("%w: records not sorted at %d", ErrCorrupt, i)
+		}
+	}
+	return &Map{count: int(count), records: records, packTable: packs}, nil
+}
+
+// getReader fetches an object from store as an io.ReadCloser.
+func getReader(ctx context.Context, store storage.ObjectStore, key string) (io.ReadCloser, error) {
+	obj, err := store.Get(ctx, key, nil)
+	if err != nil {
+		return nil, err
+	}
+	return obj.Body, nil
+}
+
+// Count returns the number of indexed objects.
+func (m *Map) Count() int { return m.count }
+
+// Lookup returns (packID, offset, ok) for oid.
+func (m *Map) Lookup(oid pack.OID) (string, uint64, bool) {
+	pos := sort.Search(m.count, func(i int) bool {
+		rec := m.records[i*recordSize : i*recordSize+20]
+		return bytes.Compare(rec, oid[:]) >= 0
+	})
+	if pos == m.count {
+		return "", 0, false
+	}
+	rec := m.records[pos*recordSize : (pos+1)*recordSize]
+	if !bytes.Equal(rec[:20], oid[:]) {
+		return "", 0, false
+	}
+	idx := binary.BigEndian.Uint16(rec[20:22])
+	off := binary.BigEndian.Uint64(rec[24:32])
+	if int(idx) >= len(m.packTable) {
+		return "", 0, false
+	}
+	return m.packTable[idx], off, true
+}

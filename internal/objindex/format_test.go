@@ -2,12 +2,15 @@ package objindex
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"strings"
 	"testing"
 
 	"github.com/bucketvcs/bucketvcs/internal/pack"
+	"github.com/bucketvcs/bucketvcs/internal/storage"
+	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 )
 
 func oidOf(t *testing.T, hex string) pack.OID {
@@ -123,4 +126,114 @@ func TestBuild_FromPackReader(t *testing.T) {
 	// We can't import internal/pack tests directly; spin up a tiny inline
 	// pack-creation here via gitcli.
 	t.Skip("integration test; covered by pack reader tests once Build(packReader) is exercised by the importer")
+}
+
+func newTestStore(t *testing.T) storage.ObjectStore {
+	t.Helper()
+	s, err := localfs.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+func TestOpenAndLookup_RoundTrip(t *testing.T) {
+	a := oidOf(t, "0000000000000000000000000000000000000001")
+	b := oidOf(t, "1000000000000000000000000000000000000001")
+	c := oidOf(t, "ff00000000000000000000000000000000000001")
+	pid := strings.Repeat("a", 40)
+	entries := []Entry{
+		{OID: a, PackID: pid, Offset: 12},
+		{OID: b, PackID: pid, Offset: 5000},
+		{OID: c, PackID: pid, Offset: 90000},
+	}
+	out, err := build(entries)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	store := newTestStore(t)
+	if _, err := store.PutIfAbsent(context.Background(), "k.bvom", strings.NewReader(string(out)), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	m, err := Open(context.Background(), store, "k.bvom")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	for _, e := range entries {
+		got, off, ok := m.Lookup(e.OID)
+		if !ok {
+			t.Fatalf("Lookup(%s) miss", e.OID)
+		}
+		if got != e.PackID {
+			t.Fatalf("Lookup pack: got %s, want %s", got, e.PackID)
+		}
+		if off != e.Offset {
+			t.Fatalf("Lookup offset: got %d, want %d", off, e.Offset)
+		}
+	}
+	bogus := oidOf(t, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+	if _, _, ok := m.Lookup(bogus); ok {
+		t.Fatalf("expected miss for bogus OID")
+	}
+}
+
+func TestOpen_RejectsBadMagic(t *testing.T) {
+	store := newTestStore(t)
+	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader("XXXXgarbage"), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := Open(context.Background(), store, "k"); err == nil {
+		t.Fatalf("expected error on bad magic")
+	}
+}
+
+func TestOpen_RejectsBadTrailer(t *testing.T) {
+	a := oidOf(t, "0000000000000000000000000000000000000001")
+	pid := strings.Repeat("a", 40)
+	out, err := build([]Entry{{OID: a, PackID: pid, Offset: 1}})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	// Flip a byte in the data section, leave trailer.
+	out[headerSize] ^= 0xff
+	store := newTestStore(t)
+	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader(string(out)), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := Open(context.Background(), store, "k"); err == nil {
+		t.Fatalf("expected trailer mismatch error")
+	}
+}
+
+func TestOpen_RejectsTooSmall(t *testing.T) {
+	store := newTestStore(t)
+	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader("x"), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := Open(context.Background(), store, "k"); err == nil {
+		t.Fatalf("expected file-too-small error")
+	}
+}
+
+func TestOpen_RejectsBadVersion(t *testing.T) {
+	a := oidOf(t, "0000000000000000000000000000000000000001")
+	pid := strings.Repeat("a", 40)
+	out, err := build([]Entry{{OID: a, PackID: pid, Offset: 1}})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	// Bump version field to 99.
+	out[7] = 99
+	// Recompute trailer so it isn't the trailer check that fires.
+	pre := out[:len(out)-trailerSize]
+	want := sha256.Sum256(pre)
+	copy(out[len(out)-trailerSize:], want[:])
+	store := newTestStore(t)
+	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader(string(out)), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := Open(context.Background(), store, "k"); err == nil {
+		t.Fatalf("expected version mismatch error")
+	}
 }
