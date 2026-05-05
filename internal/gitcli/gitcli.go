@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,6 +58,17 @@ func scrubGitRepoEnv(env []string) []string {
 		}
 	}
 	return out
+}
+
+// urlCredsPattern matches `user:password@` in URLs. Used to redact
+// credentials from error messages that include git command lines or
+// stderr output.
+var urlCredsPattern = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)([^:/@\s]+):([^@/\s]+)@`)
+
+// redactCreds replaces user:password@ with REDACTED:REDACTED@ in any
+// URL-like substring of s.
+func redactCreds(s string) string {
+	return urlCredsPattern.ReplaceAllString(s, "${1}REDACTED:REDACTED@")
 }
 
 // SetBinaryForTest overrides the resolved git binary path. Returns the
@@ -107,7 +119,7 @@ func (e *runError) Error() string {
 		dir = "<no dir>"
 	}
 	return fmt.Sprintf("gitcli: %s %s (dir=%s exit=%d): %v: stderr=%q",
-		e.cmd, args, dir, e.exit, e.cause, e.stderr)
+		e.cmd, redactCreds(args), dir, e.exit, e.cause, redactCreds(e.stderr))
 }
 
 func (e *runError) Unwrap() error { return e.cause }

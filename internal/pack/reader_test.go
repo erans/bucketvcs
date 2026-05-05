@@ -321,6 +321,22 @@ func TestReader_Get_RejectsIDXOIDMismatch(t *testing.T) {
 	_ = realOID // silence unused
 }
 
+func TestObjectCache_SkipsLargeObjects(t *testing.T) {
+	c := newObjectCache(10, 100) // max 100 bytes per entry
+	// Object below threshold caches.
+	small := &Object{Type: TypeBlob, Size: 50, Data: make([]byte, 50)}
+	c.put(1, small)
+	if _, hit := c.get(1); !hit {
+		t.Fatalf("small object should be cached")
+	}
+	// Object above threshold is skipped.
+	big := &Object{Type: TypeBlob, Size: 200, Data: make([]byte, 200)}
+	c.put(2, big)
+	if _, hit := c.get(2); hit {
+		t.Fatalf("large object should not be cached")
+	}
+}
+
 // buildIdxLiar constructs a single-entry .idx for the given (lying) OID
 // pointing at the given offset, with the given pack trailer SHA-1.
 func buildIdxLiar(t *testing.T, oid OID, offset uint32, packSHA [20]byte) []byte {

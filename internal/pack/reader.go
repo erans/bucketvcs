@@ -20,6 +20,12 @@ const DefaultDeltaChainDepth = 50
 // DefaultObjectCacheEntries bounds the delta-base LRU. Unit: objects.
 const DefaultObjectCacheEntries = 256
 
+// DefaultObjectCacheBytes is the per-entry size threshold for the
+// delta-base LRU. Objects larger than this skip the cache. 4 MiB is
+// well above typical commit/tree/blob bodies and below what could
+// trigger memory pressure when the LRU fills up.
+const DefaultObjectCacheBytes = int64(4 * 1024 * 1024)
+
 // Reader is a pure-Go random-access pack reader.
 type Reader struct {
 	idx      *Idx
@@ -90,7 +96,7 @@ func Open(ctx context.Context, store storage.ObjectStore, packKey, idxKey string
 	return &Reader{
 		idx: idx, packKey: packKey, idxKey: idxKey, store: store,
 		chainCap: DefaultDeltaChainDepth,
-		objCache: newObjectCache(DefaultObjectCacheEntries),
+		objCache: newObjectCache(DefaultObjectCacheEntries, DefaultObjectCacheBytes),
 		packSize: packMeta.Size,
 	}, nil
 }
