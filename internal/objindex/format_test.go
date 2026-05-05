@@ -5,9 +5,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/bucketvcs/bucketvcs/internal/gitcli"
 	"github.com/bucketvcs/bucketvcs/internal/pack"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
@@ -121,11 +124,72 @@ func TestBuild_RejectsBadPackIDLength(t *testing.T) {
 }
 
 func TestBuild_FromPackReader(t *testing.T) {
-	// Use the same makeOnePackRepo as internal/pack but indirectly:
-	// build a pack reader from a fixture, then call objindex.Build.
-	// We can't import internal/pack tests directly; spin up a tiny inline
-	// pack-creation here via gitcli.
-	t.Skip("integration test; covered by pack reader tests once Build(packReader) is exercised by the importer")
+	// Skip if git is unavailable.
+	if _, err := gitcli.Version(context.Background()); err != nil {
+		t.Skip("git not available:", err)
+	}
+	work := t.TempDir()
+	mustGit := func(args ...string) {
+		t.Helper()
+		out, err := gitcli.RunForTest(work, args...)
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	mustGit("init", "--initial-branch=main")
+	if err := os.WriteFile(filepath.Join(work, "f"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	mustGit("add", "f")
+	mustGit("-c", "user.name=t", "-c", "user.email=t@e", "commit", "-m", "init")
+	bare := filepath.Join(t.TempDir(), "bare")
+	if err := gitcli.CloneBareMirror(context.Background(), work, bare); err != nil {
+		t.Fatalf("CloneBareMirror: %v", err)
+	}
+	out := t.TempDir()
+	prefix := filepath.Join(out, "pack")
+	id, err := gitcli.PackObjectsAll(context.Background(), bare, prefix)
+	if err != nil {
+		t.Fatalf("PackObjectsAll: %v", err)
+	}
+	store := newTestStore(t)
+	uploadFile := func(srcPath, dstKey string) {
+		t.Helper()
+		f, err := os.Open(srcPath)
+		if err != nil {
+			t.Fatalf("Open %s: %v", srcPath, err)
+		}
+		defer f.Close()
+		if _, err := store.PutIfAbsent(context.Background(), dstKey, f, nil); err != nil {
+			t.Fatalf("PutIfAbsent %s: %v", dstKey, err)
+		}
+	}
+	uploadFile(prefix+"-"+id+".pack", "p.pack")
+	uploadFile(prefix+"-"+id+".idx", "p.idx")
+	r, err := pack.Open(context.Background(), store, "p.pack", "p.idx")
+	if err != nil {
+		t.Fatalf("pack.Open: %v", err)
+	}
+	defer r.Close()
+	bvom, err := Build(r, id)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	// Open the result and verify each idx OID is found.
+	if _, err := store.PutIfAbsent(context.Background(), "k.bvom", bytes.NewReader(bvom), nil); err != nil {
+		t.Fatalf("Put bvom: %v", err)
+	}
+	m, err := Open(context.Background(), store, "k.bvom")
+	if err != nil {
+		t.Fatalf("Open bvom: %v", err)
+	}
+	for i := 0; i < r.Idx().Count(); i++ {
+		o := r.Idx().OIDAt(i)
+		_, _, ok := m.Lookup(o)
+		if !ok {
+			t.Fatalf("Lookup miss for %s", o)
+		}
+	}
 }
 
 func newTestStore(t *testing.T) storage.ObjectStore {

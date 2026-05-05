@@ -112,3 +112,13 @@ func TestParseParents_NoParents(t *testing.T) {
 		t.Fatalf("expected 0 parents, got %d", len(parents))
 	}
 }
+
+func TestBuild_RejectsTipNotInCommitSet(t *testing.T) {
+	a := oid(t, "0000000000000000000000000000000000000001")
+	b := oid(t, "0000000000000000000000000000000000000002")
+	commits := []Record{{OID: a, Parents: nil}}
+	tips := []Tip{{Ref: "refs/heads/main", OID: b}} // b is not in commits
+	if _, err := build(commits, tips); err == nil {
+		t.Fatalf("expected tip-not-in-commit-set rejection")
+	}
+}

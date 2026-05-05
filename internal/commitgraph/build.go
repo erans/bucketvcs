@@ -13,10 +13,18 @@ import (
 
 // Build inflates every commit in packReader, derives parents from the
 // commit body, and produces .bvcg bytes paired with the given tips.
-func Build(packReader *pack.Reader, tips []Tip) ([]byte, error) {
+//
+// Note: commits in a real pack are typically delta-encoded, so a
+// type-only optimization would not help — we'd still need to resolve
+// deltas to discover the resolved type. The ctx parameter is honored
+// per packReader.Get call.
+func Build(ctx context.Context, packReader *pack.Reader, tips []Tip) ([]byte, error) {
 	var commits []Record
 	if err := packReader.ForEach(func(oid pack.OID, off uint64) error {
-		obj, err := packReader.Get(context.Background(), oid)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		obj, err := packReader.Get(ctx, oid)
 		if err != nil {
 			return err
 		}
@@ -83,6 +91,18 @@ func build(commits []Record, tips []Tip) ([]byte, error) {
 		if len(c.Parents) > maxParents {
 			return nil, fmt.Errorf("commitgraph: %s has %d parents (max %d)",
 				c.OID, len(c.Parents), maxParents)
+		}
+	}
+
+	// Validate tips: every tip's OID must be in the commit set.
+	commitSet := make(map[pack.OID]struct{}, len(commits))
+	for _, c := range commits {
+		commitSet[c.OID] = struct{}{}
+	}
+	for _, t := range tips {
+		if _, ok := commitSet[t.OID]; !ok {
+			return nil, fmt.Errorf("commitgraph: tip %s -> %s not in commit set",
+				t.Ref, t.OID)
 		}
 	}
 
