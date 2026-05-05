@@ -376,7 +376,7 @@ func TestResolveObject_RejectsOfsDeltaBaseNotInIdx(t *testing.T) {
 	syn := make([]byte, 200)
 	syn[50] = 0x60
 	syn[51] = 13
-	if _, err := resolveObjectRec(bytes.NewReader(syn), idx, 50, 64, nil); err == nil {
+	if _, err := resolveObjectRec(bytes.NewReader(syn), idx, 50, 64, nil, nil); err == nil {
 		t.Fatalf("expected ofs-delta base-not-in-idx rejection")
 	}
 }

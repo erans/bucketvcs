@@ -321,6 +321,44 @@ func TestReader_Get_RejectsIDXOIDMismatch(t *testing.T) {
 	_ = realOID // silence unused
 }
 
+func TestReader_GetCacheImmuneToCallerMutation(t *testing.T) {
+	prefix, id, _ := makeOnePackRepo(t)
+	store := newTestStore(t)
+	uploadFile(t, store, prefix+"-"+id+".pack", "p.pack")
+	uploadFile(t, store, prefix+"-"+id+".idx", "p.idx")
+	r, err := Open(context.Background(), store, "p.pack", "p.idx")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer r.Close()
+	if r.Idx().Count() == 0 {
+		t.Skip("empty fixture")
+	}
+	oid := r.Idx().OIDAt(0)
+	a, err := r.Get(context.Background(), oid)
+	if err != nil {
+		t.Fatalf("Get a: %v", err)
+	}
+	originalLen := len(a.Data)
+	// Mutate caller's copy in-place.
+	for i := range a.Data {
+		a.Data[i] ^= 0xff
+	}
+	// Re-fetch — should be unaffected by the mutation above.
+	b, err := r.Get(context.Background(), oid)
+	if err != nil {
+		t.Fatalf("Get b: %v", err)
+	}
+	if len(b.Data) != originalLen {
+		t.Fatalf("len: got %d, want %d", len(b.Data), originalLen)
+	}
+	// Hash b again to verify; if cache was poisoned, hashGitObject would mismatch.
+	gotHash := hashGitObject(b.Type, b.Data)
+	if gotHash != oid {
+		t.Fatalf("cache was poisoned: rehash %s != oid %s", gotHash, oid)
+	}
+}
+
 func TestObjectCache_SkipsLargeObjects(t *testing.T) {
 	c := newObjectCache(10, 100) // max 100 bytes per entry
 	// Object below threshold caches.

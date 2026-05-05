@@ -166,12 +166,15 @@ func (r *Reader) Get(ctx context.Context, oid OID) (*Object, error) {
 		return nil, fmt.Errorf("pack: oid %s not in idx", oid)
 	}
 	if obj, hit := r.objCache.get(off); hit {
-		return obj, nil
+		// Defensive copy: callers may mutate Data despite the read-only
+		// contract, and the cache must never serve poisoned bytes.
+		out := &Object{Type: obj.Type, Size: obj.Size, Data: append([]byte(nil), obj.Data...)}
+		return out, nil
 	}
 	// Build a per-call StoreSource so the call's ctx (not Open's)
 	// governs range reads. This is essentially free (4-field struct).
 	src := NewStoreSource(ctx, r.store, r.packKey, r.packSize)
-	obj, err := resolveObject(src, r.idx, off, r.chainCap)
+	obj, err := resolveObjectRec(src, r.idx, off, r.chainCap, nil, r.objCache)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +183,11 @@ func (r *Reader) Get(ctx context.Context, oid OID) (*Object, error) {
 		return nil, fmt.Errorf("%w: oid %s resolves to body hashing to %s",
 			ErrPackCorrupt, oid, got)
 	}
-	r.objCache.put(off, obj)
+	// Cache a snapshot so subsequent caller mutations don't poison the entry.
+	// resolveObjectRec already cached non-delta bases; this covers the
+	// top-level object (delta-resolved or not).
+	cached := &Object{Type: obj.Type, Size: obj.Size, Data: append([]byte(nil), obj.Data...)}
+	r.objCache.put(off, cached)
 	return obj, nil
 }
 

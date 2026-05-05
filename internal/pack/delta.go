@@ -139,17 +139,23 @@ func readSizeVarint(r io.ByteReader) (uint64, error) {
 	}
 }
 
-// resolveObject reads, decompresses, and (recursively) un-deltas the
-// object at off in the pack. maxDepth bounds the chain length; visited
-// detects cycles so that pathological packs surface as ErrPackCorrupt
-// rather than ErrDeltaChainTooDeep.
+// resolveObject is the public entry point used by Reader.Get and tests.
+// The cache is optional; pass nil to disable.
 func resolveObject(r io.ReaderAt, idx *Idx, off uint64, maxDepth int) (*Object, error) {
-	return resolveObjectRec(r, idx, off, maxDepth, nil)
+	return resolveObjectRec(r, idx, off, maxDepth, nil, nil)
 }
 
-func resolveObjectRec(r io.ReaderAt, idx *Idx, off uint64, maxDepth int, visited map[uint64]struct{}) (*Object, error) {
+func resolveObjectRec(r io.ReaderAt, idx *Idx, off uint64, maxDepth int,
+	visited map[uint64]struct{}, cache *objectCache) (*Object, error) {
 	if _, seen := visited[off]; seen {
 		return nil, fmt.Errorf("%w: delta cycle at offset %d", ErrPackCorrupt, off)
+	}
+	if cache != nil {
+		if obj, hit := cache.get(off); hit {
+			// Defensive copy so the recursive caller (which may mutate
+			// e.g. via applyDelta) doesn't poison the cache.
+			return &Object{Type: obj.Type, Size: obj.Size, Data: append([]byte(nil), obj.Data...)}, nil
+		}
 	}
 	hdr, err := readObjectHeader(r, int64(off))
 	if err != nil {
@@ -162,7 +168,11 @@ func resolveObjectRec(r io.ReaderAt, idx *Idx, off uint64, maxDepth int, visited
 		if err != nil {
 			return nil, err
 		}
-		return &Object{Type: hdr.Type, Size: int64(len(body)), Data: body}, nil
+		obj := &Object{Type: hdr.Type, Size: int64(len(body)), Data: body}
+		if cache != nil {
+			cache.put(off, &Object{Type: obj.Type, Size: obj.Size, Data: append([]byte(nil), obj.Data...)})
+		}
+		return obj, nil
 	case typeOFSDelta:
 		// Each delta hop consumes one unit of depth budget.
 		if maxDepth <= 0 {
@@ -177,7 +187,7 @@ func resolveObjectRec(r io.ReaderAt, idx *Idx, off uint64, maxDepth int, visited
 			visited = make(map[uint64]struct{})
 		}
 		visited[off] = struct{}{}
-		base, err := resolveObjectRec(r, idx, uint64(hdr.BaseOffset), maxDepth-1, visited)
+		base, err := resolveObjectRec(r, idx, uint64(hdr.BaseOffset), maxDepth-1, visited, cache)
 		if err != nil {
 			return nil, err
 		}
@@ -206,7 +216,7 @@ func resolveObjectRec(r io.ReaderAt, idx *Idx, off uint64, maxDepth int, visited
 			visited = make(map[uint64]struct{})
 		}
 		visited[off] = struct{}{}
-		base, err := resolveObjectRec(r, idx, baseOff, maxDepth-1, visited)
+		base, err := resolveObjectRec(r, idx, baseOff, maxDepth-1, visited, cache)
 		if err != nil {
 			return nil, err
 		}

@@ -72,10 +72,10 @@ func (t ObjectType) String() string {
 
 // Object is a fully-resolved Git object: deltas applied, payload inflated.
 //
-// Data ownership: callers MUST treat Object.Data as read-only. The bytes
-// may alias buffers owned by a Reader's internal cache (used to share
-// delta-base objects across Get calls). Copy before mutating or
-// retaining beyond a single call.
+// Data is owned by the caller; mutation is permitted. The Reader's
+// internal cache holds a separate snapshot, so caller mutations cannot
+// poison subsequent Get calls. (Earlier M2 drafts required Data to be
+// treated as read-only; that contract is no longer needed for safety.)
 type Object struct {
 	Type ObjectType
 	Size int64  // length of Data; matches `git cat-file -s` semantics
