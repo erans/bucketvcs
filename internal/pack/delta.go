@@ -148,9 +148,6 @@ func resolveObject(r io.ReaderAt, idx *Idx, off uint64, maxDepth int) (*Object, 
 }
 
 func resolveObjectRec(r io.ReaderAt, idx *Idx, off uint64, maxDepth int, visited map[uint64]struct{}) (*Object, error) {
-	if maxDepth <= 0 {
-		return nil, ErrDeltaChainTooDeep
-	}
 	if _, seen := visited[off]; seen {
 		return nil, fmt.Errorf("%w: delta cycle at offset %d", ErrPackCorrupt, off)
 	}
@@ -160,12 +157,17 @@ func resolveObjectRec(r io.ReaderAt, idx *Idx, off uint64, maxDepth int, visited
 	}
 	switch hdr.Type {
 	case TypeCommit, TypeTree, TypeBlob, TypeTag:
+		// Non-delta bases never consume depth budget.
 		body, err := inflateAt(r, int64(off)+hdr.HeaderLen, hdr.Size)
 		if err != nil {
 			return nil, err
 		}
 		return &Object{Type: hdr.Type, Size: int64(len(body)), Data: body}, nil
 	case typeOFSDelta:
+		// Each delta hop consumes one unit of depth budget.
+		if maxDepth <= 0 {
+			return nil, ErrDeltaChainTooDeep
+		}
 		if !idx.HasOffset(uint64(hdr.BaseOffset)) {
 			return nil, fmt.Errorf("%w: ofs-delta base offset %d not an object in idx",
 				ErrPackCorrupt, hdr.BaseOffset)
@@ -189,6 +191,10 @@ func resolveObjectRec(r io.ReaderAt, idx *Idx, off uint64, maxDepth int, visited
 		}
 		return &Object{Type: base.Type, Size: int64(len(out)), Data: out}, nil
 	case typeREFDelta:
+		// Each delta hop consumes one unit of depth budget.
+		if maxDepth <= 0 {
+			return nil, ErrDeltaChainTooDeep
+		}
 		baseOff, ok := idx.Lookup(hdr.BaseOID)
 		if !ok {
 			return nil, fmt.Errorf("%w: ref-delta base %s not in pack", ErrPackCorrupt, hdr.BaseOID)

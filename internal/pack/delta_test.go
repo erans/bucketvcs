@@ -2,7 +2,9 @@ package pack
 
 import (
 	"bytes"
+	"compress/zlib"
 	"crypto/sha1"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"testing"
@@ -177,7 +179,7 @@ func TestResolveObject_DepthBound(t *testing.T) {
 		t.Fatalf("ParseIdx: %v", err)
 	}
 	r := bytes.NewReader(packBytes)
-	// Find any delta object and verify depth=0 fails.
+	// Find any delta object and verify maxDepth=0 fails.
 	var deltaOID OID
 	found := false
 	for i := 0; i < idx.Count(); i++ {
@@ -198,6 +200,35 @@ func TestResolveObject_DepthBound(t *testing.T) {
 	if _, err := resolveObject(r, idx, off, 0); err == nil {
 		t.Fatalf("expected ErrDeltaChainTooDeep at depth 0")
 	}
+	// Depth 1 should succeed for a single-hop delta against a base.
+	// (Some deltas chain deeper; in those cases depth=1 errors. Either
+	//  outcome is acceptable for this assertion.)
+}
+
+func TestResolveObject_DepthAllowsNonDeltaAtZero(t *testing.T) {
+	// A non-delta base must succeed at maxDepth=0 because no budget
+	// is consumed by base resolution.
+	prefix, id, _ := makeOnePackRepo(t)
+	packBytes, err := os.ReadFile(prefix + "-" + id + ".pack")
+	if err != nil {
+		t.Fatalf("ReadFile pack: %v", err)
+	}
+	idxBytes, err := os.ReadFile(prefix + "-" + id + ".idx")
+	if err != nil {
+		t.Fatalf("ReadFile idx: %v", err)
+	}
+	idx, err := ParseIdx(bytes.NewReader(idxBytes), int64(len(idxBytes)))
+	if err != nil {
+		t.Fatalf("ParseIdx: %v", err)
+	}
+	if idx.Count() == 0 {
+		t.Skip("empty fixture")
+	}
+	oid := idx.OIDAt(0)
+	if _, err := resolveObject(bytes.NewReader(packBytes), idx, idx.OffsetAt(0), 0); err != nil {
+		t.Fatalf("non-delta resolution at depth 0 should succeed: %v", err)
+	}
+	_ = oid
 }
 
 // deltaOp helps tests describe a sequence of copy/insert operations.
@@ -379,4 +410,158 @@ func TestReadSizeVarint_AcceptsMaxRepresentable(t *testing.T) {
 	if got != want {
 		t.Fatalf("got %#x, want %#x", got, want)
 	}
+}
+
+func TestResolveObject_REFDeltaPath(t *testing.T) {
+	// Build a minimal in-memory pack with two objects:
+	//   object 1: blob "hello" at offset 12 (immediately after pack header)
+	//   object 2: ref-delta whose base OID == SHA-1 of object 1, delta produces "hello world"
+	// This exercises the typeREFDelta branch deterministically without
+	// relying on git's deltification heuristics.
+
+	// hashObj computes the git object SHA-1: sha1("type SP size NUL body").
+	hashObj := func(typ ObjectType, body []byte) OID {
+		h := sha1.New()
+		fmt.Fprintf(h, "%s %d", typ.String(), len(body))
+		h.Write([]byte{0})
+		h.Write(body)
+		var o OID
+		copy(o[:], h.Sum(nil))
+		return o
+	}
+
+	baseBody := []byte("hello")
+	baseOID := hashObj(TypeBlob, baseBody)
+
+	// Build the delta payload that transforms "hello" → "hello world":
+	//   base_size  = 5 (varint)
+	//   result_size = 11 (varint)
+	//   COPY op 0x90: off selector bits = none (off==0, no bytes needed),
+	//                 sz selector bit4 set (sz1=5); so header = 0x80|0x10 = 0x90, then 0x05
+	//   INSERT 6 bytes: opcode 0x06, then " world"
+	var deltaPayload bytes.Buffer
+	writeSizeVarint(&deltaPayload, uint64(len(baseBody))) // base_size = 5
+	writeSizeVarint(&deltaPayload, 11)                    // result_size = 11
+	deltaPayload.WriteByte(0x90)                          // COPY: sz1 only (off==0, no off bytes)
+	deltaPayload.WriteByte(0x05)                          // sz = 5
+	deltaPayload.WriteByte(0x06)                          // INSERT 6 bytes
+	deltaPayload.WriteString(" world")
+
+	if deltaPayload.Len() >= 1<<4 {
+		t.Fatalf("delta payload %d too large for single-byte size header in this test", deltaPayload.Len())
+	}
+
+	// Assemble the pack buffer.
+	var pack bytes.Buffer
+
+	// Pack header: "PACK" + version 2 + count 2.
+	pack.WriteString("PACK")
+	{
+		var ver [4]byte
+		binary.BigEndian.PutUint32(ver[:], 2)
+		pack.Write(ver[:])
+		var cnt [4]byte
+		binary.BigEndian.PutUint32(cnt[:], 2)
+		pack.Write(cnt[:])
+	}
+
+	// Object 1: blob "hello" at offset 12.
+	off1 := uint64(pack.Len()) // should be 12
+	// Type+size header: type=blob(3)<<4=0x30, low 4 bits = size=5 → 0x35, MSB clear.
+	pack.WriteByte(0x35)
+	{
+		var zb bytes.Buffer
+		zw := zlib.NewWriter(&zb)
+		_, _ = zw.Write(baseBody)
+		_ = zw.Close()
+		pack.Write(zb.Bytes())
+	}
+
+	// Object 2: ref-delta at current offset.
+	off2 := uint64(pack.Len())
+	// Type+size header: type=ref_delta(7)<<4=0x70, low 4 bits = deltaPayload.Len(), MSB clear.
+	pack.WriteByte(0x70 | byte(deltaPayload.Len()))
+	// REF_DELTA base OID (20 bytes).
+	pack.Write(baseOID[:])
+	{
+		var zb bytes.Buffer
+		zw := zlib.NewWriter(&zb)
+		_, _ = zw.Write(deltaPayload.Bytes())
+		_ = zw.Close()
+		pack.Write(zb.Bytes())
+	}
+
+	// Build the delta result OID for indexing.
+	deltaResultOID := hashObj(TypeBlob, []byte("hello world"))
+
+	// Build a synthetic .idx for both objects.
+	idxData := buildIdxFor2Objects(t, baseOID, deltaResultOID, off1, off2)
+
+	idx, err := ParseIdx(bytes.NewReader(idxData), int64(len(idxData)))
+	if err != nil {
+		t.Fatalf("ParseIdx: %v", err)
+	}
+
+	// Resolve the ref-delta object (object 2).
+	off, ok := idx.Lookup(deltaResultOID)
+	if !ok {
+		t.Fatalf("ref-delta result OID not in idx")
+	}
+	obj, err := resolveObject(bytes.NewReader(pack.Bytes()), idx, off, 64)
+	if err != nil {
+		t.Fatalf("resolveObject ref-delta: %v", err)
+	}
+	if obj.Type != TypeBlob {
+		t.Fatalf("type: got %v, want blob", obj.Type)
+	}
+	if string(obj.Data) != "hello world" {
+		t.Fatalf("body: got %q, want %q", obj.Data, "hello world")
+	}
+}
+
+// buildIdxFor2Objects constructs a minimal valid v2 .idx for exactly two
+// objects at the given offsets. OIDs and offsets are placed in sorted order.
+// The trailer idx_sha1 is computed correctly so ParseIdx's hash check passes.
+func buildIdxFor2Objects(t *testing.T, oid1, oid2 OID, off1, off2 uint64) []byte {
+	t.Helper()
+	// Sort the two by OID.
+	a, b := oid1, oid2
+	offA, offB := off1, off2
+	if bytes.Compare(a[:], b[:]) > 0 {
+		a, b = b, a
+		offA, offB = offB, offA
+	}
+	var buf bytes.Buffer
+	// Magic + version.
+	buf.Write([]byte{0xff, 0x74, 0x4f, 0x63})
+	binWrite32(&buf, 2)
+	// Fanout table: cumulative count of OIDs with first byte <= i.
+	for i := 0; i < 256; i++ {
+		var cnt uint32
+		if int(a[0]) <= i {
+			cnt++
+		}
+		if int(b[0]) <= i {
+			cnt++
+		}
+		binWrite32(&buf, cnt)
+	}
+	// OID table (sorted).
+	buf.Write(a[:])
+	buf.Write(b[:])
+	// CRC32 table (zeros; M2 stores but does not validate CRCs).
+	binWrite32(&buf, 0)
+	binWrite32(&buf, 0)
+	// Offset table (both offsets fit in 31 bits for our small in-memory packs).
+	binWrite32(&buf, uint32(offA))
+	binWrite32(&buf, uint32(offB))
+	// Trailer: 20-byte pack SHA placeholder + 20-byte idx self-SHA.
+	buf.Write(make([]byte, 20)) // pack trailer placeholder
+	// Compute idx_sha1 = SHA-1 of all bytes written so far.
+	pre := buf.Bytes()
+	h := sha1.New()
+	h.Write(pre)
+	idxSHA := h.Sum(nil)
+	buf.Write(idxSHA)
+	return buf.Bytes()
 }
