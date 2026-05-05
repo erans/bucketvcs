@@ -279,8 +279,26 @@ func Import(ctx context.Context, store storage.ObjectStore, opts Options) (*Resu
 		return nil, err
 	}
 
-	// Step 6: upload (PutIfAbsent) in order: pack, idx, .bvom, .bvcg.
-	// Skip uploads if the repo is empty (no pack).
+	// Step 7a: claim the repo via Create BEFORE uploading anything.
+	// This way ErrRepoExists fires before we waste pack uploads.
+	defaultBranch := opts.DefaultBranch
+	if defaultBranch == "" {
+		defaultBranch = prep.DefaultBranch
+	}
+	if defaultBranch == "" {
+		defaultBranch = "refs/heads/main"
+	}
+	r, err := repo.Create(ctx, store, opts.Tenant, opts.Repo, repo.CreateOptions{
+		DefaultBranch: defaultBranch,
+		ObjectFormat:  "sha1",
+		Actor:         opts.Actor,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Step 6: now that we own the repo, upload (PutIfAbsent) in order:
+	// pack, idx, .bvom, .bvcg. Skip uploads if the repo is empty.
 	var packs []manifest.PackEntry
 	indexes := manifest.Indexes{}
 	if prep.PackID != "" {
@@ -311,23 +329,7 @@ func Import(ctx context.Context, store storage.ObjectStore, opts Options) (*Resu
 		}
 	}
 
-	// Step 7: Create + Commit.
-	defaultBranch := opts.DefaultBranch
-	if defaultBranch == "" {
-		defaultBranch = prep.DefaultBranch
-	}
-	if defaultBranch == "" {
-		defaultBranch = "refs/heads/main"
-	}
-	r, err := repo.Create(ctx, store, opts.Tenant, opts.Repo, repo.CreateOptions{
-		DefaultBranch: defaultBranch,
-		ObjectFormat:  "sha1",
-		Actor:         opts.Actor,
-	})
-	if err != nil {
-		return nil, err
-	}
-
+	// Step 7b: Commit the body.
 	body := manifest.Body{
 		DefaultBranch: defaultBranch,
 		Refs:          prep.Refs,
@@ -351,7 +353,10 @@ func Import(ctx context.Context, store storage.ObjectStore, opts Options) (*Resu
 		if jerr := json.Unmarshal(prev.Body, &existingBody); jerr != nil {
 			return nil, fmt.Errorf("importer: unmarshal prev body: %w", jerr)
 		}
+		// Include Bundles in the populated-body check so a version-1 body
+		// with bundles is correctly rejected.
 		if len(existingBody.Refs) > 0 || len(existingBody.Packs) > 0 ||
+			len(existingBody.Bundles) > 0 ||
 			existingBody.Indexes.ObjectMap != nil || existingBody.Indexes.CommitGraph != nil {
 			return nil, fmt.Errorf("importer: concurrent writer populated body before import Commit")
 		}

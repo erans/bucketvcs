@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/gitcli"
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	"github.com/bucketvcs/bucketvcs/internal/repo/repoerrs"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 )
@@ -264,8 +266,12 @@ func TestImport_RejectsExistingRepo(t *testing.T) {
 	if _, err := Import(context.Background(), store, Options{SourceDir: src, Tenant: "t", Repo: "r"}); err != nil {
 		t.Fatalf("first Import: %v", err)
 	}
-	if _, err := Import(context.Background(), store, Options{SourceDir: src, Tenant: "t", Repo: "r"}); err == nil {
+	_, err := Import(context.Background(), store, Options{SourceDir: src, Tenant: "t", Repo: "r"})
+	if err == nil {
 		t.Fatalf("second Import should fail with ErrRepoExists")
+	}
+	if !errors.Is(err, repoerrs.ErrRepoExists) {
+		t.Fatalf("expected ErrRepoExists in error chain, got %v", err)
 	}
 }
 
@@ -316,14 +322,17 @@ func TestImport_RejectsRealConflict(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("first Import: %v", err)
 	}
-	// Second import: pack key already exists (same pack_id from same source),
-	// so uploadFile returns ErrAlreadyExists which surfaces as an error.
-	// Even if the pack happened to differ, repo.Create would return ErrRepoExists.
-	// Either way, a second Import on an existing repo must fail.
-	if _, err := Import(context.Background(), store, Options{
+	// Second import: repo.Create fires before any upload attempt, so the
+	// error is ErrRepoExists rather than a storage.ErrAlreadyExists from
+	// a wasted pack upload.
+	_, err := Import(context.Background(), store, Options{
 		SourceDir: src, Tenant: "t", Repo: "r",
-	}); err == nil {
+	})
+	if err == nil {
 		t.Fatalf("expected error on real conflict")
+	}
+	if !errors.Is(err, repoerrs.ErrRepoExists) {
+		t.Fatalf("expected ErrRepoExists in error chain, got %v", err)
 	}
 }
 
