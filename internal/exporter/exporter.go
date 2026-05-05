@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/bucketvcs/bucketvcs/internal/gitcli"
 	"github.com/bucketvcs/bucketvcs/internal/repo"
@@ -121,11 +122,19 @@ func requireEmptyDir(p string) error {
 // downloadAndIndexPack copies the .pack from store into dest's objects/pack/
 // and runs git index-pack to (re)build the .idx.
 func downloadAndIndexPack(ctx context.Context, store storage.ObjectStore, p manifest.PackEntry, destDir string) (int, error) {
+	if !validPackID(p.PackID) {
+		return 0, fmt.Errorf("exporter: invalid PackID %q (want 40-char lowercase hex)", p.PackID)
+	}
 	packDir := filepath.Join(destDir, "objects", "pack")
 	if err := os.MkdirAll(packDir, 0o755); err != nil {
 		return 0, err
 	}
 	dstPack := filepath.Join(packDir, "pack-"+p.PackID+".pack")
+	// Defense-in-depth: verify dstPack is still under packDir after cleaning.
+	cleaned := filepath.Clean(dstPack)
+	if !strings.HasPrefix(cleaned, filepath.Clean(packDir)+string(filepath.Separator)) {
+		return 0, fmt.Errorf("exporter: pack path escapes packDir: %s", cleaned)
+	}
 
 	obj, err := store.Get(ctx, p.PackKey, nil)
 	if err != nil {
@@ -151,4 +160,18 @@ func downloadAndIndexPack(ctx context.Context, store storage.ObjectStore, p mani
 		return 0, fmt.Errorf("exporter: index-pack: %w", err)
 	}
 	return p.ObjectCount, nil
+}
+
+// validPackID reports whether s is a 40-character lowercase hex string.
+func validPackID(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
 }

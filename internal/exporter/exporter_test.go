@@ -8,6 +8,9 @@ import (
 
 	"github.com/bucketvcs/bucketvcs/internal/gitcli"
 	"github.com/bucketvcs/bucketvcs/internal/importer"
+	"github.com/bucketvcs/bucketvcs/internal/repo"
+	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	"github.com/bucketvcs/bucketvcs/internal/repo/tx"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 )
@@ -152,5 +155,48 @@ func TestExport_DefaultRunsFsck(t *testing.T) {
 	}
 	if !res.FsckOK {
 		t.Fatalf("FsckOK should be true with default options")
+	}
+}
+
+func TestExport_RejectsMalformedPackID(t *testing.T) {
+	// Build a synthetic manifest body with a malformed PackID, write it
+	// directly to storage, then attempt export.
+	store := newTestStore(t)
+	// Use repo.Create to set up a valid version-1 root, then Commit a
+	// body with an evil PackID.
+	r, err := repo.Create(context.Background(), store, "t", "r", repo.CreateOptions{
+		DefaultBranch: "refs/heads/main",
+		ObjectFormat:  "sha1",
+		Actor:         "test",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	body := manifest.Body{
+		DefaultBranch: "refs/heads/main",
+		Refs:          map[string]string{},
+		Packs: []manifest.PackEntry{{
+			PackID:      "../../etc/passwd",
+			PackKey:     "bogus",
+			IdxKey:      "bogus",
+			SizeBytes:   1,
+			ObjectCount: 1,
+		}},
+		Indexes: manifest.Indexes{},
+	}
+	bodyBytes, err := manifest.MarshalBody(body)
+	if err != nil {
+		t.Fatalf("MarshalBody: %v", err)
+	}
+	if _, err := r.Commit(context.Background(), tx.Body{Type: "test", Actor: "test"},
+		func(prev *repo.RootView) ([]byte, error) { return bodyBytes, nil }); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	dst := filepath.Join(t.TempDir(), "out")
+	_, err = Export(context.Background(), store, Options{
+		Tenant: "t", Repo: "r", DestDir: dst, SkipFsck: true,
+	})
+	if err == nil {
+		t.Fatalf("expected rejection of malformed PackID")
 	}
 }
