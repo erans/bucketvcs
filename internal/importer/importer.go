@@ -99,12 +99,10 @@ func prepareLocalPack(ctx context.Context, sourceDir, wantDefaultBranch string) 
 			if sErr != nil {
 				return nil, fmt.Errorf("importer: pre-synth show-ref: %w", sErr)
 			}
-			if existingOID, exists := existingRefs[wantDefaultBranch]; exists {
-				if existingOID != headOID {
-					return nil, fmt.Errorf("importer: detached HEAD synthesis: %s exists at %s, want %s",
-						wantDefaultBranch, existingOID, headOID)
-				}
-				// Already exists pointing at HEAD; nothing to do.
+			if _, exists := existingRefs[wantDefaultBranch]; exists {
+				// Caller's DefaultBranch already exists in the source.
+				// Leave it as the source author intended; we will use it
+				// for HEAD downstream rather than synthesizing.
 			} else {
 				if err := gitcli.UpdateRef(ctx, bare, wantDefaultBranch, headOID); err != nil {
 					return nil, fmt.Errorf("importer: synthesize ref %s -> %s: %w", wantDefaultBranch, headOID, err)

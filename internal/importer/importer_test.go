@@ -536,7 +536,9 @@ func TestImport_DetachedHEADRefAlreadyAtSameOID(t *testing.T) {
 	skipIfNoGit(t)
 	src := makeSrcRepo(t)
 	// Find the existing ref OID, set HEAD to that OID (raw), keep the
-	// existing ref. Now HEAD is "detached" but pointing at refs/heads/main.
+	// existing ref. Now HEAD is "detached" but refs/heads/main still exists.
+	// The importer must leave refs/heads/main unchanged (no-op branch), even
+	// though HEAD's OID matches, rather than erroring or synthesizing.
 	refs, err := gitcli.ShowRef(context.Background(), src)
 	if err != nil {
 		t.Fatalf("ShowRef: %v", err)
@@ -553,10 +555,10 @@ func TestImport_DetachedHEADRefAlreadyAtSameOID(t *testing.T) {
 	store := newTestStore(t)
 	res, err := Import(context.Background(), store, Options{
 		SourceDir: src, Tenant: "t", Repo: "r",
-		DefaultBranch: "refs/heads/main", // matches the existing ref + same OID
+		DefaultBranch: "refs/heads/main", // already exists in source; left alone (no-op)
 	})
 	if err != nil {
-		t.Fatalf("Import detached-HEAD with already-pointing branch: %v", err)
+		t.Fatalf("Import detached-HEAD with already-existing branch: %v", err)
 	}
 	if res.PackID == "" {
 		t.Fatalf("expected pack")
