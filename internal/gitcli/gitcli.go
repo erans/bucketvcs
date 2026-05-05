@@ -229,19 +229,20 @@ func PackObjectsAll(ctx context.Context, dir, outPrefix string) (string, error) 
 		_ = pw.Close()
 		return "", fmt.Errorf("gitcli: PackObjectsAll: pack start: %w", err)
 	}
+	// pack now owns its own dup of pr; close the parent's copy so when
+	// pack exits the read side is fully closed (lets rev-list get SIGPIPE
+	// if pack dies first).
+	_ = pr.Close()
 	if err := revList.Start(); err != nil {
-		_ = pr.Close()
 		_ = pw.Close()
 		_ = pack.Wait()
 		return "", fmt.Errorf("gitcli: PackObjectsAll: rev-list start: %w", err)
 	}
-	// Wait for rev-list, THEN close the writer end so pack-objects
-	// sees EOF on its stdin. pack-objects can finish draining its
-	// kernel buffer before we close.
+	// rev-list now owns its own dup of pw; close the parent's copy so
+	// when rev-list exits the write side is fully closed and pack sees EOF.
+	_ = pw.Close()
 	rlErr := revList.Wait()
-	_ = pw.Close() // signal EOF to pack-objects
 	packErr := pack.Wait()
-	_ = pr.Close() // pack-objects no longer needs its stdin
 
 	if rlErr != nil {
 		return "", fmt.Errorf("gitcli: PackObjectsAll: rev-list: %w: stderr=%q",
