@@ -266,3 +266,17 @@ func TestExport_RejectsMalformedRefOID(t *testing.T) {
 		t.Fatalf("expected rejection of malformed ref OID")
 	}
 }
+
+func TestExport_AcceptsDashPrefixedDest(t *testing.T) {
+	store, _ := makeAndImport(t)
+	parent := t.TempDir()
+	dst := filepath.Join(parent, "-out") // name starts with dash
+	if _, err := Export(context.Background(), store, Options{
+		Tenant: "acme", Repo: "x", DestDir: dst, SkipFsck: true,
+	}); err != nil {
+		t.Fatalf("Export to dash-prefixed dest: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "objects")); err != nil {
+		t.Fatalf("expected objects/ in dst: %v", err)
+	}
+}

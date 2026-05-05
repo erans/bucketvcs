@@ -159,7 +159,11 @@ func downloadAndIndexPack(ctx context.Context, store storage.ObjectStore, p mani
 	if err := out.Close(); err != nil {
 		return 0, err
 	}
-	if err := gitcli.IndexPack(ctx, destDir, dstPack); err != nil {
+	absPack, err := filepath.Abs(dstPack)
+	if err != nil {
+		return 0, fmt.Errorf("exporter: abs path: %w", err)
+	}
+	if err := gitcli.IndexPack(ctx, destDir, absPack); err != nil {
 		return 0, fmt.Errorf("exporter: index-pack: %w", err)
 	}
 	return p.ObjectCount, nil

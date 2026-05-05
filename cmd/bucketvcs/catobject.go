@@ -131,6 +131,55 @@ func runCatObject(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	return 0
 }
 
+// quotePath formats a tree entry pathname the way `git cat-file -p`
+// does. Names with control bytes, tabs, newlines, quotes, or high-bit
+// bytes are wrapped in double quotes and C-escaped; "safe" names pass
+// through unchanged.
+func quotePath(b []byte) string {
+	needsQuote := false
+	for _, c := range b {
+		if c < 0x20 || c == '"' || c == '\\' || c >= 0x80 {
+			needsQuote = true
+			break
+		}
+	}
+	if !needsQuote {
+		return string(b)
+	}
+	var buf bytes.Buffer
+	buf.WriteByte('"')
+	for _, c := range b {
+		switch c {
+		case '\a':
+			buf.WriteString(`\a`)
+		case '\b':
+			buf.WriteString(`\b`)
+		case '\t':
+			buf.WriteString(`\t`)
+		case '\n':
+			buf.WriteString(`\n`)
+		case '\v':
+			buf.WriteString(`\v`)
+		case '\f':
+			buf.WriteString(`\f`)
+		case '\r':
+			buf.WriteString(`\r`)
+		case '"':
+			buf.WriteString(`\"`)
+		case '\\':
+			buf.WriteString(`\\`)
+		default:
+			if c < 0x20 || c >= 0x80 {
+				fmt.Fprintf(&buf, `\%03o`, c)
+			} else {
+				buf.WriteByte(c)
+			}
+		}
+	}
+	buf.WriteByte('"')
+	return buf.String()
+}
+
 // prettyTree writes a tree object in `git cat-file -p` format:
 //
 //	<mode> SP <type> SP <oid> TAB <name> NL
@@ -169,7 +218,7 @@ func prettyTree(w io.Writer, data []byte) error {
 		for len(paddedMode) < 6 {
 			paddedMode = "0" + paddedMode
 		}
-		fmt.Fprintf(w, "%s %s %s\t%s\n", paddedMode, typ, oid, name)
+		fmt.Fprintf(w, "%s %s %s\t%s\n", paddedMode, typ, oid, quotePath(name))
 	}
 	return nil
 }
