@@ -249,16 +249,31 @@ func tagTarget(body []byte) (pack.OID, error) {
 
 // Import is the public entry point. See spec §3.6.
 //
-// Atomicity: a successful Import advances the manifest from version 1
-// (Create) to version 2 (this Import's Commit) atomically via M1's CAS.
-// If Import fails AFTER repo.Create but BEFORE Commit (e.g., process
-// kill, network partition during pack upload), the repo is left in an
-// inconsistent state with manifest_version=1 and an empty body. M2 does
-// NOT auto-recover from this — a subsequent Import call gets
-// ErrRepoExists from repo.Create and must be preceded by manual cleanup.
-// M8 GC sweeps orphan tx records and any partial pack/idx uploads.
+// Atomicity & failure semantics:
 //
-// Repos that already exist (any version) are rejected with ErrRepoExists.
+// Successful Import advances the manifest from version 1 (Create) to
+// version 2 (this Import's Commit) via M1's CAS. The order is:
+//  1. prepareLocalPack + buildIndexesLocal (local)
+//  2. repo.Create — claim the repo (atomic)
+//  3. Upload pack, idx, .bvom, .bvcg via PutIfAbsent
+//  4. repo.Commit — atomic CAS swap to the imported body
+//
+// Failure modes:
+//   - Step 1-2 failure: nothing visible in storage (no claim made).
+//   - Step 3 (upload) failure: repo is claimed at version 1 with empty
+//     body, plus any uploads that succeeded. Retrying Import with the
+//     same (tenant, repo) will hit ErrRepoExists. The orphaned repo
+//     and partial uploads must be cleaned up before retry. M8 GC will
+//     sweep tx records and uploads; an explicit `bucketvcs delete`
+//     command (M-later) will offer manual cleanup.
+//   - Step 4 (Commit) failure: same as step 3 — repo claimed, body
+//     remains empty.
+//
+// This is a known M2 limitation. A future iteration may add a single-
+// CAS create-with-body primitive in internal/repo to make Import
+// fully atomic.
+//
+// Repos that already exist (any version) return ErrRepoExists.
 func Import(ctx context.Context, store storage.ObjectStore, opts Options) (*Result, error) {
 	if opts.SourceDir == "" || opts.Tenant == "" || opts.Repo == "" {
 		return nil, fmt.Errorf("importer: SourceDir, Tenant, Repo required")

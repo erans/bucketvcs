@@ -152,6 +152,26 @@ func run(ctx context.Context, dir string, args ...string) ([]byte, error) {
 	return stdout.Bytes(), nil
 }
 
+// validRefOrOID reports whether s is a safe value to pass to git as a
+// ref name or object ID — i.e., it doesn't look like a flag and doesn't
+// contain whitespace. This is a defensive check against caller-supplied
+// strings that might begin with `-`.
+func validRefOrOID(s string) bool {
+	if s == "" {
+		return false
+	}
+	if s[0] == '-' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // Version returns the output of `git --version` (e.g. "git version 2.43.0").
 func Version(ctx context.Context) (string, error) {
 	out, err := run(ctx, "", "--version")
@@ -263,6 +283,9 @@ func PackObjectsAll(ctx context.Context, dir, outPrefix string) (string, error) 
 // IndexPack runs `git index-pack` against an existing .pack file,
 // producing the corresponding .idx alongside it.
 func IndexPack(ctx context.Context, dir, packPath string) error {
+	if packPath == "" || packPath[0] == '-' {
+		return fmt.Errorf("gitcli: IndexPack: invalid packPath %q", packPath)
+	}
 	_, err := run(ctx, dir, "index-pack", packPath)
 	return err
 }
@@ -307,13 +330,22 @@ func RunForTest(dir string, args ...string) ([]byte, error) {
 
 // UpdateRef runs `git update-ref <ref> <oid>` in dir.
 func UpdateRef(ctx context.Context, dir, ref, oid string) error {
-	_, err := run(ctx, dir, "update-ref", ref, oid)
+	if !validRefOrOID(ref) {
+		return fmt.Errorf("gitcli: UpdateRef: invalid ref %q", ref)
+	}
+	if !validRefOrOID(oid) {
+		return fmt.Errorf("gitcli: UpdateRef: invalid oid %q", oid)
+	}
+	_, err := run(ctx, dir, "update-ref", "--", ref, oid)
 	return err
 }
 
 // SymbolicRef returns the target of a symbolic ref (e.g. "HEAD").
 func SymbolicRef(ctx context.Context, dir, name string) (string, error) {
-	out, err := run(ctx, dir, "symbolic-ref", name)
+	if !validRefOrOID(name) {
+		return "", fmt.Errorf("gitcli: SymbolicRef: invalid ref name %q", name)
+	}
+	out, err := run(ctx, dir, "symbolic-ref", "--", name)
 	if err != nil {
 		return "", err
 	}
@@ -323,7 +355,13 @@ func SymbolicRef(ctx context.Context, dir, name string) (string, error) {
 // SymbolicRefSet sets the target of a symbolic ref (e.g. HEAD ->
 // refs/heads/main). target must be a full ref name.
 func SymbolicRefSet(ctx context.Context, dir, name, target string) error {
-	_, err := run(ctx, dir, "symbolic-ref", name, target)
+	if !validRefOrOID(name) {
+		return fmt.Errorf("gitcli: SymbolicRefSet: invalid name %q", name)
+	}
+	if !validRefOrOID(target) {
+		return fmt.Errorf("gitcli: SymbolicRefSet: invalid target %q", target)
+	}
+	_, err := run(ctx, dir, "symbolic-ref", "--", name, target)
 	return err
 }
 
@@ -391,12 +429,18 @@ func RevListAllObjects(ctx context.Context, dir string) ([]string, error) {
 // CatFilePretty returns the pretty-printed bytes for an object, matching
 // `git cat-file -p <oid>`.
 func CatFilePretty(ctx context.Context, dir, oid string) ([]byte, error) {
+	if !validRefOrOID(oid) {
+		return nil, fmt.Errorf("gitcli: CatFilePretty: invalid oid %q", oid)
+	}
 	return run(ctx, dir, "cat-file", "-p", oid)
 }
 
 // CatFileType returns the type ("commit", "tree", "blob", "tag") for an
 // object, matching `git cat-file -t <oid>`.
 func CatFileType(ctx context.Context, dir, oid string) (string, error) {
+	if !validRefOrOID(oid) {
+		return "", fmt.Errorf("gitcli: CatFileType: invalid oid %q", oid)
+	}
 	out, err := run(ctx, dir, "cat-file", "-t", oid)
 	if err != nil {
 		return "", err
@@ -407,6 +451,9 @@ func CatFileType(ctx context.Context, dir, oid string) (string, error) {
 // CatFileSize returns the size of an object's content, matching
 // `git cat-file -s <oid>`.
 func CatFileSize(ctx context.Context, dir, oid string) (int64, error) {
+	if !validRefOrOID(oid) {
+		return 0, fmt.Errorf("gitcli: CatFileSize: invalid oid %q", oid)
+	}
 	out, err := run(ctx, dir, "cat-file", "-s", oid)
 	if err != nil {
 		return 0, err

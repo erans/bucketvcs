@@ -594,3 +594,44 @@ func TestPackObjectsAll_RedactsCredsInStderr(t *testing.T) {
 		t.Fatalf("error message leaked credentials: %v", err)
 	}
 }
+
+func TestValidRefOrOID(t *testing.T) {
+	cases := map[string]bool{
+		"refs/heads/main":                          true,
+		"0123456789abcdef0123456789abcdef01234567": true,
+		"--config=foo":                             false,
+		"-rf":                                      false,
+		"":                                         false,
+		"with space":                               false,
+		"with\ttab":                                false,
+		"with\nnewline":                            false,
+	}
+	for in, want := range cases {
+		got := validRefOrOID(in)
+		if got != want {
+			t.Errorf("validRefOrOID(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestUpdateRef_RejectsDashRef(t *testing.T) {
+	skipIfNoGit(t)
+	dir := t.TempDir()
+	if err := InitBare(context.Background(), dir); err != nil {
+		t.Fatalf("InitBare: %v", err)
+	}
+	if err := UpdateRef(context.Background(), dir, "--config=foo", "0123456789abcdef0123456789abcdef01234567"); err == nil {
+		t.Fatalf("expected rejection of dash-prefixed ref")
+	}
+}
+
+func TestCatFile_RejectsDashOID(t *testing.T) {
+	skipIfNoGit(t)
+	dir := t.TempDir()
+	if err := InitBare(context.Background(), dir); err != nil {
+		t.Fatalf("InitBare: %v", err)
+	}
+	if _, err := CatFilePretty(context.Background(), dir, "--config=foo"); err == nil {
+		t.Fatalf("expected rejection of dash-prefixed oid")
+	}
+}
