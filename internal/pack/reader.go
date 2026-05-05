@@ -133,7 +133,27 @@ func (r *Reader) Has(oid OID) bool {
 	return ok
 }
 
+// hashGitObject returns the SHA-1 of (type SP size NUL body). Cheap helper
+// for Get's identity check; we don't expose it because the rule of thumb
+// is "consumers should call git's hash conventions through Object, not
+// reach for SHA-1 directly."
+func hashGitObject(typ ObjectType, body []byte) OID {
+	h := sha1.New()
+	fmt.Fprintf(h, "%s %d", typ.String(), len(body))
+	h.Write([]byte{0})
+	h.Write(body)
+	var o OID
+	copy(o[:], h.Sum(nil))
+	return o
+}
+
 // Get returns the fully-resolved object for oid, or an error.
+//
+// Verifies that the resolved object actually hashes to oid before
+// returning, defending against a corrupt .idx whose OID->offset
+// mapping points at the wrong pack content. Cache hits skip the
+// re-hash because the cached entry was verified at insertion time
+// against the same offset reached via the (verified) idx lookup.
 func (r *Reader) Get(ctx context.Context, oid OID) (*Object, error) {
 	off, ok := r.idx.Lookup(oid)
 	if !ok {
@@ -148,6 +168,11 @@ func (r *Reader) Get(ctx context.Context, oid OID) (*Object, error) {
 	obj, err := resolveObject(src, r.idx, off, r.chainCap)
 	if err != nil {
 		return nil, err
+	}
+	got := hashGitObject(obj.Type, obj.Data)
+	if got != oid {
+		return nil, fmt.Errorf("%w: oid %s resolves to body hashing to %s",
+			ErrPackCorrupt, oid, got)
 	}
 	r.objCache.put(off, obj)
 	return obj, nil

@@ -2,8 +2,10 @@ package pack
 
 import (
 	"bytes"
+	"compress/zlib"
 	"context"
 	"crypto/sha1"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
@@ -258,4 +260,90 @@ func (s *ctxCheckStore) GetRange(ctx context.Context, key string, start, end int
 		return nil, err
 	}
 	return s.ObjectStore.GetRange(ctx, key, start, end)
+}
+
+func TestReader_Get_RejectsIDXOIDMismatch(t *testing.T) {
+	// Build a minimal pack: one blob "hello".
+	body := []byte("hello")
+	realOID := hashGitObject(TypeBlob, body)
+
+	// Pack: header (12) + object header (1 byte: 0x35 = type=blob, size=5, no continuation)
+	// + zlib(body) + trailing 20-byte SHA-1 of (header+object data).
+	var pack bytes.Buffer
+	pack.WriteString("PACK")
+	{
+		var b [4]byte
+		binary.BigEndian.PutUint32(b[:], 2) // version
+		pack.Write(b[:])
+		binary.BigEndian.PutUint32(b[:], 1) // count
+		pack.Write(b[:])
+	}
+	pack.WriteByte(0x35)
+	{
+		var zb bytes.Buffer
+		zw := zlib.NewWriter(&zb)
+		zw.Write(body)
+		zw.Close()
+		pack.Write(zb.Bytes())
+	}
+	// Compute pack trailer = SHA-1 of all bytes so far.
+	trailer := sha1.Sum(pack.Bytes())
+	pack.Write(trailer[:])
+
+	// Now build a synthetic idx that LIES about the OID. Claim the blob
+	// at offset 12 has a different OID than `realOID`.
+	fakeOID := OID{0x42}
+	for i := 1; i < 20; i++ {
+		fakeOID[i] = 0x42
+	}
+
+	idxBytes := buildIdxLiar(t, fakeOID, 12, trailer)
+
+	store := newTestStore(t)
+	if _, err := store.PutIfAbsent(context.Background(), "p.pack", bytes.NewReader(pack.Bytes()), nil); err != nil {
+		t.Fatalf("Put pack: %v", err)
+	}
+	if _, err := store.PutIfAbsent(context.Background(), "p.idx", bytes.NewReader(idxBytes), nil); err != nil {
+		t.Fatalf("Put idx: %v", err)
+	}
+	r, err := Open(context.Background(), store, "p.pack", "p.idx")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer r.Close()
+
+	// Get(fakeOID) finds it in the idx, resolves to the real blob bytes,
+	// but the body hashes to realOID, not fakeOID. Must reject.
+	if _, err := r.Get(context.Background(), fakeOID); err == nil {
+		t.Fatalf("expected ErrPackCorrupt for idx OID-mismatch")
+	}
+
+	_ = realOID // silence unused
+}
+
+// buildIdxLiar constructs a single-entry .idx for the given (lying) OID
+// pointing at the given offset, with the given pack trailer SHA-1.
+func buildIdxLiar(t *testing.T, oid OID, offset uint32, packSHA [20]byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	buf.Write([]byte{0xff, 0x74, 0x4f, 0x63})
+	binWrite32(&buf, 2)
+	for i := 0; i < 256; i++ {
+		var cnt uint32
+		if oid[0] <= byte(i) {
+			cnt = 1
+		}
+		binWrite32(&buf, cnt)
+	}
+	buf.Write(oid[:])
+	binWrite32(&buf, 0) // crc
+	binWrite32(&buf, offset)
+	pre := append([]byte(nil), buf.Bytes()...)
+	buf.Write(packSHA[:])
+	// idx_self_sha
+	h := sha1.New()
+	h.Write(pre)
+	h.Write(packSHA[:])
+	buf.Write(h.Sum(nil))
+	return buf.Bytes()
 }
