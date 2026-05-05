@@ -21,14 +21,14 @@ import (
 type Options struct {
 	Tenant, Repo string
 	DestDir      string
-	RunFsck      bool
+	SkipFsck     bool // by default, fsck runs after materialization
 }
 
 // Result describes a successful export.
 type Result struct {
 	ManifestVersion uint64
 	ObjectCount     int
-	FsckOK          bool
+	FsckOK          bool // true if fsck ran and passed; false if SkipFsck or fsck failed
 }
 
 // ErrDestNotEmpty is returned when DestDir exists with content.
@@ -38,7 +38,7 @@ var ErrDestNotEmpty = errors.New("exporter: dest dir exists and is not empty")
 var ErrMissingObject = errors.New("exporter: bucket missing referenced object")
 
 // Export downloads packs/indexes from store, materializes a normal bare
-// git repo at DestDir, and (unless RunFsck=false) runs git fsck.
+// git repo at DestDir, and (unless SkipFsck is set) runs git fsck.
 func Export(ctx context.Context, store storage.ObjectStore, opts Options) (*Result, error) {
 	if opts.Tenant == "" || opts.Repo == "" || opts.DestDir == "" {
 		return nil, fmt.Errorf("exporter: Tenant, Repo, DestDir required")
@@ -88,7 +88,7 @@ func Export(ctx context.Context, store storage.ObjectStore, opts Options) (*Resu
 	}
 
 	res := &Result{ManifestVersion: view.Header.ManifestVersion, ObjectCount: objectCount}
-	if opts.RunFsck {
+	if !opts.SkipFsck {
 		if err := gitcli.Fsck(ctx, opts.DestDir, true); err != nil {
 			return res, fmt.Errorf("exporter: fsck: %w", err)
 		}

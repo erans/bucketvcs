@@ -93,6 +93,17 @@ func prepareLocalPack(ctx context.Context, sourceDir, wantDefaultBranch string) 
 		// PackObjectsAll's rev-list sees the commit.
 		headOID, rpErr := gitcli.RevParse(ctx, bare, "HEAD")
 		if rpErr == nil {
+			// Check whether wantDefaultBranch already exists; if so,
+			// don't overwrite. The user can re-run with a different
+			// DefaultBranch.
+			existingRefs, sErr := gitcli.ShowRef(ctx, bare)
+			if sErr != nil {
+				return nil, fmt.Errorf("importer: pre-synth show-ref: %w", sErr)
+			}
+			if _, exists := existingRefs[wantDefaultBranch]; exists {
+				return nil, fmt.Errorf("importer: detached HEAD synthesis: %s already exists in source",
+					wantDefaultBranch)
+			}
 			if err := gitcli.UpdateRef(ctx, bare, wantDefaultBranch, headOID); err != nil {
 				return nil, fmt.Errorf("importer: synthesize ref %s -> %s: %w", wantDefaultBranch, headOID, err)
 			}

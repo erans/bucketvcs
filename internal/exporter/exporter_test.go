@@ -62,7 +62,7 @@ func TestExport_RoundTripFsckClean(t *testing.T) {
 	store, _ := makeAndImport(t)
 	dst := filepath.Join(t.TempDir(), "out")
 	res, err := Export(context.Background(), store, Options{
-		Tenant: "acme", Repo: "x", DestDir: dst, RunFsck: true,
+		Tenant: "acme", Repo: "x", DestDir: dst,
 	})
 	if err != nil {
 		t.Fatalf("Export: %v", err)
@@ -82,7 +82,7 @@ func TestExport_RejectsNonEmptyDest(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	_, err := Export(context.Background(), store, Options{
-		Tenant: "acme", Repo: "x", DestDir: dst, RunFsck: true,
+		Tenant: "acme", Repo: "x", DestDir: dst,
 	})
 	if err == nil {
 		t.Fatalf("expected error on non-empty DestDir")
@@ -104,7 +104,7 @@ func TestExport_RefsMatchSource(t *testing.T) {
 	store, srcBare := makeAndImport(t)
 	dst := filepath.Join(t.TempDir(), "out")
 	if _, err := Export(context.Background(), store, Options{
-		Tenant: "acme", Repo: "x", DestDir: dst, RunFsck: true,
+		Tenant: "acme", Repo: "x", DestDir: dst,
 	}); err != nil {
 		t.Fatalf("Export: %v", err)
 	}
@@ -123,5 +123,34 @@ func TestExport_RefsMatchSource(t *testing.T) {
 		if dstRefs[k] != v {
 			t.Fatalf("ref %s: src=%s dst=%s", k, v, dstRefs[k])
 		}
+	}
+}
+
+func TestExport_SkipFsck(t *testing.T) {
+	store, _ := makeAndImport(t)
+	dst := filepath.Join(t.TempDir(), "out")
+	res, err := Export(context.Background(), store, Options{
+		Tenant: "acme", Repo: "x", DestDir: dst, SkipFsck: true,
+	})
+	if err != nil {
+		t.Fatalf("Export with SkipFsck: %v", err)
+	}
+	if res.FsckOK {
+		t.Fatalf("FsckOK should be false when SkipFsck=true")
+	}
+}
+
+func TestExport_DefaultRunsFsck(t *testing.T) {
+	store, _ := makeAndImport(t)
+	dst := filepath.Join(t.TempDir(), "out")
+	res, err := Export(context.Background(), store, Options{
+		Tenant: "acme", Repo: "x", DestDir: dst,
+		// SkipFsck not set — default = run fsck
+	})
+	if err != nil {
+		t.Fatalf("Export with default options: %v", err)
+	}
+	if !res.FsckOK {
+		t.Fatalf("FsckOK should be true with default options")
 	}
 }
