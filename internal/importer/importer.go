@@ -9,7 +9,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -22,7 +21,6 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
-	repoerrs "github.com/bucketvcs/bucketvcs/internal/repo/repoerrs"
 	"github.com/bucketvcs/bucketvcs/internal/repo/tx"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
@@ -250,9 +248,16 @@ func tagTarget(body []byte) (pack.OID, error) {
 
 // Import is the public entry point. See spec §3.6.
 //
-// On any failure path, partial uploads are content-addressed and may be
-// reclaimed by future runs (idempotent up to the final CAS) or by M8 GC.
-// Repos that already exist are rejected with ErrRepoExists.
+// Atomicity: a successful Import advances the manifest from version 1
+// (Create) to version 2 (this Import's Commit) atomically via M1's CAS.
+// If Import fails AFTER repo.Create but BEFORE Commit (e.g., process
+// kill, network partition during pack upload), the repo is left in an
+// inconsistent state with manifest_version=1 and an empty body. M2 does
+// NOT auto-recover from this — a subsequent Import call gets
+// ErrRepoExists from repo.Create and must be preceded by manual cleanup.
+// M8 GC sweeps orphan tx records and any partial pack/idx uploads.
+//
+// Repos that already exist (any version) are rejected with ErrRepoExists.
 func Import(ctx context.Context, store storage.ObjectStore, opts Options) (*Result, error) {
 	if opts.SourceDir == "" || opts.Tenant == "" || opts.Repo == "" {
 		return nil, fmt.Errorf("importer: SourceDir, Tenant, Repo required")
@@ -305,7 +310,7 @@ func Import(ctx context.Context, store storage.ObjectStore, opts Options) (*Resu
 		}
 	}
 
-	// Step 7: Create + Commit (with recovery from partial prior Import).
+	// Step 7: Create + Commit.
 	defaultBranch := opts.DefaultBranch
 	if defaultBranch == "" {
 		defaultBranch = prep.DefaultBranch
@@ -313,44 +318,13 @@ func Import(ctx context.Context, store storage.ObjectStore, opts Options) (*Resu
 	if defaultBranch == "" {
 		defaultBranch = "refs/heads/main"
 	}
-	// Step 7a: Create or recover from a partial prior Import.
 	r, err := repo.Create(ctx, store, opts.Tenant, opts.Repo, repo.CreateOptions{
 		DefaultBranch: defaultBranch,
 		ObjectFormat:  "sha1",
 		Actor:         opts.Actor,
 	})
 	if err != nil {
-		if !errors.Is(err, repo.ErrRepoExists) {
-			return nil, err
-		}
-		// Repo exists. Check if it's an empty Create-only state from a
-		// prior partial import; if so, continue with our Commit. If the
-		// repo has any body content, this is a real conflict.
-		existing, openErr := repo.Open(ctx, store, opts.Tenant, opts.Repo)
-		if openErr != nil {
-			return nil, fmt.Errorf("importer: existing repo: %w", openErr)
-		}
-		view, viewErr := existing.ReadRoot(ctx)
-		if viewErr != nil {
-			return nil, fmt.Errorf("importer: read existing root: %w", viewErr)
-		}
-		// Only Create-only state qualifies for recovery: ManifestVersion
-		// must be 1 (the version Create writes; Import's Commit bumps to 2).
-		// A populated body OR a higher manifest version means a prior
-		// Import (possibly with empty body) already completed.
-		if view.Header.ManifestVersion != 1 {
-			return nil, repoerrs.ErrRepoExists
-		}
-		var existingBody manifest.Body
-		if jerr := json.Unmarshal(view.Body, &existingBody); jerr != nil {
-			return nil, fmt.Errorf("importer: unmarshal existing body: %w", jerr)
-		}
-		if len(existingBody.Refs) > 0 || len(existingBody.Packs) > 0 ||
-			existingBody.Indexes.ObjectMap != nil || existingBody.Indexes.CommitGraph != nil {
-			return nil, repoerrs.ErrRepoExists
-		}
-		// Empty Create-only state — recover.
-		r = existing
+		return nil, err
 	}
 
 	body := manifest.Body{
@@ -364,25 +338,10 @@ func Import(ctx context.Context, store storage.ObjectStore, opts Options) (*Resu
 		return nil, err
 	}
 	commitTxBody := tx.Body{Type: "import", Actor: opts.Actor}
-	commitErr := error(nil)
-	_, commitErr = r.Commit(ctx, commitTxBody, func(prev *repo.RootView) ([]byte, error) {
-		if prev.Header.ManifestVersion != 1 {
-			return nil, fmt.Errorf("%w: manifest already advanced to version %d",
-				repoerrs.ErrRepoExists, prev.Header.ManifestVersion)
-		}
-		var existingBody manifest.Body
-		if jerr := json.Unmarshal(prev.Body, &existingBody); jerr != nil {
-			return nil, fmt.Errorf("importer: unmarshal prev body: %w", jerr)
-		}
-		if len(existingBody.Refs) > 0 || len(existingBody.Packs) > 0 ||
-			existingBody.Indexes.ObjectMap != nil || existingBody.Indexes.CommitGraph != nil {
-			return nil, fmt.Errorf("%w: repo body populated by concurrent writer",
-				repoerrs.ErrRepoExists)
-		}
+	if _, err := r.Commit(ctx, commitTxBody, func(prev *repo.RootView) ([]byte, error) {
 		return bodyBytes, nil
-	})
-	if commitErr != nil {
-		return nil, fmt.Errorf("importer: Commit: %w", commitErr)
+	}); err != nil {
+		return nil, fmt.Errorf("importer: Commit: %w", err)
 	}
 
 	view, err := r.ReadRoot(ctx)
@@ -401,7 +360,12 @@ func Import(ctx context.Context, store storage.ObjectStore, opts Options) (*Resu
 }
 
 // uploadFile streams a local file to the given key via PutIfAbsent.
-// Already-uploaded content (idempotent re-runs) is treated as success.
+//
+// Pack/idx files are NOT content-addressed by their bytes (pack_id is
+// based on the object set, not the bytes), so byte-level ErrAlreadyExists
+// is NOT safe to treat as success — different deltifications can produce
+// the same pack_id with different bytes. Pack-level conflicts surface to
+// the caller; operators must clean up partial state before retrying.
 func uploadFile(ctx context.Context, store storage.ObjectStore, srcPath, dstKey string) error {
 	f, err := os.Open(srcPath)
 	if err != nil {
@@ -409,16 +373,15 @@ func uploadFile(ctx context.Context, store storage.ObjectStore, srcPath, dstKey 
 	}
 	defer f.Close()
 	if _, err := store.PutIfAbsent(ctx, dstKey, f, nil); err != nil {
-		if errors.Is(err, storage.ErrAlreadyExists) {
-			return nil
-		}
 		return err
 	}
 	return nil
 }
 
-// uploadBytes uploads in-memory bytes via PutIfAbsent. Already-present
-// content is success.
+// uploadBytes uploads in-memory bytes via PutIfAbsent. The bytes ARE
+// content-addressed (SHA-256 hash is part of the key), so an existing
+// object with the same key necessarily has the same bytes — ErrAlreadyExists
+// is safe to treat as success here.
 func uploadBytes(ctx context.Context, store storage.ObjectStore, b []byte, dstKey string) error {
 	if _, err := store.PutIfAbsent(ctx, dstKey, bytes.NewReader(b), nil); err != nil {
 		if errors.Is(err, storage.ErrAlreadyExists) {

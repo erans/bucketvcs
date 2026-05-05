@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,7 +13,6 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/gitcli"
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
-	repoerrs "github.com/bucketvcs/bucketvcs/internal/repo/repoerrs"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 )
@@ -309,35 +307,6 @@ func TestImport_EmptyRepoCommitsEmptyBody(t *testing.T) {
 	}
 }
 
-func TestImport_RecoversFromCreateOnlyState(t *testing.T) {
-	skipIfNoGit(t)
-	src := makeSrcRepo(t)
-	store := newTestStore(t)
-	// Pre-create the repo (simulating a prior import that did Create
-	// but failed before Commit).
-	if _, err := repo.Create(context.Background(), store, "acme", "x", repo.CreateOptions{
-		DefaultBranch: "refs/heads/main",
-		ObjectFormat:  "sha1",
-		Actor:         "test",
-	}); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	// Import should detect the empty state and continue with the Commit
-	// instead of failing with ErrRepoExists.
-	res, err := Import(context.Background(), store, Options{
-		SourceDir: src, Tenant: "acme", Repo: "x", Actor: "tester",
-	})
-	if err != nil {
-		t.Fatalf("Import on recoverable state: %v", err)
-	}
-	if res.PackID == "" {
-		t.Fatalf("expected PackID after recovery")
-	}
-	if res.ManifestVersion < 2 {
-		t.Fatalf("ManifestVersion: got %d, want >=2", res.ManifestVersion)
-	}
-}
-
 func TestImport_RejectsRealConflict(t *testing.T) {
 	skipIfNoGit(t)
 	src := makeSrcRepo(t)
@@ -347,37 +316,14 @@ func TestImport_RejectsRealConflict(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("first Import: %v", err)
 	}
-	// Second import: repo body is now populated, so this is a real conflict.
-	_, err := Import(context.Background(), store, Options{
-		SourceDir: src, Tenant: "t", Repo: "r",
-	})
-	if err == nil {
-		t.Fatalf("expected error on real conflict")
-	}
-	if !errors.Is(err, repoerrs.ErrRepoExists) {
-		t.Fatalf("expected ErrRepoExists, got %v", err)
-	}
-}
-
-func TestImport_DoubleRecoveryStillRejects(t *testing.T) {
-	skipIfNoGit(t)
-	src := makeSrcRepo(t)
-	store := newTestStore(t)
-	// First Import succeeds and populates the repo.
+	// Second import: pack key already exists (same pack_id from same source),
+	// so uploadFile returns ErrAlreadyExists which surfaces as an error.
+	// Even if the pack happened to differ, repo.Create would return ErrRepoExists.
+	// Either way, a second Import on an existing repo must fail.
 	if _, err := Import(context.Background(), store, Options{
 		SourceDir: src, Tenant: "t", Repo: "r",
-	}); err != nil {
-		t.Fatalf("first Import: %v", err)
-	}
-	// A second Import call must reject — the populated body is a real conflict.
-	_, err := Import(context.Background(), store, Options{
-		SourceDir: src, Tenant: "t", Repo: "r",
-	})
-	if err == nil {
-		t.Fatalf("expected rejection on already-populated repo")
-	}
-	if !errors.Is(err, repoerrs.ErrRepoExists) {
-		t.Fatalf("expected ErrRepoExists in chain, got %v", err)
+	}); err == nil {
+		t.Fatalf("expected error on real conflict")
 	}
 }
 
@@ -467,37 +413,6 @@ func TestPrepareLocalPack_SymbolicRefFailToleratedWithDefaultBranch(t *testing.T
 		t.Fatalf("DefaultBranch: got %q, want refs/heads/override", body.DefaultBranch)
 	}
 	_ = res
-}
-
-func TestImport_RejectsReimportIntoEmptyResult(t *testing.T) {
-	skipIfNoGit(t)
-	work := t.TempDir()
-	bare := filepath.Join(t.TempDir(), "bare")
-	if out, err := gitcli.RunForTest(work, "init", "--initial-branch=main"); err != nil {
-		t.Fatalf("git init: %v: %s", err, out)
-	}
-	if err := gitcli.CloneBareMirror(context.Background(), work, bare); err != nil {
-		t.Fatalf("CloneBareMirror: %v", err)
-	}
-	store := newTestStore(t)
-	// First Import: empty source repo, completes at manifest_version=2 with empty body.
-	if _, err := Import(context.Background(), store, Options{
-		SourceDir: bare, Tenant: "acme", Repo: "x",
-	}); err != nil {
-		t.Fatalf("first Import: %v", err)
-	}
-	// Second Import attempt: even though body is "empty", the repo is at
-	// manifest_version=2 (already imported), so this is a real conflict.
-	src := makeSrcRepo(t)
-	_, err := Import(context.Background(), store, Options{
-		SourceDir: src, Tenant: "acme", Repo: "x",
-	})
-	if err == nil {
-		t.Fatalf("expected reimport-into-empty-completed to fail")
-	}
-	if !errors.Is(err, repoerrs.ErrRepoExists) {
-		t.Fatalf("expected ErrRepoExists, got %v", err)
-	}
 }
 
 func TestImport_DetachedHEADWithoutDefaultBranchFails(t *testing.T) {
