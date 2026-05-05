@@ -36,7 +36,6 @@ func runImport(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return 2
 	}
 	defer closeStore(store)
-	fmt.Fprintln(stderr, "fsck source ok")
 	res, err := importer.Import(ctx, store, importer.Options{
 		SourceDir: src, Tenant: tenantID, Repo: repoID,
 		Actor: *actor, DefaultBranch: *defaultBranch,
@@ -50,6 +49,7 @@ func runImport(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		fmt.Fprintf(stderr, "import: %v\n", err)
 		return 1
 	}
+	fmt.Fprintln(stderr, "fsck source ok")
 	fmt.Fprintf(stderr, "pack built %s %d objects\n", res.PackID, res.ObjectCount)
 	fmt.Fprintf(stderr, "uploaded pack\n")
 	fmt.Fprintf(stderr, "uploaded indexes\n")

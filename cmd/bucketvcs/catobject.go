@@ -154,9 +154,16 @@ func prettyTree(w io.Writer, data []byte) error {
 		var oid pack.OID
 		copy(oid[:], data[:20])
 		data = data[20:]
-		typ := "blob"
-		if mode == "40000" || mode == "040000" {
+		var typ string
+		switch mode {
+		case "40000", "040000":
 			typ = "tree"
+		case "160000":
+			typ = "commit"
+		case "120000":
+			typ = "blob" // symlink
+		default:
+			typ = "blob" // regular files: 100644, 100755
 		}
 		paddedMode := mode
 		for len(paddedMode) < 6 {

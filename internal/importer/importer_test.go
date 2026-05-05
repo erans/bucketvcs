@@ -562,3 +562,23 @@ func TestImport_DetachedHEADRefAlreadyAtSameOID(t *testing.T) {
 		t.Fatalf("expected pack")
 	}
 }
+
+func TestImport_RejectsInvalidDefaultBranch(t *testing.T) {
+	skipIfNoGit(t)
+	work := t.TempDir()
+	bare := filepath.Join(t.TempDir(), "bare")
+	if out, err := gitcli.RunForTest(work, "init", "--initial-branch=main"); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	if err := gitcli.CloneBareMirror(context.Background(), work, bare); err != nil {
+		t.Fatalf("CloneBareMirror: %v", err)
+	}
+	store := newTestStore(t)
+	_, err := Import(context.Background(), store, Options{
+		SourceDir: bare, Tenant: "t", Repo: "r",
+		DefaultBranch: "garbage", // missing refs/ prefix
+	})
+	if err == nil {
+		t.Fatalf("expected rejection of invalid default_branch")
+	}
+}

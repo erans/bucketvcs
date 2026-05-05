@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/bucketvcs/bucketvcs/internal/commitgraph"
 	"github.com/bucketvcs/bucketvcs/internal/gitcli"
@@ -332,9 +333,12 @@ func Import(ctx context.Context, store storage.ObjectStore, opts Options) (*Resu
 		defaultBranch = "refs/heads/main"
 	}
 
-	// Validate default_branch points at a known ref. Empty repos (no
-	// refs) are exempt — there's nothing to point at, and the field is
-	// effectively a placeholder for future commits.
+	// Validate default_branch is a syntactically reasonable full ref name.
+	if !validFullRefName(defaultBranch) {
+		return nil, fmt.Errorf("importer: default_branch %q is not a valid full ref name (e.g., refs/heads/main)",
+			defaultBranch)
+	}
+	// For non-empty repos, default_branch must also be present in source refs.
 	if len(prep.Refs) > 0 {
 		if _, ok := prep.Refs[defaultBranch]; !ok {
 			return nil, fmt.Errorf("importer: default_branch %q not present in source refs (have %d refs)",
@@ -465,4 +469,29 @@ func uploadBytes(ctx context.Context, store storage.ObjectStore, b []byte, dstKe
 		return err
 	}
 	return nil
+}
+
+// validFullRefName performs a lightweight syntactic check on a full git
+// ref name. It rejects empty strings, refs not starting with "refs/",
+// path-traversal segments, and characters git's check-ref-format
+// considers invalid. It's not a full reimplementation of Git's rules —
+// callers can rely on git itself for downstream operations — but
+// catches obviously-wrong inputs at the bucketvcs API boundary.
+func validFullRefName(s string) bool {
+	if s == "" || !strings.HasPrefix(s, "refs/") {
+		return false
+	}
+	if strings.Contains(s, "//") || strings.Contains(s, "/.") || strings.HasSuffix(s, "/") || strings.HasSuffix(s, ".lock") {
+		return false
+	}
+	if strings.Contains(s, "..") || strings.Contains(s, "@{") {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c <= ' ' || c == '~' || c == '^' || c == ':' || c == '?' || c == '*' || c == '[' || c == 0x7f {
+			return false
+		}
+	}
+	return true
 }
