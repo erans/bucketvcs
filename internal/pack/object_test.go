@@ -2,6 +2,7 @@ package pack
 
 import (
 	"bytes"
+	"compress/zlib"
 	"crypto/sha1"
 	"fmt"
 	"io"
@@ -164,5 +165,22 @@ func TestInflateAt_RejectsExcessiveSize(t *testing.T) {
 	_, err := inflateAt(bytes.NewReader([]byte{}), 0, maxObjectSize+1)
 	if err == nil {
 		t.Fatalf("expected error for excessive inflate size")
+	}
+}
+
+func TestInflateAt_RejectsExtraInflatedBytes(t *testing.T) {
+	// Build a zlib stream that inflates to 10 bytes; pass want=5.
+	// inflateAt must reject because the stream has 5 extra bytes
+	// past want.
+	var compressed bytes.Buffer
+	zw := zlib.NewWriter(&compressed)
+	if _, err := zw.Write([]byte("0123456789")); err != nil {
+		t.Fatalf("zlib write: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zlib close: %v", err)
+	}
+	if _, err := inflateAt(bytes.NewReader(compressed.Bytes()), 0, 5); err == nil {
+		t.Fatalf("expected inflateAt to reject excess inflated bytes")
 	}
 }

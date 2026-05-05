@@ -122,14 +122,17 @@ func readSizeVarint(r io.ByteReader) (uint64, error) {
 		if err != nil {
 			return 0, fmt.Errorf("pack: read size varint: %w", err)
 		}
-		v |= uint64(b&0x7f) << shift
+		// 7 bits of payload at position [shift, shift+7). Reject if any
+		// payload bit would land past bit 63 of v.
+		payload := uint64(b & 0x7f)
+		if shift >= 64 || (shift > 57 && payload>>(64-shift) != 0) {
+			return 0, fmt.Errorf("pack: size varint overflow")
+		}
+		v |= payload << shift
 		if b&0x80 == 0 {
 			return v, nil
 		}
 		shift += 7
-		if shift > 63 {
-			return 0, fmt.Errorf("pack: size varint overflow")
-		}
 	}
 }
 

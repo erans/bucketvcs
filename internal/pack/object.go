@@ -143,12 +143,18 @@ func inflateAt(r io.ReaderAt, off int64, want int64) ([]byte, error) {
 	if int64(out.Len()) != want {
 		return nil, fmt.Errorf("%w: inflated %d, want %d", ErrPackCorrupt, out.Len(), want)
 	}
-	// Drain to EOF so zlib reads its Adler-32 trailer, then validate
-	// via Close. This catches checksum-corrupted streams that the
-	// known-size CopyN would otherwise let through.
-	if _, err := io.Copy(io.Discard, zr); err != nil {
-		return nil, fmt.Errorf("%w: zlib drain: %v", ErrPackCorrupt, err)
+	// The zlib stream must be exactly `want` bytes long — reading one
+	// more byte must hit EOF. Anything else means corruption (the pack
+	// header lied about the object size).
+	var probe [1]byte
+	n, err := zr.Read(probe[:])
+	if n > 0 {
+		return nil, fmt.Errorf("%w: zlib stream emitted more than %d bytes", ErrPackCorrupt, want)
 	}
+	if err != io.EOF {
+		return nil, fmt.Errorf("%w: zlib stream tail: %v", ErrPackCorrupt, err)
+	}
+	// Close validates the Adler-32 trailer.
 	if err := zr.Close(); err != nil {
 		return nil, fmt.Errorf("%w: zlib close: %v", ErrPackCorrupt, err)
 	}

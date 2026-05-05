@@ -349,3 +349,34 @@ func TestResolveObject_RejectsOfsDeltaBaseNotInIdx(t *testing.T) {
 		t.Fatalf("expected ofs-delta base-not-in-idx rejection")
 	}
 }
+
+func TestReadSizeVarint_RejectsOverlongPayload(t *testing.T) {
+	// 10 continuation bytes (each 0x80) followed by a terminator with
+	// the high bit set in its 7-bit payload — would shift bits past 63.
+	buf := bytes.NewBuffer(nil)
+	for i := 0; i < 10; i++ {
+		buf.WriteByte(0x80)
+	}
+	buf.WriteByte(0x40) // payload 0b1000000 at shift=70 -> would wrap
+	if _, err := readSizeVarint(buf); err == nil {
+		t.Fatalf("expected overflow error for overlong varint")
+	}
+}
+
+func TestReadSizeVarint_AcceptsMaxRepresentable(t *testing.T) {
+	// 9 continuation bytes carrying 7 zero-payload bits each (shift up to 63),
+	// then a terminator at shift=63 with payload bit 0 set: yields v=1<<63.
+	buf := bytes.NewBuffer(nil)
+	for i := 0; i < 9; i++ {
+		buf.WriteByte(0x80)
+	}
+	buf.WriteByte(0x01)
+	got, err := readSizeVarint(buf)
+	if err != nil {
+		t.Fatalf("readSizeVarint: %v", err)
+	}
+	want := uint64(1) << 63
+	if got != want {
+		t.Fatalf("got %#x, want %#x", got, want)
+	}
+}
