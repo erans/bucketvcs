@@ -2,12 +2,26 @@ package commitgraph
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"strings"
 	"testing"
 
 	"github.com/bucketvcs/bucketvcs/internal/pack"
+	"github.com/bucketvcs/bucketvcs/internal/storage"
+	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 )
+
+func newTestStore(t *testing.T) storage.ObjectStore {
+	t.Helper()
+	s, err := localfs.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
 
 func oid(t *testing.T, hex string) pack.OID {
 	t.Helper()
@@ -131,5 +145,111 @@ func TestBuild_RejectsDanglingParent(t *testing.T) {
 	}
 	if _, err := build(commits, nil); err == nil {
 		t.Fatalf("expected dangling-parent rejection")
+	}
+}
+
+func TestOpenAndParents_RoundTrip(t *testing.T) {
+	a := oid(t, "0000000000000000000000000000000000000001")
+	b := oid(t, "0000000000000000000000000000000000000002")
+	c := oid(t, "0000000000000000000000000000000000000003")
+	commits := []Record{
+		{OID: a},
+		{OID: b, Parents: []pack.OID{a}},
+		{OID: c, Parents: []pack.OID{b, a}}, // octopus
+	}
+	tips := []Tip{{Ref: "refs/heads/main", OID: c}}
+	out, err := build(commits, tips)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	store := newTestStore(t)
+	if _, err := store.PutIfAbsent(context.Background(), "k.bvcg", strings.NewReader(string(out)), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	g, err := Open(context.Background(), store, "k.bvcg")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	gotA, ok := g.Parents(a)
+	if !ok || len(gotA) != 0 {
+		t.Fatalf("Parents(a): ok=%v parents=%v", ok, gotA)
+	}
+	gotB, ok := g.Parents(b)
+	if !ok || len(gotB) != 1 || gotB[0] != a {
+		t.Fatalf("Parents(b): %v %v", gotB, ok)
+	}
+	gotC, ok := g.Parents(c)
+	if !ok || len(gotC) != 2 || gotC[0] != b || gotC[1] != a {
+		t.Fatalf("Parents(c): %v %v", gotC, ok)
+	}
+	gotTips := g.Tips()
+	if len(gotTips) != 1 || gotTips[0].Ref != "refs/heads/main" || gotTips[0].OID != c {
+		t.Fatalf("Tips: %+v", gotTips)
+	}
+}
+
+func TestOpen_RejectsBadMagic(t *testing.T) {
+	store := newTestStore(t)
+	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader("XXXXgarbage"), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := Open(context.Background(), store, "k"); err == nil {
+		t.Fatalf("expected bad-magic rejection")
+	}
+}
+
+func TestOpen_RejectsBadTrailer(t *testing.T) {
+	a := oid(t, "0000000000000000000000000000000000000001")
+	out, _ := build([]Record{{OID: a}}, nil)
+	out[headerSize] ^= 0xff // tamper one byte; trailer becomes stale
+	store := newTestStore(t)
+	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader(string(out)), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := Open(context.Background(), store, "k"); err == nil {
+		t.Fatalf("expected error on tampered body")
+	}
+}
+
+func TestOpen_RejectsBadVersion(t *testing.T) {
+	a := oid(t, "0000000000000000000000000000000000000001")
+	out, _ := build([]Record{{OID: a}}, nil)
+	out[7] = 99 // bump version
+	pre := out[:len(out)-trailerSize]
+	want := sha256.Sum256(pre)
+	copy(out[len(out)-trailerSize:], want[:]) // re-trailer
+	store := newTestStore(t)
+	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader(string(out)), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := Open(context.Background(), store, "k"); err == nil {
+		t.Fatalf("expected version mismatch")
+	}
+}
+
+func TestOpen_RejectsTooSmall(t *testing.T) {
+	store := newTestStore(t)
+	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader("x"), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := Open(context.Background(), store, "k"); err == nil {
+		t.Fatalf("expected file-too-small rejection")
+	}
+}
+
+func TestOpen_ParentsMissForUnknownOID(t *testing.T) {
+	a := oid(t, "0000000000000000000000000000000000000001")
+	out, _ := build([]Record{{OID: a}}, nil)
+	store := newTestStore(t)
+	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader(string(out)), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	g, err := Open(context.Background(), store, "k")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	bogus := oid(t, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+	if _, ok := g.Parents(bogus); ok {
+		t.Fatalf("expected miss for bogus OID")
 	}
 }
