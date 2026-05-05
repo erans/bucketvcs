@@ -18,6 +18,7 @@ import (
 	"sync"
 )
 
+
 var (
 	binMu  sync.Mutex
 	binVal string
@@ -183,50 +184,73 @@ func CloneBareMirror(ctx context.Context, src, dst string) error {
 	return err
 }
 
-// PackObjectsAll produces a single pack containing every reachable object
-// in dir, written as `outPrefix-{pack_id}.pack` (and the corresponding
-// `outPrefix-{pack_id}.idx`). Returns the pack_id (40-char hex SHA-1, the
-// Git-native pack name from §3.2 of the M2 design). The function pipes
-// `git rev-list --all --objects` into `git pack-objects` to keep behavior
-// deterministic across git versions. Returns an error if pack-objects
-// produces zero packs (empty repo) or splits the output across multiple
-// packs; bucketvcs callers are expected to ensure the input fits in one pack.
+// PackObjectsAll produces a single pack containing every reachable
+// object in dir, written as `outPrefix-{pack_id}.pack` (and the
+// corresponding `outPrefix-{pack_id}.idx`). Returns the pack_id (40-
+// char hex SHA-1, the Git-native pack name from §3.2 of the M2
+// design). The function pipes `git rev-list --all --objects` into
+// `git pack-objects` to keep behavior deterministic across git
+// versions.
+//
+// Returns an error if pack-objects produces zero packs (empty repo)
+// or splits the output across multiple packs; bucketvcs callers are
+// expected to ensure the input fits in one pack.
 func PackObjectsAll(ctx context.Context, dir, outPrefix string) (string, error) {
 	bin, err := resolveBinary()
 	if err != nil {
 		return "", err
 	}
+	// Use an explicit os.Pipe so we control the close ordering. Using
+	// StdoutPipe + Run/Wait would close the read end (consumed by
+	// pack-objects) when rev-list exits, racing with pack-objects'
+	// remaining reads from the kernel pipe buffer.
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return "", fmt.Errorf("gitcli: PackObjectsAll: pipe: %w", err)
+	}
+
 	revList := exec.CommandContext(ctx, bin, "-C", dir, "rev-list", "--all", "--objects")
 	revList.Env = scrubGitRepoEnv(os.Environ())
-	pipe, err := revList.StdoutPipe()
-	if err != nil {
-		return "", fmt.Errorf("gitcli: PackObjectsAll: rev-list pipe: %w", err)
-	}
+	revList.Stdout = pw
 	var rlStderr bytes.Buffer
 	revList.Stderr = &rlStderr
 
-	pack := exec.CommandContext(ctx, bin, "-C", dir,
-		"pack-objects", "--quiet", outPrefix)
+	pack := exec.CommandContext(ctx, bin, "-C", dir, "pack-objects", "--quiet", outPrefix)
 	pack.Env = scrubGitRepoEnv(os.Environ())
-	pack.Stdin = pipe
+	pack.Stdin = pr
 	var packStdout, packStderr bytes.Buffer
 	pack.Stdout = &packStdout
 	pack.Stderr = &packStderr
 
+	// Start pack-objects first so it's ready to consume; then start
+	// rev-list to feed it.
 	if err := pack.Start(); err != nil {
-		_ = pipe.Close()
+		_ = pr.Close()
+		_ = pw.Close()
 		return "", fmt.Errorf("gitcli: PackObjectsAll: pack start: %w", err)
 	}
-	if err := revList.Run(); err != nil {
+	if err := revList.Start(); err != nil {
+		_ = pr.Close()
+		_ = pw.Close()
 		_ = pack.Wait()
+		return "", fmt.Errorf("gitcli: PackObjectsAll: rev-list start: %w", err)
+	}
+	// Wait for rev-list, THEN close the writer end so pack-objects
+	// sees EOF on its stdin. pack-objects can finish draining its
+	// kernel buffer before we close.
+	rlErr := revList.Wait()
+	_ = pw.Close() // signal EOF to pack-objects
+	packErr := pack.Wait()
+	_ = pr.Close() // pack-objects no longer needs its stdin
+
+	if rlErr != nil {
 		return "", fmt.Errorf("gitcli: PackObjectsAll: rev-list: %w: stderr=%q",
-			err, rlStderr.String())
+			rlErr, rlStderr.String())
 	}
-	if err := pack.Wait(); err != nil {
+	if packErr != nil {
 		return "", fmt.Errorf("gitcli: PackObjectsAll: pack-objects: %w: stderr=%q",
-			err, packStderr.String())
+			packErr, packStderr.String())
 	}
-	// pack-objects writes the pack_id followed by a newline.
 	id := strings.TrimSpace(packStdout.String())
 	if len(id) != 40 {
 		return "", fmt.Errorf("gitcli: PackObjectsAll: unexpected pack-objects stdout %q",

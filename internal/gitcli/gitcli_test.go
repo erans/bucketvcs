@@ -517,3 +517,56 @@ func TestUpdateRef_CreatesBranch(t *testing.T) {
 		t.Fatalf("refs/heads/dev: got %s, want %s", devOID, tip)
 	}
 }
+
+func TestPackObjectsAll_HandlesLargerOutput(t *testing.T) {
+	skipIfNoGit(t)
+	// Build a repo with ~100 small commits to force a non-trivial
+	// rev-list | pack-objects stream. Ensures the pipeline doesn't
+	// truncate under realistic load.
+	work := t.TempDir()
+	bin, err := resolveBinary()
+	if err != nil {
+		t.Fatalf("resolveBinary: %v", err)
+	}
+	mustGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command(bin, append([]string{"-C", work}, args...)...)
+		cmd.Env = scrubGitRepoEnv(os.Environ())
+		cmd.Env = append(cmd.Env,
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@e",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@e",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	mustGit("init", "--initial-branch=main")
+	for i := 0; i < 100; i++ {
+		path := filepath.Join(work, "f")
+		if err := os.WriteFile(path, []byte(strings.Repeat("x", i+1)+"\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		mustGit("add", "f")
+		mustGit("commit", "-m", "c"+strings.Repeat("x", i%10))
+	}
+	bare := filepath.Join(t.TempDir(), "bare")
+	if err := CloneBareMirror(context.Background(), work, bare); err != nil {
+		t.Fatalf("CloneBareMirror: %v", err)
+	}
+	prefix := filepath.Join(t.TempDir(), "p")
+	id, err := PackObjectsAll(context.Background(), bare, prefix)
+	if err != nil {
+		t.Fatalf("PackObjectsAll: %v", err)
+	}
+	if len(id) != 40 {
+		t.Fatalf("pack_id length: %d", len(id))
+	}
+	// The pack should exist and be non-trivial in size.
+	st, err := os.Stat(prefix + "-" + id + ".pack")
+	if err != nil {
+		t.Fatalf("stat pack: %v", err)
+	}
+	if st.Size() < 1000 {
+		t.Fatalf("pack too small: %d bytes (truncation?)", st.Size())
+	}
+}
