@@ -16,6 +16,20 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/pack"
 )
 
+// validPackID reports whether s is a 40-character lowercase hex string.
+func validPackID(s string) bool {
+	if len(s) != packIDSize {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
 const (
 	headerSize  = 32
 	recordSize  = 32

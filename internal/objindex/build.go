@@ -13,8 +13,8 @@ import (
 // Build produces .bvom bytes from packReader's idx and the given pack ID.
 // All entries are emitted with pack_idx=0 (M2 has one pack per repo).
 func Build(packReader *pack.Reader, packID string) ([]byte, error) {
-	if len(packID) != packIDSize {
-		return nil, fmt.Errorf("objindex: packID must be 40 hex chars (got %d)", len(packID))
+	if !validPackID(packID) {
+		return nil, fmt.Errorf("objindex: packID must be 40-char lowercase hex (got %q)", packID)
 	}
 	idx := packReader.Idx()
 	entries := make([]Entry, 0, idx.Count())
@@ -31,8 +31,8 @@ func build(entries []Entry) ([]byte, error) {
 	idOf := make(map[string]uint16)
 	var packTable []string
 	for _, e := range entries {
-		if len(e.PackID) != packIDSize {
-			return nil, fmt.Errorf("objindex: pack_id length: got %d, want %d", len(e.PackID), packIDSize)
+		if !validPackID(e.PackID) {
+			return nil, fmt.Errorf("objindex: invalid pack_id %q (want 40-char lowercase hex)", e.PackID)
 		}
 		if _, ok := idOf[e.PackID]; ok {
 			continue

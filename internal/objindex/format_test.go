@@ -285,3 +285,46 @@ func TestOpen_RejectsSurplusBytesBeforeTrailer(t *testing.T) {
 		t.Fatalf("expected surplus-bytes rejection")
 	}
 }
+
+func TestOpen_RejectsRecordPackIdxOutOfRange(t *testing.T) {
+	// Build a single-record idx, then mutate the record's pack_idx field
+	// to a value beyond nPacks=1. Re-trailer to bypass the trailer check.
+	a := oidOf(t, "0000000000000000000000000000000000000001")
+	pid := strings.Repeat("a", 40)
+	out, err := build([]Entry{{OID: a, PackID: pid, Offset: 1}})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	// pack_idx field is at record_offset + 20 (2 bytes BE).
+	binary.BigEndian.PutUint16(out[headerSize+20:headerSize+22], 99)
+	pre := out[:len(out)-trailerSize]
+	want := sha256.Sum256(pre)
+	copy(out[len(out)-trailerSize:], want[:])
+	store := newTestStore(t)
+	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader(string(out)), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := Open(context.Background(), store, "k"); err == nil {
+		t.Fatalf("expected pack_idx-out-of-range rejection")
+	}
+}
+
+func TestBuild_RejectsNonHexPackID(t *testing.T) {
+	bad := strings.Repeat("Z", 40) // not hex
+	entries := []Entry{
+		{OID: oidOf(t, "0000000000000000000000000000000000000001"), PackID: bad, Offset: 1},
+	}
+	if _, err := build(entries); err == nil {
+		t.Fatalf("expected non-hex pack_id rejection")
+	}
+}
+
+func TestBuild_RejectsUppercasePackID(t *testing.T) {
+	bad := strings.Repeat("A", 40) // valid hex but uppercase
+	entries := []Entry{
+		{OID: oidOf(t, "0000000000000000000000000000000000000001"), PackID: bad, Offset: 1},
+	}
+	if _, err := build(entries); err == nil {
+		t.Fatalf("expected uppercase pack_id rejection (M2 requires lowercase)")
+	}
+}

@@ -79,6 +79,13 @@ func Open(ctx context.Context, store storage.ObjectStore, key string) (*Map, err
 		off := packTblOff + 2 + uint64(i)*uint64(packIDSize)
 		packs[i] = string(all[off : off+uint64(packIDSize)])
 	}
+	// Validate pack IDs are 40-char lowercase hex.
+	for i, p := range packs {
+		if !validPackID(p) {
+			return nil, fmt.Errorf("%w: pack table entry %d %q is not 40-char lowercase hex",
+				ErrCorrupt, i, p)
+		}
+	}
 	records := all[headerSize : headerSize+count*recordSize]
 	// Sanity: records sorted ascending; reject duplicates.
 	for i := 1; i < int(count); i++ {
@@ -86,6 +93,14 @@ func Open(ctx context.Context, store storage.ObjectStore, key string) (*Map, err
 		cur := records[i*recordSize : i*recordSize+20]
 		if bytes.Compare(prev, cur) >= 0 {
 			return nil, fmt.Errorf("%w: records not sorted at %d", ErrCorrupt, i)
+		}
+	}
+	// Validate every record's pack_idx is within the pack table.
+	for i := 0; i < int(count); i++ {
+		idx := binary.BigEndian.Uint16(records[i*recordSize+20 : i*recordSize+22])
+		if int(idx) >= int(nPacks) {
+			return nil, fmt.Errorf("%w: record %d pack_idx %d >= nPacks %d",
+				ErrCorrupt, i, idx, nPacks)
 		}
 	}
 	return &Map{count: int(count), records: records, packTable: packs}, nil
