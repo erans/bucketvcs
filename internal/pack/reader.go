@@ -3,7 +3,9 @@ package pack
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 
@@ -21,7 +23,6 @@ const DefaultObjectCacheEntries = 256
 // Reader is a pure-Go random-access pack reader.
 type Reader struct {
 	idx      *Idx
-	pack     io.ReaderAt
 	packKey  string
 	idxKey   string
 	store    storage.ObjectStore
@@ -50,8 +51,44 @@ func Open(ctx context.Context, store storage.ObjectStore, packKey, idxKey string
 	if err := validatePackHeader(src, idx); err != nil {
 		return nil, err
 	}
+	// Verify pack self-integrity (SHA-1 of body == trailer) and that
+	// the pack belongs to this idx (idx.PackTrailerSHA1 == pack trailer).
+	bodyEnd := packMeta.Size - 20
+	if bodyEnd < 12 {
+		return nil, fmt.Errorf("%w: pack too small (%d bytes)", ErrPackCorrupt, packMeta.Size)
+	}
+	h := sha1.New()
+	const chunk = 64 * 1024
+	buf := make([]byte, chunk)
+	pos := int64(0)
+	for pos < bodyEnd {
+		want := int64(chunk)
+		if bodyEnd-pos < want {
+			want = bodyEnd - pos
+		}
+		n, readErr := src.ReadAt(buf[:want], pos)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return nil, fmt.Errorf("%w: hash pack body: %v", ErrPackCorrupt, readErr)
+		}
+		h.Write(buf[:n])
+		pos += int64(n)
+	}
+	gotBodySHA := h.Sum(nil)
+	gotTrailer := make([]byte, 20)
+	if _, err := src.ReadAt(gotTrailer, bodyEnd); err != nil {
+		return nil, fmt.Errorf("%w: read pack trailer: %v", ErrPackCorrupt, err)
+	}
+	if !bytes.Equal(gotBodySHA, gotTrailer) {
+		return nil, fmt.Errorf("%w: pack self-SHA-1 mismatch (body=%x trailer=%x)",
+			ErrPackCorrupt, gotBodySHA, gotTrailer)
+	}
+	wantTrailer := idx.PackTrailerSHA1()
+	if !bytes.Equal(gotTrailer, wantTrailer[:]) {
+		return nil, fmt.Errorf("%w: pack/idx trailer mismatch (pack=%x idx=%x)",
+			ErrPackCorrupt, gotTrailer, wantTrailer[:])
+	}
 	return &Reader{
-		idx: idx, pack: src, packKey: packKey, idxKey: idxKey, store: store,
+		idx: idx, packKey: packKey, idxKey: idxKey, store: store,
 		chainCap: DefaultDeltaChainDepth,
 		objCache: newObjectCache(DefaultObjectCacheEntries),
 		packSize: packMeta.Size,
@@ -105,7 +142,10 @@ func (r *Reader) Get(ctx context.Context, oid OID) (*Object, error) {
 	if obj, hit := r.objCache.get(off); hit {
 		return obj, nil
 	}
-	obj, err := resolveObject(r.pack, r.idx, off, r.chainCap)
+	// Build a per-call StoreSource so the call's ctx (not Open's)
+	// governs range reads. This is essentially free (4-field struct).
+	src := NewStoreSource(ctx, r.store, r.packKey, r.packSize)
+	obj, err := resolveObject(src, r.idx, off, r.chainCap)
 	if err != nil {
 		return nil, err
 	}
