@@ -46,6 +46,9 @@ func (c *objectCache) get(off uint64) (*Object, bool) {
 }
 
 func (c *objectCache) put(off uint64, obj *Object) {
+	if c.maxEntries <= 0 {
+		return
+	}
 	if c.maxObjBytes > 0 && obj.Size > c.maxObjBytes {
 		return
 	}

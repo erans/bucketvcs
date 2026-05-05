@@ -479,6 +479,14 @@ func TestReader_Open_RejectsIDXOffsetOutOfBounds(t *testing.T) {
 	}
 }
 
+func TestObjectCache_MaxEntriesZeroDisablesCaching(t *testing.T) {
+	c := newObjectCache(0, 0, 0)
+	c.put(1, &Object{Type: TypeBlob, Size: 10, Data: make([]byte, 10)})
+	if _, hit := c.get(1); hit {
+		t.Fatalf("expected no caching when maxEntries=0")
+	}
+}
+
 func TestObjectCache_TotalByteBudget(t *testing.T) {
 	// 10 entries max, 1000 bytes per object, 5000 bytes total budget.
 	c := newObjectCache(10, 1000, 5000)

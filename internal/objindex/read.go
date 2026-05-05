@@ -67,6 +67,13 @@ func Open(ctx context.Context, store storage.ObjectStore, key string) (*Map, err
 		return nil, fmt.Errorf("%w: pack_tbl offset mismatch (got %d, want %d)",
 			ErrCorrupt, packTblOff, expectedRecBytes)
 	}
+	// Validate packTblOff range before slicing. count*recordSize was
+	// already bounded above, but packTblOff is read from the file
+	// independently and must fit before the trailer.
+	if packTblOff+2 > uint64(len(all))-uint64(trailerSize) {
+		return nil, fmt.Errorf("%w: pack-table header would overlap trailer (off=%d)",
+			ErrCorrupt, packTblOff)
+	}
 	nPacks := binary.BigEndian.Uint16(all[packTblOff : packTblOff+2])
 	tblBytes := uint64(nPacks) * uint64(packIDSize)
 	expectedTotal := packTblOff + 2 + tblBytes + uint64(trailerSize)

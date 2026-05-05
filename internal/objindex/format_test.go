@@ -393,6 +393,29 @@ func TestBuild_RejectsUppercasePackID(t *testing.T) {
 	}
 }
 
+func TestOpen_RejectsPackTblOffPastFileEnd(t *testing.T) {
+	// Build a valid 1-record idx, then tamper packTblOff to a large value.
+	// The existing pack_tbl offset-mismatch check fires, confirming the
+	// validation path that guards the slice is in place.
+	a := oidOf(t, "0000000000000000000000000000000000000001")
+	pid := strings.Repeat("a", 40)
+	out, err := build([]Entry{{OID: a, PackID: pid, Offset: 1}})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	binary.BigEndian.PutUint64(out[16:24], 999) // wrong packTblOff
+	pre := out[:len(out)-trailerSize]
+	want := sha256.Sum256(pre)
+	copy(out[len(out)-trailerSize:], want[:])
+	store := newTestStore(t)
+	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader(string(out)), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := Open(context.Background(), store, "k"); err == nil {
+		t.Fatalf("expected packTblOff mismatch rejection")
+	}
+}
+
 func TestBuild_MultiPack_DeterministicAcrossInputOrder(t *testing.T) {
 	pidA := strings.Repeat("a", 40)
 	pidB := strings.Repeat("b", 40)
