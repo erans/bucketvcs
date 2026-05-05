@@ -582,3 +582,43 @@ func TestImport_RejectsInvalidDefaultBranch(t *testing.T) {
 		t.Fatalf("expected rejection of invalid default_branch")
 	}
 }
+
+func TestImport_RejectsDefaultBranchEndingInDot(t *testing.T) {
+	skipIfNoGit(t)
+	work := t.TempDir()
+	bare := filepath.Join(t.TempDir(), "bare")
+	if out, err := gitcli.RunForTest(work, "init", "--initial-branch=main"); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	if err := gitcli.CloneBareMirror(context.Background(), work, bare); err != nil {
+		t.Fatalf("CloneBareMirror: %v", err)
+	}
+	store := newTestStore(t)
+	_, err := Import(context.Background(), store, Options{
+		SourceDir: bare, Tenant: "t", Repo: "r",
+		DefaultBranch: "refs/heads/main.", // git rejects trailing dot
+	})
+	if err == nil {
+		t.Fatalf("expected rejection of default_branch ending in dot")
+	}
+}
+
+func TestImport_RejectsDefaultBranchWithBackslash(t *testing.T) {
+	skipIfNoGit(t)
+	work := t.TempDir()
+	bare := filepath.Join(t.TempDir(), "bare")
+	if out, err := gitcli.RunForTest(work, "init", "--initial-branch=main"); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	if err := gitcli.CloneBareMirror(context.Background(), work, bare); err != nil {
+		t.Fatalf("CloneBareMirror: %v", err)
+	}
+	store := newTestStore(t)
+	_, err := Import(context.Background(), store, Options{
+		SourceDir: bare, Tenant: "t", Repo: "r",
+		DefaultBranch: `refs/heads/foo\bar`, // backslash is invalid
+	})
+	if err == nil {
+		t.Fatalf("expected rejection of default_branch with backslash")
+	}
+}

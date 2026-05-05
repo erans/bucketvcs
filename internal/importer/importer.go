@@ -338,6 +338,10 @@ func Import(ctx context.Context, store storage.ObjectStore, opts Options) (*Resu
 		return nil, fmt.Errorf("importer: default_branch %q is not a valid full ref name (e.g., refs/heads/main)",
 			defaultBranch)
 	}
+	if err := gitcli.CheckRefFormat(ctx, defaultBranch); err != nil {
+		return nil, fmt.Errorf("importer: default_branch %q rejected by git check-ref-format: %w",
+			defaultBranch, err)
+	}
 	// For non-empty repos, default_branch must also be present in source refs.
 	if len(prep.Refs) > 0 {
 		if _, ok := prep.Refs[defaultBranch]; !ok {

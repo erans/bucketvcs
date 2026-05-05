@@ -138,7 +138,7 @@ func runCatObject(ctx context.Context, args []string, stdout, stderr io.Writer) 
 func quotePath(b []byte) string {
 	needsQuote := false
 	for _, c := range b {
-		if c < 0x20 || c == '"' || c == '\\' || c >= 0x80 {
+		if c < 0x20 || c == 0x7f || c == '"' || c == '\\' || c >= 0x80 {
 			needsQuote = true
 			break
 		}
@@ -169,7 +169,7 @@ func quotePath(b []byte) string {
 		case '\\':
 			buf.WriteString(`\\`)
 		default:
-			if c < 0x20 || c >= 0x80 {
+			if c < 0x20 || c == 0x7f || c >= 0x80 {
 				fmt.Fprintf(&buf, `\%03o`, c)
 			} else {
 				buf.WriteByte(c)

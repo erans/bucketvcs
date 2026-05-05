@@ -485,3 +485,14 @@ func CatFileSize(ctx context.Context, dir, oid string) (int64, error) {
 	}
 	return n, nil
 }
+
+// CheckRefFormat returns nil if name is a valid Git ref name per
+// `git check-ref-format <name>`, or an error describing why git
+// rejected it.
+func CheckRefFormat(ctx context.Context, name string) error {
+	if !validRefOrOID(name) {
+		return fmt.Errorf("gitcli: CheckRefFormat: invalid name %q", name)
+	}
+	_, err := run(ctx, "", "check-ref-format", name)
+	return err
+}
