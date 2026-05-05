@@ -245,11 +245,11 @@ func PackObjectsAll(ctx context.Context, dir, outPrefix string) (string, error) 
 
 	if rlErr != nil {
 		return "", fmt.Errorf("gitcli: PackObjectsAll: rev-list: %w: stderr=%q",
-			rlErr, rlStderr.String())
+			rlErr, redactCreds(rlStderr.String()))
 	}
 	if packErr != nil {
 		return "", fmt.Errorf("gitcli: PackObjectsAll: pack-objects: %w: stderr=%q",
-			packErr, packStderr.String())
+			packErr, redactCreds(packStderr.String()))
 	}
 	id := strings.TrimSpace(packStdout.String())
 	if len(id) != 40 {
@@ -284,7 +284,7 @@ func UnpackObjects(ctx context.Context, dir, packPath string) error {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("gitcli: UnpackObjects: %w: stderr=%q", err, stderr.String())
+		return fmt.Errorf("gitcli: UnpackObjects: %w: stderr=%q", err, redactCreds(stderr.String()))
 	}
 	return nil
 }

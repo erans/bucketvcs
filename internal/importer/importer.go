@@ -69,14 +69,6 @@ func prepareLocalPack(ctx context.Context, sourceDir string) (_ *preparedPack, r
 	if err := gitcli.Fsck(ctx, bare, true); err != nil {
 		return nil, fmt.Errorf("importer: source fsck: %w", err)
 	}
-	prefix := filepath.Join(work, "out", "pack")
-	if err := os.MkdirAll(filepath.Dir(prefix), 0o755); err != nil {
-		return nil, fmt.Errorf("importer: mkdir pack out: %w", err)
-	}
-	packID, err := gitcli.PackObjectsAll(ctx, bare, prefix)
-	if err != nil {
-		return nil, fmt.Errorf("importer: pack-objects: %w", err)
-	}
 	refs, err := gitcli.ShowRef(ctx, bare)
 	if err != nil {
 		return nil, fmt.Errorf("importer: show-ref: %w", err)
@@ -84,6 +76,26 @@ func prepareLocalPack(ctx context.Context, sourceDir string) (_ *preparedPack, r
 	headTarget, err := gitcli.SymbolicRef(ctx, bare, "HEAD")
 	if err != nil {
 		return nil, fmt.Errorf("importer: symbolic-ref HEAD: %w", err)
+	}
+	// Empty repo: no refs, no objects to pack. Skip pack-objects so
+	// import can produce a manifest with empty packs/refs/indexes.
+	if len(refs) == 0 {
+		return &preparedPack{
+			WorkDir:       work,
+			PackID:        "",
+			PackPath:      "",
+			IdxPath:       "",
+			Refs:          refs,
+			DefaultBranch: headTarget,
+		}, nil
+	}
+	prefix := filepath.Join(work, "out", "pack")
+	if err := os.MkdirAll(filepath.Dir(prefix), 0o755); err != nil {
+		return nil, fmt.Errorf("importer: mkdir pack out: %w", err)
+	}
+	packID, err := gitcli.PackObjectsAll(ctx, bare, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("importer: pack-objects: %w", err)
 	}
 	return &preparedPack{
 		WorkDir:       work,
@@ -111,6 +123,17 @@ type localIndexes struct {
 // file-backed store), then calls objindex.Build and commitgraph.Build,
 // hashing each output with SHA-256.
 func buildIndexesLocal(ctx context.Context, prep *preparedPack) (*localIndexes, error) {
+	if prep.PackID == "" {
+		// Empty repo: no pack, no indexes.
+		return &localIndexes{
+			ObjectMapBytes:   nil,
+			ObjectMapHash:    "",
+			CommitGraphBytes: nil,
+			CommitGraphHash:  "",
+			ObjectCount:      0,
+			PackSizeBytes:    0,
+		}, nil
+	}
 	store, err := newLocalFilePackStore(prep.PackPath, prep.IdxPath)
 	if err != nil {
 		return nil, fmt.Errorf("importer: localfile pack store: %w", err)

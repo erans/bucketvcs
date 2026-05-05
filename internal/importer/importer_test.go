@@ -133,3 +133,60 @@ func sha256Hex(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
+
+func TestPrepareLocalPack_EmptyRepo(t *testing.T) {
+	skipIfNoGit(t)
+	work := t.TempDir()
+	bare := filepath.Join(t.TempDir(), "bare")
+	if out, err := gitcli.RunForTest(work, "init", "--initial-branch=main"); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	// Don't author any commits — empty repo.
+	if err := gitcli.CloneBareMirror(context.Background(), work, bare); err != nil {
+		t.Fatalf("CloneBareMirror: %v", err)
+	}
+	prep, err := prepareLocalPack(context.Background(), bare)
+	if err != nil {
+		t.Fatalf("prepareLocalPack on empty repo: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(prep.WorkDir) })
+	if prep.PackID != "" {
+		t.Fatalf("PackID for empty repo: got %q, want \"\"", prep.PackID)
+	}
+	if len(prep.Refs) != 0 {
+		t.Fatalf("Refs for empty repo: got %v, want none", prep.Refs)
+	}
+	if !strings.HasPrefix(prep.DefaultBranch, "refs/heads/") {
+		t.Fatalf("DefaultBranch: %q", prep.DefaultBranch)
+	}
+}
+
+func TestBuildIndexes_EmptyRepo(t *testing.T) {
+	skipIfNoGit(t)
+	work := t.TempDir()
+	bare := filepath.Join(t.TempDir(), "bare")
+	if out, err := gitcli.RunForTest(work, "init", "--initial-branch=main"); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	if err := gitcli.CloneBareMirror(context.Background(), work, bare); err != nil {
+		t.Fatalf("CloneBareMirror: %v", err)
+	}
+	prep, err := prepareLocalPack(context.Background(), bare)
+	if err != nil {
+		t.Fatalf("prepareLocalPack: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(prep.WorkDir) })
+	indexes, err := buildIndexesLocal(context.Background(), prep)
+	if err != nil {
+		t.Fatalf("buildIndexesLocal on empty repo: %v", err)
+	}
+	if len(indexes.ObjectMapBytes) != 0 || indexes.ObjectMapHash != "" {
+		t.Fatalf("expected empty .bvom for empty repo")
+	}
+	if len(indexes.CommitGraphBytes) != 0 || indexes.CommitGraphHash != "" {
+		t.Fatalf("expected empty .bvcg for empty repo")
+	}
+	if indexes.ObjectCount != 0 || indexes.PackSizeBytes != 0 {
+		t.Fatalf("expected zero counts/size")
+	}
+}

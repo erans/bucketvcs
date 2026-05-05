@@ -570,3 +570,21 @@ func TestPackObjectsAll_HandlesLargerOutput(t *testing.T) {
 		t.Fatalf("pack too small: %d bytes (truncation?)", st.Size())
 	}
 }
+
+func TestPackObjectsAll_RedactsCredsInStderr(t *testing.T) {
+	skipIfNoGit(t)
+	// Force a failure with a URL containing credentials embedded in
+	// the SOURCE path. PackObjectsAll itself doesn't take a URL — but
+	// CloneBareMirror does. The cleaner test target is CloneBareMirror's
+	// error path: try to clone from a bogus https URL with creds and
+	// verify the returned error doesn't contain the cred substring.
+	bogusURL := "https://user:supersecret@nonexistent.invalid/repo.git"
+	dst := filepath.Join(t.TempDir(), "x")
+	err := CloneBareMirror(context.Background(), bogusURL, dst)
+	if err == nil {
+		t.Fatalf("expected clone to fail")
+	}
+	if strings.Contains(err.Error(), "supersecret") {
+		t.Fatalf("error message leaked credentials: %v", err)
+	}
+}
