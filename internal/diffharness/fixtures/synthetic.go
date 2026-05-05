@@ -1,6 +1,7 @@
 package fixtures
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -127,4 +128,27 @@ func buildDeepNestedTrees(t *testing.T, dir string) Fixture {
 		"commit", "-m", "deep tree")
 	buildBareFromWork(t, work, dir)
 	return finalize(t, "deep_tree", dir)
+}
+
+func buildReplaceRef(t *testing.T, dir string) Fixture {
+	work := initWork(t)
+	commitFile(t, work, "f", "original\n", "original")
+	mustGit(t, work, "checkout", "-b", "tmp")
+	commitFile(t, work, "f", "replacement\n", "replacement")
+	// Get the original commit's OID and the replacement's.
+	origOIDBytes, err := gitcli.RunForTest(work, "rev-parse", "main")
+	if err != nil {
+		t.Fatalf("rev-parse main: %v: %s", err, origOIDBytes)
+	}
+	origOID := string(bytes.TrimSpace(origOIDBytes))
+	replOIDBytes, err := gitcli.RunForTest(work, "rev-parse", "tmp")
+	if err != nil {
+		t.Fatalf("rev-parse tmp: %v: %s", err, replOIDBytes)
+	}
+	replOID := string(bytes.TrimSpace(replOIDBytes))
+	mustGit(t, work, "checkout", "main")
+	mustGit(t, work, "branch", "-D", "tmp")
+	mustGit(t, work, "replace", origOID, replOID)
+	buildBareFromWork(t, work, dir)
+	return finalize(t, "replace_ref", dir)
 }

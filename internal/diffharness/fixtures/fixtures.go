@@ -33,6 +33,7 @@ var Registry = map[string]Builder{
 	"two_branches":     buildTwoBranchesDivergent,
 	"binary_blob":      buildBlobWithBinaryContent,
 	"deep_tree":        buildDeepNestedTrees,
+	"replace_ref":      buildReplaceRef,
 }
 
 // buildBareFromWork clones a non-bare working repo into a bare repo at dir.

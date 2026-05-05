@@ -90,8 +90,14 @@ func Export(ctx context.Context, store storage.ObjectStore, opts Options) (*Resu
 	}
 
 	for ref, oid := range body.Refs {
+		if !validRefName(ref) {
+			return nil, fmt.Errorf("exporter: ref name %q not in refs/* namespace or malformed", ref)
+		}
 		if !validOID(oid) {
 			return nil, fmt.Errorf("exporter: ref %s has invalid OID %q", ref, oid)
+		}
+		if err := gitcli.CheckRefFormat(ctx, ref); err != nil {
+			return nil, fmt.Errorf("exporter: ref %s rejected by git check-ref-format: %w", ref, err)
 		}
 		if err := gitcli.UpdateRef(ctx, opts.DestDir, ref, oid); err != nil {
 			return nil, fmt.Errorf("exporter: update-ref %s: %w", ref, err)
@@ -182,6 +188,30 @@ func downloadAndIndexPack(ctx context.Context, store storage.ObjectStore, p mani
 }
 
 const nullOID = "0000000000000000000000000000000000000000"
+
+// validRefName reports whether s is in the refs/* namespace and has a
+// reasonable shape. Pseudo-refs (HEAD, ORIG_HEAD, FETCH_HEAD) are rejected
+// here because UpdateRef on them would mutate symbolic state, not create
+// a regular ref. A separate gitcli.CheckRefFormat call provides the
+// authoritative validation.
+func validRefName(s string) bool {
+	if !strings.HasPrefix(s, "refs/") {
+		return false
+	}
+	if strings.Contains(s, "//") || strings.Contains(s, "/.") || strings.HasSuffix(s, "/") {
+		return false
+	}
+	if strings.Contains(s, "..") || strings.Contains(s, "@{") {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c <= ' ' || c == '~' || c == '^' || c == ':' || c == '?' || c == '*' || c == '[' || c == 0x7f {
+			return false
+		}
+	}
+	return true
+}
 
 // validOID reports whether s is a 40-character lowercase hex Git OID
 // other than the null OID. Used to validate manifest-supplied OIDs

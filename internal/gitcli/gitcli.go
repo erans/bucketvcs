@@ -189,7 +189,7 @@ func InitBare(ctx context.Context, dir string) error {
 
 // Fsck runs `git fsck` (with --strict if strict) inside dir.
 func Fsck(ctx context.Context, dir string, strict bool) error {
-	args := []string{"fsck"}
+	args := []string{"--no-replace-objects", "fsck"}
 	if strict {
 		args = append(args, "--strict")
 	}
@@ -229,7 +229,7 @@ func PackObjectsAll(ctx context.Context, dir, outPrefix string) (string, error) 
 		return "", fmt.Errorf("gitcli: PackObjectsAll: pipe: %w", err)
 	}
 
-	revList := exec.CommandContext(ctx, bin, "-C", dir, "rev-list", "--all", "--objects")
+	revList := exec.CommandContext(ctx, bin, "-C", dir, "--no-replace-objects", "rev-list", "--all", "--objects")
 	revList.Env = scrubGitRepoEnv(os.Environ())
 	revList.Stdout = pw
 	var rlStderr bytes.Buffer
@@ -403,7 +403,7 @@ func ShowRef(ctx context.Context, dir string) (map[string]string, error) {
 // hex strings. Equivalent to `git rev-list --all --objects` but stripped
 // of trailing path metadata.
 func RevListAllObjects(ctx context.Context, dir string) ([]string, error) {
-	out, err := run(ctx, dir, "rev-list", "--all", "--objects")
+	out, err := run(ctx, dir, "--no-replace-objects", "rev-list", "--all", "--objects")
 	if err != nil {
 		return nil, err
 	}
@@ -449,7 +449,7 @@ func CatFilePretty(ctx context.Context, dir, oid string) ([]byte, error) {
 	if !validRefOrOID(oid) {
 		return nil, fmt.Errorf("gitcli: CatFilePretty: invalid oid %q", oid)
 	}
-	return run(ctx, dir, "cat-file", "-p", oid)
+	return run(ctx, dir, "--no-replace-objects", "cat-file", "-p", oid)
 }
 
 // CatFileType returns the type ("commit", "tree", "blob", "tag") for an
@@ -458,7 +458,7 @@ func CatFileType(ctx context.Context, dir, oid string) (string, error) {
 	if !validRefOrOID(oid) {
 		return "", fmt.Errorf("gitcli: CatFileType: invalid oid %q", oid)
 	}
-	out, err := run(ctx, dir, "cat-file", "-t", oid)
+	out, err := run(ctx, dir, "--no-replace-objects", "cat-file", "-t", oid)
 	if err != nil {
 		return "", err
 	}
@@ -471,7 +471,7 @@ func CatFileSize(ctx context.Context, dir, oid string) (int64, error) {
 	if !validRefOrOID(oid) {
 		return 0, fmt.Errorf("gitcli: CatFileSize: invalid oid %q", oid)
 	}
-	out, err := run(ctx, dir, "cat-file", "-s", oid)
+	out, err := run(ctx, dir, "--no-replace-objects", "cat-file", "-s", oid)
 	if err != nil {
 		return 0, err
 	}

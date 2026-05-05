@@ -280,3 +280,36 @@ func TestExport_AcceptsDashPrefixedDest(t *testing.T) {
 		t.Fatalf("expected objects/ in dst: %v", err)
 	}
 }
+
+func TestExport_RejectsRefNameNotInRefsNamespace(t *testing.T) {
+	store := newTestStore(t)
+	r, err := repo.Create(context.Background(), store, "t", "r", repo.CreateOptions{
+		DefaultBranch: "refs/heads/main",
+		ObjectFormat:  "sha1",
+		Actor:         "test",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	body := manifest.Body{
+		DefaultBranch: "refs/heads/main",
+		Refs:          map[string]string{"HEAD": "0123456789abcdef0123456789abcdef01234567"},
+		Packs:         []manifest.PackEntry{},
+		Indexes:       manifest.Indexes{},
+	}
+	bodyBytes, err := manifest.MarshalBody(body)
+	if err != nil {
+		t.Fatalf("MarshalBody: %v", err)
+	}
+	if _, err := r.Commit(context.Background(), tx.Body{Type: "test", Actor: "test"},
+		func(prev *repo.RootView) ([]byte, error) { return bodyBytes, nil }); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	dst := filepath.Join(t.TempDir(), "out")
+	_, err = Export(context.Background(), store, Options{
+		Tenant: "t", Repo: "r", DestDir: dst, SkipFsck: true,
+	})
+	if err == nil {
+		t.Fatalf("expected rejection of HEAD as ref name")
+	}
+}
