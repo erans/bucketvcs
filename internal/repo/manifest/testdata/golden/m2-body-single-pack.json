@@ -1,0 +1,27 @@
+{
+  "default_branch": "refs/heads/main",
+  "refs": {
+    "refs/heads/main": "0123456789abcdef0123456789abcdef01234567",
+    "refs/tags/v1": "1123456789abcdef0123456789abcdef01234567"
+  },
+  "packs": [
+    {
+      "pack_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pack_key": "tenants/t/repos/r/packs/canonical/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.pack",
+      "idx_key": "tenants/t/repos/r/packs/canonical/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.idx",
+      "size_bytes": 4096,
+      "object_count": 7
+    }
+  ],
+  "indexes": {
+    "object_map": {
+      "key": "tenants/t/repos/r/indexes/object-map/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.bvom",
+      "hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "commit_graph": {
+      "key": "tenants/t/repos/r/indexes/commit-graph/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.bvcg",
+      "hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    }
+  },
+  "bundles": []
+}

@@ -1,6 +1,7 @@
-// Command bucketvcs is the bucketvcs CLI entry point. M1 wires two
-// subcommands: `init` and `inspect-manifest`. Subcommand surface
-// expands per-milestone (M3 adds the protocol gateway, M8 adds gc, etc.).
+// Command bucketvcs is the bucketvcs CLI entry point. M2 wires five
+// subcommands: `init`, `inspect-manifest`, `import`, `export`, and
+// `cat-object`. Subcommand surface expands per-milestone (M3 adds the
+// protocol gateway, M8 adds gc, etc.).
 package main
 
 import (
@@ -31,6 +32,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return runInit(ctx, rest, stdout, stderr)
 	case "inspect-manifest":
 		return runInspect(ctx, rest, stdout, stderr)
+	case "import":
+		return runImport(ctx, rest, stdout, stderr)
+	case "export":
+		return runExport(ctx, rest, stdout, stderr)
+	case "cat-object":
+		return runCatObject(ctx, rest, stdout, stderr)
 	case "-h", "--help", "help":
 		usage(stdout)
 		return 0
@@ -47,6 +54,9 @@ func usage(w io.Writer) {
 Subcommands:
   init               Create a new repo
   inspect-manifest   Print summary of the root manifest
+  import             Round-trip a bare git repo into bucketvcs storage
+  export             Materialize a bare git repo from bucketvcs storage
+  cat-object         Read a Git object from a bucketvcs repo
 
 Run "bucketvcs <subcommand> --help" for subcommand flags.
 `)
