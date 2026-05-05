@@ -218,7 +218,9 @@ func prettyTree(w io.Writer, data []byte) error {
 		for len(paddedMode) < 6 {
 			paddedMode = "0" + paddedMode
 		}
-		fmt.Fprintf(w, "%s %s %s\t%s\n", paddedMode, typ, oid, quotePath(name))
+		if _, err := fmt.Fprintf(w, "%s %s %s\t%s\n", paddedMode, typ, oid, quotePath(name)); err != nil {
+			return err
+		}
 	}
 	return nil
 }

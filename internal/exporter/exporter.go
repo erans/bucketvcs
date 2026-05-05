@@ -38,8 +38,20 @@ var ErrDestNotEmpty = errors.New("exporter: dest dir exists and is not empty")
 // ErrMissingObject is returned when a referenced bucket key is absent.
 var ErrMissingObject = errors.New("exporter: bucket missing referenced object")
 
-// Export downloads packs/indexes from store, materializes a normal bare
-// git repo at DestDir, and (unless SkipFsck is set) runs git fsck.
+// Export materializes a normal bare git repo at DestDir from
+// bucketvcs storage. See spec §6.3.
+//
+// Atomicity & failure semantics:
+//
+// Successful Export produces a fsck-clean bare git repo at DestDir.
+// Failure paths:
+//   - Step 1 (Open/ReadRoot/Unmarshal): no DestDir created.
+//   - Step 2-onwards (init-bare, downloads, refs, fsck): DestDir
+//     contains a partial bare repo. Retrying Export with the same
+//     DestDir gets ErrDestNotEmpty; the operator must rm -rf and
+//     retry. This is a known M2 limitation parallel to Import's
+//     stranded-repo behavior. A future iteration may stage into a
+//     temp dir and rename atomically on success.
 func Export(ctx context.Context, store storage.ObjectStore, opts Options) (*Result, error) {
 	if opts.Tenant == "" || opts.Repo == "" || opts.DestDir == "" {
 		return nil, fmt.Errorf("exporter: Tenant, Repo, DestDir required")
