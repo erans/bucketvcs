@@ -464,13 +464,21 @@ func TestCatFileSize_RejectsBadOID(t *testing.T) {
 	}
 }
 
-func TestRedactCreds_StripsUserPass(t *testing.T) {
+func TestRedactCreds_StripsURLUserInfo(t *testing.T) {
 	cases := map[string]string{
-		"https://user:token@github.com/x.git":       "https://REDACTED:REDACTED@github.com/x.git",
-		"http://alice:hunter2@host":                  "http://REDACTED:REDACTED@host",
-		"git://noauth@host/repo.git":                 "git://noauth@host/repo.git",          // no password = unchanged
-		"clone failed: https://u:p@h/r.git failed":  "clone failed: https://REDACTED:REDACTED@h/r.git failed",
-		"local-path/repo.git":                        "local-path/repo.git", // no scheme = unchanged
+		// user:password
+		"https://user:token@github.com/x.git": "https://REDACTED@github.com/x.git",
+		"http://alice:hunter2@host":           "http://REDACTED@host",
+		// token-only
+		"https://ghp_TOKEN@github.com/x.git":  "https://REDACTED@github.com/x.git",
+		"https://x-access-token:ghp_TOKEN@github.com/x.git": "https://REDACTED@github.com/x.git",
+		// embedded in surrounding text
+		"clone failed: https://u:p@h/r.git failed": "clone failed: https://REDACTED@h/r.git failed",
+		"clone failed: https://TOKEN@h/r.git failed":   "clone failed: https://REDACTED@h/r.git failed",
+		// no scheme = unchanged
+		"local-path/repo.git": "local-path/repo.git",
+		// scheme without userinfo = unchanged
+		"https://github.com/x.git": "https://github.com/x.git",
 	}
 	for in, want := range cases {
 		if got := redactCreds(in); got != want {

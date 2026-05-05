@@ -60,15 +60,15 @@ func scrubGitRepoEnv(env []string) []string {
 	return out
 }
 
-// urlCredsPattern matches `user:password@` in URLs. Used to redact
-// credentials from error messages that include git command lines or
-// stderr output.
-var urlCredsPattern = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)([^:/@\s]+):([^@/\s]+)@`)
+// urlCredsPattern matches URL userinfo (the segment between `scheme://`
+// and `@`). This catches both `user:password@host` and token-only forms
+// like `TOKEN@host` (common for HTTPS git remotes that embed a PAT).
+var urlCredsPattern = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)([^@/\s]+)@`)
 
-// redactCreds replaces user:password@ with REDACTED:REDACTED@ in any
-// URL-like substring of s.
+// redactCreds replaces any URL userinfo (the segment before `@`) with
+// REDACTED in s. Unchanged for strings that contain no scheme://...@.
 func redactCreds(s string) string {
-	return urlCredsPattern.ReplaceAllString(s, "${1}REDACTED:REDACTED@")
+	return urlCredsPattern.ReplaceAllString(s, "${1}REDACTED@")
 }
 
 // SetBinaryForTest overrides the resolved git binary path. Returns the
