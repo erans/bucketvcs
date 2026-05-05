@@ -45,7 +45,10 @@ func applyDelta(base, delta []byte) ([]byte, error) {
 	if resultSize > maxDeltaResult {
 		return nil, fmt.Errorf("delta: declared result size %d exceeds bound %d", resultSize, maxDeltaResult)
 	}
-	out := make([]byte, 0, resultSize)
+	var out []byte
+	// Don't preallocate to declared resultSize; a corrupt delta could
+	// claim 1 GiB. Grow incrementally; per-instruction bounds and the
+	// final size check enforce the contract.
 	for {
 		op, err := r.ReadByte()
 		if errors.Is(err, io.EOF) {

@@ -136,8 +136,11 @@ func inflateAt(r io.ReaderAt, off int64, want int64) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: zlib: %v", ErrPackCorrupt, err)
 	}
-	out := bytes.NewBuffer(make([]byte, 0, want))
-	if _, err := io.CopyN(out, zr, want); err != nil {
+	var out bytes.Buffer
+	// Note: we intentionally don't preallocate to `want`. A corrupt pack
+	// could declare a huge size; bytes.Buffer grows incrementally and
+	// the maxObjectSize cap (validated above) bounds the worst case.
+	if _, err := io.CopyN(&out, zr, want); err != nil {
 		return nil, fmt.Errorf("%w: inflate copy: %v", ErrPackCorrupt, err)
 	}
 	if int64(out.Len()) != want {
