@@ -2,6 +2,8 @@ package importer
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -92,4 +94,42 @@ func TestPrepareLocalPack_RejectsNonexistentSource(t *testing.T) {
 	if _, err := prepareLocalPack(context.Background(), "/nonexistent/path"); err == nil {
 		t.Fatalf("expected prepareLocalPack to fail on nonexistent source")
 	}
+}
+
+func TestBuildIndexes_FromPreparedPack(t *testing.T) {
+	skipIfNoGit(t)
+	src := makeSrcRepo(t)
+	prep, err := prepareLocalPack(context.Background(), src)
+	if err != nil {
+		t.Fatalf("prepareLocalPack: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(prep.WorkDir) })
+
+	indexes, err := buildIndexesLocal(context.Background(), prep)
+	if err != nil {
+		t.Fatalf("buildIndexesLocal: %v", err)
+	}
+	if len(indexes.ObjectMapBytes) == 0 {
+		t.Fatalf("empty .bvom")
+	}
+	if len(indexes.CommitGraphBytes) == 0 {
+		t.Fatalf("empty .bvcg")
+	}
+	if indexes.ObjectMapHash != sha256Hex(indexes.ObjectMapBytes) {
+		t.Fatalf(".bvom hash mismatch")
+	}
+	if indexes.CommitGraphHash != sha256Hex(indexes.CommitGraphBytes) {
+		t.Fatalf(".bvcg hash mismatch")
+	}
+	if indexes.ObjectCount == 0 {
+		t.Fatalf("ObjectCount=0")
+	}
+	if indexes.PackSizeBytes <= 0 {
+		t.Fatalf("PackSizeBytes=%d", indexes.PackSizeBytes)
+	}
+}
+
+func sha256Hex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
