@@ -4,12 +4,17 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/bucketvcs/bucketvcs/internal/gitcli"
+	"github.com/bucketvcs/bucketvcs/internal/repo"
+	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	"github.com/bucketvcs/bucketvcs/internal/storage"
+	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 )
 
 func skipIfNoGit(t *testing.T) {
@@ -188,5 +193,116 @@ func TestBuildIndexes_EmptyRepo(t *testing.T) {
 	}
 	if indexes.ObjectCount != 0 || indexes.PackSizeBytes != 0 {
 		t.Fatalf("expected zero counts/size")
+	}
+}
+
+func newTestStore(t *testing.T) storage.ObjectStore {
+	t.Helper()
+	s, err := localfs.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+func TestImport_RoundTripState(t *testing.T) {
+	skipIfNoGit(t)
+	src := makeSrcRepo(t)
+	store := newTestStore(t)
+	res, err := Import(context.Background(), store, Options{
+		SourceDir: src,
+		Tenant:    "acme", Repo: "x",
+		Actor: "tester",
+	})
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if len(res.PackID) != 40 {
+		t.Fatalf("PackID: %q", res.PackID)
+	}
+	if res.ManifestVersion != 2 {
+		// Create writes manifest_version=1; the import Commit advances to 2.
+		t.Fatalf("ManifestVersion: got %d, want 2", res.ManifestVersion)
+	}
+	r, err := repo.Open(context.Background(), store, "acme", "x")
+	if err != nil {
+		t.Fatalf("repo.Open: %v", err)
+	}
+	view, err := r.ReadRoot(context.Background())
+	if err != nil {
+		t.Fatalf("ReadRoot: %v", err)
+	}
+	var body manifest.Body
+	if err := json.Unmarshal(view.Body, &body); err != nil {
+		t.Fatalf("Unmarshal body: %v", err)
+	}
+	if body.DefaultBranch != "refs/heads/main" {
+		t.Fatalf("default_branch: %q", body.DefaultBranch)
+	}
+	if len(body.Refs) == 0 {
+		t.Fatalf("no refs in committed body")
+	}
+	if len(body.Packs) != 1 {
+		t.Fatalf("packs: %d", len(body.Packs))
+	}
+	if body.Packs[0].PackID != res.PackID {
+		t.Fatalf("PackID mismatch")
+	}
+	if body.Indexes.ObjectMap == nil || body.Indexes.ObjectMap.Hash != res.ObjectMapHash {
+		t.Fatalf("ObjectMap.Hash mismatch")
+	}
+	if body.Indexes.CommitGraph == nil || body.Indexes.CommitGraph.Hash != res.CommitGraphHash {
+		t.Fatalf("CommitGraph.Hash mismatch")
+	}
+}
+
+func TestImport_RejectsExistingRepo(t *testing.T) {
+	skipIfNoGit(t)
+	src := makeSrcRepo(t)
+	store := newTestStore(t)
+	if _, err := Import(context.Background(), store, Options{SourceDir: src, Tenant: "t", Repo: "r"}); err != nil {
+		t.Fatalf("first Import: %v", err)
+	}
+	if _, err := Import(context.Background(), store, Options{SourceDir: src, Tenant: "t", Repo: "r"}); err == nil {
+		t.Fatalf("second Import should fail with ErrRepoExists")
+	}
+}
+
+func TestImport_EmptyRepoCommitsEmptyBody(t *testing.T) {
+	skipIfNoGit(t)
+	work := t.TempDir()
+	bare := filepath.Join(t.TempDir(), "bare")
+	if out, err := gitcli.RunForTest(work, "init", "--initial-branch=main"); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	if err := gitcli.CloneBareMirror(context.Background(), work, bare); err != nil {
+		t.Fatalf("CloneBareMirror: %v", err)
+	}
+	store := newTestStore(t)
+	res, err := Import(context.Background(), store, Options{
+		SourceDir: bare,
+		Tenant:    "acme", Repo: "empty",
+	})
+	if err != nil {
+		t.Fatalf("Import empty repo: %v", err)
+	}
+	if res.PackID != "" {
+		t.Fatalf("empty repo PackID should be \"\", got %q", res.PackID)
+	}
+	r, err := repo.Open(context.Background(), store, "acme", "empty")
+	if err != nil {
+		t.Fatalf("repo.Open: %v", err)
+	}
+	view, err := r.ReadRoot(context.Background())
+	if err != nil {
+		t.Fatalf("ReadRoot: %v", err)
+	}
+	var body manifest.Body
+	if err := json.Unmarshal(view.Body, &body); err != nil {
+		t.Fatalf("Unmarshal body: %v", err)
+	}
+	if len(body.Packs) != 0 || len(body.Refs) != 0 {
+		t.Fatalf("empty repo body should have empty packs+refs")
 	}
 }

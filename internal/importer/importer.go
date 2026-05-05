@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,6 +18,11 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/gitcli"
 	"github.com/bucketvcs/bucketvcs/internal/objindex"
 	"github.com/bucketvcs/bucketvcs/internal/pack"
+	"github.com/bucketvcs/bucketvcs/internal/repo"
+	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
+	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	"github.com/bucketvcs/bucketvcs/internal/repo/tx"
+	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
 
 // Options configures one import.
@@ -231,4 +237,139 @@ func tagTarget(body []byte) (pack.OID, error) {
 		}
 	}
 	return pack.OID{}, fmt.Errorf("tag body missing 'object <oid>' line")
+}
+
+// Import is the public entry point. See spec §3.6.
+//
+// On any failure path, partial uploads are content-addressed and may be
+// reclaimed by future runs (idempotent up to the final CAS) or by M8 GC.
+// Repos that already exist are rejected with ErrRepoExists.
+func Import(ctx context.Context, store storage.ObjectStore, opts Options) (*Result, error) {
+	if opts.SourceDir == "" || opts.Tenant == "" || opts.Repo == "" {
+		return nil, fmt.Errorf("importer: SourceDir, Tenant, Repo required")
+	}
+	prep, err := prepareLocalPack(ctx, opts.SourceDir)
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(prep.WorkDir)
+
+	idx, err := buildIndexesLocal(ctx, prep)
+	if err != nil {
+		return nil, err
+	}
+
+	k, err := keys.NewRepo(opts.Tenant, opts.Repo)
+	if err != nil {
+		return nil, err
+	}
+
+	// Step 6: upload (PutIfAbsent) in order: pack, idx, .bvom, .bvcg.
+	// Skip uploads if the repo is empty (no pack).
+	var packs []manifest.PackEntry
+	indexes := manifest.Indexes{}
+	if prep.PackID != "" {
+		if err := uploadFile(ctx, store, prep.PackPath, k.CanonicalPackKey(prep.PackID)); err != nil {
+			return nil, fmt.Errorf("importer: upload pack: %w", err)
+		}
+		if err := uploadFile(ctx, store, prep.IdxPath, k.PackIdxKey(prep.PackID, "canonical")); err != nil {
+			return nil, fmt.Errorf("importer: upload idx: %w", err)
+		}
+		bvomKey := k.ObjectMapKey(idx.ObjectMapHash)
+		if err := uploadBytes(ctx, store, idx.ObjectMapBytes, bvomKey); err != nil {
+			return nil, fmt.Errorf("importer: upload .bvom: %w", err)
+		}
+		bvcgKey := k.CommitGraphKey(idx.CommitGraphHash)
+		if err := uploadBytes(ctx, store, idx.CommitGraphBytes, bvcgKey); err != nil {
+			return nil, fmt.Errorf("importer: upload .bvcg: %w", err)
+		}
+		packs = []manifest.PackEntry{{
+			PackID:      prep.PackID,
+			PackKey:     k.CanonicalPackKey(prep.PackID),
+			IdxKey:      k.PackIdxKey(prep.PackID, "canonical"),
+			SizeBytes:   idx.PackSizeBytes,
+			ObjectCount: idx.ObjectCount,
+		}}
+		indexes = manifest.Indexes{
+			ObjectMap:   &manifest.IndexRef{Key: bvomKey, Hash: idx.ObjectMapHash},
+			CommitGraph: &manifest.IndexRef{Key: bvcgKey, Hash: idx.CommitGraphHash},
+		}
+	}
+
+	// Step 7: Create + Commit.
+	defaultBranch := opts.DefaultBranch
+	if defaultBranch == "" {
+		defaultBranch = prep.DefaultBranch
+	}
+	if defaultBranch == "" {
+		defaultBranch = "refs/heads/main"
+	}
+	r, err := repo.Create(ctx, store, opts.Tenant, opts.Repo, repo.CreateOptions{
+		DefaultBranch: defaultBranch,
+		ObjectFormat:  "sha1",
+		Actor:         opts.Actor,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	body := manifest.Body{
+		DefaultBranch: defaultBranch,
+		Refs:          prep.Refs,
+		Packs:         packs,
+		Indexes:       indexes,
+	}
+	bodyBytes, err := manifest.MarshalBody(body)
+	if err != nil {
+		return nil, err
+	}
+	commitTxBody := tx.Body{Type: "import", Actor: opts.Actor}
+	if _, err := r.Commit(ctx, commitTxBody, func(prev *repo.RootView) ([]byte, error) {
+		return bodyBytes, nil
+	}); err != nil {
+		return nil, fmt.Errorf("importer: Commit: %w", err)
+	}
+
+	view, err := r.ReadRoot(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("importer: ReadRoot post-commit: %w", err)
+	}
+
+	return &Result{
+		PackID:          prep.PackID,
+		ObjectMapHash:   idx.ObjectMapHash,
+		CommitGraphHash: idx.CommitGraphHash,
+		ManifestVersion: view.Header.ManifestVersion,
+		RefCount:        len(prep.Refs),
+		ObjectCount:     idx.ObjectCount,
+	}, nil
+}
+
+// uploadFile streams a local file to the given key via PutIfAbsent.
+// Already-uploaded content (idempotent re-runs) is treated as success.
+func uploadFile(ctx context.Context, store storage.ObjectStore, srcPath, dstKey string) error {
+	f, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := store.PutIfAbsent(ctx, dstKey, f, nil); err != nil {
+		if errors.Is(err, storage.ErrAlreadyExists) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// uploadBytes uploads in-memory bytes via PutIfAbsent. Already-present
+// content is success.
+func uploadBytes(ctx context.Context, store storage.ObjectStore, b []byte, dstKey string) error {
+	if _, err := store.PutIfAbsent(ctx, dstKey, bytes.NewReader(b), nil); err != nil {
+		if errors.Is(err, storage.ErrAlreadyExists) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
