@@ -426,6 +426,23 @@ func RevListAllObjects(ctx context.Context, dir string) ([]string, error) {
 	return oids, nil
 }
 
+// RevParse resolves an arbitrary ref-like expression to its OID.
+// Used to dereference HEAD on detached-HEAD repos.
+func RevParse(ctx context.Context, dir, expr string) (string, error) {
+	if !validRefOrOID(expr) {
+		return "", fmt.Errorf("gitcli: RevParse: invalid expr %q", expr)
+	}
+	out, err := run(ctx, dir, "rev-parse", expr)
+	if err != nil {
+		return "", err
+	}
+	s := strings.TrimSpace(string(out))
+	if len(s) != 40 {
+		return "", fmt.Errorf("gitcli: RevParse: unexpected output %q", s)
+	}
+	return s, nil
+}
+
 // CatFilePretty returns the pretty-printed bytes for an object, matching
 // `git cat-file -p <oid>`.
 func CatFilePretty(ctx context.Context, dir, oid string) ([]byte, error) {

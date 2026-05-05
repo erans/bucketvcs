@@ -467,3 +467,54 @@ func TestImport_DetachedHEADWithoutDefaultBranchFails(t *testing.T) {
 		t.Skip("mirror-clone healed detached HEAD; failure path not reachable with this git version")
 	}
 }
+
+func TestImport_DetachedHEADSynthesizesRef(t *testing.T) {
+	skipIfNoGit(t)
+	src := makeSrcRepo(t)
+	// Look up the existing ref OID, then detach HEAD and remove the original ref.
+	refs, err := gitcli.ShowRef(context.Background(), src)
+	if err != nil {
+		t.Fatalf("ShowRef: %v", err)
+	}
+	var origRef, oid string
+	for k, v := range refs {
+		origRef, oid = k, v
+		break
+	}
+	// Set HEAD to the raw OID (detach).
+	headPath := filepath.Join(src, "HEAD")
+	if err := os.WriteFile(headPath, []byte(oid+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile HEAD: %v", err)
+	}
+	// Delete the original ref.
+	if out, err := gitcli.RunForTest(src, "update-ref", "-d", origRef); err != nil {
+		t.Fatalf("update-ref -d: %v: %s", err, out)
+	}
+	store := newTestStore(t)
+	res, err := Import(context.Background(), store, Options{
+		SourceDir: src, Tenant: "t", Repo: "r",
+		DefaultBranch: "refs/heads/synthesized",
+	})
+	if err != nil {
+		t.Fatalf("Import detached-HEAD with DefaultBranch: %v", err)
+	}
+	if res.RefCount != 1 {
+		t.Fatalf("RefCount: got %d, want 1 (synthesized ref)", res.RefCount)
+	}
+	// Verify the manifest body has the synthesized ref.
+	r, err := repo.Open(context.Background(), store, "t", "r")
+	if err != nil {
+		t.Fatalf("repo.Open: %v", err)
+	}
+	view, err := r.ReadRoot(context.Background())
+	if err != nil {
+		t.Fatalf("ReadRoot: %v", err)
+	}
+	var body manifest.Body
+	if err := json.Unmarshal(view.Body, &body); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if body.Refs["refs/heads/synthesized"] != oid {
+		t.Fatalf("synthesized ref: got %v, want %s", body.Refs, oid)
+	}
+}

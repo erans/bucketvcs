@@ -88,7 +88,14 @@ func prepareLocalPack(ctx context.Context, sourceDir, wantDefaultBranch string) 
 		if wantDefaultBranch == "" {
 			return nil, fmt.Errorf("importer: symbolic-ref HEAD: %w", err)
 		}
-		// Caller overrides HEAD; tolerate detached/non-symbolic HEAD.
+		// Caller overrides HEAD. Try to resolve HEAD as a raw OID; if
+		// successful, synthesize a ref entry under wantDefaultBranch so
+		// the detached-HEAD commit isn't silently dropped.
+		headOID, rpErr := gitcli.RevParse(ctx, bare, "HEAD")
+		if rpErr == nil {
+			refs[wantDefaultBranch] = headOID
+		}
+		// Either way, headTarget stays unset; downstream uses wantDefaultBranch.
 		headTarget = ""
 	}
 	// Empty repo: no refs, no objects to pack. Skip pack-objects so
