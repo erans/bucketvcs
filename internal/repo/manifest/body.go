@@ -13,7 +13,12 @@ type Body struct {
 	Refs          map[string]string `json:"refs"`
 	Packs         []PackEntry       `json:"packs"`
 	Indexes       Indexes           `json:"indexes"`
+	Bundles       []BundleEntry     `json:"bundles"`
 }
+
+// BundleEntry is reserved for M11 — placeholder type so the field exists
+// in the wire format from M1 onwards.
+type BundleEntry struct{}
 
 // PackEntry references one pack uploaded under packs/canonical/.
 type PackEntry struct {
@@ -47,6 +52,9 @@ func MarshalBody(b Body) ([]byte, error) {
 	}
 	if b.Packs == nil {
 		b.Packs = []PackEntry{}
+	}
+	if b.Bundles == nil {
+		b.Bundles = []BundleEntry{}
 	}
 	out, err := json.MarshalIndent(b, "", "  ")
 	if err != nil {

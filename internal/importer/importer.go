@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -339,6 +340,21 @@ func Import(ctx context.Context, store storage.ObjectStore, opts Options) (*Resu
 	}
 	commitTxBody := tx.Body{Type: "import", Actor: opts.Actor}
 	if _, err := r.Commit(ctx, commitTxBody, func(prev *repo.RootView) ([]byte, error) {
+		// Validate prev is still the empty Create-only state on every CAS
+		// attempt. A concurrent committer between our Create and Commit
+		// would otherwise be silently overwritten.
+		if prev.Header.ManifestVersion != 1 {
+			return nil, fmt.Errorf("importer: concurrent commit detected (manifest_version=%d, want 1)",
+				prev.Header.ManifestVersion)
+		}
+		var existingBody manifest.Body
+		if jerr := json.Unmarshal(prev.Body, &existingBody); jerr != nil {
+			return nil, fmt.Errorf("importer: unmarshal prev body: %w", jerr)
+		}
+		if len(existingBody.Refs) > 0 || len(existingBody.Packs) > 0 ||
+			existingBody.Indexes.ObjectMap != nil || existingBody.Indexes.CommitGraph != nil {
+			return nil, fmt.Errorf("importer: concurrent writer populated body before import Commit")
+		}
 		return bodyBytes, nil
 	}); err != nil {
 		return nil, fmt.Errorf("importer: Commit: %w", err)

@@ -22,5 +22,6 @@
       "key": "tenants/t/repos/r/indexes/commit-graph/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.bvcg",
       "hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
     }
-  }
+  },
+  "bundles": []
 }
