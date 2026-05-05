@@ -122,3 +122,14 @@ func TestBuild_RejectsTipNotInCommitSet(t *testing.T) {
 		t.Fatalf("expected tip-not-in-commit-set rejection")
 	}
 }
+
+func TestBuild_RejectsDanglingParent(t *testing.T) {
+	a := oid(t, "0000000000000000000000000000000000000001")
+	b := oid(t, "0000000000000000000000000000000000000002") // referenced as parent but not in commits
+	commits := []Record{
+		{OID: a, Parents: []pack.OID{b}},
+	}
+	if _, err := build(commits, nil); err == nil {
+		t.Fatalf("expected dangling-parent rejection")
+	}
+}

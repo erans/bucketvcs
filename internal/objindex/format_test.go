@@ -392,3 +392,37 @@ func TestBuild_RejectsUppercasePackID(t *testing.T) {
 		t.Fatalf("expected uppercase pack_id rejection (M2 requires lowercase)")
 	}
 }
+
+func TestBuild_MultiPack_DeterministicAcrossInputOrder(t *testing.T) {
+	pidA := strings.Repeat("a", 40)
+	pidB := strings.Repeat("b", 40)
+	pidC := strings.Repeat("c", 40)
+	a := oidOf(t, "0000000000000000000000000000000000000001")
+	b := oidOf(t, "0000000000000000000000000000000000000002")
+	c := oidOf(t, "0000000000000000000000000000000000000003")
+	mk := func(order []Entry) []byte {
+		out, err := build(order)
+		if err != nil {
+			t.Fatalf("build: %v", err)
+		}
+		return out
+	}
+	out1 := mk([]Entry{
+		{OID: a, PackID: pidA, Offset: 1},
+		{OID: b, PackID: pidB, Offset: 2},
+		{OID: c, PackID: pidC, Offset: 3},
+	})
+	out2 := mk([]Entry{
+		{OID: c, PackID: pidC, Offset: 3},
+		{OID: a, PackID: pidA, Offset: 1},
+		{OID: b, PackID: pidB, Offset: 2},
+	})
+	out3 := mk([]Entry{
+		{OID: b, PackID: pidB, Offset: 2},
+		{OID: c, PackID: pidC, Offset: 3},
+		{OID: a, PackID: pidA, Offset: 1},
+	})
+	if !bytes.Equal(out1, out2) || !bytes.Equal(out2, out3) {
+		t.Fatalf("multi-pack build is not deterministic across input orderings")
+	}
+}

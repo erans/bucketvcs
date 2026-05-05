@@ -27,21 +27,26 @@ func Build(packReader *pack.Reader, packID string) ([]byte, error) {
 }
 
 func build(entries []Entry) ([]byte, error) {
-	// Group entries by pack_id, dedup pack_id table.
-	idOf := make(map[string]uint16)
-	var packTable []string
+	// Build a sorted, deduplicated pack-id table for deterministic
+	// output regardless of caller input order.
+	seen := make(map[string]struct{})
 	for _, e := range entries {
 		if !validPackID(e.PackID) {
 			return nil, fmt.Errorf("objindex: invalid pack_id %q (want 40-char lowercase hex)", e.PackID)
 		}
-		if _, ok := idOf[e.PackID]; ok {
-			continue
-		}
-		idOf[e.PackID] = uint16(len(packTable))
-		packTable = append(packTable, e.PackID)
-		if len(packTable) > 0xffff {
-			return nil, fmt.Errorf("objindex: too many distinct packs (%d)", len(packTable))
-		}
+		seen[e.PackID] = struct{}{}
+	}
+	packTable := make([]string, 0, len(seen))
+	for pid := range seen {
+		packTable = append(packTable, pid)
+	}
+	sort.Strings(packTable)
+	if len(packTable) > 0xffff {
+		return nil, fmt.Errorf("objindex: too many distinct packs (%d)", len(packTable))
+	}
+	idOf := make(map[string]uint16, len(packTable))
+	for i, pid := range packTable {
+		idOf[pid] = uint16(i)
 	}
 	// Sort entries by OID.
 	sort.Slice(entries, func(i, j int) bool {

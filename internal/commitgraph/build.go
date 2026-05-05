@@ -106,6 +106,16 @@ func build(commits []Record, tips []Tip) ([]byte, error) {
 		}
 	}
 
+	// Validate parent edges: every parent OID must be a known commit.
+	for _, c := range commits {
+		for _, p := range c.Parents {
+			if _, ok := commitSet[p]; !ok {
+				return nil, fmt.Errorf("commitgraph: commit %s has dangling parent %s",
+					c.OID, p)
+			}
+		}
+	}
+
 	// Sort tips by (ref, oid) for determinism before building the string
 	// table, so that table layout is independent of the caller's tip order.
 	sortedTips := make([]Tip, len(tips))
