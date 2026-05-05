@@ -471,11 +471,11 @@ func TestRedactCreds_StripsURLUserInfo(t *testing.T) {
 		"https://user:token@github.com/x.git": "https://REDACTED@github.com/x.git",
 		"http://alice:hunter2@host":           "http://REDACTED@host",
 		// token-only
-		"https://ghp_TOKEN@github.com/x.git":  "https://REDACTED@github.com/x.git",
+		"https://ghp_TOKEN@github.com/x.git":                "https://REDACTED@github.com/x.git",
 		"https://x-access-token:ghp_TOKEN@github.com/x.git": "https://REDACTED@github.com/x.git",
 		// embedded in surrounding text
-		"clone failed: https://u:p@h/r.git failed": "clone failed: https://REDACTED@h/r.git failed",
-		"clone failed: https://TOKEN@h/r.git failed":   "clone failed: https://REDACTED@h/r.git failed",
+		"clone failed: https://u:p@h/r.git failed":   "clone failed: https://REDACTED@h/r.git failed",
+		"clone failed: https://TOKEN@h/r.git failed": "clone failed: https://REDACTED@h/r.git failed",
 		// no scheme = unchanged
 		"local-path/repo.git": "local-path/repo.git",
 		// scheme without userinfo = unchanged

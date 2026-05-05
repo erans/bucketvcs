@@ -12,8 +12,8 @@ import (
 // number of bytes consumed by the variable-length header itself (so the
 // caller knows where the zlib payload begins).
 type ObjectHeader struct {
-	Type      ObjectType
-	Size      int64
+	Type ObjectType
+	Size int64
 	// HeaderLen is the number of bytes consumed by the variable-length header
 	// itself, including OFS_DELTA negOff varint or REF_DELTA OID.
 	HeaderLen int64

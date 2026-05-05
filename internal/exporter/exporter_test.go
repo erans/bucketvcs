@@ -313,3 +313,36 @@ func TestExport_RejectsRefNameNotInRefsNamespace(t *testing.T) {
 		t.Fatalf("expected rejection of HEAD as ref name")
 	}
 }
+
+func TestExport_RejectsInvalidDefaultBranch(t *testing.T) {
+	store := newTestStore(t)
+	r, err := repo.Create(context.Background(), store, "t", "r", repo.CreateOptions{
+		DefaultBranch: "refs/heads/main",
+		ObjectFormat:  "sha1",
+		Actor:         "test",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	body := manifest.Body{
+		DefaultBranch: "garbage", // missing refs/ prefix
+		Refs:          map[string]string{},
+		Packs:         []manifest.PackEntry{},
+		Indexes:       manifest.Indexes{},
+	}
+	bodyBytes, err := manifest.MarshalBody(body)
+	if err != nil {
+		t.Fatalf("MarshalBody: %v", err)
+	}
+	if _, err := r.Commit(context.Background(), tx.Body{Type: "test", Actor: "test"},
+		func(prev *repo.RootView) ([]byte, error) { return bodyBytes, nil }); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	dst := filepath.Join(t.TempDir(), "out")
+	_, err = Export(context.Background(), store, Options{
+		Tenant: "t", Repo: "r", DestDir: dst, SkipFsck: true,
+	})
+	if err == nil {
+		t.Fatalf("expected rejection of invalid default_branch")
+	}
+}

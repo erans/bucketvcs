@@ -178,7 +178,7 @@ func TestParseIdx_RejectsBadMagic(t *testing.T) {
 func TestParseIdx_RejectsBadVersion(t *testing.T) {
 	garbage := make([]byte, 8+1024+40)
 	copy(garbage[:4], []byte{0xff, 0x74, 0x4f, 0x63}) // good magic
-	garbage[7] = 99                                    // bad version
+	garbage[7] = 99                                   // bad version
 	if _, err := ParseIdx(bytes.NewReader(garbage), int64(len(garbage))); err == nil {
 		t.Fatalf("expected ParseIdx to reject bad version")
 	}

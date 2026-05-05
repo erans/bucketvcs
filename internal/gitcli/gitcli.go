@@ -18,7 +18,6 @@ import (
 	"sync"
 )
 
-
 var (
 	binMu  sync.Mutex
 	binVal string

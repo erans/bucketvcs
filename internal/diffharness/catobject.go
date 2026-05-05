@@ -21,7 +21,7 @@ import (
 type CatObjectMode int
 
 const (
-	CatType   CatObjectMode = iota
+	CatType CatObjectMode = iota
 	CatSize
 	CatPretty
 )

@@ -104,6 +104,18 @@ func Export(ctx context.Context, store storage.ObjectStore, opts Options) (*Resu
 		}
 	}
 	if body.DefaultBranch != "" {
+		if !validRefName(body.DefaultBranch) {
+			return nil, fmt.Errorf("exporter: default_branch %q not a valid refs/* name", body.DefaultBranch)
+		}
+		if err := gitcli.CheckRefFormat(ctx, body.DefaultBranch); err != nil {
+			return nil, fmt.Errorf("exporter: default_branch %q rejected by git check-ref-format: %w", body.DefaultBranch, err)
+		}
+		// If refs are non-empty, default_branch must point to one of them.
+		if len(body.Refs) > 0 {
+			if _, ok := body.Refs[body.DefaultBranch]; !ok {
+				return nil, fmt.Errorf("exporter: default_branch %q not present in refs", body.DefaultBranch)
+			}
+		}
 		if err := gitcli.SymbolicRefSet(ctx, opts.DestDir, "HEAD", body.DefaultBranch); err != nil {
 			return nil, fmt.Errorf("exporter: set HEAD: %w", err)
 		}

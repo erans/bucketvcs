@@ -2,12 +2,12 @@
 //
 // Layout (per spec §3.5):
 //
-//   header (32 bytes)  : magic "BVCG", version u32, n_commits u64,
-//                        n_tips u32, reserved 12 bytes
-//   tips (n_tips × 24) : ref_name_offset u32, oid 20 bytes
-//   commits sorted by oid: oid 20 + n_parents u8 + parent_oids[n_parents]*20
-//   string table       : NUL-terminated UTF-8 strings (ref names)
-//   trailer (32 bytes) : SHA-256 over preceding bytes
+//	header (32 bytes)  : magic "BVCG", version u32, n_commits u64,
+//	                     n_tips u32, reserved 12 bytes
+//	tips (n_tips × 24) : ref_name_offset u32, oid 20 bytes
+//	commits sorted by oid: oid 20 + n_parents u8 + parent_oids[n_parents]*20
+//	string table       : NUL-terminated UTF-8 strings (ref names)
+//	trailer (32 bytes) : SHA-256 over preceding bytes
 package commitgraph
 
 import (
