@@ -52,7 +52,10 @@ func runExport(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		fmt.Fprintf(stderr, "export: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "exported %s/%s manifest_version=%d objects=%d fsck=%v\n",
-		tenantID, repoID, res.ManifestVersion, res.ObjectCount, res.FsckOK)
+	if _, err := fmt.Fprintf(stdout, "exported %s/%s manifest_version=%d objects=%d fsck=%v\n",
+		tenantID, repoID, res.ManifestVersion, res.ObjectCount, res.FsckOK); err != nil {
+		fmt.Fprintf(stderr, "export: write stdout: %v\n", err)
+		return 1
+	}
 	return 0
 }

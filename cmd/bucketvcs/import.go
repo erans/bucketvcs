@@ -54,7 +54,10 @@ func runImport(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	fmt.Fprintf(stderr, "uploaded pack\n")
 	fmt.Fprintf(stderr, "uploaded indexes\n")
 	fmt.Fprintf(stderr, "commit %d\n", res.ManifestVersion)
-	fmt.Fprintf(stdout, "imported %s/%s pack=%s manifest_version=%d refs=%d objects=%d\n",
-		tenantID, repoID, res.PackID, res.ManifestVersion, res.RefCount, res.ObjectCount)
+	if _, err := fmt.Fprintf(stdout, "imported %s/%s pack=%s manifest_version=%d refs=%d objects=%d\n",
+		tenantID, repoID, res.PackID, res.ManifestVersion, res.RefCount, res.ObjectCount); err != nil {
+		fmt.Fprintf(stderr, "import: write stdout: %v\n", err)
+		return 1
+	}
 	return 0
 }
