@@ -253,3 +253,56 @@ func TestOpen_ParentsMissForUnknownOID(t *testing.T) {
 		t.Fatalf("expected miss for bogus OID")
 	}
 }
+
+func TestOpen_RejectsTipNotInCommitSet(t *testing.T) {
+	a := oid(t, "0000000000000000000000000000000000000001")
+	b := oid(t, "0000000000000000000000000000000000000002")
+	// Build with a valid tip pointing at a, then mutate the tip's OID to b.
+	out, err := build([]Record{{OID: a}}, []Tip{{Ref: "refs/heads/main", OID: a}})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	// The tip OID lives at headerSize + 4 (after ref_name_offset).
+	copy(out[headerSize+4:headerSize+24], b[:])
+	// Re-trailer.
+	pre := out[:len(out)-trailerSize]
+	want := sha256.Sum256(pre)
+	copy(out[len(out)-trailerSize:], want[:])
+	store := newTestStore(t)
+	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader(string(out)), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := Open(context.Background(), store, "k"); err == nil {
+		t.Fatalf("expected dangling-tip rejection")
+	}
+}
+
+func TestOpen_RejectsDanglingParent(t *testing.T) {
+	a := oid(t, "0000000000000000000000000000000000000001")
+	b := oid(t, "0000000000000000000000000000000000000002")
+	// Build a valid 2-commit graph (a, b parent=a), then mutate
+	// b's parent OID to something not in the set.
+	out, err := build([]Record{
+		{OID: a},
+		{OID: b, Parents: []pack.OID{a}},
+	}, nil)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	// commitsStart = headerSize + n_tips*tipSize = 32 + 0 = 32.
+	// First record (a, 20+1=21 bytes), second record (b at 32+21=53, 20+1+20=41 bytes).
+	// b's parent OID is at 32 + 21 + 20 + 1 = 74.
+	bogus := make([]byte, 20)
+	bogus[0] = 0x42
+	copy(out[74:94], bogus)
+	pre := out[:len(out)-trailerSize]
+	want := sha256.Sum256(pre)
+	copy(out[len(out)-trailerSize:], want[:])
+	store := newTestStore(t)
+	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader(string(out)), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := Open(context.Background(), store, "k"); err == nil {
+		t.Fatalf("expected dangling-parent rejection")
+	}
+}

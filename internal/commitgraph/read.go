@@ -52,6 +52,17 @@ func Open(ctx context.Context, store storage.ObjectStore, key string) (*Graph, e
 	if nCommits > uint64(math.MaxInt32) {
 		return nil, fmt.Errorf("%w: n_commits %d exceeds MaxInt32", ErrCorrupt, nCommits)
 	}
+	// Bound nCommits against the section's minimum-record capacity.
+	// Each commit record is at least 21 bytes (20-byte OID + 1-byte n_parents + 0 parents).
+	commitsSection := int64(len(all)) - int64(headerSize) - int64(nTips)*int64(tipSize) - int64(trailerSize)
+	if commitsSection < 0 {
+		return nil, fmt.Errorf("%w: tips overflow header+trailer space", ErrCorrupt)
+	}
+	const minRecordBytes = 21 // oid(20) + n_parents(1) + 0 parents
+	maxCommits := uint64(commitsSection / minRecordBytes)
+	if nCommits > maxCommits {
+		return nil, fmt.Errorf("%w: n_commits %d exceeds file capacity %d", ErrCorrupt, nCommits, maxCommits)
+	}
 	if int64(nTips)*int64(tipSize) > int64(len(all))-int64(headerSize)-int64(trailerSize) {
 		return nil, fmt.Errorf("%w: n_tips %d exceeds file capacity", ErrCorrupt, nTips)
 	}
@@ -81,6 +92,33 @@ func Open(ctx context.Context, store storage.ObjectStore, key string) (*Graph, e
 			return nil, fmt.Errorf("%w: tip ref: %v", ErrCorrupt, err)
 		}
 		tips = append(tips, Tip{Ref: ref, OID: oid})
+	}
+
+	// Build commit OID set from parsed records.
+	commitSet := make(map[pack.OID]struct{}, len(commitOffsets))
+	for _, ofs := range commitOffsets {
+		var coid pack.OID
+		copy(coid[:], all[commitsStart+ofs:commitsStart+ofs+20])
+		commitSet[coid] = struct{}{}
+	}
+	// Validate tip OIDs.
+	for _, t := range tips {
+		if _, ok := commitSet[t.OID]; !ok {
+			return nil, fmt.Errorf("%w: tip %s -> %s not in commit set",
+				ErrCorrupt, t.Ref, t.OID)
+		}
+	}
+	// Validate parent OIDs.
+	for i, ofs := range commitOffsets {
+		nParents := int(all[commitsStart+ofs+20])
+		for p := 0; p < nParents; p++ {
+			var poid pack.OID
+			copy(poid[:], all[commitsStart+ofs+21+p*20:commitsStart+ofs+21+(p+1)*20])
+			if _, ok := commitSet[poid]; !ok {
+				return nil, fmt.Errorf("%w: commit at index %d has dangling parent %s",
+					ErrCorrupt, i, poid)
+			}
+		}
 	}
 
 	return &Graph{

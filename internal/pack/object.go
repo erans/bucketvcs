@@ -51,11 +51,14 @@ func readObjectHeader(r io.ReaderAt, off int64) (ObjectHeader, error) {
 			return hdr, fmt.Errorf("%w: read header continuation: %v", ErrPackCorrupt, err)
 		}
 		read++
-		size |= int64(b[0]&0x7f) << shift
-		shift += 7
-		if shift > 63 {
-			return hdr, fmt.Errorf("%w: size overflow", ErrPackCorrupt)
+		payload := int64(b[0] & 0x7f)
+		// Guard before the shift: any payload bit landing at/past bit 63
+		// would overflow int64 and could silently flip sign.
+		if shift >= 63 || (shift > 56 && payload>>(63-shift) != 0) {
+			return hdr, fmt.Errorf("%w: size varint overflow", ErrPackCorrupt)
 		}
+		size |= payload << shift
+		shift += 7
 	}
 	hdr.Size = size
 	if hdr.Size < 0 {

@@ -184,3 +184,17 @@ func TestInflateAt_RejectsExtraInflatedBytes(t *testing.T) {
 		t.Fatalf("expected inflateAt to reject excess inflated bytes")
 	}
 }
+
+func TestReadObjectHeader_RejectsOverlongSizeVarint(t *testing.T) {
+	// Header byte 0: MSB set, type=blob(3)<<4 = 0x30, low 4 bits=0 -> 0xb0.
+	// Then 9 continuation bytes 0x80 (MSB set, payload 0). At shift=63 we hit
+	// the guard and reject.
+	b := []byte{0xb0}
+	for i := 0; i < 9; i++ {
+		b = append(b, 0x80)
+	}
+	b = append(b, 0x01) // terminator at shift=67 - overlong.
+	if _, err := readObjectHeader(bytesReaderForTest(b), 0); err == nil {
+		t.Fatalf("expected overflow rejection")
+	}
+}
