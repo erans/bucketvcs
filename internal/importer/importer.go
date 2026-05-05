@@ -22,6 +22,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	repoerrs "github.com/bucketvcs/bucketvcs/internal/repo/repoerrs"
 	"github.com/bucketvcs/bucketvcs/internal/repo/tx"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
@@ -57,7 +58,10 @@ type preparedPack struct {
 
 // prepareLocalPack runs steps 1-3 + 5 of §3.6: clone, fsck, pack-objects,
 // collect refs + default branch.
-func prepareLocalPack(ctx context.Context, sourceDir string) (_ *preparedPack, retErr error) {
+//
+// If wantDefaultBranch is non-empty, the caller is overriding the source
+// repo's HEAD; SymbolicRef failures (detached HEAD, etc.) are tolerated.
+func prepareLocalPack(ctx context.Context, sourceDir, wantDefaultBranch string) (_ *preparedPack, retErr error) {
 	work, err := os.MkdirTemp("", "bucketvcs-import-")
 	if err != nil {
 		return nil, fmt.Errorf("importer: tmpdir: %w", err)
@@ -82,7 +86,11 @@ func prepareLocalPack(ctx context.Context, sourceDir string) (_ *preparedPack, r
 	}
 	headTarget, err := gitcli.SymbolicRef(ctx, bare, "HEAD")
 	if err != nil {
-		return nil, fmt.Errorf("importer: symbolic-ref HEAD: %w", err)
+		if wantDefaultBranch == "" {
+			return nil, fmt.Errorf("importer: symbolic-ref HEAD: %w", err)
+		}
+		// Caller overrides HEAD; tolerate detached/non-symbolic HEAD.
+		headTarget = ""
 	}
 	// Empty repo: no refs, no objects to pack. Skip pack-objects so
 	// import can produce a manifest with empty packs/refs/indexes.
@@ -249,7 +257,7 @@ func Import(ctx context.Context, store storage.ObjectStore, opts Options) (*Resu
 	if opts.SourceDir == "" || opts.Tenant == "" || opts.Repo == "" {
 		return nil, fmt.Errorf("importer: SourceDir, Tenant, Repo required")
 	}
-	prep, err := prepareLocalPack(ctx, opts.SourceDir)
+	prep, err := prepareLocalPack(ctx, opts.SourceDir, opts.DefaultBranch)
 	if err != nil {
 		return nil, err
 	}
@@ -352,10 +360,25 @@ func Import(ctx context.Context, store storage.ObjectStore, opts Options) (*Resu
 		return nil, err
 	}
 	commitTxBody := tx.Body{Type: "import", Actor: opts.Actor}
-	if _, err := r.Commit(ctx, commitTxBody, func(prev *repo.RootView) ([]byte, error) {
+	commitErr := error(nil)
+	_, commitErr = r.Commit(ctx, commitTxBody, func(prev *repo.RootView) ([]byte, error) {
+		// Revalidate on every CAS attempt: only commit our body if the
+		// repo's current body is empty (Create-only state). If anyone
+		// else populated the repo since we Opened it, abort with a
+		// real conflict rather than overwriting their content.
+		var existingBody manifest.Body
+		if jerr := json.Unmarshal(prev.Body, &existingBody); jerr != nil {
+			return nil, fmt.Errorf("importer: unmarshal prev body: %w", jerr)
+		}
+		if len(existingBody.Refs) > 0 || len(existingBody.Packs) > 0 ||
+			existingBody.Indexes.ObjectMap != nil || existingBody.Indexes.CommitGraph != nil {
+			return nil, fmt.Errorf("%w: repo body populated by concurrent writer",
+				repoerrs.ErrRepoExists)
+		}
 		return bodyBytes, nil
-	}); err != nil {
-		return nil, fmt.Errorf("importer: Commit: %w", err)
+	})
+	if commitErr != nil {
+		return nil, fmt.Errorf("importer: Commit: %w", commitErr)
 	}
 
 	view, err := r.ReadRoot(ctx)
