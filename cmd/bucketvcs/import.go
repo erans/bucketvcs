@@ -50,9 +50,13 @@ func runImport(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return 1
 	}
 	fmt.Fprintln(stderr, "fsck source ok")
-	fmt.Fprintf(stderr, "pack built %s %d objects\n", res.PackID, res.ObjectCount)
-	fmt.Fprintf(stderr, "uploaded pack\n")
-	fmt.Fprintf(stderr, "uploaded indexes\n")
+	if res.PackID != "" {
+		fmt.Fprintf(stderr, "pack built %s %d objects\n", res.PackID, res.ObjectCount)
+		fmt.Fprintln(stderr, "uploaded pack")
+		fmt.Fprintln(stderr, "uploaded indexes")
+	} else {
+		fmt.Fprintln(stderr, "empty repo: no pack to upload")
+	}
 	fmt.Fprintf(stderr, "commit %d\n", res.ManifestVersion)
 	if _, err := fmt.Fprintf(stdout, "imported %s/%s pack=%s manifest_version=%d refs=%d objects=%d\n",
 		tenantID, repoID, res.PackID, res.ManifestVersion, res.RefCount, res.ObjectCount); err != nil {

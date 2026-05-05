@@ -10,6 +10,35 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/gitcli"
 )
 
+func TestImportCmd_EmptyRepo(t *testing.T) {
+	if _, err := gitcli.Version(context.Background()); err != nil {
+		t.Skip("git not available")
+	}
+	work := t.TempDir()
+	if out, err := gitcli.RunForTest(work, "init", "--initial-branch=main"); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	bare := filepath.Join(t.TempDir(), "bare")
+	if err := gitcli.CloneBareMirror(context.Background(), work, bare); err != nil {
+		t.Fatalf("CloneBareMirror: %v", err)
+	}
+	storeRoot := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(),
+		[]string{"import", "--store=localfs:" + storeRoot,
+			"--default-branch=refs/heads/main", bare, "t", "r"},
+		&stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte("empty repo: no pack to upload")) {
+		t.Fatalf("expected empty-repo progress line: %q", stderr.String())
+	}
+	if bytes.Contains(stderr.Bytes(), []byte("pack built ")) {
+		t.Fatalf("empty-repo run should not print 'pack built': %q", stderr.String())
+	}
+}
+
 // makeBareForTest authors a tiny bare git repo for CLI tests.
 func makeBareForTest(t *testing.T) string {
 	t.Helper()
