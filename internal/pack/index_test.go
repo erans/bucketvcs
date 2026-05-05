@@ -384,3 +384,43 @@ func TestParseIdx_RejectsSurplusLargeOffsetBytes(t *testing.T) {
 		t.Fatalf("expected ParseIdx to reject surplus large-offset bytes")
 	}
 }
+
+func TestParseIdx_RejectsDuplicateOffsets(t *testing.T) {
+	// Build a 2-entry idx where both OIDs map to the same offset.
+	// We need fanout consistent with two distinct OIDs at distinct first-bytes.
+	var buf bytes.Buffer
+	buf.Write([]byte{0xff, 0x74, 0x4f, 0x63})
+	binWrite32(&buf, 2)
+	for i := 0; i < 256; i++ {
+		var cnt uint32
+		if 0x10 <= i {
+			cnt++
+		}
+		if 0x20 <= i {
+			cnt++
+		}
+		binWrite32(&buf, cnt)
+	}
+	a := make([]byte, 20)
+	a[0] = 0x10
+	b := make([]byte, 20)
+	b[0] = 0x20
+	buf.Write(a)
+	buf.Write(b)
+	binWrite32(&buf, 0)
+	binWrite32(&buf, 0)
+	// Both offsets identical.
+	binWrite32(&buf, 100)
+	binWrite32(&buf, 100)
+	// Trailer placeholder (pack_sha) + idx_self_sha.
+	pre := append([]byte(nil), buf.Bytes()...)
+	buf.Write(make([]byte, 20))
+	h := sha1.New()
+	h.Write(pre)
+	h.Write(make([]byte, 20))
+	buf.Write(h.Sum(nil))
+
+	if _, err := ParseIdx(bytes.NewReader(buf.Bytes()), int64(buf.Len())); err == nil {
+		t.Fatalf("expected duplicate-offset rejection")
+	}
+}

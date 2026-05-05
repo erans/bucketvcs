@@ -166,6 +166,23 @@ func ParseIdx(r io.ReaderAt, size int64) (*Idx, error) {
 			}
 		}
 	}
+
+	// Validate: pack offsets are pairwise distinct. The offset-keyed
+	// caches in Reader rely on this invariant — without it, a corrupt
+	// idx mapping multiple OIDs to the same offset would let cache
+	// hits return objects whose body doesn't hash to the requested OID.
+	{
+		seen := make(map[uint64]int, idx.count)
+		for k := 0; k < idx.count; k++ {
+			off := idx.OffsetAt(k)
+			if prev, dup := seen[off]; dup {
+				return nil, fmt.Errorf("%w: duplicate pack offset %d (entries %d and %d)",
+					ErrIdxCorrupt, off, prev, k)
+			}
+			seen[off] = k
+		}
+	}
+
 	trailer := make([]byte, idxTrailerSize)
 	if _, err := r.ReadAt(trailer, off); err != nil {
 		return nil, fmt.Errorf("%w: read trailer: %v", ErrIdxCorrupt, err)
