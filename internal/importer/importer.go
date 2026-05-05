@@ -79,25 +79,34 @@ func prepareLocalPack(ctx context.Context, sourceDir, wantDefaultBranch string) 
 	if err := gitcli.Fsck(ctx, bare, true); err != nil {
 		return nil, fmt.Errorf("importer: source fsck: %w", err)
 	}
+
+	// Resolve HEAD. If the source has detached HEAD, we need to write a
+	// real on-disk ref BEFORE ShowRef and PackObjectsAll, so that
+	// rev-list --all --objects in PackObjectsAll can discover the commit.
+	headTarget, symErr := gitcli.SymbolicRef(ctx, bare, "HEAD")
+	if symErr != nil {
+		if wantDefaultBranch == "" {
+			return nil, fmt.Errorf("importer: symbolic-ref HEAD: %w", symErr)
+		}
+		// Detached HEAD with caller-provided DefaultBranch: try to
+		// resolve HEAD as a raw OID and write a real on-disk ref so
+		// PackObjectsAll's rev-list sees the commit.
+		headOID, rpErr := gitcli.RevParse(ctx, bare, "HEAD")
+		if rpErr == nil {
+			if err := gitcli.UpdateRef(ctx, bare, wantDefaultBranch, headOID); err != nil {
+				return nil, fmt.Errorf("importer: synthesize ref %s -> %s: %w", wantDefaultBranch, headOID, err)
+			}
+		}
+		// If rpErr != nil, HEAD doesn't resolve (truly-empty repo).
+		// Continue; ShowRef will return empty and the empty-repo path triggers.
+		headTarget = ""
+	}
+
 	refs, err := gitcli.ShowRef(ctx, bare)
 	if err != nil {
 		return nil, fmt.Errorf("importer: show-ref: %w", err)
 	}
-	headTarget, err := gitcli.SymbolicRef(ctx, bare, "HEAD")
-	if err != nil {
-		if wantDefaultBranch == "" {
-			return nil, fmt.Errorf("importer: symbolic-ref HEAD: %w", err)
-		}
-		// Caller overrides HEAD. Try to resolve HEAD as a raw OID; if
-		// successful, synthesize a ref entry under wantDefaultBranch so
-		// the detached-HEAD commit isn't silently dropped.
-		headOID, rpErr := gitcli.RevParse(ctx, bare, "HEAD")
-		if rpErr == nil {
-			refs[wantDefaultBranch] = headOID
-		}
-		// Either way, headTarget stays unset; downstream uses wantDefaultBranch.
-		headTarget = ""
-	}
+
 	// Empty repo: no refs, no objects to pack. Skip pack-objects so
 	// import can produce a manifest with empty packs/refs/indexes.
 	if len(refs) == 0 {
