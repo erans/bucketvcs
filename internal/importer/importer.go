@@ -334,18 +334,22 @@ func Import(ctx context.Context, store storage.ObjectStore, opts Options) (*Resu
 		if viewErr != nil {
 			return nil, fmt.Errorf("importer: read existing root: %w", viewErr)
 		}
+		// Only Create-only state qualifies for recovery: ManifestVersion
+		// must be 1 (the version Create writes; Import's Commit bumps to 2).
+		// A populated body OR a higher manifest version means a prior
+		// Import (possibly with empty body) already completed.
+		if view.Header.ManifestVersion != 1 {
+			return nil, repoerrs.ErrRepoExists
+		}
 		var existingBody manifest.Body
 		if jerr := json.Unmarshal(view.Body, &existingBody); jerr != nil {
 			return nil, fmt.Errorf("importer: unmarshal existing body: %w", jerr)
 		}
 		if len(existingBody.Refs) > 0 || len(existingBody.Packs) > 0 ||
 			existingBody.Indexes.ObjectMap != nil || existingBody.Indexes.CommitGraph != nil {
-			// Real conflict: repo already has content.
-			return nil, repo.ErrRepoExists
+			return nil, repoerrs.ErrRepoExists
 		}
-		// Empty Create-only state — recover by reusing the existing
-		// Repo handle for our Commit. CAS in Commit ensures we don't
-		// race with a concurrent importer that also recovered.
+		// Empty Create-only state — recover.
 		r = existing
 	}
 
@@ -362,10 +366,10 @@ func Import(ctx context.Context, store storage.ObjectStore, opts Options) (*Resu
 	commitTxBody := tx.Body{Type: "import", Actor: opts.Actor}
 	commitErr := error(nil)
 	_, commitErr = r.Commit(ctx, commitTxBody, func(prev *repo.RootView) ([]byte, error) {
-		// Revalidate on every CAS attempt: only commit our body if the
-		// repo's current body is empty (Create-only state). If anyone
-		// else populated the repo since we Opened it, abort with a
-		// real conflict rather than overwriting their content.
+		if prev.Header.ManifestVersion != 1 {
+			return nil, fmt.Errorf("%w: manifest already advanced to version %d",
+				repoerrs.ErrRepoExists, prev.Header.ManifestVersion)
+		}
 		var existingBody manifest.Body
 		if jerr := json.Unmarshal(prev.Body, &existingBody); jerr != nil {
 			return nil, fmt.Errorf("importer: unmarshal prev body: %w", jerr)

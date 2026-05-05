@@ -469,6 +469,37 @@ func TestPrepareLocalPack_SymbolicRefFailToleratedWithDefaultBranch(t *testing.T
 	_ = res
 }
 
+func TestImport_RejectsReimportIntoEmptyResult(t *testing.T) {
+	skipIfNoGit(t)
+	work := t.TempDir()
+	bare := filepath.Join(t.TempDir(), "bare")
+	if out, err := gitcli.RunForTest(work, "init", "--initial-branch=main"); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	if err := gitcli.CloneBareMirror(context.Background(), work, bare); err != nil {
+		t.Fatalf("CloneBareMirror: %v", err)
+	}
+	store := newTestStore(t)
+	// First Import: empty source repo, completes at manifest_version=2 with empty body.
+	if _, err := Import(context.Background(), store, Options{
+		SourceDir: bare, Tenant: "acme", Repo: "x",
+	}); err != nil {
+		t.Fatalf("first Import: %v", err)
+	}
+	// Second Import attempt: even though body is "empty", the repo is at
+	// manifest_version=2 (already imported), so this is a real conflict.
+	src := makeSrcRepo(t)
+	_, err := Import(context.Background(), store, Options{
+		SourceDir: src, Tenant: "acme", Repo: "x",
+	})
+	if err == nil {
+		t.Fatalf("expected reimport-into-empty-completed to fail")
+	}
+	if !errors.Is(err, repoerrs.ErrRepoExists) {
+		t.Fatalf("expected ErrRepoExists, got %v", err)
+	}
+}
+
 func TestImport_DetachedHEADWithoutDefaultBranchFails(t *testing.T) {
 	skipIfNoGit(t)
 	src := makeSrcRepo(t)
