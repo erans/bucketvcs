@@ -43,7 +43,7 @@ func TestBody_GoldenSinglePack(t *testing.T) {
 				Hash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
 			},
 			CommitGraph: &IndexRef{
-				Key:  "tenants/t/repos/r/indexes/commit-graphs/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.graph",
+				Key:  "tenants/t/repos/r/indexes/commit-graph/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.bvcg",
 				Hash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
 			},
 		},

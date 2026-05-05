@@ -19,7 +19,7 @@
       "hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
     },
     "commit_graph": {
-      "key": "tenants/t/repos/r/indexes/commit-graphs/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.graph",
+      "key": "tenants/t/repos/r/indexes/commit-graph/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.bvcg",
       "hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
     }
   }

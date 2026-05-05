@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/gitcli"
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	repoerrs "github.com/bucketvcs/bucketvcs/internal/repo/repoerrs"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 )
@@ -304,5 +306,55 @@ func TestImport_EmptyRepoCommitsEmptyBody(t *testing.T) {
 	}
 	if len(body.Packs) != 0 || len(body.Refs) != 0 {
 		t.Fatalf("empty repo body should have empty packs+refs")
+	}
+}
+
+func TestImport_RecoversFromCreateOnlyState(t *testing.T) {
+	skipIfNoGit(t)
+	src := makeSrcRepo(t)
+	store := newTestStore(t)
+	// Pre-create the repo (simulating a prior import that did Create
+	// but failed before Commit).
+	if _, err := repo.Create(context.Background(), store, "acme", "x", repo.CreateOptions{
+		DefaultBranch: "refs/heads/main",
+		ObjectFormat:  "sha1",
+		Actor:         "test",
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Import should detect the empty state and continue with the Commit
+	// instead of failing with ErrRepoExists.
+	res, err := Import(context.Background(), store, Options{
+		SourceDir: src, Tenant: "acme", Repo: "x", Actor: "tester",
+	})
+	if err != nil {
+		t.Fatalf("Import on recoverable state: %v", err)
+	}
+	if res.PackID == "" {
+		t.Fatalf("expected PackID after recovery")
+	}
+	if res.ManifestVersion < 2 {
+		t.Fatalf("ManifestVersion: got %d, want >=2", res.ManifestVersion)
+	}
+}
+
+func TestImport_RejectsRealConflict(t *testing.T) {
+	skipIfNoGit(t)
+	src := makeSrcRepo(t)
+	store := newTestStore(t)
+	if _, err := Import(context.Background(), store, Options{
+		SourceDir: src, Tenant: "t", Repo: "r",
+	}); err != nil {
+		t.Fatalf("first Import: %v", err)
+	}
+	// Second import: repo body is now populated, so this is a real conflict.
+	_, err := Import(context.Background(), store, Options{
+		SourceDir: src, Tenant: "t", Repo: "r",
+	})
+	if err == nil {
+		t.Fatalf("expected error on real conflict")
+	}
+	if !errors.Is(err, repoerrs.ErrRepoExists) {
+		t.Fatalf("expected ErrRepoExists, got %v", err)
 	}
 }

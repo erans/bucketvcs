@@ -102,7 +102,7 @@ func TestPackKeys(t *testing.T) {
 func TestIndexAndBundleKeys(t *testing.T) {
 	r, _ := keys.NewRepo("acme", "my-repo")
 	cases := []struct{ got, want string }{
-		{r.CommitGraphKey("g1"), "tenants/acme/repos/my-repo/indexes/commit-graphs/g1.graph"},
+		{r.CommitGraphKey("g1"), "tenants/acme/repos/my-repo/indexes/commit-graph/g1.bvcg"},
 		{r.ObjectMapKey("o1"), "tenants/acme/repos/my-repo/indexes/object-map/o1.bvom"},
 		{r.ReachabilityKey("i1"), "tenants/acme/repos/my-repo/indexes/reachability/i1.json"},
 		{r.BundleKey("b1"), "tenants/acme/repos/my-repo/bundles/b1.bundle"},

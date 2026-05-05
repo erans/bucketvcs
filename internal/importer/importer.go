@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -296,7 +297,7 @@ func Import(ctx context.Context, store storage.ObjectStore, opts Options) (*Resu
 		}
 	}
 
-	// Step 7: Create + Commit.
+	// Step 7: Create + Commit (with recovery from partial prior Import).
 	defaultBranch := opts.DefaultBranch
 	if defaultBranch == "" {
 		defaultBranch = prep.DefaultBranch
@@ -304,13 +305,40 @@ func Import(ctx context.Context, store storage.ObjectStore, opts Options) (*Resu
 	if defaultBranch == "" {
 		defaultBranch = "refs/heads/main"
 	}
+	// Step 7a: Create or recover from a partial prior Import.
 	r, err := repo.Create(ctx, store, opts.Tenant, opts.Repo, repo.CreateOptions{
 		DefaultBranch: defaultBranch,
 		ObjectFormat:  "sha1",
 		Actor:         opts.Actor,
 	})
 	if err != nil {
-		return nil, err
+		if !errors.Is(err, repo.ErrRepoExists) {
+			return nil, err
+		}
+		// Repo exists. Check if it's an empty Create-only state from a
+		// prior partial import; if so, continue with our Commit. If the
+		// repo has any body content, this is a real conflict.
+		existing, openErr := repo.Open(ctx, store, opts.Tenant, opts.Repo)
+		if openErr != nil {
+			return nil, fmt.Errorf("importer: existing repo: %w", openErr)
+		}
+		view, viewErr := existing.ReadRoot(ctx)
+		if viewErr != nil {
+			return nil, fmt.Errorf("importer: read existing root: %w", viewErr)
+		}
+		var existingBody manifest.Body
+		if jerr := json.Unmarshal(view.Body, &existingBody); jerr != nil {
+			return nil, fmt.Errorf("importer: unmarshal existing body: %w", jerr)
+		}
+		if len(existingBody.Refs) > 0 || len(existingBody.Packs) > 0 ||
+			existingBody.Indexes.ObjectMap != nil || existingBody.Indexes.CommitGraph != nil {
+			// Real conflict: repo already has content.
+			return nil, repo.ErrRepoExists
+		}
+		// Empty Create-only state — recover by reusing the existing
+		// Repo handle for our Commit. CAS in Commit ensures we don't
+		// race with a concurrent importer that also recovered.
+		r = existing
 	}
 
 	body := manifest.Body{

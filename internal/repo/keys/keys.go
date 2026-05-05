@@ -107,9 +107,10 @@ func checkPackArea(area string) {
 	}
 }
 
-// CommitGraphKey returns the path for a commit-graph index. Used by M2.
+// CommitGraphKey returns the path for an M2 commit-graph index (.bvcg).
+// Used by M2.
 func (r *Repo) CommitGraphKey(graphHash string) string {
-	return r.prefix + "indexes/commit-graphs/" + graphHash + ".graph"
+	return r.prefix + "indexes/commit-graph/" + graphHash + ".bvcg"
 }
 
 // ObjectMapKey returns the path for an M2 object-to-pack map (.bvom).
