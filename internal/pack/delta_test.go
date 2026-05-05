@@ -10,18 +10,6 @@ import (
 	"testing"
 )
 
-// hashObject returns the SHA-1 of (typeName SP size NUL body).
-// Used by tests to verify resolveObject correctness.
-func hashObject(typ ObjectType, body []byte) OID {
-	h := sha1.New()
-	fmt.Fprintf(h, "%s %d", typ.String(), len(body))
-	h.Write([]byte{0})
-	h.Write(body)
-	var o OID
-	copy(o[:], h.Sum(nil))
-	return o
-}
-
 func TestApplyDelta_InsertOnly(t *testing.T) {
 	base := []byte("the quick brown fox")
 	result := []byte("the lazy dog")

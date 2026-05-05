@@ -287,12 +287,10 @@ func (r *Repo) Commit(
 
 		nextBytes, err := manifest.WrapHeaderInBody(nextHeader, newBody)
 		if err != nil {
-			orphans = append(orphans, txID)
 			return "", err
 		}
 
 		if err := ctx.Err(); err != nil {
-			orphans = append(orphans, txID)
 			return "", err
 		}
 

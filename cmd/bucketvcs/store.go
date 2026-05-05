@@ -20,7 +20,7 @@ func parseStoreURL(s string) (scheme, path string, err error) {
 	scheme = s[:colon]
 	path = s[colon+1:]
 	if path == "" {
-		return "", "", fmt.Errorf(`--store: empty path after %q:`, scheme)
+		return "", "", fmt.Errorf(`--store: %q scheme requires a non-empty path (got %q)`, scheme, s)
 	}
 	switch scheme {
 	case "localfs":
