@@ -157,24 +157,30 @@ func hashGitObject(typ ObjectType, body []byte) OID {
 //
 // Verifies that the resolved object actually hashes to oid before
 // returning, defending against a corrupt .idx whose OID->offset
-// mapping points at the wrong pack content. Cache hits skip the
-// re-hash because the cached entry was verified at insertion time
-// against the same offset reached via the (verified) idx lookup.
+// mapping points at the wrong pack content. Cache hits are also
+// verified: the cached body is rehashed to guard against future
+// cache-poisoning bugs and defense in depth against corrupt idx.
 func (r *Reader) Get(ctx context.Context, oid OID) (*Object, error) {
 	off, ok := r.idx.Lookup(oid)
 	if !ok {
 		return nil, fmt.Errorf("pack: oid %s not in idx", oid)
 	}
 	if obj, hit := r.objCache.get(off); hit {
-		// Defensive copy: callers may mutate Data despite the read-only
-		// contract, and the cache must never serve poisoned bytes.
-		out := &Object{Type: obj.Type, Size: obj.Size, Data: append([]byte(nil), obj.Data...)}
-		return out, nil
+		// Verify the cached object actually hashes to the requested OID.
+		// Without this check, a corrupt idx that maps multiple OIDs to
+		// the same offset (caught at idx parse time, but defense in
+		// depth) or a future cache-poisoning bug could serve wrong
+		// bytes under a different OID. Cost: one SHA-1 over the body
+		// per cache hit (~hundreds of MB/s on modern CPUs).
+		if hashGitObject(obj.Type, obj.Data) != oid {
+			return nil, fmt.Errorf("%w: cache OID mismatch for off=%d", ErrPackCorrupt, off)
+		}
+		return &Object{Type: obj.Type, Size: obj.Size, Data: append([]byte(nil), obj.Data...)}, nil
 	}
 	// Build a per-call StoreSource so the call's ctx (not Open's)
 	// governs range reads. This is essentially free (4-field struct).
 	src := NewStoreSource(ctx, r.store, r.packKey, r.packSize)
-	obj, err := resolveObjectRec(src, r.idx, off, r.chainCap, nil, r.objCache)
+	obj, err := resolveObject(src, r.idx, off, r.chainCap)
 	if err != nil {
 		return nil, err
 	}
@@ -183,9 +189,6 @@ func (r *Reader) Get(ctx context.Context, oid OID) (*Object, error) {
 		return nil, fmt.Errorf("%w: oid %s resolves to body hashing to %s",
 			ErrPackCorrupt, oid, got)
 	}
-	// Cache a snapshot so subsequent caller mutations don't poison the entry.
-	// resolveObjectRec already cached non-delta bases; this covers the
-	// top-level object (delta-resolved or not).
 	cached := &Object{Type: obj.Type, Size: obj.Size, Data: append([]byte(nil), obj.Data...)}
 	r.objCache.put(off, cached)
 	return obj, nil

@@ -140,22 +140,14 @@ func readSizeVarint(r io.ByteReader) (uint64, error) {
 }
 
 // resolveObject is the public entry point used by Reader.Get and tests.
-// The cache is optional; pass nil to disable.
 func resolveObject(r io.ReaderAt, idx *Idx, off uint64, maxDepth int) (*Object, error) {
-	return resolveObjectRec(r, idx, off, maxDepth, nil, nil)
+	return resolveObjectRec(r, idx, off, maxDepth, nil)
 }
 
 func resolveObjectRec(r io.ReaderAt, idx *Idx, off uint64, maxDepth int,
-	visited map[uint64]struct{}, cache *objectCache) (*Object, error) {
+	visited map[uint64]struct{}) (*Object, error) {
 	if _, seen := visited[off]; seen {
 		return nil, fmt.Errorf("%w: delta cycle at offset %d", ErrPackCorrupt, off)
-	}
-	if cache != nil {
-		if obj, hit := cache.get(off); hit {
-			// Defensive copy so the recursive caller (which may mutate
-			// e.g. via applyDelta) doesn't poison the cache.
-			return &Object{Type: obj.Type, Size: obj.Size, Data: append([]byte(nil), obj.Data...)}, nil
-		}
 	}
 	hdr, err := readObjectHeader(r, int64(off))
 	if err != nil {
@@ -163,18 +155,12 @@ func resolveObjectRec(r io.ReaderAt, idx *Idx, off uint64, maxDepth int,
 	}
 	switch hdr.Type {
 	case TypeCommit, TypeTree, TypeBlob, TypeTag:
-		// Non-delta bases never consume depth budget.
 		body, err := inflateAt(r, int64(off)+hdr.HeaderLen, hdr.Size)
 		if err != nil {
 			return nil, err
 		}
-		obj := &Object{Type: hdr.Type, Size: int64(len(body)), Data: body}
-		if cache != nil {
-			cache.put(off, &Object{Type: obj.Type, Size: obj.Size, Data: append([]byte(nil), obj.Data...)})
-		}
-		return obj, nil
+		return &Object{Type: hdr.Type, Size: int64(len(body)), Data: body}, nil
 	case typeOFSDelta:
-		// Each delta hop consumes one unit of depth budget.
 		if maxDepth <= 0 {
 			return nil, ErrDeltaChainTooDeep
 		}
@@ -182,12 +168,11 @@ func resolveObjectRec(r io.ReaderAt, idx *Idx, off uint64, maxDepth int,
 			return nil, fmt.Errorf("%w: ofs-delta base offset %d not an object in idx",
 				ErrPackCorrupt, hdr.BaseOffset)
 		}
-		// Lazily allocate the visited map only when we recurse.
 		if visited == nil {
 			visited = make(map[uint64]struct{})
 		}
 		visited[off] = struct{}{}
-		base, err := resolveObjectRec(r, idx, uint64(hdr.BaseOffset), maxDepth-1, visited, cache)
+		base, err := resolveObjectRec(r, idx, uint64(hdr.BaseOffset), maxDepth-1, visited)
 		if err != nil {
 			return nil, err
 		}
@@ -201,7 +186,6 @@ func resolveObjectRec(r io.ReaderAt, idx *Idx, off uint64, maxDepth int,
 		}
 		return &Object{Type: base.Type, Size: int64(len(out)), Data: out}, nil
 	case typeREFDelta:
-		// Each delta hop consumes one unit of depth budget.
 		if maxDepth <= 0 {
 			return nil, ErrDeltaChainTooDeep
 		}
@@ -216,7 +200,7 @@ func resolveObjectRec(r io.ReaderAt, idx *Idx, off uint64, maxDepth int,
 			visited = make(map[uint64]struct{})
 		}
 		visited[off] = struct{}{}
-		base, err := resolveObjectRec(r, idx, baseOff, maxDepth-1, visited, cache)
+		base, err := resolveObjectRec(r, idx, baseOff, maxDepth-1, visited)
 		if err != nil {
 			return nil, err
 		}

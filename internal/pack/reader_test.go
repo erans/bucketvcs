@@ -375,6 +375,42 @@ func TestObjectCache_SkipsLargeObjects(t *testing.T) {
 	}
 }
 
+func TestReader_Get_HashCheckOnCacheHit(t *testing.T) {
+	// First Get warms the cache; mutate cache entry's bytes to a different
+	// valid object; second Get for the same OID must reject as
+	// ErrPackCorrupt because the body no longer hashes to oid.
+	prefix, id, _ := makeOnePackRepo(t)
+	store := newTestStore(t)
+	uploadFile(t, store, prefix+"-"+id+".pack", "p.pack")
+	uploadFile(t, store, prefix+"-"+id+".idx", "p.idx")
+	r, err := Open(context.Background(), store, "p.pack", "p.idx")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer r.Close()
+	if r.Idx().Count() == 0 {
+		t.Skip("empty fixture")
+	}
+	oid := r.Idx().OIDAt(0)
+	if _, err := r.Get(context.Background(), oid); err != nil {
+		t.Fatalf("first Get: %v", err)
+	}
+	// Tamper with the cache entry. Reach into the LRU and mutate the
+	// cached object's Data via the package-private cache API.
+	off, _ := r.Idx().Lookup(oid)
+	cached, hit := r.objCache.get(off)
+	if !hit {
+		t.Fatalf("expected cache hit after first Get")
+	}
+	if len(cached.Data) == 0 {
+		t.Skip("cached object is empty; can't tamper")
+	}
+	cached.Data[0] ^= 0xff
+	if _, err := r.Get(context.Background(), oid); err == nil {
+		t.Fatalf("expected ErrPackCorrupt on tampered cache entry")
+	}
+}
+
 // buildIdxLiar constructs a single-entry .idx for the given (lying) OID
 // pointing at the given offset, with the given pack trailer SHA-1.
 func buildIdxLiar(t *testing.T, oid OID, offset uint32, packSHA [20]byte) []byte {
