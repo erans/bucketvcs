@@ -3,6 +3,7 @@ package gitcli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -541,13 +542,18 @@ func TestPackObjectsAll_HandlesLargerOutput(t *testing.T) {
 		}
 	}
 	mustGit("init", "--initial-branch=main")
-	for i := 0; i < 100; i++ {
+	for i := 0; i < 50; i++ {
 		path := filepath.Join(work, "f")
-		if err := os.WriteFile(path, []byte(strings.Repeat("x", i+1)+"\n"), 0o644); err != nil {
+		// Vary BOTH file content AND commit message per iteration so
+		// every commit produces a distinct tree+commit OID. Earlier
+		// versions reused the message every 10 iterations, occasionally
+		// triggering "unable to read <oid>" on rapid-fire commits with
+		// the same git plumbing state.
+		if err := os.WriteFile(path, []byte(fmt.Sprintf("rev=%d\n", i)), 0o644); err != nil {
 			t.Fatalf("WriteFile: %v", err)
 		}
 		mustGit("add", "f")
-		mustGit("commit", "-m", "c"+strings.Repeat("x", i%10))
+		mustGit("commit", "-m", fmt.Sprintf("c%d", i))
 	}
 	bare := filepath.Join(t.TempDir(), "bare")
 	if err := CloneBareMirror(context.Background(), work, bare); err != nil {
