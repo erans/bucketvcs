@@ -67,9 +67,9 @@ func TestBody_RoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal: %v", err)
 			}
-			if !bytes.Equal(canonicalize(t, data), canonicalize(t, got)) {
-				t.Fatalf("round-trip mismatch.\nwant:\n%s\ngot:\n%s",
-					canonicalize(t, data), canonicalize(t, got))
+			want := bytes.TrimRight(data, "\n")
+			if !bytes.Equal(want, got) {
+				t.Fatalf("round-trip byte mismatch.\nwant:\n%s\ngot:\n%s", want, got)
 			}
 		})
 	}
@@ -83,7 +83,7 @@ func checkGolden(t *testing.T, name string, body Body) {
 	}
 	path := filepath.Join("testdata/golden", name)
 	if *updateGolden {
-		if err := os.WriteFile(path, got, 0o644); err != nil {
+		if err := os.WriteFile(path, append(got, '\n'), 0o644); err != nil {
 			t.Fatalf("write golden: %v", err)
 		}
 		return
@@ -92,25 +92,10 @@ func checkGolden(t *testing.T, name string, body Body) {
 	if err != nil {
 		t.Fatalf("read golden: %v", err)
 	}
-	wantC := canonicalize(t, want)
-	gotC := canonicalize(t, got)
-	if !bytes.Equal(wantC, gotC) {
-		t.Fatalf("golden mismatch %s.\nwant:\n%s\ngot:\n%s", name, wantC, gotC)
+	want = bytes.TrimRight(want, "\n")
+	// Strict byte-for-byte comparison enforces the documented wire-format
+	// contract (2-space indent, key order, trailing newline...).
+	if !bytes.Equal(want, got) {
+		t.Fatalf("golden bytes mismatch %s.\nwant:\n%s\ngot:\n%s", name, want, got)
 	}
-}
-
-// canonicalize re-marshals JSON via encoding/json with the standard
-// formatting we use, so trivial whitespace differences in the golden
-// don't break the test.
-func canonicalize(t *testing.T, raw []byte) []byte {
-	t.Helper()
-	var v interface{}
-	if err := json.Unmarshal(raw, &v); err != nil {
-		t.Fatalf("canonicalize unmarshal: %v", err)
-	}
-	out, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		t.Fatalf("canonicalize marshal: %v", err)
-	}
-	return out
 }

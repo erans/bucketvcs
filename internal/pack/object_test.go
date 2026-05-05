@@ -198,3 +198,17 @@ func TestReadObjectHeader_RejectsOverlongSizeVarint(t *testing.T) {
 		t.Fatalf("expected overflow rejection")
 	}
 }
+
+func TestReadObjectHeader_RejectsOverlongOFSVarint(t *testing.T) {
+	// First byte: type=ofs_delta(6) << 4 = 0x60, MSB clear, size=0 -> 0x60.
+	// Then negOff varint that's overlong: 10+ continuation bytes 0x80.
+	pack := make([]byte, 200)
+	pack[100] = 0x60
+	for i := 1; i <= 12; i++ {
+		pack[100+i] = 0x80
+	}
+	pack[100+13] = 0x01 // terminator -> overlong negOff
+	if _, err := readObjectHeader(bytes.NewReader(pack), 100); err == nil {
+		t.Fatalf("expected ofs varint overflow rejection")
+	}
+}

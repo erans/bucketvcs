@@ -72,28 +72,27 @@ func readObjectHeader(r io.ReaderAt, off int64) (ObjectHeader, error) {
 			return hdr, fmt.Errorf("%w: read ofs varint: %v", ErrPackCorrupt, err)
 		}
 		read++
-		negOff := int64(b[0] & 0x7f)
-		ofsShift := uint(7) // first byte already consumed 7 bits
+		// Decode into uint64 to detect overflow before any conversion.
+		negOff := uint64(b[0] & 0x7f)
+		const maxNegOff = uint64(1) << 62 // safe int64 ceiling
 		for b[0]&0x80 != 0 {
-			if ofsShift >= 63 {
-				return hdr, fmt.Errorf("%w: ofs varint too long", ErrPackCorrupt)
-			}
 			negOff++ // implicit +1 between continuation bytes
+			if negOff > maxNegOff>>7 {
+				return hdr, fmt.Errorf("%w: ofs varint overflow", ErrPackCorrupt)
+			}
 			negOff <<= 7
 			if _, err := r.ReadAt(b[:], off+read); err != nil {
 				return hdr, fmt.Errorf("%w: read ofs varint cont: %v", ErrPackCorrupt, err)
 			}
 			read++
-			negOff |= int64(b[0] & 0x7f)
-			if negOff < 0 {
-				return hdr, fmt.Errorf("%w: ofs varint overflow", ErrPackCorrupt)
-			}
-			ofsShift += 7
+			negOff |= uint64(b[0] & 0x7f)
 		}
-		hdr.BaseOffset = off - negOff
-		// Pack header is 12 bytes (PACK + version u32 + count u32);
-		// no real object can live there or before, and BaseOffset must
-		// strictly precede `off` (the current object).
+		if negOff > uint64(off) {
+			return hdr, fmt.Errorf("%w: ofs base before pack start", ErrPackCorrupt)
+		}
+		hdr.BaseOffset = off - int64(negOff)
+		// Pack header is 12 bytes; reject bases inside header or at/after
+		// the current object.
 		if hdr.BaseOffset < 12 || hdr.BaseOffset >= off {
 			return hdr, fmt.Errorf("%w: ofs_delta base offset %d invalid (this=%d)",
 				ErrPackCorrupt, hdr.BaseOffset, off)
