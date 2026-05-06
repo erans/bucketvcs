@@ -141,3 +141,80 @@ func TestWriteAcknowledgments_SomeCommon(t *testing.T) {
 		t.Fatalf("ack stream: got %v, want %v", got, want)
 	}
 }
+
+func TestParseFetchArgs_DeepenSinceAndNot(t *testing.T) {
+	args := tokensFromLines(
+		"command=fetch\n",
+		"DELIM",
+		"want 1111111111111111111111111111111111111111\n",
+		"deepen-since 1700000000\n",
+		"deepen-not refs/heads/main\n",
+		"deepen-not refs/tags/v1\n",
+		"FLUSH",
+	)
+	got, err := ParseFetchArgs(args)
+	if err != nil {
+		t.Fatalf("ParseFetchArgs: %v", err)
+	}
+	if got.DeepenSince != "1700000000" {
+		t.Fatalf("DeepenSince: %q", got.DeepenSince)
+	}
+	wantNot := []string{"refs/heads/main", "refs/tags/v1"}
+	if !reflect.DeepEqual(got.DeepenNot, wantNot) {
+		t.Fatalf("DeepenNot: got %v, want %v", got.DeepenNot, wantNot)
+	}
+}
+
+func TestParseFetchArgs_WantRefOnly(t *testing.T) {
+	args := tokensFromLines(
+		"command=fetch\n",
+		"DELIM",
+		"want-ref refs/heads/main\n",
+		"FLUSH",
+	)
+	got, err := ParseFetchArgs(args)
+	if err != nil {
+		t.Fatalf("ParseFetchArgs: %v", err)
+	}
+	if len(got.Wants) != 0 {
+		t.Fatalf("Wants: got %v, want empty", got.Wants)
+	}
+	if !reflect.DeepEqual(got.WantRefs, []string{"refs/heads/main"}) {
+		t.Fatalf("WantRefs: got %v", got.WantRefs)
+	}
+}
+
+func TestParseFetchArgs_HaveWithoutWantRejected(t *testing.T) {
+	args := tokensFromLines(
+		"command=fetch\n",
+		"DELIM",
+		"have 3333333333333333333333333333333333333333\n",
+		"FLUSH",
+	)
+	if _, err := ParseFetchArgs(args); err == nil {
+		t.Fatalf("ParseFetchArgs: expected error when only have is present")
+	}
+}
+
+func TestWriteAcknowledgments_MultipleCommonsPreservesOrder(t *testing.T) {
+	var buf bytes.Buffer
+	commons := []string{
+		"3333333333333333333333333333333333333333",
+		"4444444444444444444444444444444444444444",
+		"5555555555555555555555555555555555555555",
+	}
+	if err := WriteAcknowledgments(&buf, commons, nil); err != nil {
+		t.Fatalf("WriteAcknowledgments: %v", err)
+	}
+	got := drainPayloads(t, &buf)
+	want := []string{
+		"acknowledgments\n",
+		"ACK 3333333333333333333333333333333333333333 common\n",
+		"ACK 4444444444444444444444444444444444444444 common\n",
+		"ACK 5555555555555555555555555555555555555555 common\n",
+		"ready\n",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ack stream: got %v, want %v", got, want)
+	}
+}
