@@ -11,9 +11,12 @@ import (
 )
 
 // FetchRequest is the parsed form of a protocol-v2 "fetch" command body.
+//
+// Note: want-ref is intentionally not represented; the M3 capability
+// advertisement does not expose ref-in-want, and ParseFetchArgs rejects
+// want-ref lines outright.
 type FetchRequest struct {
 	Wants       []string // raw 40-char SHA-1 hex
-	WantRefs    []string // ref names (server-side resolution)
 	Haves       []string // raw 40-char SHA-1 hex
 	Done        bool
 	ThinPack    bool
@@ -55,11 +58,11 @@ func ParseFetchArgs(args []pktline.Token) (FetchRequest, error) {
 			}
 			req.Wants = append(req.Wants, oid)
 		case strings.HasPrefix(line, "want-ref "):
-			ref := strings.TrimPrefix(line, "want-ref ")
-			if ref == "" || strings.ContainsAny(ref, " \t") {
-				return fmt.Errorf("fetch: invalid want-ref %q", ref)
-			}
-			req.WantRefs = append(req.WantRefs, ref)
+			// "want-ref" requires the "ref-in-want" fetch capability, which
+			// the M3 advertisement (see V2Capabilities) does not expose.
+			// Reject it so a manually crafted client cannot use an
+			// unadvertised extension to make the server resolve refs.
+			return fmt.Errorf("fetch: want-ref not supported (ref-in-want not advertised)")
 		case strings.HasPrefix(line, "have "):
 			oid := strings.TrimPrefix(line, "have ")
 			if !validOID(oid) {
@@ -73,9 +76,18 @@ func ParseFetchArgs(args []pktline.Token) (FetchRequest, error) {
 			}
 			req.Depth = n
 		case strings.HasPrefix(line, "deepen-since "):
-			req.DeepenSince = strings.TrimPrefix(line, "deepen-since ")
+			v := strings.TrimPrefix(line, "deepen-since ")
+			ts, err := strconv.ParseInt(v, 10, 64)
+			if err != nil || ts <= 0 {
+				return fmt.Errorf("fetch: invalid deepen-since %q", v)
+			}
+			req.DeepenSince = v
 		case strings.HasPrefix(line, "deepen-not "):
-			req.DeepenNot = append(req.DeepenNot, strings.TrimPrefix(line, "deepen-not "))
+			ref := strings.TrimPrefix(line, "deepen-not ")
+			if ref == "" || strings.ContainsAny(ref, " \t") {
+				return fmt.Errorf("fetch: invalid deepen-not %q", ref)
+			}
+			req.DeepenNot = append(req.DeepenNot, ref)
 		case strings.HasPrefix(line, "shallow "):
 			oid := strings.TrimPrefix(line, "shallow ")
 			if !validOID(oid) {
@@ -91,7 +103,7 @@ func ParseFetchArgs(args []pktline.Token) (FetchRequest, error) {
 	}); err != nil {
 		return FetchRequest{}, err
 	}
-	if len(req.Wants) == 0 && len(req.WantRefs) == 0 {
+	if len(req.Wants) == 0 {
 		return FetchRequest{}, fmt.Errorf("fetch: no want present")
 	}
 	return req, nil

@@ -165,22 +165,53 @@ func TestParseFetchArgs_DeepenSinceAndNot(t *testing.T) {
 	}
 }
 
-func TestParseFetchArgs_WantRefOnly(t *testing.T) {
+func TestParseFetchArgs_WantRefRejected(t *testing.T) {
+	// "want-ref" requires the ref-in-want capability, which the M3
+	// advertisement does not expose. The parser must reject it.
 	args := tokensFromLines(
 		"command=fetch\n",
 		"DELIM",
 		"want-ref refs/heads/main\n",
 		"FLUSH",
 	)
-	got, err := ParseFetchArgs(args)
-	if err != nil {
-		t.Fatalf("ParseFetchArgs: %v", err)
+	if _, err := ParseFetchArgs(args); err == nil {
+		t.Fatalf("ParseFetchArgs: expected error on unadvertised want-ref")
 	}
-	if len(got.Wants) != 0 {
-		t.Fatalf("Wants: got %v, want empty", got.Wants)
+}
+
+func TestParseFetchArgs_RejectsBadDeepenSince(t *testing.T) {
+	cases := map[string]string{
+		"empty":       "deepen-since \n",
+		"non-numeric": "deepen-since notanumber\n",
+		"zero":        "deepen-since 0\n",
+		"negative":    "deepen-since -5\n",
 	}
-	if !reflect.DeepEqual(got.WantRefs, []string{"refs/heads/main"}) {
-		t.Fatalf("WantRefs: got %v", got.WantRefs)
+	for name, line := range cases {
+		t.Run(name, func(t *testing.T) {
+			args := tokensFromLines(
+				"command=fetch\n",
+				"DELIM",
+				"want 1111111111111111111111111111111111111111\n",
+				line,
+				"FLUSH",
+			)
+			if _, err := ParseFetchArgs(args); err == nil {
+				t.Fatalf("ParseFetchArgs: expected error on bad deepen-since %q", line)
+			}
+		})
+	}
+}
+
+func TestParseFetchArgs_RejectsBadDeepenNot(t *testing.T) {
+	args := tokensFromLines(
+		"command=fetch\n",
+		"DELIM",
+		"want 1111111111111111111111111111111111111111\n",
+		"deepen-not \n",
+		"FLUSH",
+	)
+	if _, err := ParseFetchArgs(args); err == nil {
+		t.Fatalf("ParseFetchArgs: expected error on empty deepen-not")
 	}
 }
 
