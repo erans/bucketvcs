@@ -526,7 +526,7 @@ type PackForFetchOptions struct {
 	IncludeTag  bool
 	OfsDelta    bool
 	NoProgress  bool   // suppress stderr-as-progress
-	ShallowFile string // optional path to a temp shallow file for shallow fetches
+	ShallowFile string // optional path to a shallow file (passed via GIT_SHALLOW_FILE)
 	// Depth is informational only — actual depth handling for shallow fetches
 	// is via the ShallowFile contents written by the caller before invocation.
 	// Stored for caller bookkeeping; not consumed by this package.
@@ -538,6 +538,18 @@ type PackForFetchOptions struct {
 // io.ReadCloser over the resulting pack stream. The caller MUST Close() the
 // returned reader (which waits for git to exit and surfaces nonzero exit
 // status as an error).
+//
+// Wants/haves are validated as strict hex object IDs before invocation;
+// callers do NOT need to pre-sanitize for shell metacharacters.
+//
+// SECURITY — REACHABILITY IS THE CALLER'S JOB. This wrapper does NOT verify
+// that wants are advertised, reachable from advertised refs, or otherwise
+// authorized. `git pack-objects --revs` will happily pack any object the
+// caller names if it exists in the repo, so a client that knows or guesses
+// an OID could exfiltrate hidden objects. Callers (the v2proto fetch
+// handler / gateway) MUST enforce upload-pack-style allow-tip / allow-reachable-sha1
+// semantics against an advertised want set BEFORE handing OIDs to this
+// function. See M3 Tasks 14-15 (gateway info/refs + git-upload-pack).
 //
 // Any output on stderr is captured into the returned error on close-failure;
 // it is NOT streamed to a side-band by this layer (the caller wraps it).
@@ -574,12 +586,17 @@ func PackObjectsForFetch(ctx context.Context, dir string, opts PackForFetchOptio
 	if opts.NoProgress {
 		args = append(args, "-q")
 	}
-	if opts.ShallowFile != "" {
-		args = append([]string{"-c", "core.shallow=" + opts.ShallowFile}, args...)
-	}
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Dir = dir
-	cmd.Env = scrubGitRepoEnv(os.Environ())
+	env := scrubGitRepoEnv(os.Environ())
+	if opts.ShallowFile != "" {
+		// GIT_SHALLOW_FILE is the documented, supported mechanism for
+		// pointing pack-objects (and other plumbing) at an alternate
+		// shallow boundary. The previously used `-c core.shallow=...`
+		// is silently ignored by git — there is no such config key.
+		env = append(env, "GIT_SHALLOW_FILE="+opts.ShallowFile)
+	}
+	cmd.Env = env
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

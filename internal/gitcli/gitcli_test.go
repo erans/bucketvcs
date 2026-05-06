@@ -860,33 +860,75 @@ func TestPackObjectsForFetch_ShallowFileForwardedAsConfig(t *testing.T) {
 	mustGit(t, dir, "init", "--bare", bare)
 	work := filepath.Join(dir, "wt")
 	mustGit(t, dir, "clone", bare, work)
-	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("x"), 0o644); err != nil {
-		t.Fatalf("write: %v", err)
+	// Build A -> B -> C so we can prove the shallow boundary excludes
+	// ancestors from the resulting pack.
+	for i, txt := range []string{"a", "b", "c"} {
+		if err := os.WriteFile(filepath.Join(work, "f.txt"), []byte(txt), 0o644); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+		mustGit(t, work, "add", ".")
+		mustGit(t, work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", txt)
 	}
-	mustGit(t, work, "add", ".")
-	mustGit(t, work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "x")
 	mustGit(t, work, "push", "origin", "HEAD:refs/heads/main")
 	tip := strings.TrimSpace(string(mustGitCapture(t, work, "rev-parse", "HEAD")))
 
-	// An empty shallow file is a valid no-op; just exercise the arg-prepending
-	// codepath without breaking the fetch.
+	// countCommits returns how many commit objects are present in the
+	// pack stream produced by PackObjectsForFetch.
+	countCommits := func(t *testing.T, opts PackForFetchOptions) int {
+		t.Helper()
+		ctx := context.Background()
+		rc, err := PackObjectsForFetch(ctx, bare, opts)
+		if err != nil {
+			t.Fatalf("PackObjectsForFetch: %v", err)
+		}
+		packDir := t.TempDir()
+		packPath := filepath.Join(packDir, "in.pack")
+		f, err := os.Create(packPath)
+		if err != nil {
+			t.Fatalf("create pack: %v", err)
+		}
+		if _, err := io.Copy(f, rc); err != nil {
+			t.Fatalf("copy pack: %v", err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatalf("close pack file: %v", err)
+		}
+		if err := rc.Close(); err != nil {
+			t.Fatalf("close pack reader: %v", err)
+		}
+		// Index the pack so we can list its objects.
+		mustGit(t, packDir, "index-pack", "in.pack")
+		out := mustGitCapture(t, packDir, "verify-pack", "-v", "in.pack")
+		commits := 0
+		for _, line := range strings.Split(string(out), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 && fields[1] == "commit" {
+				commits++
+			}
+		}
+		return commits
+	}
+
+	// Baseline: no shallow file -> all 3 commits in the pack.
+	full := countCommits(t, PackForFetchOptions{Wants: []string{tip}})
+	if full != 3 {
+		t.Fatalf("baseline pack: expected 3 commits, got %d", full)
+	}
+
+	// With a shallow file that marks the tip itself as shallow, history
+	// is cut at C and pack-objects must NOT include C's ancestors. If
+	// the shallow file is silently ignored (the prior `-c core.shallow=`
+	// bug), the pack would still contain all 3 commits.
 	shallow := filepath.Join(t.TempDir(), "shallow")
-	if err := os.WriteFile(shallow, []byte(""), 0o644); err != nil {
+	if err := os.WriteFile(shallow, []byte(tip+"\n"), 0o644); err != nil {
 		t.Fatalf("write shallow: %v", err)
 	}
-	ctx := context.Background()
-	out, err := PackObjectsForFetch(ctx, bare, PackForFetchOptions{
+	got := countCommits(t, PackForFetchOptions{
 		Wants:       []string{tip},
 		ShallowFile: shallow,
 	})
-	if err != nil {
-		t.Fatalf("PackObjectsForFetch: %v", err)
-	}
-	if _, err := io.Copy(io.Discard, out); err != nil {
-		t.Fatalf("copy: %v", err)
-	}
-	if err := out.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+	if got != 1 {
+		t.Fatalf("shallow pack: expected 1 commit (boundary at tip), got %d (shallow file likely ignored)", got)
 	}
 }
 
