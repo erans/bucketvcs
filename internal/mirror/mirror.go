@@ -175,7 +175,7 @@ func (mg *Manager) Open(ctx context.Context, tenant, repoID string) (*Mirror, er
 		return nil, fmt.Errorf("mirror: mkdir incoming: %w", err)
 	}
 	m := &Mirror{root: root, tenant: tenant, repoID: repoID, store: mg.store}
-	if err := m.syncTo(ctx, view); err != nil {
+	if err := m.syncToLocked(ctx, view); err != nil {
 		return nil, err
 	}
 
@@ -196,9 +196,11 @@ func (mg *Manager) Open(ctx context.Context, tenant, repoID string) (*Mirror, er
 // Close releases the process flock. It does not delete on-disk mirrors.
 // Safe to call multiple times.
 func (mg *Manager) Close() error {
-	f := mg.lock
+	mg.mu.Lock()
+	lock := mg.lock
 	mg.lock = nil
-	return releaseLock(f)
+	mg.mu.Unlock()
+	return releaseLock(lock)
 }
 
 // openForTest is the in-package entry point used by tests. It wraps
@@ -234,6 +236,23 @@ func (m *Mirror) SyncToCurrent(ctx context.Context) error {
 	view, err := r.ReadRoot(ctx)
 	if err != nil {
 		return fmt.Errorf("mirror: repo.ReadRoot: %w", err)
+	}
+	return m.syncToLocked(ctx, view)
+}
+
+// syncToLocked serializes rebuilds via the per-repo mutex. The mutex is the
+// gateway's existing write lock; readers use RLock and never see a partial
+// rebuild because a stale-rebuild path always promotes to Lock here.
+func (m *Mirror) syncToLocked(ctx context.Context, view *repo.RootView) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Re-check sentinel under the lock: if another goroutine just rebuilt,
+	// we may already be current and can skip the heavy path.
+	want := sentinel{ManifestVersion: view.Header.ManifestVersion, LatestTx: view.Header.LatestTx}
+	if dirExists(m.BareDir()) {
+		if got, err := readSentinel(m.VersionFile()); err == nil && got == want {
+			return nil
+		}
 	}
 	return m.syncTo(ctx, view)
 }

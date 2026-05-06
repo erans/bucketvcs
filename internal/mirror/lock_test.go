@@ -2,9 +2,12 @@ package mirror
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"runtime"
+	"sync"
+	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 )
@@ -74,25 +77,27 @@ func TestMirror_LockUnlockSerializesWriters(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 
-	// Acquire write lock; a second goroutine attempting Lock must block until
-	// we Unlock. Sleep briefly to give the goroutine a chance to be scheduled
-	// so the "did NOT progress" assertion is meaningful (otherwise a too-fast
-	// poll wins purely by being first to run).
 	m.Lock()
-	gotSecond := make(chan struct{})
+	var inside atomic.Int32
+	done := make(chan struct{})
 	go func() {
 		m.Lock()
-		defer m.Unlock()
-		close(gotSecond)
+		inside.Add(1)
+		m.Unlock()
+		close(done)
 	}()
-	time.Sleep(10 * time.Millisecond)
-	select {
-	case <-gotSecond:
-		t.Fatalf("second Lock acquired before first Unlock")
-	default:
+	// Yield repeatedly to give the goroutine a chance to be scheduled.
+	for i := 0; i < 100; i++ {
+		runtime.Gosched()
+	}
+	if got := inside.Load(); got != 0 {
+		t.Fatalf("second Lock acquired before first Unlock (inside=%d)", got)
 	}
 	m.Unlock()
-	<-gotSecond
+	<-done
+	if got := inside.Load(); got != 1 {
+		t.Fatalf("second goroutine never entered: inside=%d", got)
+	}
 }
 
 func TestMirror_RLockAllowsConcurrentReaders(t *testing.T) {
@@ -121,4 +126,55 @@ func TestMirror_RLockAllowsConcurrentReaders(t *testing.T) {
 		close(got)
 	}()
 	<-got // would deadlock if RLock blocked on first RLock
+}
+
+func TestMirror_ConcurrentSyncDoesNotRaceOnRebuild(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	store, tenant, repoID := makeImportedRepo(t)
+
+	root := t.TempDir()
+	mgr, err := NewManager(root, store)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	t.Cleanup(func() { _ = mgr.Close() })
+
+	// Cold path: first Open materializes.
+	if _, err := mgr.Open(context.Background(), tenant, repoID); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	// Force stale by corrupting the sentinel.
+	versPath := filepath.Join(root, tenant, repoID, "manifest_version.txt")
+	if err := os.WriteFile(versPath, []byte(`{"manifest_version":99999,"latest_tx":"FORCESTALE0000000000000000"}`), 0o644); err != nil {
+		t.Fatalf("corrupt sentinel: %v", err)
+	}
+
+	// Two concurrent Opens both detect stale and try to rebuild.
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := mgr.Open(context.Background(), tenant, repoID)
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Open errored (rebuild race): %v", err)
+		}
+	}
+	// Final state: a clean bare repo with the correct sentinel.
+	got, err := os.ReadFile(versPath)
+	if err != nil {
+		t.Fatalf("read sentinel: %v", err)
+	}
+	if string(got) == `{"manifest_version":99999,"latest_tx":"FORCESTALE0000000000000000"}` {
+		t.Fatalf("sentinel not rewritten after rebuild")
+	}
 }
