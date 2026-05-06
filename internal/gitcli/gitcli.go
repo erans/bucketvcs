@@ -507,7 +507,10 @@ type PackForFetchOptions struct {
 	OfsDelta    bool
 	NoProgress  bool   // suppress stderr-as-progress
 	ShallowFile string // optional path to a temp shallow file for shallow fetches
-	Depth       int    // 0 = unbounded
+	// Depth is informational only — actual depth handling for shallow fetches
+	// is via the ShallowFile contents written by the caller before invocation.
+	// Stored for caller bookkeeping; not consumed by this package.
+	Depth int
 }
 
 // PackObjectsForFetch invokes "git pack-objects --revs --stdout" against the
@@ -610,7 +613,7 @@ func RevParseObjectKind(ctx context.Context, dir, oid string) (string, error) {
 	if !validRefOrOID(oid) {
 		return "", fmt.Errorf("rev-parse: invalid oid %q", oid)
 	}
-	out, err := run(ctx, dir, "cat-file", "-t", oid)
+	out, err := run(ctx, dir, "--no-replace-objects", "cat-file", "-t", oid)
 	if err != nil {
 		return "", err
 	}

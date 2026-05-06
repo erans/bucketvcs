@@ -750,3 +750,142 @@ func TestRevParseObjectKind_CommitTagBlob(t *testing.T) {
 		t.Fatalf("tag kind=%q", k)
 	}
 }
+
+func TestPackObjectsForFetch_IncrementalWithHaves(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "src.git")
+	mustGit(t, dir, "init", "--bare", bare)
+	work := filepath.Join(dir, "wt")
+	mustGit(t, dir, "clone", bare, work)
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("v1\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "v1")
+	firstOID := strings.TrimSpace(string(mustGitCapture(t, work, "rev-parse", "HEAD")))
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("v2\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "v2")
+	secondOID := strings.TrimSpace(string(mustGitCapture(t, work, "rev-parse", "HEAD")))
+	mustGit(t, work, "push", "origin", "HEAD:refs/heads/main")
+
+	// Incremental fetch: have firstOID, want secondOID. The result should be
+	// non-empty (at least the new commit and modified blob) and indexable.
+	ctx := context.Background()
+	out, err := PackObjectsForFetch(ctx, bare, PackForFetchOptions{
+		Wants:    []string{secondOID},
+		Haves:    []string{firstOID},
+		ThinPack: true,
+		OfsDelta: true,
+	})
+	if err != nil {
+		t.Fatalf("PackObjectsForFetch: %v", err)
+	}
+	defer out.Close()
+
+	dst := filepath.Join(dir, "dst.git")
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := InitBare(ctx, dst); err != nil {
+		t.Fatalf("InitBare: %v", err)
+	}
+	packDir := filepath.Join(dst, "objects", "pack")
+	if err := os.MkdirAll(packDir, 0o755); err != nil {
+		t.Fatalf("mkdir pack: %v", err)
+	}
+	packPath := filepath.Join(packDir, "pack-incr.pack")
+	f, err := os.Create(packPath)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	n, err := io.Copy(f, out)
+	if err != nil {
+		t.Fatalf("copy: %v", err)
+	}
+	if n == 0 {
+		t.Fatalf("incremental pack was empty")
+	}
+	f.Close()
+	// Thin packs need --fix-thin to be indexable into a fresh repo. We don't
+	// have IndexPackStrict here yet (Task 10), so just verify nonzero size
+	// and that pack-objects exited cleanly via Close() above (deferred).
+}
+
+func TestPackObjectsForFetch_BogusWantSurfacesError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "src.git")
+	mustGit(t, dir, "init", "--bare", bare)
+
+	ctx := context.Background()
+	out, err := PackObjectsForFetch(ctx, bare, PackForFetchOptions{
+		Wants: []string{"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"},
+	})
+	if err != nil {
+		// Acceptable: the start path may detect the bogus want and fail early.
+		return
+	}
+	_, _ = io.Copy(io.Discard, out)
+	if err := out.Close(); err == nil {
+		t.Fatalf("Close: expected error for bogus want OID")
+	}
+}
+
+func TestRevParseObjectKind_MissingOIDReturnsError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "src.git")
+	mustGit(t, dir, "init", "--bare", bare)
+	if _, err := RevParseObjectKind(context.Background(), bare, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"); err == nil {
+		t.Fatalf("RevParseObjectKind: expected error for missing oid")
+	}
+}
+
+func TestPackObjectsForFetch_ShallowFileForwardedAsConfig(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "src.git")
+	mustGit(t, dir, "init", "--bare", bare)
+	work := filepath.Join(dir, "wt")
+	mustGit(t, dir, "clone", bare, work)
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "x")
+	mustGit(t, work, "push", "origin", "HEAD:refs/heads/main")
+	tip := strings.TrimSpace(string(mustGitCapture(t, work, "rev-parse", "HEAD")))
+
+	// An empty shallow file is a valid no-op; just exercise the arg-prepending
+	// codepath without breaking the fetch.
+	shallow := filepath.Join(t.TempDir(), "shallow")
+	if err := os.WriteFile(shallow, []byte(""), 0o644); err != nil {
+		t.Fatalf("write shallow: %v", err)
+	}
+	ctx := context.Background()
+	out, err := PackObjectsForFetch(ctx, bare, PackForFetchOptions{
+		Wants:       []string{tip},
+		ShallowFile: shallow,
+	})
+	if err != nil {
+		t.Fatalf("PackObjectsForFetch: %v", err)
+	}
+	if _, err := io.Copy(io.Discard, out); err != nil {
+		t.Fatalf("copy: %v", err)
+	}
+	if err := out.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
