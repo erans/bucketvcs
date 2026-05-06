@@ -114,11 +114,16 @@ func prefixOK(name string, prefixes []string) bool {
 // iterateArgs walks a pkt-line token stream of the shape
 //
 //	"command=<cmd>\n"
+//	"<capability>\n" ...     (zero or more; e.g. agent=..., object-format=...)
 //	delim
 //	"<arg-line>\n" ...
 //	flush
 //
 // invoking fn for each <arg-line> with the trailing newline stripped.
+// Per gitprotocol-v2, command requests may include capability lines between
+// the command line and the delim; those lines are not ls-refs/fetch arguments
+// and are tolerated and ignored here. If no delim is present the request has
+// no command-specific args and fn is never invoked.
 func iterateArgs(args []pktline.Token, expectCmd string, fn func(line string) error) error {
 	if len(args) == 0 {
 		return fmt.Errorf("v2proto: empty arg stream")
@@ -126,10 +131,35 @@ func iterateArgs(args []pktline.Token, expectCmd string, fn func(line string) er
 	if args[0].Type != pktline.Data || strings.TrimRight(string(args[0].Payload), "\n") != "command="+expectCmd {
 		return fmt.Errorf("v2proto: expected command=%s, got %q", expectCmd, args[0].Payload)
 	}
+
+	// Phase 1: skip the command line plus any pre-delim capability lines.
 	i := 1
-	if i < len(args) && args[i].Type == pktline.Delim {
-		i++
+	sawDelim := false
+	for ; i < len(args); i++ {
+		t := args[i]
+		switch t.Type {
+		case pktline.Delim:
+			sawDelim = true
+		case pktline.Data:
+			// Capability line; ignore.
+			continue
+		case pktline.Flush:
+			// Request terminated before any args.
+			return nil
+		default:
+			return fmt.Errorf("v2proto: unexpected token %v", t.Type)
+		}
+		if sawDelim {
+			i++
+			break
+		}
 	}
+	if !sawDelim {
+		// Reached end of stream without a delim — no args.
+		return nil
+	}
+
+	// Phase 2: emit each arg line until flush or end of stream.
 	for ; i < len(args); i++ {
 		t := args[i]
 		switch t.Type {

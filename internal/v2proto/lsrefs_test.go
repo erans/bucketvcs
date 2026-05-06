@@ -223,3 +223,63 @@ func TestLsRefs_EmptyDefaultBranchUnbornNoSymrefAnnotation(t *testing.T) {
 		t.Fatalf("output: got %v, want %v", got, want)
 	}
 }
+
+// Per gitprotocol-v2, command requests may include capability lines (e.g.
+// agent=..., object-format=...) between the command line and the delim.
+// iterateArgs must tolerate them rather than treating them as ls-refs args.
+func TestLsRefs_TolerantesPreDelimCapabilityLines(t *testing.T) {
+	body := &manifest.Body{
+		DefaultBranch: "main",
+		Refs: map[string]string{
+			"refs/heads/main": "1111111111111111111111111111111111111111",
+		},
+	}
+	args := tokensFromLines(
+		"command=ls-refs\n",
+		"agent=git/2.43.0\n",
+		"object-format=sha1\n",
+		"DELIM",
+		"symrefs\n",
+		"FLUSH",
+	)
+	var buf bytes.Buffer
+	if err := HandleLsRefs(args, body, &buf); err != nil {
+		t.Fatalf("HandleLsRefs: %v", err)
+	}
+	got := drainPayloads(t, &buf)
+	want := []string{
+		"1111111111111111111111111111111111111111 HEAD symref-target:refs/heads/main\n",
+		"1111111111111111111111111111111111111111 refs/heads/main\n",
+	}
+	if !equalIgnoreOrder(got, want) {
+		t.Fatalf("output: got %v, want %v", got, want)
+	}
+}
+
+// A request with no delim (just command + capabilities + flush) carries no
+// command-specific args; the handler should produce a default advertisement.
+func TestLsRefs_NoDelimNoArgs(t *testing.T) {
+	body := &manifest.Body{
+		DefaultBranch: "main",
+		Refs: map[string]string{
+			"refs/heads/main": "1111111111111111111111111111111111111111",
+		},
+	}
+	args := tokensFromLines(
+		"command=ls-refs\n",
+		"agent=git/2.43.0\n",
+		"FLUSH",
+	)
+	var buf bytes.Buffer
+	if err := HandleLsRefs(args, body, &buf); err != nil {
+		t.Fatalf("HandleLsRefs: %v", err)
+	}
+	got := drainPayloads(t, &buf)
+	want := []string{
+		"1111111111111111111111111111111111111111 HEAD\n",
+		"1111111111111111111111111111111111111111 refs/heads/main\n",
+	}
+	if !equalIgnoreOrder(got, want) {
+		t.Fatalf("output: got %v, want %v", got, want)
+	}
+}
