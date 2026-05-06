@@ -48,6 +48,10 @@ func (t TokenType) String() string {
 }
 
 // Token is one decoded frame. For non-Data tokens, Payload is empty.
+//
+// IMPORTANT: For Data tokens returned by Reader.Read, Payload aliases an
+// internal buffer that is invalidated on the next Read. Copy if you need
+// to retain it.
 type Token struct {
 	Type    TokenType
 	Payload []byte
@@ -65,8 +69,12 @@ func NewReader(r io.Reader) *Reader {
 }
 
 // Read returns the next pkt-line token. At true end of stream after a
-// previously-returned Flush (or any clean boundary), Read returns io.EOF.
-// On a truncated or malformed frame, an error is returned.
+// previously-returned Flush (or any clean boundary), Read returns io.EOF
+// without wrapping. On a truncated or malformed frame, an error is returned.
+//
+// For Data tokens, the returned Token.Payload aliases an internal buffer
+// that is overwritten on the next Read call. Callers that need to retain
+// the bytes across Read calls MUST copy them (e.g., append([]byte{}, p...)).
 func (r *Reader) Read() (Token, error) {
 	n, err := io.ReadFull(r.r, r.hdr[:])
 	if err == io.EOF && n == 0 {

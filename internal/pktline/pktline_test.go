@@ -116,3 +116,54 @@ func TestWriter_RejectsOversizedPayload(t *testing.T) {
 		t.Fatalf("WritePacket: expected error on payload > MaxPayload")
 	}
 }
+
+func TestReader_EmptyDataFrameRoundTrip(t *testing.T) {
+	// "0004" is a length-4 frame with zero-byte payload — a valid Data frame.
+	r := NewReader(strings.NewReader("0004"))
+	tok, err := r.Read()
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if tok.Type != Data {
+		t.Fatalf("Type: got %v, want Data", tok.Type)
+	}
+	if len(tok.Payload) != 0 {
+		t.Fatalf("Payload: got %q, want empty", tok.Payload)
+	}
+}
+
+func TestWriter_ExactMaxPayloadRoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	big := bytes.Repeat([]byte{'x'}, MaxPayload)
+	if err := w.WritePacket(big); err != nil {
+		t.Fatalf("WritePacket: %v", err)
+	}
+	r := NewReader(&buf)
+	tok, err := r.Read()
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if tok.Type != Data {
+		t.Fatalf("Type: %v", tok.Type)
+	}
+	if !bytes.Equal(tok.Payload, big) {
+		t.Fatalf("Payload mismatch: len=%d want=%d", len(tok.Payload), len(big))
+	}
+}
+
+func TestWriter_WriteStringRoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	if err := w.WriteString("greetings\n"); err != nil {
+		t.Fatalf("WriteString: %v", err)
+	}
+	r := NewReader(&buf)
+	tok, err := r.Read()
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if tok.Type != Data || string(tok.Payload) != "greetings\n" {
+		t.Fatalf("got %+v, want Data/'greetings\\n'", tok)
+	}
+}
