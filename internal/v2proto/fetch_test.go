@@ -134,7 +134,7 @@ func TestWriteAcknowledgments_SomeCommon(t *testing.T) {
 	got := drainPayloads(t, &buf)
 	want := []string{
 		"acknowledgments\n",
-		"ACK 3333333333333333333333333333333333333333 common\n",
+		"ACK 3333333333333333333333333333333333333333\n",
 		"ready\n",
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -142,14 +142,12 @@ func TestWriteAcknowledgments_SomeCommon(t *testing.T) {
 	}
 }
 
-func TestParseFetchArgs_DeepenSinceAndNot(t *testing.T) {
+func TestParseFetchArgs_DeepenSince(t *testing.T) {
 	args := tokensFromLines(
 		"command=fetch\n",
 		"DELIM",
 		"want 1111111111111111111111111111111111111111\n",
 		"deepen-since 1700000000\n",
-		"deepen-not refs/heads/main\n",
-		"deepen-not refs/tags/v1\n",
 		"FLUSH",
 	)
 	got, err := ParseFetchArgs(args)
@@ -159,9 +157,60 @@ func TestParseFetchArgs_DeepenSinceAndNot(t *testing.T) {
 	if got.DeepenSince != "1700000000" {
 		t.Fatalf("DeepenSince: %q", got.DeepenSince)
 	}
+}
+
+func TestParseFetchArgs_DeepenNotMultiple(t *testing.T) {
+	args := tokensFromLines(
+		"command=fetch\n",
+		"DELIM",
+		"want 1111111111111111111111111111111111111111\n",
+		"deepen-not refs/heads/main\n",
+		"deepen-not refs/tags/v1\n",
+		"FLUSH",
+	)
+	got, err := ParseFetchArgs(args)
+	if err != nil {
+		t.Fatalf("ParseFetchArgs: %v", err)
+	}
 	wantNot := []string{"refs/heads/main", "refs/tags/v1"}
 	if !reflect.DeepEqual(got.DeepenNot, wantNot) {
 		t.Fatalf("DeepenNot: got %v, want %v", got.DeepenNot, wantNot)
+	}
+}
+
+func TestParseFetchArgs_RejectsConflictingShallow(t *testing.T) {
+	cases := map[string][]string{
+		"depth+since": {
+			"deepen 3\n",
+			"deepen-since 1700000000\n",
+		},
+		"depth+not": {
+			"deepen 3\n",
+			"deepen-not refs/heads/main\n",
+		},
+		"since+not": {
+			"deepen-since 1700000000\n",
+			"deepen-not refs/heads/main\n",
+		},
+		"not+since": {
+			"deepen-not refs/heads/main\n",
+			"deepen-since 1700000000\n",
+		},
+	}
+	for name, extra := range cases {
+		t.Run(name, func(t *testing.T) {
+			lines := []string{
+				"command=fetch\n",
+				"DELIM",
+				"want 1111111111111111111111111111111111111111\n",
+			}
+			lines = append(lines, extra...)
+			lines = append(lines, "FLUSH")
+			args := tokensFromLines(lines...)
+			if _, err := ParseFetchArgs(args); err == nil {
+				t.Fatalf("ParseFetchArgs: expected conflict error for %s", name)
+			}
+		})
 	}
 }
 
@@ -240,9 +289,9 @@ func TestWriteAcknowledgments_MultipleCommonsPreservesOrder(t *testing.T) {
 	got := drainPayloads(t, &buf)
 	want := []string{
 		"acknowledgments\n",
-		"ACK 3333333333333333333333333333333333333333 common\n",
-		"ACK 4444444444444444444444444444444444444444 common\n",
-		"ACK 5555555555555555555555555555555555555555 common\n",
+		"ACK 3333333333333333333333333333333333333333\n",
+		"ACK 4444444444444444444444444444444444444444\n",
+		"ACK 5555555555555555555555555555555555555555\n",
 		"ready\n",
 	}
 	if !reflect.DeepEqual(got, want) {

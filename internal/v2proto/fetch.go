@@ -39,6 +39,23 @@ type FetchRequest struct {
 //	flush
 func ParseFetchArgs(args []pktline.Token) (FetchRequest, error) {
 	var req FetchRequest
+	// Track which shallow specifier the client picked. Per protocol-v2,
+	// "deepen", "deepen-since", and "deepen-not" are mutually exclusive
+	// shallow modes; "deepen-not" may repeat within its own mode.
+	const (
+		shallowNone = iota
+		shallowDepth
+		shallowSince
+		shallowNot
+	)
+	shallowMode := shallowNone
+	setShallow := func(mode int, name string) error {
+		if shallowMode != shallowNone && shallowMode != mode {
+			return fmt.Errorf("fetch: %s conflicts with another shallow option", name)
+		}
+		shallowMode = mode
+		return nil
+	}
 	if err := iterateArgs(args, "fetch", func(line string) error {
 		switch {
 		case line == "thin-pack":
@@ -74,6 +91,9 @@ func ParseFetchArgs(args []pktline.Token) (FetchRequest, error) {
 			if err != nil || n <= 0 {
 				return fmt.Errorf("fetch: invalid deepen %q", line)
 			}
+			if err := setShallow(shallowDepth, "deepen"); err != nil {
+				return err
+			}
 			req.Depth = n
 		case strings.HasPrefix(line, "deepen-since "):
 			v := strings.TrimPrefix(line, "deepen-since ")
@@ -81,11 +101,17 @@ func ParseFetchArgs(args []pktline.Token) (FetchRequest, error) {
 			if err != nil || ts <= 0 {
 				return fmt.Errorf("fetch: invalid deepen-since %q", v)
 			}
+			if err := setShallow(shallowSince, "deepen-since"); err != nil {
+				return err
+			}
 			req.DeepenSince = v
 		case strings.HasPrefix(line, "deepen-not "):
 			ref := strings.TrimPrefix(line, "deepen-not ")
 			if ref == "" || strings.ContainsAny(ref, " \t") {
 				return fmt.Errorf("fetch: invalid deepen-not %q", ref)
+			}
+			if err := setShallow(shallowNot, "deepen-not"); err != nil {
+				return err
 			}
 			req.DeepenNot = append(req.DeepenNot, ref)
 		case strings.HasPrefix(line, "shallow "):
@@ -124,8 +150,11 @@ func validOID(s string) bool {
 // server is acknowledging as common ancestors. unknown is the set of haves
 // the server does not have.
 //
-// If len(commons)==0 we emit "NAK"; otherwise we emit ACKs for each common
-// plus "ready". A trailing flush is the caller's responsibility.
+// Per protocol-v2, ACK lines carry just the OID ("ACK <oid>\n") — the
+// trailing " common" suffix is the v0/v1 multi_ack_detailed form and is
+// not used in v2. If len(commons)==0 we emit "NAK"; otherwise we emit
+// ACKs for each common plus "ready". A trailing flush is the caller's
+// responsibility.
 func WriteAcknowledgments(w io.Writer, commons, unknown []string) error {
 	pw := pktline.NewWriter(w)
 	if err := pw.WriteString("acknowledgments\n"); err != nil {
@@ -135,7 +164,7 @@ func WriteAcknowledgments(w io.Writer, commons, unknown []string) error {
 		return pw.WriteString("NAK\n")
 	}
 	for _, oid := range commons {
-		if err := pw.WriteString("ACK " + oid + " common\n"); err != nil {
+		if err := pw.WriteString("ACK " + oid + "\n"); err != nil {
 			return err
 		}
 	}
