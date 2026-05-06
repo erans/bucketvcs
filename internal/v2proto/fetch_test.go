@@ -318,6 +318,18 @@ func TestWriteAcknowledgments_CommonWithoutReady(t *testing.T) {
 	}
 }
 
+func TestWriteAcknowledgments_NoHavesEmitsNothing(t *testing.T) {
+	// Initial fetch: client sent no haves, so the server must not emit
+	// an acknowledgments section at all (per protocol-v2).
+	var buf bytes.Buffer
+	if err := WriteAcknowledgments(&buf, nil, nil, true); err != nil {
+		t.Fatalf("WriteAcknowledgments: %v", err)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("expected empty stream, got %d bytes: %q", buf.Len(), buf.String())
+	}
+}
+
 func TestParseFetchArgs_DeepenRelative(t *testing.T) {
 	args := tokensFromLines(
 		"command=fetch\n",

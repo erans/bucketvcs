@@ -161,12 +161,22 @@ func validOID(s string) bool {
 // proceed with packfile generation; when false, only ACK lines (or NAK)
 // are emitted, leaving the negotiation open for another round.
 //
+// Per protocol-v2 the acknowledgments section is emitted only when the
+// client actually sent haves. If commons and unknown are both empty (the
+// initial fetch with no negotiation), this function is a no-op and the
+// caller should proceed directly to the packfile section.
+//
 // Per protocol-v2, ACK lines carry just the OID ("ACK <oid>\n") — the
 // trailing " common" suffix is the v0/v1 multi_ack_detailed form and is
-// not used in v2. If commons is empty we emit "NAK"; otherwise we emit
-// one "ACK <oid>" line per common and, when ready is true, a trailing
-// "ready" line. A trailing flush is the caller's responsibility.
+// not used in v2. When the client did send haves but none were common,
+// we emit "NAK". Otherwise we emit one "ACK <oid>" line per common and,
+// when ready is true, a trailing "ready" line. A trailing flush is the
+// caller's responsibility.
 func WriteAcknowledgments(w io.Writer, commons, unknown []string, ready bool) error {
+	if len(commons) == 0 && len(unknown) == 0 {
+		// Initial fetch (no haves) — no acknowledgments section per v2.
+		return nil
+	}
 	pw := pktline.NewWriter(w)
 	if err := pw.WriteString("acknowledgments\n"); err != nil {
 		return err
