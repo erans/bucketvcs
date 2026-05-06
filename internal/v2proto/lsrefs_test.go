@@ -25,7 +25,7 @@ func tokensFromLines(lines ...string) []pktline.Token {
 
 func TestLsRefs_BasicAdvertisement(t *testing.T) {
 	body := &manifest.Body{
-		DefaultBranch: "main",
+		DefaultBranch: "refs/heads/main",
 		Refs: map[string]string{
 			"refs/heads/main":    "1111111111111111111111111111111111111111",
 			"refs/heads/feature": "2222222222222222222222222222222222222222",
@@ -54,7 +54,7 @@ func TestLsRefs_BasicAdvertisement(t *testing.T) {
 
 func TestLsRefs_SymrefAndRefPrefix(t *testing.T) {
 	body := &manifest.Body{
-		DefaultBranch: "main",
+		DefaultBranch: "refs/heads/main",
 		Refs: map[string]string{
 			"refs/heads/main": "1111111111111111111111111111111111111111",
 			"refs/tags/v1":    "3333333333333333333333333333333333333333",
@@ -86,7 +86,7 @@ func TestLsRefs_SymrefAndRefPrefix(t *testing.T) {
 
 func TestLsRefs_UnbornHEAD(t *testing.T) {
 	body := &manifest.Body{
-		DefaultBranch: "main",
+		DefaultBranch: "refs/heads/main",
 		Refs:          map[string]string{},
 	}
 	args := tokensFromLines(
@@ -156,7 +156,7 @@ func equalIgnoreOrder(a, b []string) bool {
 
 func TestLsRefs_HEADWithSymrefsNoPrefix(t *testing.T) {
 	body := &manifest.Body{
-		DefaultBranch: "main",
+		DefaultBranch: "refs/heads/main",
 		Refs: map[string]string{
 			"refs/heads/main": "1111111111111111111111111111111111111111",
 		},
@@ -183,7 +183,7 @@ func TestLsRefs_HEADWithSymrefsNoPrefix(t *testing.T) {
 
 func TestLsRefs_EmptyRefsNoUnbornEmitsOnlyFlush(t *testing.T) {
 	body := &manifest.Body{
-		DefaultBranch: "main",
+		DefaultBranch: "refs/heads/main",
 		Refs:          map[string]string{},
 	}
 	args := tokensFromLines(
@@ -229,7 +229,7 @@ func TestLsRefs_EmptyDefaultBranchUnbornNoSymrefAnnotation(t *testing.T) {
 // iterateArgs must tolerate them rather than treating them as ls-refs args.
 func TestLsRefs_TolerantesPreDelimCapabilityLines(t *testing.T) {
 	body := &manifest.Body{
-		DefaultBranch: "main",
+		DefaultBranch: "refs/heads/main",
 		Refs: map[string]string{
 			"refs/heads/main": "1111111111111111111111111111111111111111",
 		},
@@ -260,7 +260,7 @@ func TestLsRefs_TolerantesPreDelimCapabilityLines(t *testing.T) {
 // command-specific args; the handler should produce a default advertisement.
 func TestLsRefs_NoDelimNoArgs(t *testing.T) {
 	body := &manifest.Body{
-		DefaultBranch: "main",
+		DefaultBranch: "refs/heads/main",
 		Refs: map[string]string{
 			"refs/heads/main": "1111111111111111111111111111111111111111",
 		},

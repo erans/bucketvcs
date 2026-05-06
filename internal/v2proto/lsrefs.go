@@ -63,7 +63,9 @@ func HandleLsRefs(args []pktline.Token, body *manifest.Body, w io.Writer) error 
 
 	// HEAD line: in v2, HEAD is emitted only if the default branch is in the
 	// advertised set, OR (with "unborn") even when missing.
-	headTarget := "refs/heads/" + body.DefaultBranch
+	// body.DefaultBranch is already a fully-qualified ref (e.g. refs/heads/main);
+	// see internal/repo/manifest/body.go and the importer/exporter contract.
+	headTarget := body.DefaultBranch
 	headOID, headExists := body.Refs[headTarget]
 	if (headExists || wantUnborn) && prefixOK("HEAD", prefixes) {
 		var line string
