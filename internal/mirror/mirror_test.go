@@ -120,7 +120,33 @@ func TestMirror_RejectsBadTenantOrRepo(t *testing.T) {
 	}
 }
 
-// TestMirror_StaleDetectionDifferentLatestTx covers the case where the
+// TestMirror_NoDirsForRepoLayerRejectedNames covers names that pass
+// the URL-routing-layer regex (allows '.') but are rejected by
+// internal/repo/keys.validID. openForTest must not leave a mirror
+// directory tree behind for such names.
+func TestMirror_NoDirsForRepoLayerRejectedNames(t *testing.T) {
+	root := t.TempDir()
+	store, err := localfs.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	cases := []struct {
+		tenant, repoID string
+	}{
+		{"acme.prod", "ok"},  // tenant has '.', rejected by keys.validID
+		{"acme", "demo.git"}, // repoID has '.'
+	}
+	for _, c := range cases {
+		if _, err := openForTest(context.Background(), root, store, c.tenant, c.repoID); err == nil {
+			t.Fatalf("openForTest(%q,%q): expected error", c.tenant, c.repoID)
+		}
+		if _, err := os.Stat(filepath.Join(root, c.tenant, c.repoID)); !os.IsNotExist(err) {
+			t.Fatalf("mirror dirs leaked for (%q,%q): stat err = %v", c.tenant, c.repoID, err)
+		}
+	}
+}
+
 // sentinel records the same ManifestVersion as the bucket but a different
 // LatestTx. Same-version replacement (repo deleted+recreated, restored
 // from backup, swapped from another bucket) must force a rebuild rather

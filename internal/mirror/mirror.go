@@ -80,6 +80,15 @@ func validName(s string) bool {
 
 // openForTest is the in-package entry point used by tests. The Manager in
 // Task 8 will replace it with NewManager + Manager.Open.
+//
+// We open and read the repo BEFORE creating any mirror directories so
+// that names which pass the URL-routing-layer regex but are rejected by
+// the stricter internal/repo/keys validation (e.g. "acme.prod") never
+// leave dangling cache directories. Concrete sequence:
+//  1. mirror.validName (M3 §10 regex + traversal/length checks)
+//  2. repo.Open + ReadRoot (full keys.validID + manifest existence)
+//  3. mkdir <root>/<tenant>/<repo>/incoming
+//  4. write bare/ via the M2 exporter and the sentinel
 func openForTest(ctx context.Context, rootDir string, store storage.ObjectStore, tenant, repoID string) (*Mirror, error) {
 	if !validName(tenant) {
 		return nil, fmt.Errorf("mirror: invalid tenant %q", tenant)
@@ -87,6 +96,15 @@ func openForTest(ctx context.Context, rootDir string, store storage.ObjectStore,
 	if !validName(repoID) {
 		return nil, fmt.Errorf("mirror: invalid repoID %q", repoID)
 	}
+	r, err := repo.Open(ctx, store, tenant, repoID)
+	if err != nil {
+		return nil, fmt.Errorf("mirror: repo.Open: %w", err)
+	}
+	view, err := r.ReadRoot(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("mirror: repo.ReadRoot: %w", err)
+	}
+
 	root := filepath.Join(rootDir, tenant, repoID)
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, fmt.Errorf("mirror: mkdir root: %w", err)
@@ -95,7 +113,7 @@ func openForTest(ctx context.Context, rootDir string, store storage.ObjectStore,
 		return nil, fmt.Errorf("mirror: mkdir incoming: %w", err)
 	}
 	m := &Mirror{root: root, tenant: tenant, repoID: repoID, store: store}
-	if err := m.SyncToCurrent(ctx); err != nil {
+	if err := m.syncTo(ctx, view); err != nil {
 		return nil, err
 	}
 	return m, nil
@@ -122,6 +140,13 @@ func (m *Mirror) SyncToCurrent(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("mirror: repo.ReadRoot: %w", err)
 	}
+	return m.syncTo(ctx, view)
+}
+
+// syncTo is the inner sync routine that takes an already-fetched
+// RootView. openForTest reuses this after pre-opening the repo for
+// validation.
+func (m *Mirror) syncTo(ctx context.Context, view *repo.RootView) error {
 	want := sentinel{
 		ManifestVersion: view.Header.ManifestVersion,
 		LatestTx:        view.Header.LatestTx,
