@@ -675,3 +675,38 @@ func RevParseObjectKind(ctx context.Context, dir, oid string) (string, error) {
 	}
 	return strings.TrimSpace(string(out)), nil
 }
+
+// UpdateRefDelete deletes ref atomically, asserting that ref currently
+// resolves to oldOID. Equivalent to "git update-ref -d <ref> <oldOID>".
+//
+// Stub for M3 Task 9 (mirror.IngestPack); Task 10 promotes this with
+// dedicated tests and any additional hardening the push path needs.
+func UpdateRefDelete(ctx context.Context, dir, ref, oldOID string) error {
+	if !validRefOrOID(ref) {
+		return fmt.Errorf("gitcli: UpdateRefDelete: invalid ref %q", ref)
+	}
+	if !validRefOrOID(oldOID) {
+		return fmt.Errorf("gitcli: UpdateRefDelete: invalid oldOID %q", oldOID)
+	}
+	_, err := run(ctx, dir, "update-ref", "-d", "--", ref, oldOID)
+	return err
+}
+
+// UpdateRefCAS updates ref to newOID, asserting it currently resolves to
+// oldOID. Equivalent to "git update-ref <ref> <newOID> <oldOID>".
+//
+// Stub for M3 Task 9 (mirror.IngestPack); Task 10 promotes this with
+// dedicated tests and any additional hardening the push path needs.
+func UpdateRefCAS(ctx context.Context, dir, ref, newOID, oldOID string) error {
+	if !validRefOrOID(ref) {
+		return fmt.Errorf("gitcli: UpdateRefCAS: invalid ref %q", ref)
+	}
+	if !validRefOrOID(newOID) {
+		return fmt.Errorf("gitcli: UpdateRefCAS: invalid newOID %q", newOID)
+	}
+	if !validRefOrOID(oldOID) {
+		return fmt.Errorf("gitcli: UpdateRefCAS: invalid oldOID %q", oldOID)
+	}
+	_, err := run(ctx, dir, "update-ref", "--", ref, newOID, oldOID)
+	return err
+}
