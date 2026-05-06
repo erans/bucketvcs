@@ -39,7 +39,7 @@ func WriteV2Advertisement(w io.Writer, service, version string) error {
 		return fmt.Errorf("v2proto: agent version contains forbidden control characters")
 	}
 	if strings.ContainsAny(service, "\r\n\x00 ") {
-		return fmt.Errorf("v2proto: service contains forbidden characters")
+		return fmt.Errorf("v2proto: service contains forbidden character (CR/LF/NUL/space)")
 	}
 	pw := pktline.NewWriter(w)
 	if err := pw.WriteString("# service=" + service + "\n"); err != nil {

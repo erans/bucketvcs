@@ -2,7 +2,6 @@ package v2proto
 
 import (
 	"bytes"
-	"strings"
 	"testing"
 
 	"github.com/bucketvcs/bucketvcs/internal/pktline"
@@ -67,5 +66,25 @@ func drainTokens(t *testing.T, r *bytes.Buffer) []pktline.Token {
 	return out
 }
 
-// keep imports alive
-var _ = strings.NewReader
+func TestWriteV2Advertisement_RejectsServiceWithSpace(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteV2Advertisement(&buf, "git upload-pack", "0.1"); err == nil {
+		t.Fatalf("WriteV2Advertisement: expected error on service with space")
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("partial bytes written on rejection: %d", buf.Len())
+	}
+}
+
+func TestWriteV2Advertisement_RejectsServiceWithControlChars(t *testing.T) {
+	var buf bytes.Buffer
+	for _, bad := range []string{"git\nupload-pack", "git\rupload-pack", "git\x00upload-pack"} {
+		buf.Reset()
+		if err := WriteV2Advertisement(&buf, bad, "0.1"); err == nil {
+			t.Fatalf("WriteV2Advertisement: expected error on service %q", bad)
+		}
+		if buf.Len() != 0 {
+			t.Fatalf("partial bytes written on rejection of %q: %d", bad, buf.Len())
+		}
+	}
+}
