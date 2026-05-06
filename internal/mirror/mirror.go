@@ -97,8 +97,12 @@ func validName(s string) bool {
 // gateway startup with NewManager; close on shutdown to release the
 // process-wide flock.
 //
-// The manager-level mu protects the mirrors map. Per-repo serialization
-// uses each *Mirror's RWMutex, not this lock.
+// The manager-level mu protects the mirrors and inits maps. Per-repo
+// serialization of in-flight requests uses each *Mirror's RWMutex.
+// inits holds a per-key mutex used ONLY to serialize first-time
+// materialization so concurrent first opens for the same key share
+// one *Mirror (and one RWMutex) and never run two concurrent rebuilds
+// against the same bare/ directory.
 type Manager struct {
 	rootDir string
 	store   storage.ObjectStore
@@ -106,6 +110,7 @@ type Manager struct {
 
 	mu      sync.Mutex
 	mirrors map[string]*Mirror
+	inits   map[string]*sync.Mutex
 }
 
 // NewManager creates the manager rooted at rootDir. It acquires a
@@ -124,6 +129,7 @@ func NewManager(rootDir string, store storage.ObjectStore) (*Manager, error) {
 		store:   store,
 		lock:    lf,
 		mirrors: map[string]*Mirror{},
+		inits:   map[string]*sync.Mutex{},
 	}, nil
 }
 
@@ -136,6 +142,12 @@ func NewManager(rootDir string, store storage.ObjectStore) (*Manager, error) {
 // names which pass the URL-routing-layer regex but are rejected by the
 // stricter internal/repo/keys validation (e.g. "acme.prod") never leave
 // dangling cache directories.
+//
+// Concurrent first opens for the same key are serialized via a per-key
+// init mutex (mg.inits): the second arrival waits, then finds the
+// already-registered *Mirror in mg.mirrors and reuses it. This prevents
+// two distinct *Mirror values (with separate RWMutexes) from racing
+// rebuilds against the same on-disk bare/ directory.
 func (mg *Manager) Open(ctx context.Context, tenant, repoID string) (*Mirror, error) {
 	if !validName(tenant) {
 		return nil, fmt.Errorf("mirror: invalid tenant %q", tenant)
@@ -145,10 +157,33 @@ func (mg *Manager) Open(ctx context.Context, tenant, repoID string) (*Mirror, er
 	}
 	key := tenant + "/" + repoID
 
+	// Hot path: fully materialized mirror already in the map.
 	mg.mu.Lock()
 	if m, ok := mg.mirrors[key]; ok {
 		mg.mu.Unlock()
-		// Hot path: existing mirror, just sync.
+		if err := m.SyncToCurrent(ctx); err != nil {
+			return nil, err
+		}
+		return m, nil
+	}
+	// Cold path: claim/lookup the per-key init mutex while still holding
+	// the manager lock so two concurrent first-openers serialize on the
+	// same mutex.
+	initMu, ok := mg.inits[key]
+	if !ok {
+		initMu = &sync.Mutex{}
+		mg.inits[key] = initMu
+	}
+	mg.mu.Unlock()
+
+	initMu.Lock()
+	defer initMu.Unlock()
+
+	// Re-check after acquiring the per-key init mutex: another goroutine
+	// may have completed first-open while we were waiting.
+	mg.mu.Lock()
+	if m, ok := mg.mirrors[key]; ok {
+		mg.mu.Unlock()
 		if err := m.SyncToCurrent(ctx); err != nil {
 			return nil, err
 		}
@@ -179,15 +214,7 @@ func (mg *Manager) Open(ctx context.Context, tenant, repoID string) (*Mirror, er
 		return nil, err
 	}
 
-	// Race recheck under the manager lock: another caller may have created
-	// and registered a Mirror for the same key while we were syncing. If
-	// so, return theirs so all callers share one *Mirror (and one mutex).
-	// The bare/ on-disk state is identical either way.
 	mg.mu.Lock()
-	if existing, ok := mg.mirrors[key]; ok {
-		mg.mu.Unlock()
-		return existing, nil
-	}
 	mg.mirrors[key] = m
 	mg.mu.Unlock()
 	return m, nil
@@ -228,7 +255,15 @@ func openForTest(ctx context.Context, rootDir string, store storage.ObjectStore,
 // bucket) where a different root happens to land on the same numeric
 // version. LatestTx is generated per Commit (M1 ULID-style) so two
 // distinct manifests will not share it in practice.
+//
+// We acquire the per-repo write lock BEFORE reading the authoritative
+// root. Reading root before locking would let a writer advance the
+// repo while we're waiting for the lock, after which we would rebuild
+// against a stale RootView and revert the mirror to the previous
+// manifest.
 func (m *Mirror) SyncToCurrent(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	r, err := repo.Open(ctx, m.store, m.tenant, m.repoID)
 	if err != nil {
 		return fmt.Errorf("mirror: repo.Open: %w", err)
@@ -237,15 +272,22 @@ func (m *Mirror) SyncToCurrent(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("mirror: repo.ReadRoot: %w", err)
 	}
-	return m.syncToLocked(ctx, view)
+	return m.syncToHeld(ctx, view)
 }
 
-// syncToLocked serializes rebuilds via the per-repo mutex. The mutex is the
-// gateway's existing write lock; readers use RLock and never see a partial
-// rebuild because a stale-rebuild path always promotes to Lock here.
+// syncToLocked acquires the per-repo write lock and serializes rebuilds.
+// Used by Open's cold path, which already has a freshly-read RootView and
+// holds the manager's per-key init mutex (so no other writer for the same
+// key can be racing during first materialization).
 func (m *Mirror) syncToLocked(ctx context.Context, view *repo.RootView) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.syncToHeld(ctx, view)
+}
+
+// syncToHeld runs the sentinel re-check + rebuild path with m.mu already
+// held for write. Callers MUST hold m.mu.
+func (m *Mirror) syncToHeld(ctx context.Context, view *repo.RootView) error {
 	// Re-check sentinel under the lock: if another goroutine just rebuilt,
 	// we may already be current and can skip the heavy path.
 	want := sentinel{ManifestVersion: view.Header.ManifestVersion, LatestTx: view.Header.LatestTx}
