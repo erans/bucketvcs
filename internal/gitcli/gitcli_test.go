@@ -1226,3 +1226,26 @@ func TestUpdateRefCAS_RejectsStaleOldOID(t *testing.T) {
 		t.Fatalf("UpdateRefCAS: expected error on stale oldOID")
 	}
 }
+
+func TestRevListNotAll_RejectsNonHexInputs(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "bare.git")
+	mustGit(t, dir, "init", "--bare", bare)
+	for _, bad := range []string{
+		"HEAD",
+		"refs/heads/main",
+		"main",
+		"deadbeef", // short
+		"HEAD^",
+		"main..feature",
+		"DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF", // uppercase
+		"deadbeefdeadbeefdeadbeefdeadbeefdeadbee",  // 39 chars
+		"-evil",
+		"\nevil",
+	} {
+		if _, err := RevListNotAll(ctx, bare, []string{bad}); err == nil {
+			t.Fatalf("RevListNotAll(%q): expected error", bad)
+		}
+	}
+}

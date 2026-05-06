@@ -786,7 +786,7 @@ func IndexPackStrict(ctx context.Context, dir, packPath string) (string, error) 
 // missing parents/trees/blobs.
 func RevListNotAll(ctx context.Context, dir string, oids []string) ([]string, error) {
 	for _, o := range oids {
-		if !validRefOrOID(o) {
+		if !validHexOID(o) {
 			return nil, fmt.Errorf("gitcli: RevListNotAll: invalid oid %q", o)
 		}
 	}
