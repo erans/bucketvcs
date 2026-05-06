@@ -108,7 +108,7 @@ func TestMirror_RejectsBadTenantOrRepo(t *testing.T) {
 		t.Fatalf("localfs.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	for _, bad := range []string{"", "../etc", "with space", "a/b"} {
+	for _, bad := range []string{"", ".", "..", "../etc", "with space", "a/b"} {
 		if _, err := openForTest(context.Background(), root, store, bad, "ok"); err == nil {
 			t.Fatalf("openForTest tenant=%q: expected error", bad)
 		}

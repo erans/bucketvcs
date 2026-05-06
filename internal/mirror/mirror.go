@@ -45,13 +45,24 @@ func (m *Mirror) VersionFile() string { return filepath.Join(m.root, "manifest_v
 // IncomingDir returns the per-repo staging dir for inbound packs (push).
 func (m *Mirror) IncomingDir() string { return filepath.Join(m.root, "incoming") }
 
+// validName enforces the M3 §10 identifier shape and additionally rejects
+// the path-traversal sentinels "." and ".." that nameRE would otherwise
+// accept. filepath.Join would resolve these, letting a caller escape the
+// mirror root.
+func validName(s string) bool {
+	if s == "." || s == ".." {
+		return false
+	}
+	return nameRE.MatchString(s)
+}
+
 // openForTest is the in-package entry point used by tests. The Manager in
 // Task 8 will replace it with NewManager + Manager.Open.
 func openForTest(ctx context.Context, rootDir string, store storage.ObjectStore, tenant, repoID string) (*Mirror, error) {
-	if !nameRE.MatchString(tenant) {
+	if !validName(tenant) {
 		return nil, fmt.Errorf("mirror: invalid tenant %q", tenant)
 	}
-	if !nameRE.MatchString(repoID) {
+	if !validName(repoID) {
 		return nil, fmt.Errorf("mirror: invalid repoID %q", repoID)
 	}
 	root := filepath.Join(rootDir, tenant, repoID)
