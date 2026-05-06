@@ -1021,3 +1021,208 @@ func TestPackObjectsForFetch_RejectsNonHexWantsAndHaves(t *testing.T) {
 		})
 	}
 }
+
+func TestIndexPackStrict_RoundTrip(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "src.git")
+	mustGit(t, dir, "init", "--bare", bare)
+	work := filepath.Join(dir, "wt")
+	mustGit(t, dir, "clone", bare, work)
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "x")
+	mustGit(t, work, "push", "origin", "HEAD:refs/heads/main")
+	tip := strings.TrimSpace(string(mustGitCapture(t, work, "rev-parse", "HEAD")))
+
+	// Build a thin pack from src/bare into a tempfile.
+	ctx := context.Background()
+	r, err := PackObjectsForFetch(ctx, bare, PackForFetchOptions{Wants: []string{tip}, ThinPack: true, OfsDelta: true})
+	if err != nil {
+		t.Fatalf("PackObjectsForFetch: %v", err)
+	}
+	defer r.Close()
+	tmp := filepath.Join(dir, "incoming.pack")
+	f, err := os.Create(tmp)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := io.Copy(f, r); err != nil {
+		t.Fatalf("copy: %v", err)
+	}
+	f.Close()
+
+	// Index it into a fresh bare.
+	dst := filepath.Join(dir, "dst.git")
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := InitBare(ctx, dst); err != nil {
+		t.Fatalf("InitBare: %v", err)
+	}
+	idxPath, err := IndexPackStrict(ctx, dst, tmp)
+	if err != nil {
+		t.Fatalf("IndexPackStrict: %v", err)
+	}
+	if _, err := os.Stat(idxPath); err != nil {
+		t.Fatalf("idx not present: %v", err)
+	}
+}
+
+func TestIndexPackStrict_RejectsCorruptPack(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "dst.git")
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := InitBare(context.Background(), dst); err != nil {
+		t.Fatalf("InitBare: %v", err)
+	}
+	bad := filepath.Join(dir, "bad.pack")
+	if err := os.WriteFile(bad, []byte("PACK\x00\x00\x00\x02not a real pack"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := IndexPackStrict(context.Background(), dst, bad); err == nil {
+		t.Fatalf("IndexPackStrict: expected error on corrupt pack")
+	}
+}
+
+func TestRevListNotAll_EmptyMeansClean(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "src.git")
+	mustGit(t, dir, "init", "--bare", bare)
+	work := filepath.Join(dir, "wt")
+	mustGit(t, dir, "clone", bare, work)
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "x")
+	mustGit(t, work, "push", "origin", "HEAD:refs/heads/main")
+	tip := strings.TrimSpace(string(mustGitCapture(t, work, "rev-parse", "HEAD")))
+
+	missing, err := RevListNotAll(context.Background(), bare, []string{tip})
+	if err != nil {
+		t.Fatalf("RevListNotAll: %v", err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("RevListNotAll: expected empty, got %v", missing)
+	}
+}
+
+func TestFsckConnectivityOnly_PassesOnCleanRepo(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "src.git")
+	mustGit(t, dir, "init", "--bare", bare)
+	work := filepath.Join(dir, "wt")
+	mustGit(t, dir, "clone", bare, work)
+	_ = os.WriteFile(filepath.Join(work, "a.txt"), []byte("x"), 0o644)
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "x")
+	mustGit(t, work, "push", "origin", "HEAD:refs/heads/main")
+
+	if err := FsckConnectivityOnly(context.Background(), bare); err != nil {
+		t.Fatalf("FsckConnectivityOnly: %v", err)
+	}
+}
+
+func TestUpdateRefDelete_Removes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "src.git")
+	mustGit(t, dir, "init", "--bare", bare)
+	work := filepath.Join(dir, "wt")
+	mustGit(t, dir, "clone", bare, work)
+	_ = os.WriteFile(filepath.Join(work, "a.txt"), []byte("x"), 0o644)
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "x")
+	mustGit(t, work, "push", "origin", "HEAD:refs/heads/temp")
+	oid := strings.TrimSpace(string(mustGitCapture(t, work, "rev-parse", "HEAD")))
+
+	if err := UpdateRefDelete(context.Background(), bare, "refs/heads/temp", oid); err != nil {
+		t.Fatalf("UpdateRefDelete: %v", err)
+	}
+	out, err := RunForTest(bare, "rev-parse", "--verify", "refs/heads/temp")
+	if err == nil {
+		t.Fatalf("ref not deleted: %s", out)
+	}
+}
+
+func TestUpdateRefDelete_RejectsBadInput(t *testing.T) {
+	ctx := context.Background()
+	if err := UpdateRefDelete(ctx, t.TempDir(), "bad ref", "1111111111111111111111111111111111111111"); err == nil {
+		t.Fatalf("expected error on bad ref name")
+	}
+	if err := UpdateRefDelete(ctx, t.TempDir(), "refs/heads/main", "not-an-oid"); err == nil {
+		t.Fatalf("expected error on bad oid")
+	}
+}
+
+func TestUpdateRefCAS_HappyPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "src.git")
+	mustGit(t, dir, "init", "--bare", bare)
+	work := filepath.Join(dir, "wt")
+	mustGit(t, dir, "clone", bare, work)
+	_ = os.WriteFile(filepath.Join(work, "a.txt"), []byte("v1"), 0o644)
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "v1")
+	mustGit(t, work, "push", "origin", "HEAD:refs/heads/main")
+	oldOID := strings.TrimSpace(string(mustGitCapture(t, bare, "rev-parse", "refs/heads/main")))
+	_ = os.WriteFile(filepath.Join(work, "a.txt"), []byte("v2"), 0o644)
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "v2")
+	newOID := strings.TrimSpace(string(mustGitCapture(t, work, "rev-parse", "HEAD")))
+	mustGit(t, work, "push", "origin", "HEAD:refs/heads/main")
+
+	// Reset bare's main back to oldOID so the CAS has work to do.
+	mustGit(t, bare, "update-ref", "refs/heads/main", oldOID)
+	if err := UpdateRefCAS(context.Background(), bare, "refs/heads/main", newOID, oldOID); err != nil {
+		t.Fatalf("UpdateRefCAS: %v", err)
+	}
+	got := strings.TrimSpace(string(mustGitCapture(t, bare, "rev-parse", "refs/heads/main")))
+	if got != newOID {
+		t.Fatalf("ref not updated: %s vs %s", got, newOID)
+	}
+}
+
+func TestUpdateRefCAS_RejectsStaleOldOID(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "src.git")
+	mustGit(t, dir, "init", "--bare", bare)
+	work := filepath.Join(dir, "wt")
+	mustGit(t, dir, "clone", bare, work)
+	_ = os.WriteFile(filepath.Join(work, "a.txt"), []byte("v1"), 0o644)
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "v1")
+	mustGit(t, work, "push", "origin", "HEAD:refs/heads/main")
+	currentOID := strings.TrimSpace(string(mustGitCapture(t, bare, "rev-parse", "refs/heads/main")))
+
+	// Try CAS with a wrong oldOID — should fail.
+	wrongOldOID := "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	someNewOID := currentOID // doesn't matter what we set, the CAS check fails first
+	if err := UpdateRefCAS(context.Background(), bare, "refs/heads/main", someNewOID, wrongOldOID); err == nil {
+		t.Fatalf("UpdateRefCAS: expected error on stale oldOID")
+	}
+}

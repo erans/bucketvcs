@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -708,5 +709,117 @@ func UpdateRefCAS(ctx context.Context, dir, ref, newOID, oldOID string) error {
 		return fmt.Errorf("gitcli: UpdateRefCAS: invalid oldOID %q", oldOID)
 	}
 	_, err := run(ctx, dir, "update-ref", "--", ref, newOID, oldOID)
+	return err
+}
+
+// IndexPackStrict runs `git index-pack --stdin --strict --fix-thin --keep`
+// against the bare repo at dir, streaming packPath via stdin. The pack is
+// written into dir/objects/pack/pack-<hash>.{pack,idx,keep}. Returns the
+// path to the produced .idx file.
+//
+// The .keep file is intentionally left in place to prevent `git gc` /
+// `git repack` from racing the caller; callers MUST remove the .keep file
+// after they have either advertised the new objects via a ref update
+// (mirror.IngestPack) or decided to abandon the pack. `--fix-thin` requires
+// `--stdin`, so this helper unconditionally streams the input file rather
+// than passing it as a positional argument.
+func IndexPackStrict(ctx context.Context, dir, packPath string) (string, error) {
+	if packPath == "" || packPath[0] == '-' {
+		return "", fmt.Errorf("gitcli: IndexPackStrict: invalid packPath %q", packPath)
+	}
+	bin, err := resolveBinary()
+	if err != nil {
+		return "", err
+	}
+	f, err := os.Open(packPath)
+	if err != nil {
+		return "", fmt.Errorf("gitcli: IndexPackStrict: open pack: %w", err)
+	}
+	defer f.Close()
+	cmd := exec.CommandContext(ctx, bin, "-C", dir,
+		"--no-replace-objects", "index-pack",
+		"--stdin", "--strict", "--fix-thin", "--keep")
+	cmd.Env = scrubGitRepoEnv(os.Environ())
+	cmd.Stdin = f
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		exit := -1
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			exit = ee.ExitCode()
+		}
+		return "", &runError{
+			cmd:    bin,
+			args:   []string{"-C", dir, "--no-replace-objects", "index-pack", "--stdin", "--strict", "--fix-thin", "--keep"},
+			dir:    dir,
+			exit:   exit,
+			cause:  err,
+			stderr: stderr.String(),
+		}
+	}
+	// Stdout is "<pack-hash>\n" without --keep, or "keep\t<pack-hash>\n"
+	// when --keep is in effect. Strip the optional "keep\t" prefix and
+	// validate.
+	hash := strings.TrimSpace(stdout.String())
+	hash = strings.TrimPrefix(hash, "keep\t")
+	if !validHexOID(hash) {
+		return "", fmt.Errorf("gitcli: IndexPackStrict: unexpected stdout %q", stdout.String())
+	}
+	idx := filepath.Join(dir, "objects", "pack", "pack-"+hash+".idx")
+	if _, err := os.Stat(idx); err != nil {
+		return "", fmt.Errorf("gitcli: IndexPackStrict: idx not produced at %s: %w", idx, err)
+	}
+	return idx, nil
+}
+
+// RevListNotAll runs `git rev-list --objects <oids...> --not --all` against
+// the bare repo at dir. Returns the list of OIDs that are reachable from
+// the given oids but NOT from any current ref. After a successful
+// IndexPackStrict, the inbound pack's contents should be the only members
+// of this set; if any "missing" OIDs from the pack don't appear, connectivity
+// is intact.
+//
+// In the validation flow we typically just want "any output ⇒ unreachable
+// objects exist"; the caller intersects with pack contents to detect
+// missing parents/trees/blobs.
+func RevListNotAll(ctx context.Context, dir string, oids []string) ([]string, error) {
+	for _, o := range oids {
+		if !validRefOrOID(o) {
+			return nil, fmt.Errorf("gitcli: RevListNotAll: invalid oid %q", o)
+		}
+	}
+	args := []string{"--no-replace-objects", "rev-list", "--objects"}
+	args = append(args, oids...)
+	args = append(args, "--not", "--all")
+	out, err := run(ctx, dir, args...)
+	if err != nil {
+		return nil, err
+	}
+	trimmed := strings.TrimSpace(string(out))
+	if trimmed == "" {
+		return nil, nil
+	}
+	var found []string
+	for _, line := range strings.Split(trimmed, "\n") {
+		if line == "" {
+			continue
+		}
+		// "<oid> [<path>]"
+		if i := strings.IndexByte(line, ' '); i >= 0 {
+			found = append(found, line[:i])
+		} else {
+			found = append(found, line)
+		}
+	}
+	return found, nil
+}
+
+// FsckConnectivityOnly runs `git fsck --connectivity-only --no-dangling
+// --no-progress` against dir. Used as a defensive double-check after
+// IndexPackStrict.
+func FsckConnectivityOnly(ctx context.Context, dir string) error {
+	_, err := run(ctx, dir, "--no-replace-objects", "fsck", "--connectivity-only", "--no-dangling", "--no-progress")
 	return err
 }
