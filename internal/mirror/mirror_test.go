@@ -52,9 +52,14 @@ func TestMirror_LazyMaterializeFromExporter(t *testing.T) {
 	store, tenant, repoID := makeImportedRepo(t)
 
 	root := t.TempDir()
-	m, err := openForTest(context.Background(), root, store, tenant, repoID)
+	mgr, err := NewManager(root, store)
 	if err != nil {
-		t.Fatalf("openForTest: %v", err)
+		t.Fatalf("NewManager: %v", err)
+	}
+	t.Cleanup(func() { _ = mgr.Close() })
+	m, err := mgr.Open(context.Background(), tenant, repoID)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
 	}
 	bare := m.BareDir()
 	if _, err := os.Stat(filepath.Join(bare, "HEAD")); err != nil {
@@ -65,10 +70,14 @@ func TestMirror_LazyMaterializeFromExporter(t *testing.T) {
 		t.Fatalf("manifest_version.txt not written: %v", err)
 	}
 
-	// Second open: should be cached, no rebuild.
-	m2, err := openForTest(context.Background(), root, store, tenant, repoID)
+	// Second open on the SAME manager: should be cached, no rebuild,
+	// and return the SAME *Mirror so the per-repo mutex is shared.
+	m2, err := mgr.Open(context.Background(), tenant, repoID)
 	if err != nil {
-		t.Fatalf("openForTest second: %v", err)
+		t.Fatalf("Open second: %v", err)
+	}
+	if m2 != m {
+		t.Fatalf("Open returned a different *Mirror across calls")
 	}
 	if m2.BareDir() != bare {
 		t.Fatalf("BareDir changed across opens: %q vs %q", m2.BareDir(), bare)
@@ -82,16 +91,21 @@ func TestMirror_StaleDetectionRebuilds(t *testing.T) {
 	store, tenant, repoID := makeImportedRepo(t)
 
 	root := t.TempDir()
-	if _, err := openForTest(context.Background(), root, store, tenant, repoID); err != nil {
-		t.Fatalf("first open: %v", err)
+	mgr, err := NewManager(root, store)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	t.Cleanup(func() { _ = mgr.Close() })
+	if _, err := mgr.Open(context.Background(), tenant, repoID); err != nil {
+		t.Fatalf("first Open: %v", err)
 	}
 	versPath := filepath.Join(root, tenant, repoID, "manifest_version.txt")
 	// Corrupt the sentinel so the next open detects mismatch.
 	if err := os.WriteFile(versPath, []byte("999999"), 0o644); err != nil {
 		t.Fatalf("corrupt sentinel: %v", err)
 	}
-	if _, err := openForTest(context.Background(), root, store, tenant, repoID); err != nil {
-		t.Fatalf("second open after sentinel mismatch: %v", err)
+	if _, err := mgr.Open(context.Background(), tenant, repoID); err != nil {
+		t.Fatalf("second Open after sentinel mismatch: %v", err)
 	}
 	got, err := os.ReadFile(versPath)
 	if err != nil {
@@ -109,20 +123,25 @@ func TestMirror_RejectsBadTenantOrRepo(t *testing.T) {
 		t.Fatalf("localfs.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
+	mgr, err := NewManager(root, store)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	t.Cleanup(func() { _ = mgr.Close() })
 	long := strings.Repeat("a", 129) // exceeds maxNameLen
 	for _, bad := range []string{"", ".", "..", "../etc", "with space", "a/b", "a..b", long} {
-		if _, err := openForTest(context.Background(), root, store, bad, "ok"); err == nil {
-			t.Fatalf("openForTest tenant=%q: expected error", bad)
+		if _, err := mgr.Open(context.Background(), bad, "ok"); err == nil {
+			t.Fatalf("Open tenant=%q: expected error", bad)
 		}
-		if _, err := openForTest(context.Background(), root, store, "ok", bad); err == nil {
-			t.Fatalf("openForTest repo=%q: expected error", bad)
+		if _, err := mgr.Open(context.Background(), "ok", bad); err == nil {
+			t.Fatalf("Open repo=%q: expected error", bad)
 		}
 	}
 }
 
 // TestMirror_NoDirsForRepoLayerRejectedNames covers names that pass
 // the URL-routing-layer regex (allows '.') but are rejected by
-// internal/repo/keys.validID. openForTest must not leave a mirror
+// internal/repo/keys.validID. Manager.Open must not leave a mirror
 // directory tree behind for such names.
 func TestMirror_NoDirsForRepoLayerRejectedNames(t *testing.T) {
 	root := t.TempDir()
@@ -131,6 +150,11 @@ func TestMirror_NoDirsForRepoLayerRejectedNames(t *testing.T) {
 		t.Fatalf("localfs.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
+	mgr, err := NewManager(root, store)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	t.Cleanup(func() { _ = mgr.Close() })
 	cases := []struct {
 		tenant, repoID string
 	}{
@@ -138,8 +162,8 @@ func TestMirror_NoDirsForRepoLayerRejectedNames(t *testing.T) {
 		{"acme", "demo.git"}, // repoID has '.'
 	}
 	for _, c := range cases {
-		if _, err := openForTest(context.Background(), root, store, c.tenant, c.repoID); err == nil {
-			t.Fatalf("openForTest(%q,%q): expected error", c.tenant, c.repoID)
+		if _, err := mgr.Open(context.Background(), c.tenant, c.repoID); err == nil {
+			t.Fatalf("Open(%q,%q): expected error", c.tenant, c.repoID)
 		}
 		if _, err := os.Stat(filepath.Join(root, c.tenant, c.repoID)); !os.IsNotExist(err) {
 			t.Fatalf("mirror dirs leaked for (%q,%q): stat err = %v", c.tenant, c.repoID, err)
@@ -158,9 +182,14 @@ func TestMirror_StaleDetectionDifferentLatestTx(t *testing.T) {
 	store, tenant, repoID := makeImportedRepo(t)
 
 	root := t.TempDir()
-	m, err := openForTest(context.Background(), root, store, tenant, repoID)
+	mgr, err := NewManager(root, store)
 	if err != nil {
-		t.Fatalf("first open: %v", err)
+		t.Fatalf("NewManager: %v", err)
+	}
+	t.Cleanup(func() { _ = mgr.Close() })
+	m, err := mgr.Open(context.Background(), tenant, repoID)
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
 	}
 	original, err := readSentinel(m.VersionFile())
 	if err != nil {
@@ -174,8 +203,8 @@ func TestMirror_StaleDetectionDifferentLatestTx(t *testing.T) {
 	if err := writeSentinel(m.VersionFile(), tampered); err != nil {
 		t.Fatalf("writeSentinel: %v", err)
 	}
-	if _, err := openForTest(context.Background(), root, store, tenant, repoID); err != nil {
-		t.Fatalf("second open after tx mismatch: %v", err)
+	if _, err := mgr.Open(context.Background(), tenant, repoID); err != nil {
+		t.Fatalf("second Open after tx mismatch: %v", err)
 	}
 	got, err := readSentinel(m.VersionFile())
 	if err != nil {

@@ -34,16 +34,31 @@ const maxNameLen = 128
 
 // Mirror is the per-repo on-disk bare-repo cache.
 //
-// The mu field is reserved for the Manager-level RWMutex that Task 8 wires
-// up; Task 7 does not expose Lock/Unlock yet.
+// The per-repo RWMutex (mu) is exposed via RLock/RUnlock/Lock/Unlock for
+// the gateway: fetches RLock, pushes Lock. It is held only for the duration
+// of a single HTTP request, never across long external calls.
 type Mirror struct {
 	root   string // <root>/<tenant>/<repo>/
 	tenant string
 	repoID string
 	store  storage.ObjectStore
 
-	mu sync.RWMutex // hooked up in Task 8
+	mu sync.RWMutex
 }
+
+// RLock acquires the per-repo read lock. Used by fetch handlers so multiple
+// concurrent reads can share the bare repo while a writer is excluded.
+func (m *Mirror) RLock() { m.mu.RLock() }
+
+// RUnlock releases the per-repo read lock.
+func (m *Mirror) RUnlock() { m.mu.RUnlock() }
+
+// Lock acquires the per-repo write lock. Used by push handlers so a writer
+// excludes both readers and other writers for the duration of an ingest.
+func (m *Mirror) Lock() { m.mu.Lock() }
+
+// Unlock releases the per-repo write lock.
+func (m *Mirror) Unlock() { m.mu.Unlock() }
 
 // BareDir returns the absolute path to the bare git repo (suitable for
 // `git -C <BareDir>` invocations).
@@ -78,25 +93,72 @@ func validName(s string) bool {
 	return nameRE.MatchString(s)
 }
 
-// openForTest is the in-package entry point used by tests. The Manager in
-// Task 8 will replace it with NewManager + Manager.Open.
+// Manager owns the per-process collection of mirrors. Construct one at
+// gateway startup with NewManager; close on shutdown to release the
+// process-wide flock.
 //
-// We open and read the repo BEFORE creating any mirror directories so
-// that names which pass the URL-routing-layer regex but are rejected by
-// the stricter internal/repo/keys validation (e.g. "acme.prod") never
-// leave dangling cache directories. Concrete sequence:
-//  1. mirror.validName (M3 §10 regex + traversal/length checks)
-//  2. repo.Open + ReadRoot (full keys.validID + manifest existence)
-//  3. mkdir <root>/<tenant>/<repo>/incoming
-//  4. write bare/ via the M2 exporter and the sentinel
-func openForTest(ctx context.Context, rootDir string, store storage.ObjectStore, tenant, repoID string) (*Mirror, error) {
+// The manager-level mu protects the mirrors map. Per-repo serialization
+// uses each *Mirror's RWMutex, not this lock.
+type Manager struct {
+	rootDir string
+	store   storage.ObjectStore
+	lock    *os.File
+
+	mu      sync.Mutex
+	mirrors map[string]*Mirror
+}
+
+// NewManager creates the manager rooted at rootDir. It acquires a
+// process-wide flock on <rootDir>/.bucketvcs-mirror-lock so a second
+// `bucketvcs serve` against the same mirror dir refuses to start.
+func NewManager(rootDir string, store storage.ObjectStore) (*Manager, error) {
+	if err := os.MkdirAll(rootDir, 0o755); err != nil {
+		return nil, fmt.Errorf("mirror: mkdir root: %w", err)
+	}
+	lf, err := acquireLock(filepath.Join(rootDir, ".bucketvcs-mirror-lock"))
+	if err != nil {
+		return nil, err
+	}
+	return &Manager{
+		rootDir: rootDir,
+		store:   store,
+		lock:    lf,
+		mirrors: map[string]*Mirror{},
+	}, nil
+}
+
+// Open returns the *Mirror for (tenant, repoID), lazy-materializing it on
+// first use. Subsequent calls for the same key return the same *Mirror so
+// callers share a single per-repo RWMutex. SyncToCurrent runs on every
+// call (cheap when the bare repo is already current).
+//
+// We open and read the repo BEFORE creating any mirror directories so that
+// names which pass the URL-routing-layer regex but are rejected by the
+// stricter internal/repo/keys validation (e.g. "acme.prod") never leave
+// dangling cache directories.
+func (mg *Manager) Open(ctx context.Context, tenant, repoID string) (*Mirror, error) {
 	if !validName(tenant) {
 		return nil, fmt.Errorf("mirror: invalid tenant %q", tenant)
 	}
 	if !validName(repoID) {
 		return nil, fmt.Errorf("mirror: invalid repoID %q", repoID)
 	}
-	r, err := repo.Open(ctx, store, tenant, repoID)
+	key := tenant + "/" + repoID
+
+	mg.mu.Lock()
+	if m, ok := mg.mirrors[key]; ok {
+		mg.mu.Unlock()
+		// Hot path: existing mirror, just sync.
+		if err := m.SyncToCurrent(ctx); err != nil {
+			return nil, err
+		}
+		return m, nil
+	}
+	mg.mu.Unlock()
+
+	// Validate at the repo layer FIRST so we don't pollute the dir tree
+	// with names the repo layer refuses.
+	r, err := repo.Open(ctx, mg.store, tenant, repoID)
 	if err != nil {
 		return nil, fmt.Errorf("mirror: repo.Open: %w", err)
 	}
@@ -105,18 +167,51 @@ func openForTest(ctx context.Context, rootDir string, store storage.ObjectStore,
 		return nil, fmt.Errorf("mirror: repo.ReadRoot: %w", err)
 	}
 
-	root := filepath.Join(rootDir, tenant, repoID)
+	root := filepath.Join(mg.rootDir, tenant, repoID)
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, fmt.Errorf("mirror: mkdir root: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Join(root, "incoming"), 0o755); err != nil {
 		return nil, fmt.Errorf("mirror: mkdir incoming: %w", err)
 	}
-	m := &Mirror{root: root, tenant: tenant, repoID: repoID, store: store}
+	m := &Mirror{root: root, tenant: tenant, repoID: repoID, store: mg.store}
 	if err := m.syncTo(ctx, view); err != nil {
 		return nil, err
 	}
+
+	// Race recheck under the manager lock: another caller may have created
+	// and registered a Mirror for the same key while we were syncing. If
+	// so, return theirs so all callers share one *Mirror (and one mutex).
+	// The bare/ on-disk state is identical either way.
+	mg.mu.Lock()
+	if existing, ok := mg.mirrors[key]; ok {
+		mg.mu.Unlock()
+		return existing, nil
+	}
+	mg.mirrors[key] = m
+	mg.mu.Unlock()
 	return m, nil
+}
+
+// Close releases the process flock. It does not delete on-disk mirrors.
+// Safe to call multiple times.
+func (mg *Manager) Close() error {
+	f := mg.lock
+	mg.lock = nil
+	return releaseLock(f)
+}
+
+// openForTest is the in-package entry point used by tests. It wraps
+// NewManager + Manager.Open so the same code path is exercised. The
+// Manager is intentionally leaked: the test process exits soon after and
+// releases the flock. Tests that need to assert on flock semantics or
+// reuse a manager across calls should use NewManager directly.
+func openForTest(ctx context.Context, rootDir string, store storage.ObjectStore, tenant, repoID string) (*Mirror, error) {
+	mg, err := NewManager(rootDir, store)
+	if err != nil {
+		return nil, err
+	}
+	return mg.Open(ctx, tenant, repoID)
 }
 
 // SyncToCurrent compares the on-disk sentinel against the bucket's
