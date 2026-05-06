@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bucketvcs/bucketvcs/internal/importer"
@@ -108,12 +109,56 @@ func TestMirror_RejectsBadTenantOrRepo(t *testing.T) {
 		t.Fatalf("localfs.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	for _, bad := range []string{"", ".", "..", "../etc", "with space", "a/b"} {
+	long := strings.Repeat("a", 129) // exceeds maxNameLen
+	for _, bad := range []string{"", ".", "..", "../etc", "with space", "a/b", "a..b", long} {
 		if _, err := openForTest(context.Background(), root, store, bad, "ok"); err == nil {
 			t.Fatalf("openForTest tenant=%q: expected error", bad)
 		}
 		if _, err := openForTest(context.Background(), root, store, "ok", bad); err == nil {
 			t.Fatalf("openForTest repo=%q: expected error", bad)
 		}
+	}
+}
+
+// TestMirror_StaleDetectionDifferentLatestTx covers the case where the
+// sentinel records the same ManifestVersion as the bucket but a different
+// LatestTx. Same-version replacement (repo deleted+recreated, restored
+// from backup, swapped from another bucket) must force a rebuild rather
+// than serving the cached bare repo.
+func TestMirror_StaleDetectionDifferentLatestTx(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	store, tenant, repoID := makeImportedRepo(t)
+
+	root := t.TempDir()
+	m, err := openForTest(context.Background(), root, store, tenant, repoID)
+	if err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+	original, err := readSentinel(m.VersionFile())
+	if err != nil {
+		t.Fatalf("readSentinel: %v", err)
+	}
+	// Same numeric version, different LatestTx — must be detected stale.
+	tampered := sentinel{
+		ManifestVersion: original.ManifestVersion,
+		LatestTx:        "tx_FAKE_DIFFERENT_VALUE",
+	}
+	if err := writeSentinel(m.VersionFile(), tampered); err != nil {
+		t.Fatalf("writeSentinel: %v", err)
+	}
+	if _, err := openForTest(context.Background(), root, store, tenant, repoID); err != nil {
+		t.Fatalf("second open after tx mismatch: %v", err)
+	}
+	got, err := readSentinel(m.VersionFile())
+	if err != nil {
+		t.Fatalf("readSentinel after rebuild: %v", err)
+	}
+	if got.LatestTx == tampered.LatestTx {
+		t.Fatalf("sentinel not rewritten after LatestTx mismatch: got %+v", got)
+	}
+	if got != original {
+		t.Fatalf("sentinel after rebuild: got %+v want %+v", got, original)
 	}
 }

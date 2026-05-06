@@ -6,11 +6,14 @@ package mirror
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/bucketvcs/bucketvcs/internal/exporter"
@@ -19,8 +22,15 @@ import (
 )
 
 // nameRE matches valid tenant/repo identifiers per M3 spec §10
-// (URL routing) and the M0/M1 key-component constraints.
+// (URL routing). validName layers additional checks on top to prevent
+// path traversal and to align with the stricter internal/repo/keys rules
+// (see validName for details).
 var nameRE = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// maxNameLen mirrors the 128-byte cap that internal/repo/keys.validID
+// enforces. Names longer than this would pass the URL-routing regex but
+// be rejected by repo.Open after we have already created mirror dirs.
+const maxNameLen = 128
 
 // Mirror is the per-repo on-disk bare-repo cache.
 //
@@ -45,12 +55,24 @@ func (m *Mirror) VersionFile() string { return filepath.Join(m.root, "manifest_v
 // IncomingDir returns the per-repo staging dir for inbound packs (push).
 func (m *Mirror) IncomingDir() string { return filepath.Join(m.root, "incoming") }
 
-// validName enforces the M3 §10 identifier shape and additionally rejects
-// the path-traversal sentinels "." and ".." that nameRE would otherwise
-// accept. filepath.Join would resolve these, letting a caller escape the
-// mirror root.
+// validName enforces the M3 §10 identifier shape for URL routing and
+// additionally rejects:
+//   - "." and ".." which filepath.Join would resolve, letting a caller
+//     escape the mirror root.
+//   - any ".." substring (e.g. "a..b") to match the path-traversal
+//     defense in internal/repo/keys.validID.
+//   - names longer than maxNameLen (128) to mirror the keys.validID cap,
+//     so we never create a mirror directory for a name that repo.Open
+//     will subsequently reject.
+//
+// nameRE itself stays at the spec §10 charset because the mirror is the
+// URL-routing-layer gate; the stricter checks above only narrow the set
+// in ways that the routing surface and the repo layer already reject.
 func validName(s string) bool {
-	if s == "." || s == ".." {
+	if len(s) == 0 || len(s) > maxNameLen {
+		return false
+	}
+	if s == "." || s == ".." || strings.Contains(s, "..") {
 		return false
 	}
 	return nameRE.MatchString(s)
@@ -79,15 +101,18 @@ func openForTest(ctx context.Context, rootDir string, store storage.ObjectStore,
 	return m, nil
 }
 
-// SyncToCurrent compares the on-disk sentinel against the bucket's current
-// root manifest version. If they match and bare/ exists, returns nil. If
-// they don't, wipes and rebuilds bare/ via the M2 exporter, and writes the
-// new sentinel.
+// SyncToCurrent compares the on-disk sentinel against the bucket's
+// current root manifest identity. If they match and bare/ exists,
+// returns nil. Otherwise wipes and rebuilds bare/ via the M2 exporter
+// and writes a fresh sentinel.
 //
-// The sentinel records the decimal string of the bucket manifest's
-// monotonic ManifestVersion (header field), e.g. "7". This is durable
-// across restarts and re-imports because every successful Commit advances
-// ManifestVersion by exactly one.
+// The sentinel is a small JSON document that records BOTH the
+// monotonic ManifestVersion and the per-commit LatestTx ID. Comparing
+// only ManifestVersion would miss same-version manifest replacements
+// (repo deleted+recreated, restored from backup, swapped from another
+// bucket) where a different root happens to land on the same numeric
+// version. LatestTx is generated per Commit (M1 ULID-style) so two
+// distinct manifests will not share it in practice.
 func (m *Mirror) SyncToCurrent(ctx context.Context) error {
 	r, err := repo.Open(ctx, m.store, m.tenant, m.repoID)
 	if err != nil {
@@ -97,11 +122,14 @@ func (m *Mirror) SyncToCurrent(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("mirror: repo.ReadRoot: %w", err)
 	}
-	want := strconv.FormatUint(view.Header.ManifestVersion, 10)
+	want := sentinel{
+		ManifestVersion: view.Header.ManifestVersion,
+		LatestTx:        view.Header.LatestTx,
+	}
 
 	bareExists := dirExists(m.BareDir())
-	gotSentinel, _ := os.ReadFile(m.VersionFile())
-	if bareExists && string(gotSentinel) == want {
+	got, gotErr := readSentinel(m.VersionFile())
+	if bareExists && gotErr == nil && got == want {
 		return nil
 	}
 
@@ -122,19 +150,55 @@ func (m *Mirror) SyncToCurrent(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("mirror: exporter.Export: %w", err)
 	}
-	if err := atomicWrite(m.VersionFile(), []byte(want)); err != nil {
+	if err := writeSentinel(m.VersionFile(), want); err != nil {
 		return fmt.Errorf("mirror: write sentinel: %w", err)
 	}
 	return nil
 }
 
-// CurrentVersion reads the on-disk sentinel.
+// CurrentVersion reads the on-disk sentinel and returns the recorded
+// ManifestVersion as a decimal string. Empty string and an error are
+// returned if the sentinel is missing or malformed. Tests rely on this
+// to assert the sentinel was rewritten after a rebuild.
 func (m *Mirror) CurrentVersion() (string, error) {
-	b, err := os.ReadFile(m.VersionFile())
+	s, err := readSentinel(m.VersionFile())
 	if err != nil {
 		return "", err
 	}
-	return string(b), nil
+	return strconv.FormatUint(s.ManifestVersion, 10), nil
+}
+
+// sentinel is the on-disk staleness marker. JSON gives us forward
+// compatibility (new fields can be added without breaking old readers,
+// since unknown fields are ignored on decode and we compare by value).
+type sentinel struct {
+	ManifestVersion uint64 `json:"manifest_version"`
+	LatestTx        string `json:"latest_tx"`
+}
+
+func writeSentinel(path string, s sentinel) error {
+	b, err := json.Marshal(s)
+	if err != nil {
+		return err
+	}
+	return atomicWrite(path, b)
+}
+
+func readSentinel(path string) (sentinel, error) {
+	var s sentinel
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return s, err
+	}
+	if err := json.Unmarshal(b, &s); err != nil {
+		return s, err
+	}
+	if s.LatestTx == "" {
+		// Defensive: treat a sentinel missing LatestTx as unusable so
+		// SyncToCurrent forces a rebuild and writes a fresh one.
+		return sentinel{}, errors.New("mirror: sentinel missing latest_tx")
+	}
+	return s, nil
 }
 
 func dirExists(p string) bool {
