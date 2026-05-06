@@ -256,12 +256,30 @@ func openForTest(ctx context.Context, rootDir string, store storage.ObjectStore,
 // version. LatestTx is generated per Commit (M1 ULID-style) so two
 // distinct manifests will not share it in practice.
 //
-// We acquire the per-repo write lock BEFORE reading the authoritative
-// root. Reading root before locking would let a writer advance the
-// repo while we're waiting for the lock, after which we would rebuild
+// Concurrency: the steady-state hot path (mirror already current) runs
+// entirely under the per-repo READ lock so concurrent fetches do not
+// serialize on a no-op sync. Only stale/missing mirrors promote to the
+// write lock, where we re-read root and re-check the sentinel before
+// rebuilding.
+//
+// Reading root before locking would otherwise let a writer advance the
+// repo while we were waiting for the lock, after which we would rebuild
 // against a stale RootView and revert the mirror to the previous
-// manifest.
+// manifest. We avoid that by re-reading root under the write lock.
 func (m *Mirror) SyncToCurrent(ctx context.Context) error {
+	// Fast path under RLock: parallel fetches share this and never
+	// serialize on each other when the mirror is current.
+	current, err := m.checkCurrentRLocked(ctx)
+	if err != nil {
+		return err
+	}
+	if current {
+		return nil
+	}
+
+	// Slow path: need to (potentially) rebuild. Re-read root under the
+	// write lock so we don't rebuild against a stale view if a writer
+	// landed while we were upgrading.
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	r, err := repo.Open(ctx, m.store, m.tenant, m.repoID)
@@ -273,6 +291,31 @@ func (m *Mirror) SyncToCurrent(ctx context.Context) error {
 		return fmt.Errorf("mirror: repo.ReadRoot: %w", err)
 	}
 	return m.syncToHeld(ctx, view)
+}
+
+// checkCurrentRLocked reads root and sentinel under m.mu's READ lock and
+// reports whether the on-disk mirror already matches the authoritative
+// root. It never mutates on-disk state, so concurrent readers are safe.
+func (m *Mirror) checkCurrentRLocked(ctx context.Context) (bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	r, err := repo.Open(ctx, m.store, m.tenant, m.repoID)
+	if err != nil {
+		return false, fmt.Errorf("mirror: repo.Open: %w", err)
+	}
+	view, err := r.ReadRoot(ctx)
+	if err != nil {
+		return false, fmt.Errorf("mirror: repo.ReadRoot: %w", err)
+	}
+	if !dirExists(m.BareDir()) {
+		return false, nil
+	}
+	got, err := readSentinel(m.VersionFile())
+	if err != nil {
+		return false, nil
+	}
+	want := sentinel{ManifestVersion: view.Header.ManifestVersion, LatestTx: view.Header.LatestTx}
+	return got == want, nil
 }
 
 // syncToLocked acquires the per-repo write lock and serializes rebuilds.
