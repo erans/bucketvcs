@@ -115,7 +115,7 @@ func TestParseFetchArgs_RequiresWant(t *testing.T) {
 
 func TestWriteAcknowledgments_AllUnknown(t *testing.T) {
 	var buf bytes.Buffer
-	if err := WriteAcknowledgments(&buf, nil, []string{"3333333333333333333333333333333333333333"}); err != nil {
+	if err := WriteAcknowledgments(&buf, nil, []string{"3333333333333333333333333333333333333333"}, true); err != nil {
 		t.Fatalf("WriteAcknowledgments: %v", err)
 	}
 	got := drainPayloads(t, &buf)
@@ -125,10 +125,10 @@ func TestWriteAcknowledgments_AllUnknown(t *testing.T) {
 	}
 }
 
-func TestWriteAcknowledgments_SomeCommon(t *testing.T) {
+func TestWriteAcknowledgments_SomeCommonReady(t *testing.T) {
 	var buf bytes.Buffer
 	commons := []string{"3333333333333333333333333333333333333333"}
-	if err := WriteAcknowledgments(&buf, commons, nil); err != nil {
+	if err := WriteAcknowledgments(&buf, commons, nil, true); err != nil {
 		t.Fatalf("WriteAcknowledgments: %v", err)
 	}
 	got := drainPayloads(t, &buf)
@@ -283,7 +283,7 @@ func TestWriteAcknowledgments_MultipleCommonsPreservesOrder(t *testing.T) {
 		"4444444444444444444444444444444444444444",
 		"5555555555555555555555555555555555555555",
 	}
-	if err := WriteAcknowledgments(&buf, commons, nil); err != nil {
+	if err := WriteAcknowledgments(&buf, commons, nil, true); err != nil {
 		t.Fatalf("WriteAcknowledgments: %v", err)
 	}
 	got := drainPayloads(t, &buf)
@@ -296,5 +296,45 @@ func TestWriteAcknowledgments_MultipleCommonsPreservesOrder(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ack stream: got %v, want %v", got, want)
+	}
+}
+
+func TestWriteAcknowledgments_CommonWithoutReady(t *testing.T) {
+	// Mid-negotiation: server has acknowledged some commons but is not
+	// yet ready to send the pack (more rounds expected). The "ready"
+	// trailer must be omitted.
+	var buf bytes.Buffer
+	commons := []string{"3333333333333333333333333333333333333333"}
+	if err := WriteAcknowledgments(&buf, commons, nil, false); err != nil {
+		t.Fatalf("WriteAcknowledgments: %v", err)
+	}
+	got := drainPayloads(t, &buf)
+	want := []string{
+		"acknowledgments\n",
+		"ACK 3333333333333333333333333333333333333333\n",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ack stream: got %v, want %v", got, want)
+	}
+}
+
+func TestParseFetchArgs_DeepenRelative(t *testing.T) {
+	args := tokensFromLines(
+		"command=fetch\n",
+		"DELIM",
+		"want 1111111111111111111111111111111111111111\n",
+		"deepen 2\n",
+		"deepen-relative\n",
+		"FLUSH",
+	)
+	got, err := ParseFetchArgs(args)
+	if err != nil {
+		t.Fatalf("ParseFetchArgs: %v", err)
+	}
+	if got.Depth != 2 {
+		t.Fatalf("Depth: got %d, want 2", got.Depth)
+	}
+	if !got.DeepenRelative {
+		t.Fatalf("DeepenRelative: got false, want true")
 	}
 }

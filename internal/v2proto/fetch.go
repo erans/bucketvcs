@@ -16,17 +16,18 @@ import (
 // advertisement does not expose ref-in-want, and ParseFetchArgs rejects
 // want-ref lines outright.
 type FetchRequest struct {
-	Wants       []string // raw 40-char SHA-1 hex
-	Haves       []string // raw 40-char SHA-1 hex
-	Done        bool
-	ThinPack    bool
-	NoProgress  bool
-	IncludeTag  bool
-	OfsDelta    bool
-	Depth       int // 0 = no shallow
-	DeepenSince string
-	DeepenNot   []string
-	Shallow     []string // client-side shallow boundary OIDs
+	Wants          []string // raw 40-char SHA-1 hex
+	Haves          []string // raw 40-char SHA-1 hex
+	Done           bool
+	ThinPack       bool
+	NoProgress     bool
+	IncludeTag     bool
+	OfsDelta       bool
+	Depth          int // 0 = no shallow
+	DeepenSince    string
+	DeepenNot      []string
+	DeepenRelative bool     // "deepen-relative": Depth is measured from current shallow boundary
+	Shallow        []string // client-side shallow boundary OIDs
 }
 
 // ParseFetchArgs decodes the pkt-line stream of a "fetch" command body.
@@ -66,6 +67,14 @@ func ParseFetchArgs(args []pktline.Token) (FetchRequest, error) {
 			req.IncludeTag = true
 		case line == "ofs-delta":
 			req.OfsDelta = true
+		case line == "deepen-relative":
+			// "deepen-relative" is a flag (no value) modifying the meaning
+			// of "deepen <depth>" — depth is counted from the current
+			// shallow boundary instead of the tip. It is meaningful only
+			// in combination with "deepen", but since the spec allows it
+			// to appear before or after deepen we don't enforce ordering
+			// here; downstream pack generation interprets it.
+			req.DeepenRelative = true
 		case line == "done":
 			req.Done = true
 		case strings.HasPrefix(line, "want "):
@@ -148,14 +157,16 @@ func validOID(s string) bool {
 // WriteAcknowledgments writes the protocol-v2 "acknowledgments" section that
 // precedes the packfile. commons is the (possibly empty) set of haves the
 // server is acknowledging as common ancestors. unknown is the set of haves
-// the server does not have.
+// the server does not have. ready signals that the server has decided to
+// proceed with packfile generation; when false, only ACK lines (or NAK)
+// are emitted, leaving the negotiation open for another round.
 //
 // Per protocol-v2, ACK lines carry just the OID ("ACK <oid>\n") — the
 // trailing " common" suffix is the v0/v1 multi_ack_detailed form and is
-// not used in v2. If len(commons)==0 we emit "NAK"; otherwise we emit
-// ACKs for each common plus "ready". A trailing flush is the caller's
-// responsibility.
-func WriteAcknowledgments(w io.Writer, commons, unknown []string) error {
+// not used in v2. If commons is empty we emit "NAK"; otherwise we emit
+// one "ACK <oid>" line per common and, when ready is true, a trailing
+// "ready" line. A trailing flush is the caller's responsibility.
+func WriteAcknowledgments(w io.Writer, commons, unknown []string, ready bool) error {
 	pw := pktline.NewWriter(w)
 	if err := pw.WriteString("acknowledgments\n"); err != nil {
 		return err
@@ -168,5 +179,8 @@ func WriteAcknowledgments(w io.Writer, commons, unknown []string) error {
 			return err
 		}
 	}
-	return pw.WriteString("ready\n")
+	if ready {
+		return pw.WriteString("ready\n")
+	}
+	return nil
 }
