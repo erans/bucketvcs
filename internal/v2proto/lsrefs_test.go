@@ -153,3 +153,73 @@ func equalIgnoreOrder(a, b []string) bool {
 	}
 	return true
 }
+
+func TestLsRefs_HEADWithSymrefsNoPrefix(t *testing.T) {
+	body := &manifest.Body{
+		DefaultBranch: "main",
+		Refs: map[string]string{
+			"refs/heads/main": "1111111111111111111111111111111111111111",
+		},
+	}
+	args := tokensFromLines(
+		"command=ls-refs\n",
+		"DELIM",
+		"symrefs\n",
+		"FLUSH",
+	)
+	var buf bytes.Buffer
+	if err := HandleLsRefs(args, body, &buf); err != nil {
+		t.Fatalf("HandleLsRefs: %v", err)
+	}
+	got := drainPayloads(t, &buf)
+	want := []string{
+		"1111111111111111111111111111111111111111 HEAD symref-target:refs/heads/main\n",
+		"1111111111111111111111111111111111111111 refs/heads/main\n",
+	}
+	if !equalIgnoreOrder(got, want) {
+		t.Fatalf("output: got %v, want %v", got, want)
+	}
+}
+
+func TestLsRefs_EmptyRefsNoUnbornEmitsOnlyFlush(t *testing.T) {
+	body := &manifest.Body{
+		DefaultBranch: "main",
+		Refs:          map[string]string{},
+	}
+	args := tokensFromLines(
+		"command=ls-refs\n",
+		"DELIM",
+		"FLUSH",
+	)
+	var buf bytes.Buffer
+	if err := HandleLsRefs(args, body, &buf); err != nil {
+		t.Fatalf("HandleLsRefs: %v", err)
+	}
+	got := drainPayloads(t, &buf)
+	if len(got) != 0 {
+		t.Fatalf("expected no data frames, got %v", got)
+	}
+}
+
+func TestLsRefs_EmptyDefaultBranchUnbornNoSymrefAnnotation(t *testing.T) {
+	body := &manifest.Body{
+		DefaultBranch: "",
+		Refs:          map[string]string{},
+	}
+	args := tokensFromLines(
+		"command=ls-refs\n",
+		"DELIM",
+		"unborn\n",
+		"symrefs\n",
+		"FLUSH",
+	)
+	var buf bytes.Buffer
+	if err := HandleLsRefs(args, body, &buf); err != nil {
+		t.Fatalf("HandleLsRefs: %v", err)
+	}
+	got := drainPayloads(t, &buf)
+	want := []string{"unborn HEAD\n"}
+	if !equalIgnoreOrder(got, want) {
+		t.Fatalf("output: got %v, want %v", got, want)
+	}
+}
