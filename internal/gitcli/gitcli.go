@@ -660,10 +660,14 @@ func (p *packObjectsReader) Close() error {
 
 // RevParseObjectKind returns the object type ("commit", "tag", "tree",
 // "blob") for the OID in the bare repo at dir, or an error if the object is
-// missing or unparseable.
+// missing or unparseable. The oid argument MUST be a strict hex object ID
+// (40-char SHA-1 or 64-char SHA-256, lowercase). Ref names, short OIDs, and
+// revision syntax (HEAD, main, HEAD^{tree}, HEAD:path, etc.) are rejected
+// — callers that want to resolve a name to a kind must first translate it
+// to an OID via a path that performs its own authorization.
 func RevParseObjectKind(ctx context.Context, dir, oid string) (string, error) {
-	if !validRefOrOID(oid) {
-		return "", fmt.Errorf("rev-parse: invalid oid %q", oid)
+	if !validHexOID(oid) {
+		return "", fmt.Errorf("rev-parse: invalid oid %q (must be hex object id)", oid)
 	}
 	out, err := run(ctx, dir, "--no-replace-objects", "cat-file", "-t", oid)
 	if err != nil {

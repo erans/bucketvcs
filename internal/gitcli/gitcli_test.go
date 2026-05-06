@@ -786,7 +786,6 @@ func TestPackObjectsForFetch_IncrementalWithHaves(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PackObjectsForFetch: %v", err)
 	}
-	defer out.Close()
 
 	dst := filepath.Join(dir, "dst.git")
 	if err := os.MkdirAll(dst, 0o755); err != nil {
@@ -811,10 +810,17 @@ func TestPackObjectsForFetch_IncrementalWithHaves(t *testing.T) {
 	if n == 0 {
 		t.Fatalf("incremental pack was empty")
 	}
-	f.Close()
+	if err := f.Close(); err != nil {
+		t.Fatalf("close pack file: %v", err)
+	}
+	// Close() is the only place pack-objects exit status is surfaced —
+	// call it explicitly (not deferred) and fail on non-clean exit.
+	if err := out.Close(); err != nil {
+		t.Fatalf("Close (pack-objects exit): %v", err)
+	}
 	// Thin packs need --fix-thin to be indexable into a fresh repo. We don't
 	// have IndexPackStrict here yet (Task 10), so just verify nonzero size
-	// and that pack-objects exited cleanly via Close() above (deferred).
+	// and clean subprocess exit (asserted above).
 }
 
 func TestPackObjectsForFetch_BogusWantSurfacesError(t *testing.T) {
@@ -848,6 +854,42 @@ func TestRevParseObjectKind_MissingOIDReturnsError(t *testing.T) {
 	mustGit(t, dir, "init", "--bare", bare)
 	if _, err := RevParseObjectKind(context.Background(), bare, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"); err == nil {
 		t.Fatalf("RevParseObjectKind: expected error for missing oid")
+	}
+}
+
+// TestRevParseObjectKind_RejectsNonHexInputs ensures RevParseObjectKind
+// refuses ref names, short OIDs, and revision syntax — only strict hex
+// OIDs are accepted, matching the godoc contract.
+func TestRevParseObjectKind_RejectsNonHexInputs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "src.git")
+	mustGit(t, dir, "init", "--bare", bare)
+	work := filepath.Join(dir, "wt")
+	mustGit(t, dir, "clone", bare, work)
+	if err := os.WriteFile(filepath.Join(work, "x.txt"), []byte("y"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "x")
+	mustGit(t, work, "push", "origin", "HEAD:refs/heads/main")
+	ctx := context.Background()
+	for _, in := range []string{
+		"",
+		"HEAD",
+		"main",
+		"HEAD^{tree}",
+		"HEAD:x.txt",
+		"deadbeef",                          // short OID
+		"-deadbeefdeadbeefdeadbeefdeadbeef", // dash-prefixed
+		"DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF", // uppercase
+		"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\nmain",
+	} {
+		if _, err := RevParseObjectKind(ctx, bare, in); err == nil {
+			t.Fatalf("RevParseObjectKind(%q): expected validation error, got nil", in)
+		}
 	}
 }
 
