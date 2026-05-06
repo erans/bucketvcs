@@ -889,3 +889,51 @@ func TestPackObjectsForFetch_ShallowFileForwardedAsConfig(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 }
+
+// TestPackObjectsForFetch_RejectsNonHexWantsAndHaves verifies that
+// PackObjectsForFetch rejects untrusted-looking want/have values before
+// invoking git, so newline injection, leading-dash flag injection, or
+// revision syntax (`^`, `..`, `:`, `~`) cannot smuggle extra revs or
+// exclusions into `git pack-objects --revs` stdin.
+func TestPackObjectsForFetch_RejectsNonHexWantsAndHaves(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "src.git")
+	mustGit(t, dir, "init", "--bare", bare)
+	ctx := context.Background()
+
+	cases := []struct {
+		name string
+		opts PackForFetchOptions
+	}{
+		{"empty want", PackForFetchOptions{Wants: []string{""}}},
+		{"newline want", PackForFetchOptions{Wants: []string{"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\nHEAD"}}},
+		{"dash want", PackForFetchOptions{Wants: []string{"--all"}}},
+		{"caret rev want", PackForFetchOptions{Wants: []string{"^deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}}},
+		{"branch name want", PackForFetchOptions{Wants: []string{"main"}}},
+		{"short oid want", PackForFetchOptions{Wants: []string{"deadbeef"}}},
+		{"uppercase want", PackForFetchOptions{Wants: []string{"DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF"}}},
+		{"non-hex char want", PackForFetchOptions{Wants: []string{"zeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}}},
+		{"newline have", PackForFetchOptions{
+			Wants: []string{"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"},
+			Haves: []string{"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n--all"},
+		}},
+		{"dash have", PackForFetchOptions{
+			Wants: []string{"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"},
+			Haves: []string{"--shallow-exclude=main"},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := PackObjectsForFetch(ctx, bare, tc.opts)
+			if err == nil {
+				if out != nil {
+					_ = out.Close()
+				}
+				t.Fatalf("PackObjectsForFetch: expected validation error, got nil")
+			}
+		})
+	}
+}

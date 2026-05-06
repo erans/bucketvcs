@@ -173,6 +173,26 @@ func validRefOrOID(s string) bool {
 	return true
 }
 
+// validHexOID reports whether s is a strict lowercase-hex object ID of
+// SHA-1 (40 chars) or SHA-256 (64 chars) length. Unlike validRefOrOID it
+// rejects any character that is not [0-9a-f], which makes it safe to feed
+// untrusted client input to git commands that consume revision lists on
+// stdin (e.g. `git pack-objects --revs`), where leading dashes, newlines,
+// or revision-syntax (`^`, `..`, `:`, `~`) could otherwise inject extra
+// revs or options.
+func validHexOID(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
 // Version returns the output of `git --version` (e.g. "git version 2.43.0").
 func Version(ctx context.Context) (string, error) {
 	out, err := run(ctx, "", "--version")
@@ -525,6 +545,21 @@ func PackObjectsForFetch(ctx context.Context, dir string, opts PackForFetchOptio
 	bin, err := resolveBinary()
 	if err != nil {
 		return nil, err
+	}
+	// Strict OID validation: wants/haves are written to `git pack-objects
+	// --revs` stdin. They may be client-controlled, so reject anything that
+	// is not a strict hex OID — otherwise newlines, leading dashes, or
+	// revision syntax (^, .., :, ~) could inject extra revs or exclusions
+	// and cause git to pack unintended objects.
+	for i, w := range opts.Wants {
+		if !validHexOID(w) {
+			return nil, fmt.Errorf("pack-objects: invalid want[%d] %q (must be hex object id)", i, w)
+		}
+	}
+	for i, h := range opts.Haves {
+		if !validHexOID(h) {
+			return nil, fmt.Errorf("pack-objects: invalid have[%d] %q (must be hex object id)", i, h)
+		}
 	}
 	args := []string{"--no-replace-objects", "pack-objects", "--revs", "--stdout"}
 	if opts.ThinPack {
