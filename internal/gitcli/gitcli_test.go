@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -633,5 +634,119 @@ func TestCatFile_RejectsDashOID(t *testing.T) {
 	}
 	if _, err := CatFilePretty(context.Background(), dir, "--config=foo"); err == nil {
 		t.Fatalf("expected rejection of dash-prefixed oid")
+	}
+}
+
+// mustGit is a top-level test helper that runs git with the given args in dir
+// and fails the test on error.
+func mustGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	bin, err := resolveBinary()
+	if err != nil {
+		t.Fatalf("resolveBinary: %v", err)
+	}
+	cmd := exec.Command(bin, args...)
+	cmd.Dir = dir
+	cmd.Env = scrubGitRepoEnv(os.Environ())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// mustGitCapture runs git with the given args in dir and returns stdout,
+// failing the test on error.
+func mustGitCapture(t *testing.T, dir string, args ...string) []byte {
+	t.Helper()
+	out, err := RunForTest(dir, args...)
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return out
+}
+
+func TestPackObjectsForFetch_RoundTrip(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "src.git")
+
+	mustGit(t, dir, "init", "--bare", bare)
+	work := filepath.Join(dir, "wt")
+	mustGit(t, dir, "clone", bare, work)
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "init")
+	mustGit(t, work, "push", "origin", "HEAD:refs/heads/main")
+	tip := strings.TrimSpace(string(mustGitCapture(t, work, "rev-parse", "HEAD")))
+
+	ctx := context.Background()
+	out, err := PackObjectsForFetch(ctx, bare, PackForFetchOptions{
+		Wants:      []string{tip},
+		Haves:      nil,
+		ThinPack:   true,
+		IncludeTag: true,
+		OfsDelta:   true,
+	})
+	if err != nil {
+		t.Fatalf("PackObjectsForFetch: %v", err)
+	}
+	defer out.Close()
+
+	dst := filepath.Join(dir, "dst.git")
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		t.Fatalf("mkdir dst: %v", err)
+	}
+	if err := InitBare(ctx, dst); err != nil {
+		t.Fatalf("InitBare: %v", err)
+	}
+	packDir := filepath.Join(dst, "objects", "pack")
+	if err := os.MkdirAll(packDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	packPath := filepath.Join(packDir, "pack-test.pack")
+	f, err := os.Create(packPath)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := io.Copy(f, out); err != nil {
+		t.Fatalf("copy: %v", err)
+	}
+	f.Close()
+	if err := IndexPack(ctx, dst, packPath); err != nil {
+		t.Fatalf("IndexPack: %v", err)
+	}
+}
+
+func TestRevParseObjectKind_CommitTagBlob(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "src.git")
+	mustGit(t, dir, "init", "--bare", bare)
+	work := filepath.Join(dir, "wt")
+	mustGit(t, dir, "clone", bare, work)
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "x")
+	mustGit(t, work, "tag", "v1")
+	mustGit(t, work, "push", "origin", "HEAD:refs/heads/main", "tag", "v1")
+
+	ctx := context.Background()
+	commitOID := strings.TrimSpace(string(mustGitCapture(t, work, "rev-parse", "HEAD")))
+	tagOID := strings.TrimSpace(string(mustGitCapture(t, work, "rev-parse", "v1")))
+
+	if k, err := RevParseObjectKind(ctx, bare, commitOID); err != nil || k != "commit" {
+		t.Fatalf("commit: kind=%q err=%v", k, err)
+	}
+	if k, err := RevParseObjectKind(ctx, bare, tagOID); err != nil {
+		t.Fatalf("tag: err=%v", err)
+	} else if k != "commit" && k != "tag" {
+		t.Fatalf("tag kind=%q", k)
 	}
 }

@@ -6,10 +6,12 @@
 package gitcli
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"regexp"
@@ -494,4 +496,123 @@ func CheckRefFormat(ctx context.Context, name string) error {
 	}
 	_, err := run(ctx, "", "check-ref-format", name)
 	return err
+}
+
+// PackForFetchOptions configures PackObjectsForFetch.
+type PackForFetchOptions struct {
+	Wants       []string
+	Haves       []string // ^<oid> exclusion list
+	ThinPack    bool
+	IncludeTag  bool
+	OfsDelta    bool
+	NoProgress  bool   // suppress stderr-as-progress
+	ShallowFile string // optional path to a temp shallow file for shallow fetches
+	Depth       int    // 0 = unbounded
+}
+
+// PackObjectsForFetch invokes "git pack-objects --revs --stdout" against the
+// bare repo at dir, feeding wants and ^haves via stdin and returning an
+// io.ReadCloser over the resulting pack stream. The caller MUST Close() the
+// returned reader (which waits for git to exit and surfaces nonzero exit
+// status as an error).
+//
+// Any output on stderr is captured into the returned error on close-failure;
+// it is NOT streamed to a side-band by this layer (the caller wraps it).
+func PackObjectsForFetch(ctx context.Context, dir string, opts PackForFetchOptions) (io.ReadCloser, error) {
+	bin, err := resolveBinary()
+	if err != nil {
+		return nil, err
+	}
+	args := []string{"--no-replace-objects", "pack-objects", "--revs", "--stdout"}
+	if opts.ThinPack {
+		args = append(args, "--thin")
+	}
+	if opts.IncludeTag {
+		args = append(args, "--include-tag")
+	}
+	if opts.OfsDelta {
+		args = append(args, "--delta-base-offset")
+	}
+	if opts.NoProgress {
+		args = append(args, "-q")
+	}
+	if opts.ShallowFile != "" {
+		args = append([]string{"-c", "core.shallow=" + opts.ShallowFile}, args...)
+	}
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Dir = dir
+	cmd.Env = scrubGitRepoEnv(os.Environ())
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("pack-objects: stdin pipe: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("pack-objects: stdout pipe: %w", err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("pack-objects: start: %w", err)
+	}
+
+	go func() {
+		defer stdin.Close()
+		bw := bufio.NewWriter(stdin)
+		for _, w := range opts.Wants {
+			fmt.Fprintf(bw, "%s\n", w)
+		}
+		for _, h := range opts.Haves {
+			fmt.Fprintf(bw, "^%s\n", h)
+		}
+		_ = bw.Flush()
+	}()
+
+	return &packObjectsReader{r: stdout, cmd: cmd, dir: dir, stderr: &stderr}, nil
+}
+
+type packObjectsReader struct {
+	r      io.ReadCloser
+	cmd    *exec.Cmd
+	dir    string
+	stderr *bytes.Buffer
+}
+
+func (p *packObjectsReader) Read(b []byte) (int, error) { return p.r.Read(b) }
+
+func (p *packObjectsReader) Close() error {
+	closeErr := p.r.Close()
+	waitErr := p.cmd.Wait()
+	if waitErr != nil {
+		exit := -1
+		var ee *exec.ExitError
+		if errors.As(waitErr, &ee) {
+			exit = ee.ExitCode()
+		}
+		return &runError{
+			cmd:    p.cmd.Path,
+			args:   p.cmd.Args[1:],
+			dir:    p.dir,
+			exit:   exit,
+			cause:  waitErr,
+			stderr: redactCreds(p.stderr.String()),
+		}
+	}
+	return closeErr
+}
+
+// RevParseObjectKind returns the object type ("commit", "tag", "tree",
+// "blob") for the OID in the bare repo at dir, or an error if the object is
+// missing or unparseable.
+func RevParseObjectKind(ctx context.Context, dir, oid string) (string, error) {
+	if !validRefOrOID(oid) {
+		return "", fmt.Errorf("rev-parse: invalid oid %q", oid)
+	}
+	out, err := run(ctx, dir, "cat-file", "-t", oid)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
