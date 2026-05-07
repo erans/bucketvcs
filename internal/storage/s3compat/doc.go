@@ -6,10 +6,10 @@
 //
 // The CLI exposes two schemes that route to this package:
 //
-//   s3://<bucket>[/<prefix>]   AWS S3 defaults (vhost addressing, no
-//                              endpoint override required)
-//   r2://<bucket>[/<prefix>]   Cloudflare R2 defaults (region "auto",
-//                              path-style addressing, endpoint env required)
+//	s3://<bucket>[/<prefix>]   AWS S3 defaults (vhost addressing, no
+//	                           endpoint override required)
+//	r2://<bucket>[/<prefix>]   Cloudflare R2 defaults (region "auto",
+//	                           path-style addressing, endpoint env required)
 //
 // All credentials come from the AWS SDK default credential chain
 // (env vars, shared profile). Credentials are never URL-embedded.
