@@ -85,9 +85,17 @@ func writeV0UploadPackAdvertisement(w http.ResponseWriter, body *manifest.Body, 
 	}
 
 	baseCaps := uploadPackV0Caps(version)
+	// symref=HEAD:<default> is informational; advertise it whenever the
+	// repo has a configured default branch, even if that branch is unborn
+	// (target ref absent). v0 clients use it to learn the remote default
+	// branch on clone/fetch.
+	capsWithSymref := baseCaps
+	if body.DefaultBranch != "" {
+		capsWithSymref = baseCaps + " symref=HEAD:" + body.DefaultBranch
+	}
+
 	if hasHead {
-		caps := baseCaps + " symref=HEAD:" + body.DefaultBranch
-		_ = pw.WriteString(headOID + " HEAD\x00" + caps + "\n")
+		_ = pw.WriteString(headOID + " HEAD\x00" + capsWithSymref + "\n")
 		for _, n := range names {
 			_ = pw.WriteString(body.Refs[n] + " " + n + "\n")
 		}
@@ -96,7 +104,7 @@ func writeV0UploadPackAdvertisement(w http.ResponseWriter, body *manifest.Body, 
 	}
 
 	if len(names) == 0 {
-		_ = pw.WriteString("0000000000000000000000000000000000000000 capabilities^{}\x00" + baseCaps + "\n")
+		_ = pw.WriteString("0000000000000000000000000000000000000000 capabilities^{}\x00" + capsWithSymref + "\n")
 		_ = pw.WriteFlush()
 		return
 	}
@@ -105,7 +113,7 @@ func writeV0UploadPackAdvertisement(w http.ResponseWriter, body *manifest.Body, 
 	for _, n := range names {
 		oid := body.Refs[n]
 		if first {
-			_ = pw.WriteString(oid + " " + n + "\x00" + baseCaps + "\n")
+			_ = pw.WriteString(oid + " " + n + "\x00" + capsWithSymref + "\n")
 			first = false
 			continue
 		}

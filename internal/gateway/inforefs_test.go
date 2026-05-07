@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/bucketvcs/bucketvcs/internal/importer"
+	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 )
 
@@ -300,5 +301,46 @@ func TestNewServer_RejectsBadVersion(t *testing.T) {
 		if _, err := NewServer(store, Options{MirrorDir: t.TempDir(), Version: bad}); err == nil {
 			t.Errorf("NewServer accepted bad Version %q", bad)
 		}
+	}
+}
+
+// TestInfoRefs_V0UploadPack_UnbornDefaultBranch_AdvertisesSymref ensures that
+// when a repo has DefaultBranch set but the target ref does not yet exist
+// (unborn), the v0 upload-pack advertisement still includes the
+// symref=HEAD:<default> capability so v0 clients can discover the intended
+// remote default branch on first clone/fetch.
+func TestInfoRefs_V0UploadPack_UnbornDefaultBranch_AdvertisesSymref(t *testing.T) {
+	storeDir := t.TempDir()
+	store, err := localfs.Open(storeDir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	if _, err := repo.Create(context.Background(), store, "acme", "demo", repo.CreateOptions{
+		DefaultBranch: "refs/heads/trunk",
+	}); err != nil {
+		t.Fatalf("repo.Create: %v", err)
+	}
+
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	resp, err := http.Get(ts.URL + "/acme/demo.git/info/refs?service=git-upload-pack")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !bytes.Contains(body, []byte("symref=HEAD:refs/heads/trunk")) {
+		t.Fatalf("unborn default branch must still advertise symref capability: %q", body)
+	}
+	// No HEAD line because the ref is unborn — emit capabilities^{} stub.
+	if !bytes.Contains(body, []byte("capabilities^{}")) {
+		t.Fatalf("expected capabilities^{} stub for unborn-only repo: %q", body)
+	}
+	if bytes.Contains(body, []byte(" HEAD\x00")) {
+		t.Fatalf("must not advertise HEAD line for unborn default: %q", body)
 	}
 }
