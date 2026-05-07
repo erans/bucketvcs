@@ -314,6 +314,43 @@ func TestReceivePack_RejectsExtraTrailingNewline(t *testing.T) {
 	}
 }
 
+// TestReceivePack_RejectsMissingLFTerminator verifies the strict
+// terminator rule from the other direction: pack-protocol(5) requires
+// each command to end with exactly one LF, and a frame with no
+// terminator at all must be rejected rather than silently accepted.
+func TestReceivePack_RejectsMissingLFTerminator(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeRepoInStore(t, storeDir, "acme", "demo")
+	store, _ := localfs.Open(storeDir)
+	t.Cleanup(func() { _ = store.Close() })
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	const oldOID = "1111111111111111111111111111111111111111"
+	// No trailing LF on the (only) command line.
+	body := pktBody(
+		dataLine(oldOID+" "+testNullOID+" refs/heads/feature\x00report-status"),
+		flush,
+	)
+	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	if resp.StatusCode != 400 {
+		t.Fatalf("missing LF: status %d, want 400", resp.StatusCode)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(got), "missing LF") {
+		t.Fatalf("expected 'missing LF' message, got %q", got)
+	}
+}
+
 // TestReceivePack_RejectsTooManyCommands enforces the per-request command
 // cap that bounds CPU / subprocess cost. Each command invokes
 // `git check-ref-format`, so an uncapped count is a DoS even at small

@@ -144,9 +144,13 @@ func parseReceivePackRequest(ctx context.Context, body io.Reader, incoming strin
 		// Copy payload because pktline reuses its internal buffer.
 		line := string(append([]byte{}, tok.Payload...))
 		// pack-protocol(5) requires each command to end with exactly one
-		// LF. TrimRight would silently normalize "...\n\n\n" into a valid
-		// command; we use TrimSuffix so any extra trailing newlines fail
-		// the OID/refname checks below rather than parse as valid input.
+		// LF. We enforce both halves of that contract: the LF MUST be
+		// present (HasSuffix), and we strip exactly one (TrimSuffix). A
+		// missing terminator is rejected, and any extra trailing newlines
+		// fail the OID/refname checks below rather than parse as valid.
+		if !strings.HasSuffix(line, "\n") {
+			return nil, fmt.Errorf("missing LF terminator in command %q", line)
+		}
 		line = strings.TrimSuffix(line, "\n")
 		if first {
 			first = false
