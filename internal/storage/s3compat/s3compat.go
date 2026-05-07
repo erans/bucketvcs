@@ -38,14 +38,6 @@ func (s *S3Compat) Capabilities() storage.Capabilities {
 
 var errNotImpl = errors.New("s3compat: not yet implemented (skeleton)")
 
-func (s *S3Compat) CreateMultipart(ctx context.Context, key string, opts *storage.MultipartOptions) (storage.MultipartUpload, error) {
-	return nil, errNotImpl
-}
-
-func (s *S3Compat) CompleteMultipartIfAbsent(ctx context.Context, upload storage.MultipartUpload, parts []storage.MultipartPart) (storage.ObjectVersion, error) {
-	return storage.ObjectVersion{}, errNotImpl
-}
-
 func (s *S3Compat) SignedGetURL(ctx context.Context, key string, opts storage.SignedURLOptions) (string, error) {
 	return "", errNotImpl
 }

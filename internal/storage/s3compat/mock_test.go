@@ -22,6 +22,12 @@ import (
 	"testing"
 )
 
+type mockUpload struct {
+	id    string
+	key   string
+	parts map[int][]byte
+}
+
 // mockBackend is a minimal in-memory S3 server. Each test uses one.
 // The handler matches request method + URL path against a tiny dispatch
 // table the test registers via Set/SetGet/etc. before exercising the
@@ -29,7 +35,8 @@ import (
 // S3/R2 behavior.
 type mockBackend struct {
 	t               *testing.T
-	objects         map[string]mockObject // key (incl. bucket prefix) -> obj
+	objects         map[string]mockObject  // key (incl. bucket prefix) -> obj
+	uploads         map[string]*mockUpload // upload-id -> upload
 	nextETag        uint64
 	lastContentType string
 }
@@ -41,7 +48,7 @@ type mockObject struct {
 
 func newMockBackend(t *testing.T) (*S3Compat, *mockBackend) {
 	t.Helper()
-	mb := &mockBackend{t: t, objects: map[string]mockObject{}}
+	mb := &mockBackend{t: t, objects: map[string]mockObject{}, uploads: map[string]*mockUpload{}}
 	srv := httptest.NewServer(http.HandlerFunc(mb.serve))
 	t.Cleanup(srv.Close)
 	cfg := Config{
@@ -71,6 +78,9 @@ func (m *mockBackend) keyFromPath(p string) string {
 }
 
 func (m *mockBackend) serve(w http.ResponseWriter, r *http.Request) {
+	if m.serveMultipart(w, r) {
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		if r.URL.Query().Get("list-type") == "2" {
@@ -87,6 +97,81 @@ func (m *mockBackend) serve(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.WriteHeader(http.StatusNotImplemented)
 	}
+}
+
+// serveMultipart returns true if it handled the request, false if it
+// did not match any multipart pattern (caller should fall through).
+func (m *mockBackend) serveMultipart(w http.ResponseWriter, r *http.Request) bool {
+	q := r.URL.Query()
+	switch {
+	case r.Method == http.MethodPost && q.Has("uploads"):
+		// CreateMultipartUpload
+		m.nextETag++
+		id := fmt.Sprintf("upload-%d", m.nextETag)
+		key := m.keyFromPath(r.URL.Path)
+		m.uploads[id] = &mockUpload{id: id, key: key, parts: map[int][]byte{}}
+		w.Header().Set("Content-Type", "application/xml")
+		fmt.Fprintf(w, `<?xml version="1.0"?><InitiateMultipartUploadResult><UploadId>%s</UploadId></InitiateMultipartUploadResult>`, id)
+		return true
+
+	case r.Method == http.MethodPut && q.Has("uploadId") && q.Has("partNumber"):
+		// UploadPart
+		id := q.Get("uploadId")
+		up, ok := m.uploads[id]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return true
+		}
+		pnStr := q.Get("partNumber")
+		pn, _ := strconv.Atoi(pnStr)
+		body, _ := io.ReadAll(r.Body)
+		up.parts[pn] = body
+		m.nextETag++
+		etag := fmt.Sprintf(`"p%s-%d"`, pnStr, m.nextETag)
+		w.Header().Set("ETag", etag)
+		w.WriteHeader(http.StatusOK)
+		return true
+
+	case r.Method == http.MethodPost && q.Has("uploadId"):
+		// CompleteMultipartUpload
+		id := q.Get("uploadId")
+		up, ok := m.uploads[id]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return true
+		}
+		// Honor If-None-Match: *
+		if r.Header.Get("If-None-Match") == "*" {
+			if _, exists := m.objects[up.key]; exists {
+				w.WriteHeader(http.StatusPreconditionFailed)
+				return true
+			}
+		}
+		// Reassemble parts in part-number order.
+		var pns []int
+		for pn := range up.parts {
+			pns = append(pns, pn)
+		}
+		sort.Ints(pns)
+		var buf []byte
+		for _, pn := range pns {
+			buf = append(buf, up.parts[pn]...)
+		}
+		m.nextETag++
+		etag := fmt.Sprintf(`"complete-%d"`, m.nextETag)
+		m.objects[up.key] = mockObject{body: buf, etag: etag}
+		delete(m.uploads, id)
+		w.Header().Set("Content-Type", "application/xml")
+		fmt.Fprintf(w, `<?xml version="1.0"?><CompleteMultipartUploadResult><ETag>%s</ETag></CompleteMultipartUploadResult>`, etag)
+		return true
+
+	case r.Method == http.MethodDelete && q.Has("uploadId"):
+		// AbortMultipartUpload
+		delete(m.uploads, q.Get("uploadId"))
+		w.WriteHeader(http.StatusNoContent)
+		return true
+	}
+	return false
 }
 
 func (m *mockBackend) serveGetOrHead(w http.ResponseWriter, r *http.Request) {
