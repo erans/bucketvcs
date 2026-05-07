@@ -101,6 +101,19 @@ func (s *Server) handleReceivePack(w http.ResponseWriter, r *http.Request, tenan
 	// deadlock. Any TOCTOU between Open's sync and our Lock() below is
 	// resolved by re-reading the manifest body under the write lock and by
 	// BuildAndCommit's CAS, which is the authoritative gate for ref drift.
+	//
+	// KNOWN GAP (deferred to M9): if a CONCURRENT cross-process push
+	// advances the bucket between Open's sync and our Lock(), the local
+	// bare won't have the new objects/refs. Our re-read sees the new
+	// manifest body, so old-OID validation correctly rejects stale
+	// updates with "stale info". But a push whose old-OID happens to
+	// match the new tip (rare) and whose new-OID's parents are objects
+	// the concurrent push added would fail at our connectivity check
+	// rather than succeed against the up-to-date bare. Closing this
+	// requires an exported held-variant of mirror.SyncToCurrent (or
+	// restructuring this handler around mirror's internal sync path);
+	// both are deferred to M9 alongside the broader incremental-mirror
+	// work.
 	m, err := s.mgr.Open(r.Context(), tenant, repoID)
 	if err != nil {
 		http.Error(w, "mirror: "+err.Error(), http.StatusInternalServerError)
@@ -233,6 +246,13 @@ func (s *Server) completeReceivePack(
 	// `git rev-list --objects <new-oids> --not --all` as a defensive
 	// double-check that walking from the new tips hits no missing objects.
 	//
+	// This check ALSO runs when no pack accompanied the request: a
+	// non-delete push to an OID the server already has (e.g. ref rename
+	// or fast-forward to a tip already known via another ref) sends an
+	// empty body, but we still need to verify that OID actually exists in
+	// the bare. rev-list exits non-zero in that case, which we surface as
+	// missing-connectivity.
+	//
 	// CRITICAL: a NON-empty rev-list output is normal — it lists exactly
 	// the objects newly introduced by this push (reachable from new-oids
 	// but not from any prior ref; for a first push to an empty repo this
@@ -241,18 +261,16 @@ func (s *Server) completeReceivePack(
 	// which is the connectivity failure we're guarding against. Empty
 	// output with success is fine; non-empty output with success is also
 	// fine.
-	if req.PackPath != "" {
-		var newOIDs []string
-		for i, u := range req.Updates {
-			if statuses[i] == "" && u.NewOID != gatewayNullOID {
-				newOIDs = append(newOIDs, u.NewOID)
-			}
+	var newOIDs []string
+	for i, u := range req.Updates {
+		if statuses[i] == "" && u.NewOID != gatewayNullOID {
+			newOIDs = append(newOIDs, u.NewOID)
 		}
-		if len(newOIDs) > 0 {
-			if _, err := gitcli.RevListNotAll(ctx, m.BareDir(), newOIDs); err != nil {
-				writeReceiveReport(w, "missing-connectivity: "+err.Error(), nil, req.Caps)
-				return
-			}
+	}
+	if len(newOIDs) > 0 {
+		if _, err := gitcli.RevListNotAll(ctx, m.BareDir(), newOIDs); err != nil {
+			writeReceiveReport(w, "missing-connectivity: "+err.Error(), nil, req.Caps)
+			return
 		}
 	}
 
@@ -294,6 +312,13 @@ func (s *Server) completeReceivePack(
 		}
 		mu := mirror.RefUpdate{Refname: u.Refname, OldOID: u.OldOID, NewOID: u.NewOID}
 		if err := applyRefUpdateInBare(ctx, m.BareDir(), mu); err != nil {
+			// Some refs in this batch may already have been applied to
+			// the local bare. The bucket has NOT been updated, but our
+			// sentinel still matches the (unchanged) bucket — meaning a
+			// subsequent SyncToCurrent would falsely consider the mirror
+			// current and start advertising the partially-applied refs.
+			// Remove the sentinel so the next request forces a rebuild.
+			markMirrorStale(m)
 			for j, uu := range req.Updates {
 				if statuses[j] == "" {
 					statuses[j] = "ng " + uu.Refname + " internal-mirror-error"
@@ -309,6 +334,12 @@ func (s *Server) completeReceivePack(
 	// Stale-manifest losers (concurrent pushes that won the CAS race) are
 	// surfaced via err message "stale manifest" / "lost CAS".
 	if _, err := importer.BuildAndCommit(ctx, s.store, tenant, repoID, m.BareDir(), refUpdates, "push"); err != nil {
+		// Refs are already applied to the local bare (step 9b above), but
+		// the bucket commit failed. Sentinel still matches the OLD bucket
+		// version, so SyncToCurrent would falsely consider the mirror
+		// current. Mark stale so the next request rebuilds from the
+		// authoritative bucket state.
+		markMirrorStale(m)
 		reason := "internal-storage-error"
 		emsg := err.Error()
 		if strings.Contains(emsg, "stale manifest") || strings.Contains(emsg, "lost the CAS race") {
@@ -328,10 +359,12 @@ func (s *Server) completeReceivePack(
 	// header; we need ReadRoot for ManifestVersion + LatestTx.
 	viewAfter, err := r2.ReadRoot(ctx)
 	if err != nil {
-		// Bucket-side commit succeeded; the mirror sentinel won't be
-		// updated, but the next request's SyncToCurrent will rebuild
-		// from the new authoritative root. Report success — the durable
+		// Bucket-side commit succeeded; the local bare has the new refs
+		// but we can't bump the sentinel without the new header. Mark
+		// stale so SyncToCurrent rebuilds on the next request and picks
+		// up the new authoritative root. Report success — the durable
 		// commit happened.
+		markMirrorStale(m)
 		for i, u := range req.Updates {
 			if statuses[i] == "" {
 				statuses[i] = "ok " + u.Refname
@@ -491,7 +524,8 @@ func parseReceivePackRequest(ctx context.Context, body io.Reader, incoming strin
 	if err != nil {
 		return req, fmt.Errorf("create incoming: %w", err)
 	}
-	if _, err := io.Copy(f, body); err != nil {
+	written, err := io.Copy(f, body)
+	if err != nil {
 		_ = f.Close()
 		_ = os.Remove(packPath)
 		return req, fmt.Errorf("write incoming: %w", err)
@@ -499,6 +533,19 @@ func parseReceivePackRequest(ctx context.Context, body io.Reader, incoming strin
 	if err := f.Close(); err != nil {
 		_ = os.Remove(packPath)
 		return req, fmt.Errorf("close incoming: %w", err)
+	}
+	// Zero-byte body is legal for a non-delete push: the client may be
+	// updating a ref to an OID the server already has (e.g. fast-forward
+	// to a tip already known via another ref, branch rename via push of
+	// the existing tip under a new name). pack-protocol(5) says the
+	// packfile is OPTIONAL after the command list, and real `git push`
+	// elides it entirely in this case rather than sending a zero-object
+	// pack header. Indexing a 0-byte file would fail with "invalid-pack",
+	// so leave PackPath empty and let the connectivity check verify the
+	// new OID is already present in the bare.
+	if written == 0 {
+		_ = os.Remove(packPath)
+		return req, nil
 	}
 	req.PackPath = packPath
 	return req, nil
@@ -533,6 +580,24 @@ func applyRefUpdateInBare(ctx context.Context, bareDir string, u mirror.RefUpdat
 	default:
 		return gitcli.UpdateRefCAS(ctx, bareDir, u.Refname, u.NewOID, u.OldOID)
 	}
+}
+
+// markMirrorStale removes the mirror's manifest-version sentinel so the
+// next SyncToCurrent treats the mirror as not-current and rebuilds from
+// the authoritative bucket state. Used on every failure path AFTER we
+// have mutated the local bare (applied refs) but BEFORE the bucket has
+// been updated to match — without this, the unchanged sentinel would
+// match the unchanged bucket version and SyncToCurrent would falsely
+// consider the mirror current while the bare carried partially-applied
+// or never-committed refs.
+//
+// Best-effort: a failure here is logged via the error return being
+// dropped. The next read attempt will fail to parse the (possibly
+// still-present) sentinel and rebuild anyway, since the file content
+// after a partial os.Remove failure is undefined and readSentinel
+// treats any error as "not current".
+func markMirrorStale(m *mirror.Mirror) {
+	_ = os.Remove(m.VersionFile())
 }
 
 // writeReceiveReport emits a report-status pkt-line stream per

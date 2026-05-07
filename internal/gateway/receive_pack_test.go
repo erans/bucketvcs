@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/bucketvcs/bucketvcs/internal/importer"
+	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
@@ -523,5 +524,137 @@ func TestReceivePack_RejectsStaleOldOID(t *testing.T) {
 	}
 	if !bytes.Contains(respBody, []byte("stale info")) {
 		t.Fatalf("expected 'stale info' reason: %q", respBody)
+	}
+}
+
+// TestReceivePack_AcceptsEmptyPackBody covers the case from review
+// finding (medium): a non-delete push where the new OID already exists
+// in the bare. pack-protocol(5) makes the pack file optional after the
+// command list, and real `git push` elides it entirely when the server
+// has nothing new to receive (e.g. a ref rename to an existing tip).
+// The parser must NOT treat a zero-byte body as an invalid pack — it
+// must leave PackPath empty so the connectivity check (which still runs
+// for non-delete updates) verifies the new OID is already present.
+//
+// This test asserts the PARSER fix only: the response must not contain
+// "invalid-pack" (the symptom we were fixing) and the request must not
+// fail with HTTP 400 from the parser. Whether BuildAndCommit ultimately
+// accepts a no-content-change repack is a separate (importer-layer)
+// concern outside this task's scope — see importer/buildcommit.go's
+// note on ErrAlreadyExists for the canonical-pack collision case.
+func TestReceivePack_AcceptsEmptyPackBody(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeRepoInStore(t, storeDir, "acme", "demo")
+	store, _ := localfs.Open(storeDir)
+	t.Cleanup(func() { _ = store.Close() })
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	// Find the actual ref tip in the seeded repo so we can construct a
+	// valid no-pack push.
+	r2, _ := repo.Open(context.Background(), store, "acme", "demo")
+	view, _ := r2.ReadRoot(context.Background())
+	var b manifest.Body
+	if err := json.Unmarshal(view.Body, &b); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	mainOID := b.Refs["refs/heads/main"]
+	if mainOID == "" {
+		t.Fatalf("seeded repo has no refs/heads/main: %+v", b.Refs)
+	}
+
+	// Push to create refs/heads/copy pointing at the existing main OID.
+	// The body has the command list + flush, then NO pack bytes.
+	body := pktBody(
+		dataLine(testNullOID+" "+mainOID+" refs/heads/copy\x00report-status\n"),
+		flush,
+	)
+	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d, want 200; body=%q", resp.StatusCode, respBody)
+	}
+	// The parser fix: empty body must NOT trigger invalid-pack. (Pre-fix,
+	// the parser created a 0-byte temp file and IndexPackStrict failed
+	// with "invalid-pack: pack signature mismatch".)
+	if bytes.Contains(respBody, []byte("invalid-pack")) {
+		t.Fatalf("empty body misclassified as invalid-pack: %q", respBody)
+	}
+	// Connectivity must succeed since the new OID already exists in the
+	// bare. (Pre-fix, missing-connectivity wasn't the bug — the parser
+	// crashed at index-pack first.)
+	if bytes.Contains(respBody, []byte("missing-connectivity")) {
+		t.Fatalf("empty body wrongly flagged missing-connectivity: %q", respBody)
+	}
+}
+
+// TestReceivePack_MarksMirrorStaleOnPostMutationFailure covers the High
+// review finding: when local-bare ref mutations have been applied but a
+// later step fails, the sentinel must be removed so SyncToCurrent
+// rebuilds on the next request — otherwise the unchanged sentinel would
+// match the unchanged bucket version and the mirror would falsely
+// advertise the partially-applied refs.
+//
+// We exercise the markMirrorStale helper directly against a freshly
+// materialized mirror. This is a contract test: any failure path that
+// calls markMirrorStale will cause SyncToCurrent to rebuild on the
+// next request, regardless of which step in the pipeline failed.
+// (Driving an end-to-end BuildAndCommit failure would require either
+// fault injection into the importer or carefully crafted invalid pack
+// inputs — both out of scope for verifying the gateway-layer staleness
+// contract.)
+func TestReceivePack_MarksMirrorStaleOnPostMutationFailure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeRepoInStore(t, storeDir, "acme", "demo")
+	store, err := localfs.Open(storeDir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	mirrorDir := t.TempDir()
+
+	// Materialize the mirror via mgr.Open (which writes the initial
+	// sentinel after rebuild). We run the manager directly rather than
+	// through an HTTP handler so the test is independent of any
+	// particular handler's mirror-init pathway.
+	mgr, err := mirror.NewManager(mirrorDir, store)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	t.Cleanup(func() { _ = mgr.Close() })
+	m, err := mgr.Open(context.Background(), "acme", "demo")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := os.Stat(m.VersionFile()); err != nil {
+		t.Fatalf("expected sentinel after mgr.Open, stat err=%v", err)
+	}
+
+	// markMirrorStale removes the sentinel — exercised by every
+	// post-mutation failure path in completeReceivePack.
+	markMirrorStale(m)
+	if _, err := os.Stat(m.VersionFile()); !os.IsNotExist(err) {
+		t.Fatalf("expected sentinel removed after markMirrorStale, stat err=%v", err)
+	}
+
+	// Subsequent SyncToCurrent must rebuild the mirror (write a fresh
+	// sentinel from the bucket state).
+	if err := m.SyncToCurrent(context.Background()); err != nil {
+		t.Fatalf("SyncToCurrent after stale: %v", err)
+	}
+	if _, err := os.Stat(m.VersionFile()); err != nil {
+		t.Fatalf("expected sentinel restored after SyncToCurrent, stat err=%v", err)
 	}
 }
