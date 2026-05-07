@@ -43,6 +43,11 @@ func ParseURL(raw string) (Config, error) {
 	if bucket == "" {
 		return Config{}, fmt.Errorf("s3compat: %s://: bucket required", scheme)
 	}
+	// Reject credentials in the URL (user:pass@host or user@host form).
+	// Credentials must come from env vars or a shared-config profile.
+	if strings.ContainsRune(bucket, '@') {
+		return Config{}, fmt.Errorf("s3compat: %s:// must not contain credentials in the URL (got %q); set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY in env or use a shared-config profile", scheme, raw)
+	}
 	cfg := Config{
 		scheme: scheme,
 		Bucket: bucket,

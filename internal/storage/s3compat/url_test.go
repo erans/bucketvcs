@@ -63,3 +63,23 @@ func TestParseURLR2DefaultsRegion(t *testing.T) {
 		t.Fatalf("R2 default region = %q, want \"auto\"", c.Region)
 	}
 }
+
+func TestParseURL_RejectsCredentials(t *testing.T) {
+	bad := []string{
+		"s3://key:secret@bucket/prefix",
+		"r2://key:secret@bucket/prefix",
+		"s3://user@bucket",
+		"r2://user@bucket",
+	}
+	for _, u := range bad {
+		t.Run(u, func(t *testing.T) {
+			_, err := ParseURL(u)
+			if err == nil {
+				t.Fatalf("ParseURL(%q) must reject userinfo", u)
+			}
+			if !strings.Contains(err.Error(), "credential") {
+				t.Fatalf("error %q does not mention credentials", err.Error())
+			}
+		})
+	}
+}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -19,6 +21,31 @@ func httptestServer(t *testing.T) *httptest.Server {
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// setHermeticAWSConfig makes the calling test hermetic with respect to
+// region resolution: it clears all env vars the AWS SDK consults for
+// region and credentials file paths, and points the config/credentials
+// files at empty temp files so a developer's ~/.aws/config doesn't leak in.
+func setHermeticAWSConfig(t *testing.T) {
+	t.Helper()
+	t.Setenv("AWS_REGION", "")
+	t.Setenv("AWS_DEFAULT_REGION", "")
+	t.Setenv("AWS_PROFILE", "")
+	t.Setenv("AWS_DEFAULT_PROFILE", "")
+	emptyCfg := filepath.Join(t.TempDir(), "config")
+	emptyCreds := filepath.Join(t.TempDir(), "credentials")
+	if err := os.WriteFile(emptyCfg, []byte{}, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(emptyCreds, []byte{}, 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AWS_CONFIG_FILE", emptyCfg)
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", emptyCreds)
+	// Disable IMDS metadata fallback to prevent the SDK from trying to
+	// query EC2 instance metadata for a region.
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
 }
 
 func TestOpenAppliesPathStyle(t *testing.T) {
@@ -46,6 +73,7 @@ func TestOpenAppliesPathStyle(t *testing.T) {
 }
 
 func TestOpenRejectsBadConfig(t *testing.T) {
+	setHermeticAWSConfig(t)
 	cases := []struct {
 		name string
 		cfg  Config
@@ -91,11 +119,10 @@ func TestOpenAcceptsRegionFromEnv(t *testing.T) {
 }
 
 func TestOpenStillRejectsEmptyRegion(t *testing.T) {
-	// No AWS_REGION env, no static region. The SDK default chain
-	// won't find one (assuming the test env doesn't have it), so
-	// Validate should fail.
-	t.Setenv("AWS_REGION", "")
-	t.Setenv("AWS_DEFAULT_REGION", "")
+	// Make this test hermetic: clear all env vars the AWS SDK consults
+	// for region resolution, and point the config/credentials files at
+	// empty temp files so a developer's ~/.aws/config doesn't leak in.
+	setHermeticAWSConfig(t)
 	cfg := Config{
 		Bucket:          "test-bucket",
 		AccessKeyID:     "AKID",
