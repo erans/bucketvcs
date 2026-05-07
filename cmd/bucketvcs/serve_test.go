@@ -82,6 +82,9 @@ func TestServeCommand_RejectsMissingStore(t *testing.T) {
 }
 
 func TestServeCommand_RejectsAuthScopeWithoutToken(t *testing.T) {
+	// Ensure BUCKETVCS_AUTH_TOKEN is not set; if it were, --auth-scope=all
+	// would be valid and the server might attempt to start instead of failing.
+	t.Setenv("BUCKETVCS_AUTH_TOKEN", "")
 	storeDir := t.TempDir()
 	var stdout, stderr bytes.Buffer
 	code := runServe(context.Background(), []string{

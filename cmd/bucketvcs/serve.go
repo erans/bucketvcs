@@ -31,7 +31,7 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.Writer, ln net.Listener) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	addr := fs.String("addr", ":8080", "Listen address (host:port)")
+	addr := fs.String("addr", "127.0.0.1:8080", "Listen address (host:port); defaults to loopback to avoid unintended network exposure")
 	storeURL := fs.String("store", "", `Store URL (e.g. "localfs:/var/lib/bucketvcs")`)
 	mirrorDir := fs.String("mirror-dir", "", "Mirror cache directory (default $XDG_CACHE_HOME/bucketvcs/mirrors)")
 	authToken := fs.String("auth-token", "", "HTTP Basic auth password (user=bucketvcs); also via BUCKETVCS_AUTH_TOKEN env")
