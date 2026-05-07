@@ -39,6 +39,7 @@ func TestClassify(t *testing.T) {
 		{"412 on PutIfAbsent -> AlreadyExists", opPutIfAbsent, fakeHTTPError(412, "PreconditionFailed"), storage.ErrAlreadyExists},
 		{"412 on PutIfMatch -> VersionMismatch", opPutIfMatch, fakeHTTPError(412, "PreconditionFailed"), storage.ErrVersionMismatch},
 		{"412 on DeleteIfMatch -> VersionMismatch", opDeleteIfMatch, fakeHTTPError(412, "PreconditionFailed"), storage.ErrVersionMismatch},
+		{"412 on opGet -> VersionMismatch", opGet, fakeHTTPError(412, "PreconditionFailed"), storage.ErrVersionMismatch},
 		{"throttled by SlowDown", opGet, fakeAPIError("SlowDown"), storage.ErrThrottled},
 		{"throttled by 429", opGet, fakeHTTPError(429, ""), storage.ErrThrottled},
 		{"transient 5xx", opGet, fakeHTTPError(503, ""), storage.ErrTransient},

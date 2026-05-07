@@ -69,7 +69,7 @@ func classify(op condOp, err error) error {
 			switch op {
 			case opPutIfAbsent, opCompleteIfAbsent:
 				return wrap(storage.ErrAlreadyExists, err)
-			case opPutIfMatch, opDeleteIfMatch:
+			case opPutIfMatch, opDeleteIfMatch, opGet:
 				return wrap(storage.ErrVersionMismatch, err)
 			default:
 				return wrap(storage.ErrTransient, err)
