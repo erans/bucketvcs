@@ -17,17 +17,17 @@ import (
 type condOp int
 
 const (
-	opGet             condOp = iota
-	opHead                   // HEAD request, no conditional headers
-	opGetRange               // GET with Range header
-	opList                   // ListObjectsV2 / list pages
-	opPutIfAbsent            // PUT with If-None-Match: *  -> 412 = ErrAlreadyExists
-	opPutIfMatch             // PUT with If-Match: <etag>  -> 412 = ErrVersionMismatch
-	opDeleteIfMatch          // DELETE with If-Match: <etag> -> 412 = ErrVersionMismatch
-	opCreateMultipart        // CreateMultipartUpload
-	opUploadPart             // UploadPart
-	opCompleteIfAbsent // CompleteMultipartUpload with If-None-Match: *
-	opAbortMultipart         // AbortMultipartUpload
+	opGet              condOp = iota
+	opHead                    // HEAD request, no conditional headers
+	opGetRange                // GET with Range header
+	opList                    // ListObjectsV2 / list pages
+	opPutIfAbsent             // PUT with If-None-Match: *  -> 412 = ErrAlreadyExists
+	opPutIfMatch              // PUT with If-Match: <etag>  -> 412 = ErrVersionMismatch
+	opDeleteIfMatch           // DELETE with If-Match: <etag> -> 412 = ErrVersionMismatch
+	opCreateMultipart         // CreateMultipartUpload
+	opUploadPart              // UploadPart
+	opCompleteIfAbsent        // CompleteMultipartUpload with If-None-Match: *
+	opAbortMultipart          // AbortMultipartUpload
 )
 
 // classify maps an SDK error to a storage sentinel. The original error

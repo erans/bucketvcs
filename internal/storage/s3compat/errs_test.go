@@ -44,6 +44,7 @@ func TestClassify(t *testing.T) {
 		{"transient 5xx", opGet, fakeHTTPError(503, ""), storage.ErrTransient},
 		{"access denied 403", opGet, fakeHTTPError(403, "AccessDenied"), storage.ErrAccessDenied},
 		{"invalid argument", opPutIfAbsent, fakeAPIError("InvalidArgument"), storage.ErrInvalidArgument},
+		{"unknown error -> transient", opGet, errors.New("connection refused"), storage.ErrTransient},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
