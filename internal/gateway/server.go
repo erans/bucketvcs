@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"unicode"
 
+	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
@@ -13,9 +14,8 @@ import (
 // Options configures a Server.
 type Options struct {
 	MirrorDir    string
-	Version      string   // bucketvcs version string
-	AuthMode     AuthMode // defined in auth.go (Task 13)
-	AuthToken    string
+	Version      string
+	AuthStore    auth.Store
 	MaxBodyBytes int64
 }
 
@@ -41,8 +41,8 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 	if opts.MaxBodyBytes <= 0 {
 		opts.MaxBodyBytes = 1 << 30 // 1 GiB
 	}
-	if opts.AuthMode != AuthAnonymous && opts.AuthToken == "" {
-		return nil, fmt.Errorf("gateway: AuthToken must not be empty when AuthMode is not AuthAnonymous")
+	if opts.AuthStore == nil {
+		return nil, fmt.Errorf("gateway: AuthStore is required")
 	}
 	mgr, err := mirror.NewManager(opts.MirrorDir, store)
 	if err != nil {

@@ -50,7 +50,7 @@ func TestStress_Push1000Commits(t *testing.T) {
 		t.Fatalf("seed Import: %v", err)
 	}
 
-	srv, err := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "stress"})
+	srv, err := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "stress", AuthStore: newPermissiveAuthStore(t, "fx", "stress")})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
