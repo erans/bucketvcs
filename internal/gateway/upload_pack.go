@@ -79,6 +79,40 @@ func (s *Server) handleUploadPack(w http.ResponseWriter, r *http.Request, tenant
 	}
 }
 
+// maxWants is the upper bound on want OIDs accepted in a single fetch.
+// Real Git clients send one want per remote ref they are interested in;
+// even a megarepo rarely exceeds a few thousand. We pick 4096 as a
+// generous ceiling that still bounds CPU (per-want kind probe), argv
+// size (rev-list <wants> --not --all), and memory.
+const maxWants = 4096
+
+// maxHaves is the upper bound on have OIDs accepted in a single fetch.
+// Clients negotiate haves in rounds of 256-512 by default; a single
+// request rarely exceeds 4-8K. Bounding both prevents an attacker from
+// turning a malformed POST into per-request CPU/argv exhaustion.
+const maxHaves = 8192
+
+// dedupOIDs returns oids with duplicates removed in first-seen order.
+// Both wants and haves are validated as 40-char hex by ParseFetchArgs,
+// so dedup-by-string is safe. We dedupe before any per-OID work to
+// bound the cost when a misbehaving client sends the same OID many
+// times.
+func dedupOIDs(oids []string) []string {
+	if len(oids) <= 1 {
+		return oids
+	}
+	seen := make(map[string]struct{}, len(oids))
+	out := make([]string, 0, len(oids))
+	for _, o := range oids {
+		if _, ok := seen[o]; ok {
+			continue
+		}
+		seen[o] = struct{}{}
+		out = append(out, o)
+	}
+	return out
+}
+
 // handleFetch implements the protocol-v2 "fetch" command. The flow:
 //
 //  1. Parse fetch arguments via v2proto.ParseFetchArgs.
@@ -109,6 +143,23 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request, tenant, rep
 		http.Error(w, "fetch: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	// Bound the per-OID work below: each want triggers a cat-file probe
+	// and joins the rev-list argv; each have triggers the same plus a
+	// reachability classification. Without these caps, a malformed
+	// request can blow up CPU, argv (E2BIG), or memory.
+	if len(req.Wants) > maxWants {
+		http.Error(w, fmt.Sprintf("fetch: too many wants (%d > %d)", len(req.Wants), maxWants), http.StatusBadRequest)
+		return
+	}
+	if len(req.Haves) > maxHaves {
+		http.Error(w, fmt.Sprintf("fetch: too many haves (%d > %d)", len(req.Haves), maxHaves), http.StatusBadRequest)
+		return
+	}
+	// Dedupe — clients sometimes send the same OID twice (e.g. when a
+	// have appears in multiple local refs); without dedup we'd run the
+	// same probe twice and pass duplicate args to rev-list.
+	req.Wants = dedupOIDs(req.Wants)
+	req.Haves = dedupOIDs(req.Haves)
 	m, err := s.mgr.Open(r.Context(), tenant, repoID)
 	if err != nil {
 		http.Error(w, "mirror: "+err.Error(), http.StatusInternalServerError)

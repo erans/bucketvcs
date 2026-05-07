@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -400,6 +401,50 @@ func mustGitOutput(t *testing.T, dir string, stdin io.Reader, args ...string) st
 		t.Fatalf("git %v: empty output", args)
 	}
 	return s
+}
+
+// TestUploadPack_RejectsTooManyWants verifies the want-count cap that
+// bounds per-request CPU / argv / memory cost. Each want forces a cat-file
+// probe + an entry in the rev-list argv, so an unbounded count is a DoS
+// vector. The 4096 cap is enforced with a clean 400.
+func TestUploadPack_RejectsTooManyWants(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeRepoInStore(t, storeDir, "acme", "demo")
+	store, _ := localfs.Open(storeDir)
+	t.Cleanup(func() { _ = store.Close() })
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	chunks := []pktChunk{dataLine("command=fetch\n"), delim}
+	// Spam 4097 distinct wants. We use a deterministic counter so each
+	// OID is unique (dedupOIDs would otherwise collapse them).
+	for i := 0; i <= 4096; i++ {
+		// 40-char hex: pad an integer to 40 chars with leading zeros.
+		oid := strings.Repeat("0", 40-8) + fmt.Sprintf("%08x", i)
+		chunks = append(chunks, dataLine("want "+oid+"\n"))
+	}
+	chunks = append(chunks, dataLine("done\n"), flush)
+	body := pktBody(chunks...)
+
+	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-upload-pack", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-git-upload-pack-request")
+	req.Header.Set("Git-Protocol", "version=2")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	if resp.StatusCode != 400 {
+		t.Fatalf("too-many-wants: status %d, want 400", resp.StatusCode)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if !bytes.Contains(got, []byte("too many wants")) {
+		t.Fatalf("expected 'too many wants' message, got %q", got)
+	}
 }
 
 // helpers
