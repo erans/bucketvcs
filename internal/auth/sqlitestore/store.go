@@ -591,3 +591,6 @@ func (s *Store) TouchTokenUsage(ctx context.Context, tokenID string) error {
 	)
 	return err
 }
+
+// Compile-time check that *Store satisfies auth.Store.
+var _ auth.Store = (*Store)(nil)
