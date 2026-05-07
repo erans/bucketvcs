@@ -13,10 +13,21 @@ import (
 // and for honoring the AWS SDK default credential chain when no static
 // credentials are provided.
 type Config struct {
-	Bucket          string // required
-	Prefix          string // optional; trailing "/" normalized
-	Region          string // required; "auto" for R2
-	Endpoint        string // optional for AWS S3; required for R2/MinIO
+	Bucket string // required
+	Prefix string // optional; trailing "/" normalized
+	Region string // required; "auto" for R2
+
+	// Endpoint is the S3-compatible API endpoint URL.
+	//
+	// Optional for AWS S3 (uses the default regional endpoint if empty);
+	// required for Cloudflare R2, MinIO, and other custom endpoints.
+	//
+	// When constructing Config directly for R2, also set scheme="r2"
+	// (or build via ParseURL("r2://...")) so Validate enforces the
+	// endpoint requirement; bare construction with Region="auto" alone
+	// bypasses the check.
+	Endpoint string
+
 	ForcePathStyle  bool   // true for R2/MinIO; false for AWS S3
 	AccessKeyID     string // optional; falls back to default chain
 	SecretAccessKey string // pairs with AccessKeyID
@@ -43,6 +54,11 @@ const (
 
 // Validate checks required fields. It does NOT mutate the receiver.
 // Call applyDefaults explicitly to populate optional tunables.
+//
+// Validate verifies Prefix is normalizable but does not normalize it.
+// Callers that may pass a non-trailing-slash Prefix must call
+// applyDefaults() before any operation that uses Prefix as a key
+// boundary (Open() does this in the documented order).
 func (c *Config) Validate() error {
 	if c.Bucket == "" {
 		return fmt.Errorf("s3compat: bucket is required")
