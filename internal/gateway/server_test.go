@@ -86,15 +86,6 @@ func TestServer_StubsReturn501(t *testing.T) {
 	srv := newTestServer(t)
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
-	for _, path := range []string{
-		"/foo/bar.git/info/refs?service=git-upload-pack",
-		"/foo/bar.git/info/refs?service=git-receive-pack",
-	} {
-		resp, _ := http.Get(ts.URL + path)
-		if resp.StatusCode != 501 {
-			t.Fatalf("path %s: status %d, want 501", path, resp.StatusCode)
-		}
-	}
 	for _, path := range []string{"/foo/bar.git/git-upload-pack", "/foo/bar.git/git-receive-pack"} {
 		resp, _ := http.Post(ts.URL+path, "application/octet-stream", nil)
 		if resp.StatusCode != 501 {

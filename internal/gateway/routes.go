@@ -60,10 +60,7 @@ func (s *Server) routeRepo(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Stubs for Tasks 14–17. Each task replaces these with a real handler.
-func (s *Server) handleInfoRefs(w http.ResponseWriter, r *http.Request, tenant, repoID string) {
-	http.Error(w, "info/refs not yet implemented", http.StatusNotImplemented)
-}
+// Stubs for Tasks 15–17. handleInfoRefs lives in inforefs.go.
 func (s *Server) handleUploadPack(w http.ResponseWriter, r *http.Request, tenant, repoID string) {
 	http.Error(w, "upload-pack not yet implemented", http.StatusNotImplemented)
 }
