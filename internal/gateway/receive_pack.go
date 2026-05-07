@@ -61,16 +61,21 @@ type receivePackRequest struct {
 //  3. If a pack accompanied the request: index-pack --strict --fix-thin
 //     into the bare, then a `rev-list <new-oids> --not --all` connectivity
 //     check.
-//  4. Hand the accepted commands to importer.BuildAndCommit, which repacks
-//     the bare into one canonical pack, uploads to the bucket, and CAS-
-//     commits a new manifest version. Stale-manifest losers fail the CAS
-//     and are reported as "stale-manifest".
-//  5. Re-read the manifest header to grab the post-commit version + tx ID,
-//     then mirror.IngestPack to bump local refs + sentinel. The pack itself
-//     is already in the bare from step 3, so IngestPack is called with
-//     packPath="" (refs+sentinel only, per Task 10's ARCH-1 review note).
-//  6. Emit a report-status pkt-line stream (side-band-wrapped if the client
-//     advertised side-band-64k).
+//  4. Apply ref updates to the local bare so importer.BuildAndCommit's
+//     repack sees the new tips, then BuildAndCommit (repack + upload +
+//     CAS-commit). Stale-manifest losers fail the CAS and are reported
+//     as "stale-manifest".
+//  5. Re-read the manifest header to verify the post-commit version is
+//     exactly preCommitVersion+1 (race detection: a larger jump means a
+//     concurrent push landed before BuildAndCommit's read and our
+//     updates may have stomped it). On mismatch, surface as
+//     stale-manifest.
+//  6. Mark the mirror stale (remove the sentinel) so SyncToCurrent
+//     rebuilds from the new authoritative root on the next request.
+//     This is more conservative than bumping the sentinel ourselves —
+//     the readback that would tell us the new version is itself racy.
+//  7. Emit a report-status pkt-line stream (side-band-wrapped if the
+//     client advertised side-band-64k).
 //
 // Failure modes are signaled via the report rather than HTTP status: a 200
 // with "ng <ref> <reason>" is the wire protocol's failure channel, since
@@ -165,7 +170,11 @@ func (s *Server) completeReceivePack(
 ) {
 	// Read the current manifest body under our write lock so old-OID
 	// validation sees a snapshot consistent with the BuildAndCommit CAS
-	// that follows.
+	// that follows. Capture the version so we can detect a cross-process
+	// commit landing between this read and BuildAndCommit's own ReadRoot
+	// (BuildAndCommit's CAS only catches commits AFTER its read; the
+	// window before its read is the race the post-commit version-skip
+	// check below guards against).
 	r2, err := repo.Open(ctx, s.store, tenant, repoID)
 	if err != nil {
 		writeReceiveReport(w, "internal-error: "+err.Error(), nil, req.Caps)
@@ -176,6 +185,7 @@ func (s *Server) completeReceivePack(
 		writeReceiveReport(w, "internal-error: "+err.Error(), nil, req.Caps)
 		return
 	}
+	preCommitVersion := view.Header.ManifestVersion
 	var currentBody manifest.Body
 	if err := json.Unmarshal(view.Body, &currentBody); err != nil {
 		writeReceiveReport(w, "internal-error: "+err.Error(), nil, req.Caps)
@@ -354,9 +364,27 @@ func (s *Server) completeReceivePack(
 		return
 	}
 
-	// Step 11: re-read manifest to get the post-commit version + tx ID for
-	// the mirror sentinel. BuildAndCommit returns the body but not the
-	// header; we need ReadRoot for ManifestVersion + LatestTx.
+	// Step 11: re-read manifest to verify our commit landed cleanly and to
+	// pick up the post-commit ManifestVersion + LatestTx.
+	//
+	// Race detection (review finding HIGH 1, partial mitigation): we
+	// captured preCommitVersion BEFORE old-OID validation; BuildAndCommit
+	// internally re-reads root and uses THAT version as its CAS base.
+	// If a concurrent cross-process push landed BETWEEN our read and
+	// BuildAndCommit's read, BuildAndCommit's mergeRefs would have
+	// overlaid our updates onto the newer body — silently overwriting
+	// any concurrent ref change for the same refname. BuildAndCommit
+	// commits at startVersion+1, so the post-commit version is
+	// preCommitVersion+1 in the no-race case; anything larger means the
+	// race window fired.
+	//
+	// We surface this as "ng stale-manifest" so the client sees a clean
+	// failure even though the bucket-side commit succeeded. The mirror
+	// is marked stale below so SyncToCurrent rebuilds from the new
+	// authoritative root (which now has our updates plus whatever the
+	// concurrent push made it). Eliminating the race entirely requires
+	// pushing old-OID validation INTO BuildAndCommit's commit callback
+	// — an importer-package change that's deferred to M9.
 	viewAfter, err := r2.ReadRoot(ctx)
 	if err != nil {
 		// Bucket-side commit succeeded; the local bare has the new refs
@@ -373,25 +401,33 @@ func (s *Server) completeReceivePack(
 		writeReceiveReport(w, "ok", statuses, req.Caps)
 		return
 	}
-
-	// Step 12-13: bump the mirror sentinel to record that local bare is
-	// in sync with the new manifest version. Refs are already applied
-	// (step 9b), pack is already in the bare (step 7) — IngestPack with
-	// empty updates and packPath="" is effectively a sentinel-only write.
-	if err := m.IngestPack(ctx, "", nil, viewAfter.Header.ManifestVersion, viewAfter.Header.LatestTx); err != nil {
-		// Bucket succeeded; mirror sentinel write failed. The mismatch
-		// will trigger a SyncToCurrent rebuild on the next request. The
-		// durable commit already happened, so report success — the
-		// alternative ("ng internal-mirror-error") would tell the client
-		// the push failed when in fact the bucket has it.
+	if viewAfter.Header.ManifestVersion > preCommitVersion+1 {
+		// Race detected: at least one concurrent commit landed before
+		// BuildAndCommit's read, so our updates may have stomped a
+		// concurrent change. Surface as stale-manifest. Mark stale so
+		// the next request rebuilds from the authoritative root.
+		markMirrorStale(m)
 		for i, u := range req.Updates {
 			if statuses[i] == "" {
-				statuses[i] = "ok " + u.Refname
+				statuses[i] = "ng " + u.Refname + " stale-manifest"
 			}
 		}
 		writeReceiveReport(w, "ok", statuses, req.Caps)
 		return
 	}
+
+	// Step 12-13: success path. We could bump the mirror sentinel via
+	// IngestPack(refs=nil) for efficiency (avoid a SyncToCurrent rebuild
+	// next request), BUT the readback above is itself racy: even after
+	// our version-skip check passes, a concurrent commit can land between
+	// the readback and the sentinel write, leaving us writing a sentinel
+	// for a manifest the local bare hasn't synced. Per review finding
+	// HIGH 2, we defer to markMirrorStale + SyncToCurrent on the next
+	// request rather than write a possibly-stale sentinel. The cost is
+	// one extra rebuild per push; the benefit is correctness without
+	// having to plumb the post-commit header back from BuildAndCommit
+	// (which would require an importer-package change).
+	markMirrorStale(m)
 
 	// Step 15: success. Fill in "ok <ref>" for every accepted command;
 	// rejected ones already carry their "ng <ref> <reason>".

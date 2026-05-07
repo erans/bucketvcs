@@ -597,7 +597,65 @@ func TestReceivePack_AcceptsEmptyPackBody(t *testing.T) {
 	}
 }
 
-// TestReceivePack_MarksMirrorStaleOnPostMutationFailure covers the High
+// TestReceivePack_AlwaysMarksMirrorStaleAfterSuccess covers the High
+// review finding (post-commit readback race): after a successful
+// BuildAndCommit, the gateway no longer writes a sentinel based on a
+// possibly-stale ReadRoot. Instead it always removes the sentinel so
+// SyncToCurrent rebuilds from the new authoritative root on the next
+// request. We verify this invariant by driving a successful end-to-end
+// push and asserting the sentinel is absent immediately after the push
+// returns.
+func TestReceivePack_AlwaysMarksMirrorStaleAfterSuccess(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	store, err := localfs.Open(storeDir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	srcBare := filepath.Join(t.TempDir(), "seed.git")
+	mustExecGW(t, "", "git", "init", "--bare", srcBare)
+	if _, err := importer.Import(context.Background(), store, importer.Options{
+		Tenant: "acme", Repo: "demo", SourceDir: srcBare, DefaultBranch: "refs/heads/main",
+	}); err != nil {
+		t.Fatalf("seed Import: %v", err)
+	}
+
+	mirrorDir := t.TempDir()
+	srv, err := NewServer(store, Options{MirrorDir: mirrorDir, Version: "test"})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	work := filepath.Join(t.TempDir(), "wt")
+	mustExecGW(t, "", "git", "init", work)
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustExecGW(t, work, "git", "add", ".")
+	mustExecGW(t, work, "git", "-c", "user.email=t@t", "-c", "user.name=t",
+		"commit", "-m", "init")
+	cmd := exec.Command("git", "-C", work, "push",
+		ts.URL+"/acme/demo.git", "HEAD:refs/heads/main")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git push: %v\n%s", err, out)
+	}
+
+	// After a successful push, the sentinel must be absent (the gateway
+	// pessimistically marks stale rather than write a possibly-racy
+	// sentinel; SyncToCurrent rebuilds on the next request).
+	sentinelPath := filepath.Join(mirrorDir, "acme", "demo", "manifest_version.txt")
+	if _, err := os.Stat(sentinelPath); !os.IsNotExist(err) {
+		t.Fatalf("expected sentinel removed after successful push, stat err=%v", err)
+	}
+}
+
 // review finding: when local-bare ref mutations have been applied but a
 // later step fails, the sentinel must be removed so SyncToCurrent
 // rebuilds on the next request — otherwise the unchanged sentinel would
