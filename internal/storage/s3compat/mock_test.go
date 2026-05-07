@@ -141,17 +141,26 @@ func (m *mockBackend) servePut(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveDelete handles DELETE with optional If-Match ETag check.
+// It mirrors real S3 idempotent-delete behavior: absent keys return 204
+// even when If-Match is set, because real S3 doesn't honor If-Match on
+// absent keys for DELETE. The adapter must Head-verify before deleting.
 func (m *mockBackend) serveDelete(w http.ResponseWriter, r *http.Request) {
 	key := m.keyFromPath(r.URL.Path)
 	existing, exists := m.objects[key]
+
+	// Real S3 quirk: DELETE is idempotent. Absent keys return 204
+	// even when If-Match is set. The adapter must Head-verify first.
 	if !exists {
-		w.WriteHeader(http.StatusNotFound)
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+
+	// Race: object exists but was rewritten with different ETag.
 	if im := r.Header.Get("If-Match"); im != "" && existing.etag != im {
 		w.WriteHeader(http.StatusPreconditionFailed)
 		return
 	}
+
 	delete(m.objects, key)
 	w.WriteHeader(http.StatusNoContent)
 }
