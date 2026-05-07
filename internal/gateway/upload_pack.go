@@ -16,6 +16,23 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/v2proto"
 )
 
+// uploadPackBodyLimit caps the upload-pack POST request body. A real fetch
+// command body is dominated by want/have OID lines (~50 bytes each) plus a
+// handful of capability lines. With our maxWants=4096 + maxHaves=8192 caps
+// the absolute worst-case legitimate body is well under 1 MiB; 4 MiB gives
+// plenty of headroom for client-side capability lines and future growth
+// without letting a client exhaust gateway memory through unbounded
+// pkt-line padding (capability lines, duplicated args, etc.) before we
+// even reach the per-OID caps in handleFetch.
+const uploadPackBodyLimit = 4 << 20 // 4 MiB
+
+// maxPktLineTokens caps the number of pkt-line tokens drainPktLine will
+// accumulate from one request. Even a maximal fetch body has only a few
+// thousand tokens (one per want/have/capability line plus a handful of
+// markers); 32k is above any legitimate request and below the point where
+// the slice itself becomes a memory pressure source.
+const maxPktLineTokens = 32 * 1024
+
 // handleUploadPack serves POST /<tenant>/<repo>.git/git-upload-pack for
 // protocol v2 clients. The handler requires Git-Protocol: version=2 (v0
 // upload-pack POST is not supported in M3 — v0 fallback is read-only via
@@ -27,7 +44,16 @@ func (s *Server) handleUploadPack(w http.ResponseWriter, r *http.Request, tenant
 		return
 	}
 	defer r.Body.Close()
-	body := http.MaxBytesReader(w, r.Body, s.opts.MaxBodyBytes)
+	// Use the SMALLER of (a) the operator-configured global cap and
+	// (b) the upload-pack-specific cap. The global cap is sized for
+	// receive-pack push uploads (which carry whole packfiles); upload-pack
+	// requests are command frames, not bulk data, so a tighter cap closes
+	// the pre-cap allocation window the reviewer flagged.
+	limit := int64(uploadPackBodyLimit)
+	if s.opts.MaxBodyBytes > 0 && s.opts.MaxBodyBytes < limit {
+		limit = s.opts.MaxBodyBytes
+	}
+	body := http.MaxBytesReader(w, r.Body, limit)
 
 	tokens, err := drainPktLine(body)
 	if err != nil {
@@ -374,6 +400,8 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request, tenant, rep
 
 // drainPktLine reads all tokens from r until EOF. Each Data token's Payload
 // is COPIED because pktline.Reader reuses its internal buffer across reads.
+// If r yields more than maxPktLineTokens frames, drainPktLine aborts with
+// an error — this bounds slice growth even if the body limit is generous.
 func drainPktLine(r io.Reader) ([]pktline.Token, error) {
 	pr := pktline.NewReader(r)
 	var out []pktline.Token
@@ -384,6 +412,9 @@ func drainPktLine(r io.Reader) ([]pktline.Token, error) {
 		}
 		if err != nil {
 			return nil, fmt.Errorf("pktline: %w", err)
+		}
+		if len(out) >= maxPktLineTokens {
+			return nil, fmt.Errorf("pktline: too many frames (>%d)", maxPktLineTokens)
 		}
 		if tok.Type == pktline.Data {
 			cp := append([]byte{}, tok.Payload...)

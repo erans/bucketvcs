@@ -447,6 +447,39 @@ func TestUploadPack_RejectsTooManyWants(t *testing.T) {
 	}
 }
 
+// TestUploadPack_RejectsOversizedBody verifies the upload-pack-specific
+// 4 MiB body limit. A real fetch command body is dominated by want/have
+// OID lines and is well under this size; an oversized body indicates
+// either client misbehavior or an attempted memory-exhaustion DoS, and
+// must be rejected before drainPktLine accumulates the bytes.
+func TestUploadPack_RejectsOversizedBody(t *testing.T) {
+	storeDir := t.TempDir()
+	store, _ := localfs.Open(storeDir)
+	t.Cleanup(func() { _ = store.Close() })
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	// Send 5 MiB of zeros — clearly above the 4 MiB upload-pack limit.
+	// MaxBytesReader returns an error on the read, which drainPktLine
+	// surfaces as a 400.
+	huge := make([]byte, 5<<20)
+	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-upload-pack", bytes.NewReader(huge))
+	req.Header.Set("Content-Type", "application/x-git-upload-pack-request")
+	req.Header.Set("Git-Protocol", "version=2")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	// MaxBytesReader returns the request entity too large status when
+	// the limit is hit during read; the handler treats it as a bad-body
+	// 400. Either is acceptable — the key invariant is "not 200".
+	if resp.StatusCode != 400 && resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized body: status %d, want 400 or 413", resp.StatusCode)
+	}
+}
+
 // helpers
 type pktChunk []byte
 
