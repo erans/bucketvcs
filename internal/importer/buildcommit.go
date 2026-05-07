@@ -259,7 +259,10 @@ func commitEmptyBody(ctx context.Context, r *repo.Repo, prev manifest.Body, star
 
 // mergeRefs returns prev+updates with deletes (null OID) applied. prev is
 // not mutated. updates with empty OID are also treated as deletes (some
-// callers normalize away the null hex string).
+// callers normalize away the null hex string). Each update refname is
+// syntactically validated — gateway and importer entry points are the
+// boundary where untrusted ref names enter, so we reject obviously-bad
+// names here as a defense in depth in case a caller forgets to validate.
 func mergeRefs(prev, updates map[string]string) (map[string]string, error) {
 	out := make(map[string]string, len(prev)+len(updates))
 	for k, v := range prev {
@@ -268,6 +271,9 @@ func mergeRefs(prev, updates map[string]string) (map[string]string, error) {
 	for ref, oid := range updates {
 		if ref == "" {
 			return nil, fmt.Errorf("empty refname in updates")
+		}
+		if !validFullRefName(ref) {
+			return nil, fmt.Errorf("invalid refname in updates: %q", ref)
 		}
 		if oid == "" || oid == nullOIDHex {
 			delete(out, ref)

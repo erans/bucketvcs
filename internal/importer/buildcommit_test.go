@@ -517,6 +517,30 @@ func TestMergeRefs_RejectsEmptyRefname(t *testing.T) {
 	}
 }
 
+func TestMergeRefs_RejectsMalformedRefname(t *testing.T) {
+	bad := []string{
+		"main",                // no refs/ prefix
+		"refs/heads/",         // trailing slash
+		"refs/heads//bad",     // double slash
+		"refs/heads/.hidden",  // dot segment
+		"refs/heads/foo.lock", // .lock suffix
+		"refs/heads/foo..bar", // double-dot
+		"refs/heads/foo@{0}",  // reflog syntax
+		"refs/heads/foo bar",  // space
+		"refs/heads/foo:bar",  // colon
+		"refs/heads/foo*",     // glob
+	}
+	for _, ref := range bad {
+		if _, err := mergeRefs(nil, map[string]string{ref: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}); err == nil {
+			t.Errorf("expected error on malformed refname %q", ref)
+		}
+	}
+	// Sanity: a clearly-valid refname is accepted.
+	if _, err := mergeRefs(nil, map[string]string{"refs/heads/ok": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}); err != nil {
+		t.Fatalf("unexpected error on valid refname: %v", err)
+	}
+}
+
 func TestBuildAndCommit_RejectsBadRefOID(t *testing.T) {
 	ir := setupImportedRepo(t)
 	updates := map[string]string{
