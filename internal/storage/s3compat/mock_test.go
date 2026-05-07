@@ -16,6 +16,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -71,47 +72,105 @@ func (m *mockBackend) keyFromPath(p string) string {
 
 func (m *mockBackend) serve(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
+	case http.MethodGet:
+		if r.URL.Query().Get("list-type") == "2" {
+			m.serveList(w, r)
+			return
+		}
+		m.serveGetOrHead(w, r)
+	case http.MethodHead:
+		m.serveGetOrHead(w, r)
 	case http.MethodPut:
 		m.servePut(w, r)
-	case http.MethodGet, http.MethodHead:
-		key := m.keyFromPath(r.URL.Path)
-		obj, ok := m.objects[key]
-		if !ok {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		// If-Match: reject if ETag doesn't match.
-		if im := r.Header.Get("If-Match"); im != "" && obj.etag != im {
-			w.WriteHeader(http.StatusPreconditionFailed)
-			return
-		}
-		w.Header().Set("ETag", obj.etag)
-		// Honor Range if present.
-		if rng := r.Header.Get("Range"); rng != "" {
-			start, end, ok := parseSimpleRange(rng, len(obj.body))
-			if !ok {
-				w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
-				return
-			}
-			chunk := obj.body[start : end+1]
-			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(chunk)))
-			w.WriteHeader(http.StatusPartialContent)
-			if r.Method == http.MethodGet {
-				_, _ = w.Write(chunk)
-			}
-			return
-		}
-		// Always set Content-Length so HEAD callers see the object size.
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(obj.body)))
-		w.WriteHeader(http.StatusOK)
-		if r.Method == http.MethodGet {
-			_, _ = w.Write(obj.body)
-		}
 	case http.MethodDelete:
 		m.serveDelete(w, r)
 	default:
 		w.WriteHeader(http.StatusNotImplemented)
 	}
+}
+
+func (m *mockBackend) serveGetOrHead(w http.ResponseWriter, r *http.Request) {
+	key := m.keyFromPath(r.URL.Path)
+	obj, ok := m.objects[key]
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	// If-Match: reject if ETag doesn't match.
+	if im := r.Header.Get("If-Match"); im != "" && obj.etag != im {
+		w.WriteHeader(http.StatusPreconditionFailed)
+		return
+	}
+	w.Header().Set("ETag", obj.etag)
+	// Honor Range if present.
+	if rng := r.Header.Get("Range"); rng != "" {
+		start, end, ok := parseSimpleRange(rng, len(obj.body))
+		if !ok {
+			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		chunk := obj.body[start : end+1]
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(chunk)))
+		w.WriteHeader(http.StatusPartialContent)
+		if r.Method == http.MethodGet {
+			_, _ = w.Write(chunk)
+		}
+		return
+	}
+	// Always set Content-Length so HEAD callers see the object size.
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(obj.body)))
+	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodGet {
+		_, _ = w.Write(obj.body)
+	}
+}
+
+func (m *mockBackend) serveList(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	prefix := q.Get("prefix")
+	delimiter := q.Get("delimiter")
+	startAfter := q.Get("continuation-token")
+
+	var keys []string
+	for k := range m.objects {
+		if strings.HasPrefix(k, prefix) {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+
+	type entry struct {
+		Key  string
+		ETag string
+		Size int
+	}
+	var contents []entry
+	prefixes := map[string]struct{}{}
+
+	for _, k := range keys {
+		if startAfter != "" && k <= startAfter {
+			continue
+		}
+		rem := strings.TrimPrefix(k, prefix)
+		if delimiter != "" {
+			if i := strings.Index(rem, delimiter); i >= 0 {
+				prefixes[prefix+rem[:i+len(delimiter)]] = struct{}{}
+				continue
+			}
+		}
+		contents = append(contents, entry{Key: k, ETag: m.objects[k].etag, Size: len(m.objects[k].body)})
+	}
+
+	w.Header().Set("Content-Type", "application/xml")
+	w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>`))
+	w.Write([]byte(`<ListBucketResult><IsTruncated>false</IsTruncated>`))
+	for _, c := range contents {
+		w.Write([]byte(`<Contents><Key>` + c.Key + `</Key><ETag>` + c.ETag + `</ETag><Size>` + strconv.Itoa(c.Size) + `</Size></Contents>`))
+	}
+	for p := range prefixes {
+		w.Write([]byte(`<CommonPrefixes><Prefix>` + p + `</Prefix></CommonPrefixes>`))
+	}
+	w.Write([]byte(`</ListBucketResult>`))
 }
 
 // servePut handles PUT with optional If-None-Match: * and If-Match: <etag>
