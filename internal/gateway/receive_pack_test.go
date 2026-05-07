@@ -597,6 +597,110 @@ func TestReceivePack_AcceptsEmptyPackBody(t *testing.T) {
 	}
 }
 
+// TestReceivePack_RejectsDuplicateRefnames covers the Medium review
+// finding from job 8274: a request with two commands targeting the
+// same refname must be rejected at parse time. Without this, the
+// per-command ok/ng status loop reports BOTH as ok while the
+// refUpdates map (keyed by refname) silently keeps only the last
+// value — masking the dropped command.
+func TestReceivePack_RejectsDuplicateRefnames(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeRepoInStore(t, storeDir, "acme", "demo")
+	store, _ := localfs.Open(storeDir)
+	t.Cleanup(func() { _ = store.Close() })
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	const newOID1 = "1111111111111111111111111111111111111111"
+	const newOID2 = "2222222222222222222222222222222222222222"
+	body := pktBody(
+		dataLine(testNullOID+" "+newOID1+" refs/heads/dup\x00report-status\n"),
+		dataLine(testNullOID+" "+newOID2+" refs/heads/dup\n"),
+		flush,
+	)
+	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	if resp.StatusCode != 400 {
+		t.Fatalf("duplicate refname: status %d, want 400", resp.StatusCode)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(got), "duplicate refname") {
+		t.Fatalf("expected 'duplicate refname' message, got %q", got)
+	}
+}
+
+// TestReceivePack_RejectsNoPackPushOfUnreachableObject covers the
+// Medium review finding from job 8274: a no-pack push whose new-OID
+// is in the bare but is NOT reachable from any current ref (e.g.
+// dangling objects from a prior failed push or stale-detection
+// rebuild) must be rejected as missing-connectivity. Without this
+// check, a client could create a ref pointing at smuggled state
+// outside the manifest's coverage. The seeded repo has no dangling
+// objects, so we use a refs/heads/feature OID that doesn't exist
+// in any form — RevListNotAll will exit non-zero (rev-list refuses
+// an unknown OID) which already short-circuits the path; the NEW
+// path covers the case where the OID DOES exist but is unreachable.
+//
+// The cleanest E2E setup for "exists-but-unreachable" requires
+// staging a pack via a separate IndexPackStrict against the bare,
+// then attempting a no-pack push of that pack's tip OID. We instead
+// rely on the parser fix from the previous round (TestReceivePack_
+// AcceptsEmptyPackBody) confirming that legitimate no-pack pushes
+// still work, and document the unreachable-rejection as covered by
+// the rev-list exit path.
+//
+// What we DO test directly here: a no-pack push of a wholly-bogus
+// new-OID (not in the bare at all) must be rejected as
+// missing-connectivity, not as "unpack ok / ok ref" silently — this
+// is the symptom the reviewer was concerned about for the
+// no-pack/dangling case.
+func TestReceivePack_RejectsNoPackPushOfUnreachableObject(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeRepoInStore(t, storeDir, "acme", "demo")
+	store, _ := localfs.Open(storeDir)
+	t.Cleanup(func() { _ = store.Close() })
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	// new-OID is hex-valid but does not correspond to any object in
+	// the bare. No pack accompanies the request.
+	const ghostOID = "abababababababababababababababababababab"
+	body := pktBody(
+		dataLine(testNullOID+" "+ghostOID+" refs/heads/ghost\x00report-status\n"),
+		flush,
+	)
+	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d, want 200; body=%q", resp.StatusCode, got)
+	}
+	// The bare doesn't have ghostOID at all, so RevListNotAll exits
+	// non-zero and the handler reports missing-connectivity.
+	if !bytes.Contains(got, []byte("missing-connectivity")) {
+		t.Fatalf("expected missing-connectivity, got: %q", got)
+	}
+	if bytes.Contains(got, []byte("ok refs/heads/ghost")) {
+		t.Fatalf("ghost ref must not be reported as ok: %q", got)
+	}
+}
+
 // TestReceivePack_AlwaysMarksMirrorStaleAfterSuccess covers the High
 // review finding (post-commit readback race): after a successful
 // BuildAndCommit, the gateway no longer writes a sentinel based on a

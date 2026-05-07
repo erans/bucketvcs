@@ -256,21 +256,22 @@ func (s *Server) completeReceivePack(
 	// `git rev-list --objects <new-oids> --not --all` as a defensive
 	// double-check that walking from the new tips hits no missing objects.
 	//
-	// This check ALSO runs when no pack accompanied the request: a
-	// non-delete push to an OID the server already has (e.g. ref rename
-	// or fast-forward to a tip already known via another ref) sends an
-	// empty body, but we still need to verify that OID actually exists in
-	// the bare. rev-list exits non-zero in that case, which we surface as
-	// missing-connectivity.
-	//
-	// CRITICAL: a NON-empty rev-list output is normal — it lists exactly
-	// the objects newly introduced by this push (reachable from new-oids
-	// but not from any prior ref; for a first push to an empty repo this
-	// is every object in the pack). What we care about is whether rev-list
-	// SUCCEEDED. A non-zero exit means the walk hit a missing object,
-	// which is the connectivity failure we're guarding against. Empty
-	// output with success is fine; non-empty output with success is also
-	// fine.
+	// Two semantics depending on whether a pack came in:
+	//   - WITH pack: a NON-empty rev-list output is normal — it lists
+	//     exactly the objects newly introduced by this push (reachable
+	//     from new-oids but not from any prior ref; for a first push to
+	//     an empty repo this is every object in the pack). What we care
+	//     about is whether rev-list SUCCEEDED — a non-zero exit means
+	//     the walk hit a missing object.
+	//   - WITHOUT pack: the new-OID must already be reachable from an
+	//     existing ref. NON-empty output means the new-OID points at
+	//     "dangling-but-present" objects (e.g. garbage from a previously
+	//     failed push or a stale-detection rebuild). Without this check,
+	//     a malicious or buggy client could create a ref pointing at an
+	//     object that is in the bare but was never advertised, smuggling
+	//     state outside the manifest's coverage. Reject as
+	//     missing-connectivity (the closest pack-protocol-level error
+	//     for "you didn't supply enough to back this ref").
 	var newOIDs []string
 	for i, u := range req.Updates {
 		if statuses[i] == "" && u.NewOID != gatewayNullOID {
@@ -278,8 +279,13 @@ func (s *Server) completeReceivePack(
 		}
 	}
 	if len(newOIDs) > 0 {
-		if _, err := gitcli.RevListNotAll(ctx, m.BareDir(), newOIDs); err != nil {
+		out, err := gitcli.RevListNotAll(ctx, m.BareDir(), newOIDs)
+		if err != nil {
 			writeReceiveReport(w, "missing-connectivity: "+err.Error(), nil, req.Caps)
+			return
+		}
+		if req.PackPath == "" && len(out) > 0 {
+			writeReceiveReport(w, "missing-connectivity: pack required for new objects", nil, req.Caps)
 			return
 		}
 	}
@@ -382,9 +388,19 @@ func (s *Server) completeReceivePack(
 	// failure even though the bucket-side commit succeeded. The mirror
 	// is marked stale below so SyncToCurrent rebuilds from the new
 	// authoritative root (which now has our updates plus whatever the
-	// concurrent push made it). Eliminating the race entirely requires
-	// pushing old-OID validation INTO BuildAndCommit's commit callback
-	// — an importer-package change that's deferred to M9.
+	// concurrent push made it).
+	//
+	// KNOWN LIMITATION (deferred to M9): this is detect-after-commit, not
+	// prevent-before-commit. The roborev review re-flagged this in job
+	// 8274 noting that "the bad commit is already durable." Eliminating
+	// the race requires moving old-OID validation into BuildAndCommit's
+	// commit callback (which gets `prev *RootView` of the actual
+	// CAS-pre-image body) — an importer-package change that the M3 task
+	// constraint reserves for M9. The detection narrows the user-visible
+	// outcome from "silent stomp" to "honest stale-manifest" (the
+	// stomped concurrent ref is then visible to the next reader and the
+	// client retries against a fresh tip), but it does not erase the
+	// momentary stomp.
 	viewAfter, err := r2.ReadRoot(ctx)
 	if err != nil {
 		// Bucket-side commit succeeded; the local bare has the new refs
@@ -517,6 +533,24 @@ func parseReceivePackRequest(ctx context.Context, body io.Reader, incoming strin
 	}
 	if len(req.Updates) == 0 {
 		return nil, errors.New("no update commands")
+	}
+
+	// Reject duplicate refnames in a single request. pack-protocol(5)
+	// doesn't explicitly forbid duplicates, but our pipeline collapses
+	// refUpdates into a map keyed by refname (only the LAST entry wins
+	// at BuildAndCommit time) while the per-command status loop still
+	// reports BOTH commands as ok. A crafted request with two creates
+	// for the same ref could therefore see "ok refs/heads/x" twice with
+	// only the second value committed, masking that the client's first
+	// command was silently dropped. Rejecting at parse time keeps the
+	// invariant "every accepted command corresponds to one applied
+	// update" — which the per-ref ok/ng reporting depends on.
+	seen := make(map[string]struct{}, len(req.Updates))
+	for _, u := range req.Updates {
+		if _, dup := seen[u.Refname]; dup {
+			return nil, fmt.Errorf("duplicate refname in request: %q", u.Refname)
+		}
+		seen[u.Refname] = struct{}{}
 	}
 
 	allDelete := true
