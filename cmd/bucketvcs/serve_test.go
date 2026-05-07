@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -14,6 +15,7 @@ func TestServeCommand_StartsAndStops(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires git binary + local listener")
 	}
+	_ = userCmdEnv(t) // tmp HOME so the default auth-db lands in a clean place
 	storeDir := t.TempDir()
 	mirrorDir := t.TempDir()
 
@@ -74,6 +76,7 @@ func TestServeCommand_StartsAndStops(t *testing.T) {
 }
 
 func TestServeCommand_RejectsMissingStore(t *testing.T) {
+	_ = userCmdEnv(t)
 	var stdout, stderr bytes.Buffer
 	code := runServe(context.Background(), []string{"--mirror-dir", t.TempDir()}, &stdout, &stderr)
 	if code == 0 {
@@ -81,19 +84,51 @@ func TestServeCommand_RejectsMissingStore(t *testing.T) {
 	}
 }
 
-func TestServeCommand_RejectsAuthScopeWithoutToken(t *testing.T) {
-	// Ensure BUCKETVCS_AUTH_TOKEN is not set; if it were, --auth-scope=all
-	// would be valid and the server might attempt to start instead of failing.
-	t.Setenv("BUCKETVCS_AUTH_TOKEN", "")
-	storeDir := t.TempDir()
-	var stdout, stderr bytes.Buffer
-	code := runServe(context.Background(), []string{
-		"--store", "localfs:" + storeDir,
-		"--mirror-dir", t.TempDir(),
-		"--auth-scope", "all",
-	}, &stdout, &stderr)
-	if code == 0 {
-		t.Fatalf("expected non-zero exit on --auth-scope without token, got 0")
+func TestServe_RejectsLegacyAuthModeFlag(t *testing.T) {
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	rc := runServe(context.Background(), []string{"--auth-mode", "all"}, stdout, stderr)
+	if rc != 2 {
+		t.Fatalf("rc = %d, want 2", rc)
+	}
+	if !strings.Contains(stderr.String(), "M4") {
+		t.Fatalf("stderr should explain M4 removal: %q", stderr.String())
+	}
+}
+
+func TestServe_RejectsLegacyAuthModeFlag_Equals(t *testing.T) {
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	rc := runServe(context.Background(), []string{"--auth-mode=all"}, stdout, stderr)
+	if rc != 2 {
+		t.Fatalf("rc = %d, want 2", rc)
+	}
+	if !strings.Contains(stderr.String(), "M4") {
+		t.Fatalf("stderr should explain M4 removal: %q", stderr.String())
+	}
+}
+
+func TestServe_RejectsLegacyAuthTokenFlag(t *testing.T) {
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	rc := runServe(context.Background(), []string{"--auth-token=secret"}, stdout, stderr)
+	if rc != 2 {
+		t.Fatalf("rc = %d, want 2", rc)
+	}
+	if !strings.Contains(stderr.String(), "M4") {
+		t.Fatalf("stderr should explain M4 removal: %q", stderr.String())
+	}
+}
+
+func TestServe_RejectsLegacyAuthScopeFlag(t *testing.T) {
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	rc := runServe(context.Background(), []string{"--auth-scope", "all"}, stdout, stderr)
+	if rc != 2 {
+		t.Fatalf("rc = %d, want 2", rc)
+	}
+	if !strings.Contains(stderr.String(), "M4") {
+		t.Fatalf("stderr should explain M4 removal: %q", stderr.String())
 	}
 }
 
