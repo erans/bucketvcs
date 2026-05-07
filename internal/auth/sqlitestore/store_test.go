@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 )
@@ -151,6 +152,99 @@ func TestListUsers(t *testing.T) {
 	}
 	if len(got) != 2 {
 		t.Fatalf("len = %d, want 2", len(got))
+	}
+}
+
+func TestCreateToken_AndGet(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+	uid, _ := s.CreateUser(ctx, "alice", false)
+
+	exp := time.Now().Add(24 * time.Hour).Unix()
+	err := s.CreateToken(ctx, "tokid001AAAAAAAAAAAAAAAA", uid, "$argon2id$v=19$m=65536,t=3,p=4$AAAA$BBBB",
+		"laptop", &exp)
+	if err != nil {
+		t.Fatalf("CreateToken: %v", err)
+	}
+	got, err := s.GetTokenByID(ctx, "tokid001AAAAAAAAAAAAAAAA")
+	if err != nil {
+		t.Fatalf("GetTokenByID: %v", err)
+	}
+	if got.UserID != uid || got.Label != "laptop" {
+		t.Fatalf("got %+v", got)
+	}
+	if got.ExpiresAt == nil || *got.ExpiresAt != exp {
+		t.Fatalf("ExpiresAt mismatch")
+	}
+}
+
+func TestRevokeToken(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+	uid, _ := s.CreateUser(ctx, "alice", false)
+	_ = s.CreateToken(ctx, "tokid001AAAAAAAAAAAAAAAA", uid, "$argon2id$x", "", nil)
+	if err := s.RevokeToken(ctx, "tokid001AAAAAAAAAAAAAAAA"); err != nil {
+		t.Fatalf("RevokeToken: %v", err)
+	}
+	tok, _ := s.GetTokenByID(ctx, "tokid001AAAAAAAAAAAAAAAA")
+	if tok.RevokedAt == nil {
+		t.Fatal("expected RevokedAt set")
+	}
+}
+
+func TestListTokensForUser(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+	uid, _ := s.CreateUser(ctx, "alice", false)
+	_ = s.CreateToken(ctx, "tok1AAAAAAAAAAAAAAAAAAAA", uid, "$argon2id$1", "a", nil)
+	_ = s.CreateToken(ctx, "tok2AAAAAAAAAAAAAAAAAAAA", uid, "$argon2id$2", "b", nil)
+	rows, err := s.ListTokensForUser(ctx, "alice")
+	if err != nil {
+		t.Fatalf("ListTokensForUser: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("len = %d, want 2", len(rows))
+	}
+}
+
+func TestResolveTokenIDPrefix(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+	uid, _ := s.CreateUser(ctx, "alice", false)
+	full := "tokABCDE0000000000000000"
+	_ = s.CreateToken(ctx, full, uid, "$argon2id$1", "", nil)
+	got, err := s.ResolveTokenIDPrefix(ctx, "tokABCDE")
+	if err != nil {
+		t.Fatalf("ResolveTokenIDPrefix: %v", err)
+	}
+	if got != full {
+		t.Fatalf("got %q want %q", got, full)
+	}
+
+	// Unique-prefix violation: add a second token whose id shares the prefix.
+	_ = s.CreateToken(ctx, "tokABCDE9999999999999999", uid, "$argon2id$2", "", nil)
+	if _, err := s.ResolveTokenIDPrefix(ctx, "tokABC"); !errors.Is(err, ErrAmbiguousPrefix) {
+		t.Fatalf("want ErrAmbiguousPrefix, got %v", err)
+	}
+}
+
+func TestDeleteUser_CascadesTokens(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+	// Create another admin so the user-delete is allowed.
+	_, _ = s.CreateUser(ctx, "root", true)
+	uid, _ := s.CreateUser(ctx, "alice", false)
+	_ = s.CreateToken(ctx, "tok1AAAAAAAAAAAAAAAAAAAA", uid, "$argon2id$1", "", nil)
+	if err := s.DeleteUser(ctx, "alice"); err != nil {
+		t.Fatalf("DeleteUser: %v", err)
+	}
+	if _, err := s.GetTokenByID(ctx, "tok1AAAAAAAAAAAAAAAAAAAA"); !errors.Is(err, auth.ErrNoSuchToken) {
+		t.Fatalf("want ErrNoSuchToken, got %v", err)
 	}
 }
 

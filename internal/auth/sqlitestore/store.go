@@ -215,3 +215,166 @@ func isUniqueViolation(err error) bool {
 	return strings.Contains(err.Error(), "UNIQUE constraint failed") ||
 		strings.Contains(err.Error(), "constraint failed: UNIQUE")
 }
+
+// ErrAmbiguousPrefix is returned by ResolveTokenIDPrefix when the prefix
+// matches more than one token id.
+var ErrAmbiguousPrefix = errors.New("sqlitestore: ambiguous token id prefix")
+
+// Token is the row shape returned by token-lookup methods. Note: SecretHash
+// is the PHC-encoded argon2id hash, not the plaintext secret.
+type Token struct {
+	ID         string
+	UserID     string
+	SecretHash string
+	Label      string
+	CreatedAt  int64
+	ExpiresAt  *int64
+	LastUsedAt *int64
+	RevokedAt  *int64
+}
+
+// CreateToken inserts a token row. The caller supplies the token-id segment
+// (from auth.GenerateToken) and the PHC-encoded argon2id hash of the secret
+// segment (from auth.HashSecret).
+func (s *Store) CreateToken(ctx context.Context, id, userID, secretHash, label string, expiresAt *int64) error {
+	now := time.Now().Unix()
+	var exp sql.NullInt64
+	if expiresAt != nil {
+		exp = sql.NullInt64{Int64: *expiresAt, Valid: true}
+	}
+	var lbl sql.NullString
+	if label != "" {
+		lbl = sql.NullString{String: label, Valid: true}
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO tokens (id, user_id, secret_hash, label, created_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		id, userID, secretHash, lbl, now, exp,
+	)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return auth.ErrConflict
+		}
+		return fmt.Errorf("create token: %w", err)
+	}
+	return nil
+}
+
+// GetTokenByID fetches a token row.
+func (s *Store) GetTokenByID(ctx context.Context, id string) (*Token, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, user_id, secret_hash, COALESCE(label,''), created_at,
+		        expires_at, last_used_at, revoked_at
+		   FROM tokens WHERE id = ?`, id,
+	)
+	t := &Token{}
+	var exp, last, rev sql.NullInt64
+	if err := row.Scan(&t.ID, &t.UserID, &t.SecretHash, &t.Label, &t.CreatedAt, &exp, &last, &rev); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, auth.ErrNoSuchToken
+		}
+		return nil, err
+	}
+	if exp.Valid {
+		v := exp.Int64
+		t.ExpiresAt = &v
+	}
+	if last.Valid {
+		v := last.Int64
+		t.LastUsedAt = &v
+	}
+	if rev.Valid {
+		v := rev.Int64
+		t.RevokedAt = &v
+	}
+	return t, nil
+}
+
+// ListTokensForUser returns all tokens for user `name` ordered by created_at desc.
+func (s *Store) ListTokensForUser(ctx context.Context, name string) ([]*Token, error) {
+	u, err := s.GetUserByName(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, user_id, secret_hash, COALESCE(label,''), created_at,
+		        expires_at, last_used_at, revoked_at
+		   FROM tokens WHERE user_id = ?
+		  ORDER BY created_at DESC`, u.ID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*Token{}
+	for rows.Next() {
+		t := &Token{}
+		var exp, last, rev sql.NullInt64
+		if err := rows.Scan(&t.ID, &t.UserID, &t.SecretHash, &t.Label, &t.CreatedAt, &exp, &last, &rev); err != nil {
+			return nil, err
+		}
+		if exp.Valid {
+			v := exp.Int64
+			t.ExpiresAt = &v
+		}
+		if last.Valid {
+			v := last.Int64
+			t.LastUsedAt = &v
+		}
+		if rev.Valid {
+			v := rev.Int64
+			t.RevokedAt = &v
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// RevokeToken sets revoked_at on the token row identified by full id.
+func (s *Store) RevokeToken(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`,
+		time.Now().Unix(), id,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		// Either token doesn't exist or was already revoked. Disambiguate.
+		if _, err := s.GetTokenByID(ctx, id); err != nil {
+			return err
+		}
+		// Already revoked: idempotent success.
+		return nil
+	}
+	return nil
+}
+
+// ResolveTokenIDPrefix returns the full token id for the given prefix.
+// Returns auth.ErrNoSuchToken if no match, ErrAmbiguousPrefix if >1 match.
+func (s *Store) ResolveTokenIDPrefix(ctx context.Context, prefix string) (string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id FROM tokens WHERE id LIKE ? || '%' LIMIT 2`, prefix,
+	)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	matches := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return "", err
+		}
+		matches = append(matches, id)
+	}
+	switch len(matches) {
+	case 0:
+		return "", auth.ErrNoSuchToken
+	case 1:
+		return matches[0], nil
+	default:
+		return "", ErrAmbiguousPrefix
+	}
+}
