@@ -129,6 +129,10 @@ func (m *mockBackend) serveList(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	prefix := q.Get("prefix")
 	delimiter := q.Get("delimiter")
+	// continuation-token is the token returned by the previous page's
+	// NextContinuationToken. The mock uses it as a "start-after" value:
+	// keys whose sort order is <= the token are skipped, which matches
+	// how real S3 implements opaque continuation tokens for this mock.
 	startAfter := q.Get("continuation-token")
 
 	var keys []string
@@ -161,11 +165,31 @@ func (m *mockBackend) serveList(w http.ResponseWriter, r *http.Request) {
 		contents = append(contents, entry{Key: k, ETag: m.objects[k].etag, Size: len(m.objects[k].body)})
 	}
 
+	// Honor max-keys: truncate contents and emit NextContinuationToken.
+	maxKeys := 0
+	if mk := q.Get("max-keys"); mk != "" {
+		if n, err := strconv.Atoi(mk); err == nil && n > 0 {
+			maxKeys = n
+		}
+	}
+	isTruncated := false
+	nextToken := ""
+	if maxKeys > 0 && len(contents) > maxKeys {
+		nextToken = contents[maxKeys-1].Key
+		contents = contents[:maxKeys]
+		isTruncated = true
+	}
+
 	w.Header().Set("Content-Type", "application/xml")
 	w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>`))
-	w.Write([]byte(`<ListBucketResult><IsTruncated>false</IsTruncated>`))
+	w.Write([]byte(`<ListBucketResult>`))
+	fmt.Fprintf(w, `<IsTruncated>%v</IsTruncated>`, isTruncated)
+	if nextToken != "" {
+		fmt.Fprintf(w, `<NextContinuationToken>%s</NextContinuationToken>`, nextToken)
+	}
 	for _, c := range contents {
-		w.Write([]byte(`<Contents><Key>` + c.Key + `</Key><ETag>` + c.ETag + `</ETag><Size>` + strconv.Itoa(c.Size) + `</Size></Contents>`))
+		fmt.Fprintf(w, `<Contents><Key>%s</Key><ETag>%s</ETag><Size>%d</Size><LastModified>2026-05-07T00:00:00.000Z</LastModified></Contents>`,
+			c.Key, c.ETag, c.Size)
 	}
 	for p := range prefixes {
 		w.Write([]byte(`<CommonPrefixes><Prefix>` + p + `</Prefix></CommonPrefixes>`))

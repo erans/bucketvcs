@@ -35,7 +35,7 @@ func (s *S3Compat) List(ctx context.Context, prefix string, opts *storage.ListOp
 		if err != nil {
 			return nil, err
 		}
-		page.Objects = append(page.Objects, storage.ObjectMetadata{
+		md := storage.ObjectMetadata{
 			Key: k,
 			Version: storage.ObjectVersion{
 				Provider: "s3compat",
@@ -43,7 +43,11 @@ func (s *S3Compat) List(ctx context.Context, prefix string, opts *storage.ListOp
 				Kind:     storage.VersionEtag,
 			},
 			Size: aws.ToInt64(obj.Size),
-		})
+		}
+		if obj.LastModified != nil {
+			md.ModifiedAt = *obj.LastModified
+		}
+		page.Objects = append(page.Objects, md)
 	}
 	for _, cp := range out.CommonPrefixes {
 		stored := aws.ToString(cp.Prefix)

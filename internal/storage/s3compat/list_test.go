@@ -99,3 +99,61 @@ func TestListStripsAdapterPrefix(t *testing.T) {
 		t.Fatalf("keys = %v, want %v (adapter prefix should be stripped)", got, want)
 	}
 }
+
+func TestListPaginates(t *testing.T) {
+	s, mb := newMockBackend(t)
+	for _, k := range []string{"k1", "k2", "k3", "k4", "k5"} {
+		mb.put(k, []byte("x"), `"e"`)
+	}
+
+	page1, err := s.List(context.Background(), "", &storage.ListOptions{MaxKeys: 2})
+	if err != nil {
+		t.Fatalf("List page1: %v", err)
+	}
+	if len(page1.Objects) != 2 {
+		t.Fatalf("page1 len = %d, want 2", len(page1.Objects))
+	}
+	if page1.NextToken == "" {
+		t.Fatalf("page1 NextToken empty; expected pagination")
+	}
+
+	page2, err := s.List(context.Background(), "", &storage.ListOptions{
+		MaxKeys: 2, ContinuationToken: page1.NextToken,
+	})
+	if err != nil {
+		t.Fatalf("List page2: %v", err)
+	}
+	if len(page2.Objects) != 2 {
+		t.Fatalf("page2 len = %d, want 2", len(page2.Objects))
+	}
+
+	page3, err := s.List(context.Background(), "", &storage.ListOptions{
+		MaxKeys: 2, ContinuationToken: page2.NextToken,
+	})
+	if err != nil {
+		t.Fatalf("List page3: %v", err)
+	}
+	if len(page3.Objects) != 1 {
+		t.Fatalf("page3 len = %d, want 1", len(page3.Objects))
+	}
+	if page3.NextToken != "" {
+		t.Fatalf("page3 NextToken = %q, want empty (final page)", page3.NextToken)
+	}
+}
+
+func TestListReturnsLastModified(t *testing.T) {
+	// Mock emits a fixed LastModified timestamp in each Contents entry;
+	// verify that List populates ObjectMetadata.ModifiedAt from it.
+	s, mb := newMockBackend(t)
+	mb.put("k", []byte("v"), `"e"`)
+	page, err := s.List(context.Background(), "", nil)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(page.Objects) != 1 {
+		t.Fatalf("Objects len = %d", len(page.Objects))
+	}
+	if page.Objects[0].ModifiedAt.IsZero() {
+		t.Fatalf("ModifiedAt is zero; expected populated from List response")
+	}
+}
