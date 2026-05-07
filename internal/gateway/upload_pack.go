@@ -92,10 +92,17 @@ func (s *Server) handleUploadPack(w http.ResponseWriter, r *http.Request, tenant
 //     could exfiltrate it. Reachability against `--not --all` enforces an
 //     allow-reachable-sha1-in-want policy: the mirror's loose+pack refset
 //     is the authoritative manifest snapshot under our RLock.
-//  4. If the client sent haves, emit an "acknowledgments" section listing the
-//     ones we have. With "done" the client expects the packfile in the same
-//     response; without "done" we close the round and let it negotiate again.
-//  5. Stream the pack via side-band-64k on band 1.
+//  4. Reject shallow/deepen requests — the gateway has no shallow-info
+//     plumbing yet, and silently serving a full pack to a depth-bounded
+//     fetch would corrupt the client's history view.
+//  5. If the client sent haves, emit an "acknowledgments" section listing
+//     the ones we have (NAK when none common). With "done" the client
+//     expects the packfile in the same response, separated from the acks
+//     by a delim-pkt; without "done" we close the round and let it
+//     negotiate again.
+//  6. Stream the pack via side-band-64k on band 1, then explicitly Close
+//     the pack reader so a non-zero pack-objects exit is reported as a
+//     side-band fatal BEFORE the trailing flush.
 func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request, tenant, repoID string, tokens []pktline.Token) {
 	req, err := v2proto.ParseFetchArgs(tokens)
 	if err != nil {
@@ -141,16 +148,42 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request, tenant, rep
 		return
 	}
 
+	// Reject shallow/deepen arguments until M3+ adds proper shallow-info
+	// handling. We currently have no shallow-boundary plumbing (no
+	// shallow-info section in the response, no shallow file written for
+	// pack-objects), and pack-objects' Depth knob is informational-only
+	// per the gitcli contract. Rather than silently serve a full pack to
+	// a shallow request — which would corrupt the client's view of
+	// history — we 400 with a precise reason. A future task will
+	// implement the shallow path end-to-end and (only then) honor the
+	// fetch=shallow capability we advertise.
+	if req.Depth > 0 || req.DeepenSince != "" || len(req.DeepenNot) > 0 || req.DeepenRelative || len(req.Shallow) > 0 {
+		http.Error(w, "fetch: shallow/deepen arguments not yet supported by gateway", http.StatusBadRequest)
+		return
+	}
+
 	pw := pktline.NewWriter(w)
 
-	// Acknowledgments section — only emitted when the client sent haves.
-	// When the client did not say "done", we close out after acks and let
-	// it negotiate again, so don't even start pack-objects in that case.
+	// Acknowledgments section — emitted whenever the client sent haves.
+	// Per protocol-v2 §fetch the section is REQUIRED in that case (with
+	// "NAK" when nothing is common); omitting it makes follow-on framing
+	// ambiguous. We split the haves into commons (we have them) and
+	// unknowns (we don't), and feed both into WriteAcknowledgments so
+	// it can NAK when commons is empty.
+	//
+	// We track ackEmitted so the delim before "packfile\n" is only
+	// written when the acknowledgments section actually ran.
+	var (
+		commons    []string
+		unknown    []string
+		ackEmitted bool
+	)
 	if len(req.Haves) > 0 {
-		var commons []string
 		for _, h := range req.Haves {
 			if _, err := gitcli.RevParseObjectKind(r.Context(), m.BareDir(), h); err == nil {
 				commons = append(commons, h)
+			} else {
+				unknown = append(unknown, h)
 			}
 		}
 		// "ready" tells the client we have enough to proceed to the packfile
@@ -159,9 +192,10 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request, tenant, rep
 		// client would interpret "ready" as our intent to send a packfile
 		// in this round, but it still expects another negotiation round.
 		ready := len(commons) > 0 && req.Done
-		if err := v2proto.WriteAcknowledgments(w, commons, nil, ready); err != nil {
+		if err := v2proto.WriteAcknowledgments(w, commons, unknown, ready); err != nil {
 			return
 		}
+		ackEmitted = true
 		if !req.Done {
 			// Multi-round negotiation — flush and let the client send
 			// another round.
@@ -178,20 +212,24 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request, tenant, rep
 	// present and we already wrote the acks section — at least before the
 	// packfile header). Stream-time errors after start are reported via
 	// side-band fatal below.
+	//
+	// Only commons are forwarded to pack-objects as ^<oid> exclusions;
+	// unknown haves would become invalid negative revisions and cause
+	// `git pack-objects --revs` to abort, breaking otherwise valid fetches
+	// from clients that send haves from unrelated local refs.
 	pack, err := gitcli.PackObjectsForFetch(r.Context(), m.BareDir(), gitcli.PackForFetchOptions{
 		Wants:      req.Wants,
-		Haves:      req.Haves,
+		Haves:      commons,
 		ThinPack:   req.ThinPack,
 		IncludeTag: req.IncludeTag,
 		OfsDelta:   req.OfsDelta,
 		NoProgress: req.NoProgress,
-		Depth:      req.Depth,
 	})
 	if err != nil {
 		// If we already wrote acknowledgments, we have to surface this on
 		// the side-band as the response body has begun. Otherwise we can
 		// emit a clean HTTP error.
-		if len(req.Haves) > 0 {
+		if ackEmitted {
 			sb := pktline.NewSidebandWriter(pw)
 			_, _ = sb.WriteFatal([]byte("pack-objects: " + err.Error()))
 			return
@@ -199,24 +237,26 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request, tenant, rep
 		http.Error(w, "pack-objects: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer pack.Close()
 
-	if len(req.Haves) > 0 {
+	if ackEmitted {
 		// Per protocol-v2 §fetch, when both an acknowledgments section and
 		// a packfile section are present, they are separated by a delim-pkt.
 		_ = pw.WriteDelim()
 	}
 	if err := pw.WriteString("packfile\n"); err != nil {
+		_ = pack.Close()
 		return
 	}
 
 	sb := pktline.NewSidebandWriter(pw)
 	buf := make([]byte, 65000)
+	streamErr := false
 	for {
 		n, rerr := pack.Read(buf)
 		if n > 0 {
 			if _, werr := sb.WriteData(buf[:n]); werr != nil {
-				return
+				streamErr = true
+				break
 			}
 		}
 		if rerr == io.EOF {
@@ -224,8 +264,19 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request, tenant, rep
 		}
 		if rerr != nil {
 			_, _ = sb.WriteFatal([]byte("pack stream: " + rerr.Error()))
-			return
+			streamErr = true
+			break
 		}
+	}
+	// Explicitly close the pack reader so a non-zero pack-objects exit code
+	// is observed BEFORE we send the trailing flush. A defer'd Close would
+	// run after we've already promised the client a clean response.
+	if cerr := pack.Close(); cerr != nil && !streamErr {
+		_, _ = sb.WriteFatal([]byte("pack-objects: " + cerr.Error()))
+		return
+	}
+	if streamErr {
+		return
 	}
 	_ = pw.WriteFlush()
 }

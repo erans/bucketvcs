@@ -130,6 +130,60 @@ func TestUploadPack_RejectsUnreachableWant(t *testing.T) {
 	}
 }
 
+// TestUploadPack_RejectsShallowFetch verifies that depth-bounded fetches are
+// refused with a clear error rather than silently served as full packs (which
+// would corrupt the client's history view). M3 advertises fetch=shallow at
+// the capability level but the gateway has no shallow-info plumbing yet.
+func TestUploadPack_RejectsShallowFetch(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeRepoInStore(t, storeDir, "acme", "demo")
+	store, _ := localfs.Open(storeDir)
+	t.Cleanup(func() { _ = store.Close() })
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	// Need a valid (reachable) want OID for this test; resolve refs/heads/main
+	// in the mirror by issuing an info/refs first.
+	resp, err := http.Get(ts.URL + "/acme/demo.git/info/refs?service=git-upload-pack")
+	if err != nil {
+		t.Fatalf("info/refs: %v", err)
+	}
+	advert, _ := io.ReadAll(resp.Body)
+	idx := bytes.Index(advert, []byte(" refs/heads/main"))
+	if idx < 0 {
+		t.Fatalf("info/refs missing main: %q", advert)
+	}
+	mainOID := string(advert[idx-40 : idx])
+
+	body := pktBody(
+		dataLine("command=fetch\n"),
+		delim,
+		dataLine("want "+mainOID+"\n"),
+		dataLine("deepen 1\n"),
+		dataLine("done\n"),
+		flush,
+	)
+	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-upload-pack", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-git-upload-pack-request")
+	req.Header.Set("Git-Protocol", "version=2")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	if resp.StatusCode != 400 {
+		t.Fatalf("shallow fetch: status %d, want 400", resp.StatusCode)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if !bytes.Contains(got, []byte("shallow/deepen")) {
+		t.Fatalf("expected shallow rejection message, got %q", got)
+	}
+}
+
 // helpers
 type pktChunk []byte
 
