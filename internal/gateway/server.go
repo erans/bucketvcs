@@ -35,6 +35,9 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 	if opts.MaxBodyBytes <= 0 {
 		opts.MaxBodyBytes = 1 << 30 // 1 GiB
 	}
+	if opts.AuthMode != AuthAnonymous && opts.AuthToken == "" {
+		return nil, fmt.Errorf("gateway: AuthToken must not be empty when AuthMode is not AuthAnonymous")
+	}
 	mgr, err := mirror.NewManager(opts.MirrorDir, store)
 	if err != nil {
 		return nil, fmt.Errorf("gateway: mirror manager: %w", err)
