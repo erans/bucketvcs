@@ -51,3 +51,30 @@ func TestDecideReasonNonEmptyOnDeny(t *testing.T) {
 		t.Fatal("expected non-empty reason on deny")
 	}
 }
+
+// TestDecide_NilActorIgnoresPerm guards against a caller mistakenly
+// passing a non-none perm with a nil actor. Decide must normalize and
+// reject anonymous writes/reads-on-private regardless of the perm value.
+func TestDecide_NilActorIgnoresPerm(t *testing.T) {
+	cases := []struct {
+		name   string
+		perm   Perm
+		action Action
+		flags  RepoFlags
+		want   bool
+	}{
+		{"nil+PermAdmin+write+private", PermAdmin, ActionWrite, RepoFlags{}, false},
+		{"nil+PermWrite+write+private", PermWrite, ActionWrite, RepoFlags{}, false},
+		{"nil+PermRead+write+public", PermRead, ActionWrite, RepoFlags{PublicRead: true}, false},
+		{"nil+PermAdmin+read+private", PermAdmin, ActionRead, RepoFlags{}, false},
+		{"nil+PermAdmin+read+public", PermAdmin, ActionRead, RepoFlags{PublicRead: true}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, _ := Decide(nil, c.perm, c.action, c.flags)
+			if got != c.want {
+				t.Fatalf("Decide(nil, %v, %v, %+v) = %v want %v", c.perm, c.action, c.flags, got, c.want)
+			}
+		})
+	}
+}

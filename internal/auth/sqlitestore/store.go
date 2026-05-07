@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -23,12 +24,19 @@ type Store struct {
 // Open opens (or creates) the SQLite database at path, enables WAL and
 // foreign keys, and applies any pending migrations.
 func Open(path string) (*Store, error) {
-	// Use file: URI so we can request WAL via _journal=WAL and foreign
-	// keys via _pragma=foreign_keys(1) at connection setup time.
-	dsn := fmt.Sprintf(
-		"file:%s?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)",
-		path,
-	)
+	// Build the DSN as a URL so paths containing `?`, `#`, or other URI
+	// metacharacters are escaped rather than misinterpreted as query/fragment.
+	u := &url.URL{
+		Scheme: "file",
+		Opaque: (&url.URL{Path: path}).EscapedPath(),
+	}
+	q := url.Values{}
+	q.Add("_pragma", "journal_mode(WAL)")
+	q.Add("_pragma", "foreign_keys(1)")
+	q.Add("_pragma", "busy_timeout(5000)")
+	u.RawQuery = q.Encode()
+	dsn := u.String()
+
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %q: %w", path, err)

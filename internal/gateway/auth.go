@@ -50,7 +50,14 @@ func RunAuth(w http.ResponseWriter, r *http.Request, store auth.Store, rr *Route
 	if user, pass, hasBasic := r.BasicAuth(); hasBasic {
 		actor, tokenID, err = store.VerifyCredential(ctx, auth.BasicPassword{Username: user, Password: pass})
 		if err != nil {
-			challenge(w, "invalid credentials")
+			// Only credential-state errors map to 401. Backend / internal
+			// errors (DB unreachable, etc.) must surface as 500 so they
+			// aren't masked as bad credentials.
+			if isCredentialError(err) {
+				challenge(w, "invalid credentials")
+			} else {
+				http.Error(w, "internal error", http.StatusInternalServerError)
+			}
 			return nil, false
 		}
 		// Best-effort last-used update off the hot path.
@@ -84,4 +91,14 @@ func RunAuth(w http.ResponseWriter, r *http.Request, store auth.Store, rr *Route
 func challenge(w http.ResponseWriter, body string) {
 	w.Header().Set("WWW-Authenticate", authRealm)
 	http.Error(w, body, http.StatusUnauthorized)
+}
+
+// isCredentialError reports whether err represents a known credential-state
+// failure that should map to 401. Other errors (DB / disk / network) should
+// surface as 500.
+func isCredentialError(err error) bool {
+	return errors.Is(err, auth.ErrInvalidCredential) ||
+		errors.Is(err, auth.ErrTokenExpired) ||
+		errors.Is(err, auth.ErrTokenRevoked) ||
+		errors.Is(err, auth.ErrUserDisabled)
 }

@@ -155,3 +155,19 @@ func TestRunAuth_PassesContextErrors(t *testing.T) {
 		t.Fatalf("status = %d, want 500", w.Code)
 	}
 }
+
+// TestRunAuth_VerifyCredentialBackendError_500 ensures non-credential
+// errors from VerifyCredential surface as 500, not 401. A DB outage
+// should never be reported to the client as "bad credentials."
+func TestRunAuth_VerifyCredentialBackendError_500(t *testing.T) {
+	st := &fakeStore{credErr: errors.New("db unreachable"), flags: auth.RepoFlags{}}
+	rr := &RoutedRequest{Tenant: "a", Repo: "b", Op: OpUploadPack, RequiredAction: auth.ActionRead}
+	w := httptest.NewRecorder()
+	r := req(t, "POST", "/a/b.git/git-upload-pack", "", "alice", "bvts_OK")
+	if _, ok := RunAuth(w, r, st, rr); ok {
+		t.Fatal("expected deny")
+	}
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (got challenge instead?)", w.Code)
+	}
+}

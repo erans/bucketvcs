@@ -105,7 +105,9 @@ func TestInfoRefs_ReceivePackV0(t *testing.T) {
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 
-	resp, err := http.Get(ts.URL + "/acme/demo.git/info/refs?service=git-receive-pack")
+	req, _ := http.NewRequest("GET", ts.URL+"/acme/demo.git/info/refs?service=git-receive-pack", nil)
+	req.SetBasicAuth("perm", "perm")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -207,7 +209,9 @@ func TestInfoRefs_V0ReceivePack_NoHEADLine(t *testing.T) {
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 
-	resp, err := http.Get(ts.URL + "/acme/demo.git/info/refs?service=git-receive-pack")
+	req, _ := http.NewRequest("GET", ts.URL+"/acme/demo.git/info/refs?service=git-receive-pack", nil)
+	req.SetBasicAuth("perm", "perm")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}

@@ -30,13 +30,17 @@ func newAnonymousTestAuthStore(t *testing.T, tenant, repo string, pub bool) *sql
 	return s
 }
 
-// permissiveAuthStore is a test-only auth.Store wrapper that grants
-// PermWrite to ALL callers (including anonymous). It is used by M3-era
-// gateway tests that exercised receive-pack without an auth layer; under
-// M4 the default flow requires a real credential for writes, but those
-// tests only care about the protocol behavior of the receive-pack
-// handler itself, not the auth middleware (covered separately by
-// auth_test.go).
+// permissiveAuthStore is a test-only auth.Store wrapper that grants admin
+// to anyone presenting Basic auth and reports PermWrite for any (actor,
+// tenant, repo) lookup. It is used by M3-era gateway tests that exercised
+// receive-pack without an auth layer; under M4 the default flow requires
+// a real credential for writes (Decide normalizes nil-actor perm to
+// PermNone as defense-in-depth), so VerifyCredential returns a synthetic
+// admin actor on any credential — tests just need to call
+// req.SetBasicAuth(anything, anything) so the auth middleware lets the
+// request through to the receive-pack handler. These tests only care
+// about the protocol behavior of the handler itself, not the auth
+// middleware (covered separately by auth_test.go).
 type permissiveAuthStore struct {
 	tenant, repo string
 }
@@ -49,7 +53,7 @@ func newPermissiveAuthStore(_ *testing.T, tenant, repo string) auth.Store {
 }
 
 func (p *permissiveAuthStore) VerifyCredential(ctx context.Context, c auth.Credential) (*auth.Actor, string, error) {
-	return nil, "", auth.ErrInvalidCredential
+	return &auth.Actor{UserID: "perm-admin", Name: "perm-admin", IsAdmin: true}, "perm-token", nil
 }
 func (p *permissiveAuthStore) LookupRepoPerm(ctx context.Context, _ *auth.Actor, _, _ string) (auth.Perm, error) {
 	return auth.PermWrite, nil
