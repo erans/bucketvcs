@@ -85,9 +85,13 @@ func (s *Server) handleUploadPack(w http.ResponseWriter, r *http.Request, tenant
 //  2. Open the per-repo mirror (which lazily syncs to the current manifest)
 //     and acquire a read lock so concurrent ingest cannot rewrite refs while
 //     we pack.
-//  3. Validate that every want OID exists in the mirror — protecting against
-//     clients that guess unadvertised OIDs (the gitcli helper documents that
-//     reachability checks are the caller's responsibility).
+//  3. Validate that every want OID is REACHABLE from the manifest's
+//     advertised refs — not merely present in the mirror. Mere existence
+//     is insufficient: pack files may retain hidden, deleted, or otherwise
+//     unadvertised objects, and a client that knows or guesses such an OID
+//     could exfiltrate it. Reachability against `--not --all` enforces an
+//     allow-reachable-sha1-in-want policy: the mirror's loose+pack refset
+//     is the authoritative manifest snapshot under our RLock.
 //  4. If the client sent haves, emit an "acknowledgments" section listing the
 //     ones we have. With "done" the client expects the packfile in the same
 //     response; without "done" we close the round and let it negotiate again.
@@ -106,21 +110,42 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request, tenant, rep
 	m.RLock()
 	defer m.RUnlock()
 
-	// Validate every want is reachable in the mirror. We use cat-file -t via
-	// RevParseObjectKind rather than show-ref because clients legitimately
-	// "want" non-tip commits (e.g. fetching a specific OID by sha). If the
-	// object is not present in the mirror we refuse — without this check, a
-	// client that guesses an OID could exfiltrate hidden objects.
+	// Validate every want is reachable from an advertised ref. We require
+	// commit-or-tag wants (allowAnySHA1InWant is NOT enabled): a tree or
+	// blob OID smuggled as a want would be packed by pack-objects --revs
+	// even though git rev-list rejects it as a starting point — meaning we
+	// must reject those upfront. Then rev-list <wants> --not --all over the
+	// mirror tells us which (if any) reach objects outside the advertised
+	// refset; empty means every want is fully covered.
 	for _, oid := range req.Wants {
-		if _, err := gitcli.RevParseObjectKind(r.Context(), m.BareDir(), oid); err != nil {
+		kind, err := gitcli.RevParseObjectKind(r.Context(), m.BareDir(), oid)
+		if err != nil {
 			http.Error(w, "fetch: not our ref "+oid, http.StatusBadRequest)
 			return
 		}
+		if kind != "commit" && kind != "tag" {
+			http.Error(w, "fetch: want must be a commit or tag, got "+kind+" for "+oid, http.StatusBadRequest)
+			return
+		}
+	}
+	unreachable, err := gitcli.RevListNotAll(r.Context(), m.BareDir(), req.Wants)
+	if err != nil {
+		http.Error(w, "fetch: reachability check failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if len(unreachable) > 0 {
+		// Don't echo the unreachable list verbatim; the first OID is
+		// enough to diagnose and avoids leaking other hidden OIDs we may
+		// have walked into.
+		http.Error(w, "fetch: not our ref "+unreachable[0], http.StatusBadRequest)
+		return
 	}
 
 	pw := pktline.NewWriter(w)
 
 	// Acknowledgments section — only emitted when the client sent haves.
+	// When the client did not say "done", we close out after acks and let
+	// it negotiate again, so don't even start pack-objects in that case.
 	if len(req.Haves) > 0 {
 		var commons []string
 		for _, h := range req.Haves {
@@ -143,15 +168,16 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request, tenant, rep
 			_ = pw.WriteFlush()
 			return
 		}
-		// Per protocol-v2 §fetch, when both an acknowledgments section and
-		// a packfile section are present, they are separated by a delim-pkt.
-		_ = pw.WriteDelim()
 	}
 
-	if err := pw.WriteString("packfile\n"); err != nil {
-		return
-	}
-
+	// Open the pack stream BEFORE writing the packfile section header.
+	// If pack-objects fails to start (missing binary, bad dir, invalid
+	// args), surfacing that as a clean HTTP 500 is only possible while
+	// the response body is still empty (i.e. before the acknowledgments
+	// section was emitted in the no-haves path, or — when haves were
+	// present and we already wrote the acks section — at least before the
+	// packfile header). Stream-time errors after start are reported via
+	// side-band fatal below.
 	pack, err := gitcli.PackObjectsForFetch(r.Context(), m.BareDir(), gitcli.PackForFetchOptions{
 		Wants:      req.Wants,
 		Haves:      req.Haves,
@@ -162,10 +188,27 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request, tenant, rep
 		Depth:      req.Depth,
 	})
 	if err != nil {
+		// If we already wrote acknowledgments, we have to surface this on
+		// the side-band as the response body has begun. Otherwise we can
+		// emit a clean HTTP error.
+		if len(req.Haves) > 0 {
+			sb := pktline.NewSidebandWriter(pw)
+			_, _ = sb.WriteFatal([]byte("pack-objects: " + err.Error()))
+			return
+		}
 		http.Error(w, "pack-objects: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer pack.Close()
+
+	if len(req.Haves) > 0 {
+		// Per protocol-v2 §fetch, when both an acknowledgments section and
+		// a packfile section are present, they are separated by a delim-pkt.
+		_ = pw.WriteDelim()
+	}
+	if err := pw.WriteString("packfile\n"); err != nil {
+		return
+	}
 
 	sb := pktline.NewSidebandWriter(pw)
 	buf := make([]byte, 65000)

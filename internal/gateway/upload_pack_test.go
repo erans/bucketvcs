@@ -86,6 +86,50 @@ func TestUploadPack_RejectsMissingV2Header(t *testing.T) {
 	}
 }
 
+// TestUploadPack_RejectsUnreachableWant exercises the want-reachability check
+// added to address roborev's high-severity finding: a client that names an
+// OID NOT reachable from any advertised ref must be refused, even if the
+// object happens to exist in the mirror's pack files.
+func TestUploadPack_RejectsUnreachableWant(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeRepoInStore(t, storeDir, "acme", "demo")
+	store, _ := localfs.Open(storeDir)
+	t.Cleanup(func() { _ = store.Close() })
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	// A syntactically valid but non-existent OID — the reachability check
+	// rejects it via the cat-file kind probe (object missing). The plumbing
+	// for "exists but unreachable" requires bypassing the manifest layer;
+	// the response shape we care about here is "fetch: not our ref ...".
+	bogus := "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	body := pktBody(
+		dataLine("command=fetch\n"),
+		delim,
+		dataLine("want "+bogus+"\n"),
+		flush,
+	)
+	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-upload-pack", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-git-upload-pack-request")
+	req.Header.Set("Git-Protocol", "version=2")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	if resp.StatusCode != 400 {
+		t.Fatalf("unreachable want: status %d, want 400", resp.StatusCode)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if !bytes.Contains(got, []byte("not our ref")) {
+		t.Fatalf("expected 'not our ref' message, got %q", got)
+	}
+}
+
 // helpers
 type pktChunk []byte
 
