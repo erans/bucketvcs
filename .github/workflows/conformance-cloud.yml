@@ -7,6 +7,7 @@ on:
       - 'internal/storage/s3compat/**'
       - 'internal/storage/conformance/**'
       - 'internal/storage/*.go'
+      - 'internal/diffharness/**'
       - 'cmd/bucketvcs/store*.go'
       - 'scripts/conformance-cloud.sh'
       - '.github/workflows/conformance-cloud.yml'
@@ -21,12 +22,37 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
-      - name: Run ship-gate
+
+      - name: In-tree tests (no creds)
+        run: go test ./internal/storage/s3compat/... -count=1
+
+      - name: R2 conformance + diffharness
         env:
           BUCKETVCS_R2_BUCKET:    ${{ secrets.R2_BUCKET }}
           BUCKETVCS_R2_ENDPOINT:  ${{ secrets.R2_ENDPOINT }}
+          AWS_ACCESS_KEY_ID:      ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY:  ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          if [[ -z "$BUCKETVCS_R2_BUCKET" || -z "$BUCKETVCS_R2_ENDPOINT" ]]; then
+            echo "==> R2: SKIPPED (R2_BUCKET / R2_ENDPOINT secret unset)"
+            exit 0
+          fi
+          echo "==> R2 conformance"
+          go test ./internal/storage/s3compat/... -run TestConformance_R2 -v -count=1
+          echo "==> R2 diffharness"
+          BUCKETVCS_DIFFHARNESS_STORE="r2://${BUCKETVCS_R2_BUCKET}/diffharness-${GITHUB_RUN_ID}" \
+            go test ./internal/diffharness/... -count=1
+
+      - name: AWS S3 conformance
+        env:
           BUCKETVCS_S3_BUCKET:    ${{ secrets.AWS_S3_BUCKET }}
           BUCKETVCS_S3_REGION:    ${{ secrets.AWS_REGION }}
           AWS_ACCESS_KEY_ID:      ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY:  ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        run: ./scripts/conformance-cloud.sh
+        run: |
+          if [[ -z "$BUCKETVCS_S3_BUCKET" || -z "$BUCKETVCS_S3_REGION" ]]; then
+            echo "==> S3: SKIPPED (AWS_S3_BUCKET / AWS_REGION secret unset)"
+            exit 0
+          fi
+          echo "==> S3 conformance"
+          go test ./internal/storage/s3compat/... -run TestConformance_S3 -v -count=1
