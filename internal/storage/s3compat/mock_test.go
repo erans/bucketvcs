@@ -13,6 +13,7 @@ package s3compat
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -68,6 +69,8 @@ func (m *mockBackend) keyFromPath(p string) string {
 
 func (m *mockBackend) serve(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
+	case http.MethodPut:
+		m.servePut(w, r)
 	case http.MethodGet, http.MethodHead:
 		key := m.keyFromPath(r.URL.Path)
 		obj, ok := m.objects[key]
@@ -105,6 +108,30 @@ func (m *mockBackend) serve(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.WriteHeader(http.StatusNotImplemented)
 	}
+}
+
+// servePut handles PUT with optional If-None-Match: * and If-Match: <etag>
+// semantics that mirror the production adapter's CAS expectations.
+func (m *mockBackend) servePut(w http.ResponseWriter, r *http.Request) {
+	key := m.keyFromPath(r.URL.Path)
+	body, _ := io.ReadAll(r.Body)
+	existing, exists := m.objects[key]
+
+	if r.Header.Get("If-None-Match") == "*" && exists {
+		w.WriteHeader(http.StatusPreconditionFailed)
+		return
+	}
+	if im := r.Header.Get("If-Match"); im != "" {
+		if !exists || existing.etag != im {
+			w.WriteHeader(http.StatusPreconditionFailed)
+			return
+		}
+	}
+
+	etag := `"v` + strconv.Itoa(len(m.objects)+1) + `"`
+	m.objects[key] = mockObject{body: body, etag: etag}
+	w.Header().Set("ETag", etag)
+	w.WriteHeader(http.StatusOK)
 }
 
 // parseSimpleRange handles "bytes=start-end" only.

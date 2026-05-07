@@ -3,7 +3,6 @@ package s3compat
 import (
 	"context"
 	"errors"
-	"io"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
@@ -38,14 +37,6 @@ func (s *S3Compat) Capabilities() storage.Capabilities {
 // individual methods land one at a time.
 
 var errNotImpl = errors.New("s3compat: not yet implemented (skeleton)")
-
-func (s *S3Compat) PutIfAbsent(ctx context.Context, key string, body io.Reader, opts *storage.PutOptions) (storage.ObjectVersion, error) {
-	return storage.ObjectVersion{}, errNotImpl
-}
-
-func (s *S3Compat) PutIfVersionMatches(ctx context.Context, key string, expected storage.ObjectVersion, body io.Reader, opts *storage.PutOptions) (storage.ObjectVersion, error) {
-	return storage.ObjectVersion{}, errNotImpl
-}
 
 func (s *S3Compat) DeleteIfVersionMatches(ctx context.Context, key string, expected storage.ObjectVersion) error {
 	return errNotImpl
