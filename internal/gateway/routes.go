@@ -60,10 +60,8 @@ func (s *Server) routeRepo(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Stubs for Tasks 15–17. handleInfoRefs lives in inforefs.go.
-func (s *Server) handleUploadPack(w http.ResponseWriter, r *http.Request, tenant, repoID string) {
-	http.Error(w, "upload-pack not yet implemented", http.StatusNotImplemented)
-}
+// Stub for Task 17. handleInfoRefs lives in inforefs.go; handleUploadPack
+// lives in upload_pack.go.
 func (s *Server) handleReceivePack(w http.ResponseWriter, r *http.Request, tenant, repoID string) {
 	http.Error(w, "receive-pack not yet implemented", http.StatusNotImplemented)
 }
