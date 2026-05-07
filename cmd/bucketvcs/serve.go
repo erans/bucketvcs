@@ -26,7 +26,7 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	addr := fs.String("addr", ":8080", "Listen address (host:port)")
 	storeURL := fs.String("store", "", `Store URL (e.g. "localfs:/var/lib/bucketvcs")`)
 	mirrorDir := fs.String("mirror-dir", "", "Mirror cache directory (default $XDG_CACHE_HOME/bucketvcs/mirrors)")
-	authToken := fs.String("auth-token", "", "Optional bearer token (also via BUCKETVCS_AUTH_TOKEN env)")
+	authToken := fs.String("auth-token", "", "HTTP Basic auth password (user=bucketvcs); also via BUCKETVCS_AUTH_TOKEN env")
 	authScope := fs.String("auth-scope", "", `"write-only" (default if --auth-token set) or "all"`)
 	maxBody := fs.Int64("max-body-bytes", 1<<30, "Per-request body limit in bytes")
 	shutdownTimeout := fs.Duration("shutdown-timeout", 30*time.Second, "Graceful shutdown deadline")
