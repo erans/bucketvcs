@@ -238,6 +238,82 @@ func TestReceivePack_ReportUsesSidebandWhenNegotiated(t *testing.T) {
 	}
 }
 
+// TestReceivePack_RejectsTrailingBytesAfterDeleteOnly verifies that a
+// delete-only push (which forbids a trailing packfile per pack-protocol)
+// is rejected when extra body bytes follow the flush. Without this check
+// a malformed or attacker-crafted request could smuggle bytes past
+// validation.
+func TestReceivePack_RejectsTrailingBytesAfterDeleteOnly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeRepoInStore(t, storeDir, "acme", "demo")
+	store, _ := localfs.Open(storeDir)
+	t.Cleanup(func() { _ = store.Close() })
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	const oldOID = "1111111111111111111111111111111111111111"
+	body := pktBody(
+		dataLine(oldOID+" "+testNullOID+" refs/heads/feature\x00report-status\n"),
+		flush,
+	)
+	body = append(body, []byte("PACK\x00\x00\x00\x02junk")...)
+
+	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	if resp.StatusCode != 400 {
+		t.Fatalf("trailing bytes after delete-only: status %d, want 400", resp.StatusCode)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(got), "trailing bytes") {
+		t.Fatalf("expected 'trailing bytes' message, got %q", got)
+	}
+}
+
+// TestReceivePack_RejectsExtraTrailingNewline verifies the strict
+// single-LF terminator rule. A command line with multiple trailing
+// newlines must not be silently normalized — TrimRight would have
+// accepted "...refs/heads/main\n\n", but the spec requires exactly one
+// LF, and the OID/refname checks must surface the malformed shape.
+func TestReceivePack_RejectsExtraTrailingNewline(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeRepoInStore(t, storeDir, "acme", "demo")
+	store, _ := localfs.Open(storeDir)
+	t.Cleanup(func() { _ = store.Close() })
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	const oldOID = "1111111111111111111111111111111111111111"
+	// Two trailing newlines on a non-first command (so caps parsing
+	// doesn't swallow them): TrimSuffix only strips one, leaving the
+	// refname as "refs/heads/feature\n" which fails check-ref-format.
+	body := pktBody(
+		dataLine(oldOID+" "+testNullOID+" refs/heads/main\x00report-status\n"),
+		dataLine(oldOID+" "+testNullOID+" refs/heads/feature\n\n"),
+		flush,
+	)
+	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	if resp.StatusCode != 400 {
+		t.Fatalf("extra newline: status %d, want 400", resp.StatusCode)
+	}
+}
+
 // TestReceivePack_RejectsTooManyCommands enforces the per-request command
 // cap that bounds CPU / subprocess cost. Each command invokes
 // `git check-ref-format`, so an uncapped count is a DoS even at small

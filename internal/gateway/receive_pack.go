@@ -142,7 +142,12 @@ func parseReceivePackRequest(ctx context.Context, body io.Reader, incoming strin
 			return nil, fmt.Errorf("unexpected token %v", tok.Type)
 		}
 		// Copy payload because pktline reuses its internal buffer.
-		line := strings.TrimRight(string(append([]byte{}, tok.Payload...)), "\n")
+		line := string(append([]byte{}, tok.Payload...))
+		// pack-protocol(5) requires each command to end with exactly one
+		// LF. TrimRight would silently normalize "...\n\n\n" into a valid
+		// command; we use TrimSuffix so any extra trailing newlines fail
+		// the OID/refname checks below rather than parse as valid input.
+		line = strings.TrimSuffix(line, "\n")
 		if first {
 			first = false
 			if i := strings.IndexByte(line, '\x00'); i >= 0 {
@@ -190,33 +195,50 @@ func parseReceivePackRequest(ctx context.Context, body io.Reader, incoming strin
 			break
 		}
 	}
-	if !allDelete {
-		// Read remaining body into a temp pack file under <mirror>/incoming/.
-		// IncomingDir is mkdir'd at mirror.Manager.Open time; the MkdirAll
-		// here is defensive in case the directory was removed out-of-band.
-		if err := os.MkdirAll(incoming, 0o755); err != nil {
-			return req, fmt.Errorf("incoming mkdir: %w", err)
+	if allDelete {
+		// pack-protocol(5) forbids a packfile after a delete-only command
+		// list. Trailing bytes indicate a malformed or attacker-crafted
+		// request; reject so we don't silently accept arbitrary garbage.
+		// We probe with a 1-byte read against the MaxBytesReader, which
+		// returns EOF on a clean end and a non-EOF error if the body
+		// exceeded the limit.
+		var probe [1]byte
+		n, err := body.Read(probe[:])
+		if n > 0 {
+			return req, errors.New("trailing bytes after delete-only command list")
 		}
-		idBytes := make([]byte, 12)
-		if _, err := rand.Read(idBytes); err != nil {
-			return req, fmt.Errorf("incoming name: %w", err)
+		if err != nil && err != io.EOF {
+			return req, fmt.Errorf("body trailer: %w", err)
 		}
-		packPath := filepath.Join(incoming, "rcv-"+hex.EncodeToString(idBytes)+".pack")
-		f, err := os.OpenFile(packPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o644)
-		if err != nil {
-			return req, fmt.Errorf("create incoming: %w", err)
-		}
-		if _, err := io.Copy(f, body); err != nil {
-			_ = f.Close()
-			_ = os.Remove(packPath)
-			return req, fmt.Errorf("write incoming: %w", err)
-		}
-		if err := f.Close(); err != nil {
-			_ = os.Remove(packPath)
-			return req, fmt.Errorf("close incoming: %w", err)
-		}
-		req.PackPath = packPath
+		return req, nil
 	}
+
+	// Non-delete push: read remaining body into a temp pack file under
+	// <mirror>/incoming/. IncomingDir is mkdir'd at mirror.Manager.Open
+	// time; the MkdirAll here is defensive in case the directory was
+	// removed out-of-band.
+	if err := os.MkdirAll(incoming, 0o755); err != nil {
+		return req, fmt.Errorf("incoming mkdir: %w", err)
+	}
+	idBytes := make([]byte, 12)
+	if _, err := rand.Read(idBytes); err != nil {
+		return req, fmt.Errorf("incoming name: %w", err)
+	}
+	packPath := filepath.Join(incoming, "rcv-"+hex.EncodeToString(idBytes)+".pack")
+	f, err := os.OpenFile(packPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o644)
+	if err != nil {
+		return req, fmt.Errorf("create incoming: %w", err)
+	}
+	if _, err := io.Copy(f, body); err != nil {
+		_ = f.Close()
+		_ = os.Remove(packPath)
+		return req, fmt.Errorf("write incoming: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(packPath)
+		return req, fmt.Errorf("close incoming: %w", err)
+	}
+	req.PackPath = packPath
 	return req, nil
 }
 
