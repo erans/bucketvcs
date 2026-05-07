@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"testing"
 	"time"
@@ -15,7 +16,14 @@ func TestServeCommand_StartsAndStops(t *testing.T) {
 	}
 	storeDir := t.TempDir()
 	mirrorDir := t.TempDir()
-	addr := "127.0.0.1:38719"
+
+	// Allocate an ephemeral port up front to avoid hard-coded port conflicts
+	// on developer machines and CI.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
 
 	args := []string{
 		"--addr", addr,
@@ -29,7 +37,10 @@ func TestServeCommand_StartsAndStops(t *testing.T) {
 	done := make(chan int, 1)
 	go func() {
 		var stdout, stderr bytes.Buffer
-		done <- runServe(ctx, args, &stdout, &stderr)
+		// Pass the pre-bound listener so runServeWithListener uses Serve(ln)
+		// rather than ListenAndServe, which would open a second socket on the
+		// same address and race with our Addr.String() read.
+		done <- runServeWithListener(ctx, args, &stdout, &stderr, ln)
 	}()
 
 	// Wait until /healthz responds.

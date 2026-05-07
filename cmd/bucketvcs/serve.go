@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,6 +22,13 @@ const defaultMirrorSubdir = "bucketvcs/mirrors"
 const buildVersion = "0.1-dev" // matches gateway agent= advertisement
 
 func runServe(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	return runServeWithListener(ctx, args, stdout, stderr, nil)
+}
+
+// runServeWithListener is the real implementation. When ln is non-nil the
+// server uses Serve(ln) instead of ListenAndServe, which lets tests inject
+// an ephemeral listener without touching production flag parsing.
+func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.Writer, ln net.Listener) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	addr := fs.String("addr", ":8080", "Listen address (host:port)")
@@ -83,7 +91,11 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	httpSrv := &http.Server{Addr: *addr, Handler: srv}
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- httpSrv.ListenAndServe()
+		if ln != nil {
+			errCh <- httpSrv.Serve(ln)
+		} else {
+			errCh <- httpSrv.ListenAndServe()
+		}
 	}()
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
