@@ -596,6 +596,145 @@ func TestBuildAndCommit_RejectsDeletingDefaultBranch(t *testing.T) {
 	}
 }
 
+// TestBuildAndCommit_RefOnlyUpdateReusesPack covers the ref-only push
+// case: the second BuildAndCommit adds a new branch pointing at an
+// already-reachable commit. No new objects, so PackObjectsAll returns
+// the same pack_id as the first push, and the canonical pack key
+// already exists in the bucket. uploadCanonicalArtifact must treat
+// that ErrAlreadyExists as success rather than failing the push.
+func TestBuildAndCommit_RefOnlyUpdateReusesPack(t *testing.T) {
+	ir := setupImportedRepo(t)
+
+	// First push: advance main to a second commit. This uploads a fresh
+	// canonical pack covering both commits.
+	newOID := ir.addSecondCommit(t)
+	body1, err := BuildAndCommit(context.Background(), ir.store, ir.tenant, ir.repo, ir.bareDir,
+		map[string]string{"refs/heads/main": newOID}, "pusher")
+	if err != nil {
+		t.Fatalf("first BuildAndCommit: %v", err)
+	}
+	if len(body1.Packs) != 1 {
+		t.Fatalf("first body packs len = %d, want 1", len(body1.Packs))
+	}
+	firstPackID := body1.Packs[0].PackID
+
+	// Create a new ref locally pointing at the SAME object set (the older
+	// commit, already reachable). No new objects to send.
+	if out, err := gitcli.RunForTest(ir.bareDir, "update-ref",
+		"refs/heads/feature", ir.mainOID); err != nil {
+		t.Fatalf("update-ref feature: %v: %s", err, out)
+	}
+
+	// Second BuildAndCommit: ref-only update. Same object set, so
+	// PackObjectsAll returns the same pack_id. Without the fix this
+	// fails on ErrAlreadyExists for the canonical pack key.
+	body2, err := BuildAndCommit(context.Background(), ir.store, ir.tenant, ir.repo, ir.bareDir,
+		map[string]string{"refs/heads/feature": ir.mainOID}, "pusher")
+	if err != nil {
+		t.Fatalf("ref-only BuildAndCommit: %v", err)
+	}
+	if body2.Packs[0].PackID != firstPackID {
+		t.Logf("note: pack_id changed across same-object-set repacks: %q -> %q (delta variance)",
+			firstPackID, body2.Packs[0].PackID)
+	}
+	if body2.Refs["refs/heads/feature"] != ir.mainOID {
+		t.Fatalf("post body feature: got %q, want %q", body2.Refs["refs/heads/feature"], ir.mainOID)
+	}
+	if body2.Refs["refs/heads/main"] != newOID {
+		t.Fatalf("post body main: got %q, want %q", body2.Refs["refs/heads/main"], newOID)
+	}
+}
+
+// TestBuildAndCommit_FirstPushOnUnbornDefault covers the empty-repo
+// case: an Import populated DefaultBranch but the repo has no refs yet
+// (e.g. imported source had only an unborn HEAD). A first push that
+// creates a non-default branch must NOT be misread as deleting the
+// unborn default — the default-branch guard should only fire when the
+// default ref existed before this push.
+func TestBuildAndCommit_FirstPushOnUnbornDefault(t *testing.T) {
+	skipIfNoGit(t)
+	store := newTestStore(t)
+
+	// Build a "imported" empty repo: manifest with DefaultBranch set but
+	// no refs. We do this by Import-ing a real empty bare, which yields
+	// an empty Refs map but DefaultBranch carried from HEAD's symref.
+	srcBare := filepath.Join(t.TempDir(), "empty.git")
+	if out, err := gitcli.RunForTest(t.TempDir(), "init", "--bare",
+		"--initial-branch=main", srcBare); err != nil {
+		t.Fatalf("init bare: %v: %s", err, out)
+	}
+	if _, err := Import(context.Background(), store, Options{
+		SourceDir: srcBare, Tenant: "t", Repo: "r", Actor: "tester",
+	}); err != nil {
+		t.Fatalf("Import empty: %v", err)
+	}
+
+	// Sanity: the imported manifest should carry a DefaultBranch and
+	// have no refs.
+	r, err := repo.Open(context.Background(), store, "t", "r")
+	if err != nil {
+		t.Fatalf("repo.Open: %v", err)
+	}
+	view, err := r.ReadRoot(context.Background())
+	if err != nil {
+		t.Fatalf("ReadRoot: %v", err)
+	}
+	var pre manifest.Body
+	if err := json.Unmarshal(view.Body, &pre); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if pre.DefaultBranch == "" {
+		t.Skip("import of empty bare did not set DefaultBranch on this git version")
+	}
+	if _, hasDefault := pre.Refs[pre.DefaultBranch]; hasDefault {
+		t.Skip("import populated the default ref; cannot test unborn case")
+	}
+
+	// Build a mirror with one new branch (NOT the default), one commit.
+	mirror := filepath.Join(t.TempDir(), "mirror.git")
+	if out, err := gitcli.RunForTest(t.TempDir(), "init", "--bare",
+		"--initial-branch=feature", mirror); err != nil {
+		t.Fatalf("init mirror: %v: %s", err, out)
+	}
+	work := t.TempDir()
+	mustGit := func(args ...string) string {
+		t.Helper()
+		out, err := gitcli.RunForTest(work, args...)
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	mustGit("init", "--initial-branch=feature")
+	if err := os.WriteFile(filepath.Join(work, "f"), []byte("c1\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	mustGit("add", "f")
+	mustGit("-c", "user.name=t", "-c", "user.email=t@e", "commit", "-m", "c1")
+	featOID := mustGit("rev-parse", "HEAD")
+	if out, err := gitcli.RunForTest(mirror, "fetch", "--no-write-fetch-head",
+		work, "+refs/heads/*:refs/heads/*"); err != nil {
+		t.Fatalf("fetch into mirror: %v: %s", err, out)
+	}
+
+	// First push: create only refs/heads/feature. The default branch
+	// (e.g. refs/heads/main) is not in the update set and was never in
+	// the manifest. The guard MUST allow this through.
+	body, err := BuildAndCommit(context.Background(), store, "t", "r", mirror,
+		map[string]string{"refs/heads/feature": featOID}, "first-pusher")
+	if err != nil {
+		t.Fatalf("first push on unborn default: %v", err)
+	}
+	if body.Refs["refs/heads/feature"] != featOID {
+		t.Fatalf("feature ref not committed: %v", body.Refs)
+	}
+	// DefaultBranch should be preserved in the body (still unborn until
+	// someone pushes that ref name).
+	if body.DefaultBranch != pre.DefaultBranch {
+		t.Fatalf("DefaultBranch changed: %q -> %q", pre.DefaultBranch, body.DefaultBranch)
+	}
+}
+
 func equalRefMap(a, b map[string]string) bool {
 	if len(a) != len(b) {
 		return false

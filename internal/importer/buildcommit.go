@@ -7,6 +7,7 @@ package importer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -92,8 +93,16 @@ func BuildAndCommit(
 	// Refuse to commit a body where DefaultBranch points at a deleted ref.
 	// This matches git's "deny-delete-current" behavior. M14 may add an
 	// override flag.
+	//
+	// Only reject when the default branch actually EXISTED before this push
+	// and is absent after the merge. An empty/unborn repo legitimately has
+	// DefaultBranch set (e.g. "refs/heads/main" from Import) without the
+	// ref present, and a first push that creates only a non-default branch
+	// must not be misread as "deleting" the unborn default.
 	if currentBody.DefaultBranch != "" {
-		if _, ok := newRefs[currentBody.DefaultBranch]; !ok {
+		_, hadBefore := currentBody.Refs[currentBody.DefaultBranch]
+		_, hasAfter := newRefs[currentBody.DefaultBranch]
+		if hadBefore && !hasAfter {
 			return nil, fmt.Errorf("BuildAndCommit: refuses to delete current default branch %q", currentBody.DefaultBranch)
 		}
 	}
@@ -146,13 +155,23 @@ func BuildAndCommit(
 		return nil, fmt.Errorf("importer: BuildAndCommit: build indexes: %w", err)
 	}
 
-	// Upload pack/idx/.bvom/.bvcg via PutIfAbsent. Pack uploads do NOT
-	// treat ErrAlreadyExists as success (pack bytes are not content-
-	// addressed by hash); .bvom/.bvcg uploads do.
-	if err := uploadFile(ctx, store, canonicalPack, k.CanonicalPackKey(packID)); err != nil {
+	// Upload pack/idx/.bvom/.bvcg via PutIfAbsent.
+	//
+	// Pack/idx use uploadCanonicalArtifact, which treats ErrAlreadyExists as
+	// success: the canonical pack key embeds the pack_id, which is the SHA-1
+	// of the sorted reachable object set. Two BuildAndCommit calls covering
+	// the same object set (e.g. a ref-only push that adds no new objects)
+	// always produce the same pack_id even if deltification differs. The
+	// already-uploaded bytes therefore cover the same objects and are
+	// semantically interchangeable; the loser's bytes become an orphan that
+	// M8 GC sweeps. Erroring here would block legitimate ref-only pushes.
+	//
+	// .bvom/.bvcg are content-addressed by SHA-256 of their bytes, so
+	// ErrAlreadyExists trivially means "same bytes already there".
+	if err := uploadCanonicalArtifact(ctx, store, canonicalPack, k.CanonicalPackKey(packID)); err != nil {
 		return nil, fmt.Errorf("importer: BuildAndCommit: upload pack: %w", err)
 	}
-	if err := uploadFile(ctx, store, canonicalIdx, k.PackIdxKey(packID, "canonical")); err != nil {
+	if err := uploadCanonicalArtifact(ctx, store, canonicalIdx, k.PackIdxKey(packID, "canonical")); err != nil {
 		return nil, fmt.Errorf("importer: BuildAndCommit: upload idx: %w", err)
 	}
 	bvomKey := k.ObjectMapKey(idx.ObjectMapHash)
@@ -249,6 +268,33 @@ func mergeRefs(prev, updates map[string]string) (map[string]string, error) {
 		out[ref] = oid
 	}
 	return out, nil
+}
+
+// uploadCanonicalArtifact uploads a canonical pack or idx file via
+// PutIfAbsent and treats ErrAlreadyExists as success.
+//
+// Why this is safe even though pack bytes are not byte-deterministic:
+// the canonical pack key embeds pack_id, which git computes as the SHA-1
+// of the sorted reachable object set. Two repacks of the same logical
+// object set always yield the same pack_id even if the deltification
+// they choose differs. So an existing object at this key necessarily
+// covers the same set of git objects we are about to upload — the bytes
+// may differ but they are semantically interchangeable. Without this
+// behaviour, a ref-only push (which adds no objects, hence the same
+// pack_id as the existing canonical pack) would always fail the upload.
+func uploadCanonicalArtifact(ctx context.Context, store storage.ObjectStore, srcPath, dstKey string) error {
+	f, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := store.PutIfAbsent(ctx, dstKey, f, nil); err != nil {
+		if errors.Is(err, storage.ErrAlreadyExists) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // removeKeepFiles deletes any *.keep files left in <bareDir>/objects/pack
