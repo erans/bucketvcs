@@ -34,12 +34,44 @@ func runRepo(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 }
 
+// splitTenantRepo parses a single "<tenant>/<repo>" CLI argument. Both
+// segments are validated against the same charset the gateway uses for
+// route names (^[A-Za-z0-9._-]+$). Strings with extra slashes ("a/b/c"),
+// empty segments ("a/"), or characters outside that charset are rejected
+// — the gateway route parser only accepts /{tenant}/{repo}.git, so any
+// CLI input that survives splitTenantRepo but fails the gateway's filter
+// would produce a useless registration.
 func splitTenantRepo(s string) (string, string, error) {
-	i := strings.IndexByte(s, '/')
-	if i <= 0 || i == len(s)-1 {
+	parts := strings.Split(s, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return "", "", fmt.Errorf("expected tenant/repo, got %q", s)
 	}
-	return s[:i], s[i+1:], nil
+	if !validName(parts[0]) || !validName(parts[1]) {
+		return "", "", fmt.Errorf("tenant/repo segments must match [A-Za-z0-9._-]+, got %q", s)
+	}
+	return parts[0], parts[1], nil
+}
+
+// validName reports whether s matches ^[A-Za-z0-9._-]+$ — the same charset
+// the gateway's nameRE accepts for tenant/repo path segments. Empty input
+// is rejected by the caller (splitTenantRepo) before we get here, but we
+// also reject "" defensively in case future callers add new entry points.
+func validName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'A' && r <= 'Z',
+			r >= 'a' && r <= 'z',
+			r >= '0' && r <= '9',
+			r == '.', r == '_', r == '-':
+			// ok
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func repoRegister(ctx context.Context, args []string, stdout, stderr io.Writer) int {

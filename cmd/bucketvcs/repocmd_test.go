@@ -40,3 +40,47 @@ func TestRepoGrant_RefusesUnregistered(t *testing.T) {
 		t.Fatalf("expected non-zero rc; stderr=%s", stderr)
 	}
 }
+
+// TestSplitTenantRepo_RejectsMultiSlash exercises the input-validation
+// guard that the M4 ship-gate roborev iteration 3 finding 2 added: the
+// gateway route parser only accepts /{tenant}/{repo}.git, so CLI inputs
+// that smuggle extra path segments or invalid characters past the parser
+// would register an unservable repo. splitTenantRepo now rejects them at
+// the CLI boundary.
+func TestSplitTenantRepo_RejectsMultiSlash(t *testing.T) {
+	cases := []struct {
+		in       string
+		wantOK   bool
+		wantTen  string
+		wantRepo string
+	}{
+		{in: "acme/foo", wantOK: true, wantTen: "acme", wantRepo: "foo"},
+		{in: "Acme.Co_1/repo-2", wantOK: true, wantTen: "Acme.Co_1", wantRepo: "repo-2"},
+		{in: "acme/foo/bar", wantOK: false},
+		{in: "acme", wantOK: false},
+		{in: "acme/", wantOK: false},
+		{in: "/foo", wantOK: false},
+		{in: "", wantOK: false},
+		{in: "/", wantOK: false},
+		{in: "acme/foo!", wantOK: false},
+		{in: "acme!/foo", wantOK: false},
+		{in: "acme/foo bar", wantOK: false},
+	}
+	for _, c := range cases {
+		ten, repo, err := splitTenantRepo(c.in)
+		if c.wantOK {
+			if err != nil {
+				t.Errorf("splitTenantRepo(%q) err = %v, want nil", c.in, err)
+				continue
+			}
+			if ten != c.wantTen || repo != c.wantRepo {
+				t.Errorf("splitTenantRepo(%q) = (%q, %q), want (%q, %q)",
+					c.in, ten, repo, c.wantTen, c.wantRepo)
+			}
+		} else {
+			if err == nil {
+				t.Errorf("splitTenantRepo(%q) = (%q, %q), want error", c.in, ten, repo)
+			}
+		}
+	}
+}

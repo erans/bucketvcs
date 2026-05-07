@@ -155,19 +155,60 @@ func (s *Store) ListUsers(ctx context.Context) ([]*User, error) {
 
 // SetUserDisabled toggles users.disabled_at. disabled=true sets to now;
 // disabled=false sets to NULL.
+//
+// When disabling, this method refuses to leave the system with zero
+// ENABLED admins (ErrLastAdmin). Disabling an admin user is, for the
+// purposes of authentication, equivalent to deleting them — an admin
+// account that cannot log in is not a recovery path. The check uses the
+// same predicate as DeleteUser's last-admin guard (is_admin = 1 AND
+// disabled_at IS NULL) so the two operations agree on what "remaining
+// admin" means. Re-enabling has no such guard: re-enabling can only
+// strictly increase the count of enabled admins.
 func (s *Store) SetUserDisabled(ctx context.Context, name string, disabled bool) error {
-	var res sql.Result
-	var err error
 	if disabled {
-		res, err = s.db.ExecContext(ctx,
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+
+		var isAdmin int
+		err = tx.QueryRowContext(ctx, `SELECT is_admin FROM users WHERE name = ?`, name).Scan(&isAdmin)
+		if errors.Is(err, sql.ErrNoRows) {
+			return auth.ErrNoSuchUser
+		}
+		if err != nil {
+			return err
+		}
+		if isAdmin != 0 {
+			var others int
+			err = tx.QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM users WHERE is_admin = 1 AND name != ? AND disabled_at IS NULL`, name,
+			).Scan(&others)
+			if err != nil {
+				return err
+			}
+			if others == 0 {
+				return ErrLastAdmin
+			}
+		}
+		res, err := tx.ExecContext(ctx,
 			`UPDATE users SET disabled_at = ? WHERE name = ?`,
 			time.Now().Unix(), name,
 		)
-	} else {
-		res, err = s.db.ExecContext(ctx,
-			`UPDATE users SET disabled_at = NULL WHERE name = ?`, name,
-		)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			return auth.ErrNoSuchUser
+		}
+		return tx.Commit()
 	}
+
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE users SET disabled_at = NULL WHERE name = ?`, name,
+	)
 	if err != nil {
 		return err
 	}
@@ -179,7 +220,10 @@ func (s *Store) SetUserDisabled(ctx context.Context, name string, disabled bool)
 }
 
 // DeleteUser removes the named user. It refuses to remove the user if doing
-// so would leave the system with zero admins (ErrLastAdmin).
+// so would leave the system with zero ENABLED admins (ErrLastAdmin). A
+// disabled admin doesn't count toward the remaining-admin total — they
+// can't authenticate, so leaving "the last admin disabled" would lock
+// every operator out.
 func (s *Store) DeleteUser(ctx context.Context, name string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -198,7 +242,7 @@ func (s *Store) DeleteUser(ctx context.Context, name string) error {
 	if isAdmin != 0 {
 		var others int
 		err = tx.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM users WHERE is_admin = 1 AND name != ?`, name,
+			`SELECT COUNT(*) FROM users WHERE is_admin = 1 AND name != ? AND disabled_at IS NULL`, name,
 		).Scan(&others)
 		if err != nil {
 			return err

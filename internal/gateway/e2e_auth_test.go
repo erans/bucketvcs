@@ -19,7 +19,9 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http/httptest"
 	"net/url"
 	"os"
@@ -32,6 +34,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
 	"github.com/bucketvcs/bucketvcs/internal/importer"
+	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 )
 
@@ -46,11 +49,12 @@ func skipIfNoGit(t *testing.T) {
 // e2eEnv bundles everything an e2e test needs: a running httptest server, a
 // sqlite-backed auth store, and the (tenant, repo) it was seeded with.
 type e2eEnv struct {
-	srv     *httptest.Server
-	store   *sqlitestore.Store
-	tenant  string
-	repo    string
-	baseURL string
+	srv      *httptest.Server
+	store    *sqlitestore.Store
+	objStore *localfs.Localfs
+	tenant   string
+	repo     string
+	baseURL  string
 }
 
 // newE2EEnv spins up a fresh gateway, seeds a one-commit fixture repo, and
@@ -89,11 +93,12 @@ func newE2EEnv(t *testing.T, tenant, repo string) *e2eEnv {
 	t.Cleanup(ts.Close)
 
 	return &e2eEnv{
-		srv:     ts,
-		store:   authStore,
-		tenant:  tenant,
-		repo:    repo,
-		baseURL: ts.URL,
+		srv:      ts,
+		store:    authStore,
+		objStore: objStore,
+		tenant:   tenant,
+		repo:     repo,
+		baseURL:  ts.URL,
 	}
 }
 
@@ -440,6 +445,66 @@ func TestE2E_AdminUserNoExplicitGrant_Succeeds(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dst, "a.txt")); err != nil {
 		t.Fatalf("expected a.txt in admin clone: %v", err)
+	}
+}
+
+//  11. push by an authenticated user records that user's name in the
+//     resulting tx record (regression coverage for the literal-"push" actor
+//     bug fixed in M4 ship-gate roborev iteration 3 finding 1).
+func TestReceivePack_PushTxActorIsAuthenticatedUser(t *testing.T) {
+	skipIfNoGit(t)
+	env := newE2EEnv(t, "acme", "demo")
+	tok := seedUserToken(t, env.store, "alice", false, nil)
+	if err := env.store.Grant(context.Background(), "alice", env.tenant, env.repo, "write"); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	helper := writeCredentialHelper(t, "alice", tok)
+	work := makeWorkRepo(t)
+
+	if err := os.WriteFile(filepath.Join(work, "b.txt"), []byte("more\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustExecGW(t, work, "git", "add", ".")
+	mustExecGW(t, work, "git", "-c", "user.email=t@t", "-c", "user.name=t",
+		"commit", "-m", "more")
+
+	out, err := gitWithHelper(t, helper, "-C", work, "push", env.remoteURL(), "HEAD:refs/heads/topic")
+	if err != nil {
+		t.Fatalf("push failed: %v\noutput:\n%s", err, out)
+	}
+
+	// After a successful push the root manifest's LatestTx points at the
+	// tx record this push wrote. Read it from the bucket and assert the
+	// "actor" field is the authenticated user's name, not the literal
+	// string "push" the M3 placeholder used.
+	ctx := context.Background()
+	r, err := repo.Open(ctx, env.objStore, env.tenant, env.repo)
+	if err != nil {
+		t.Fatalf("repo.Open: %v", err)
+	}
+	view, err := r.ReadRoot(ctx)
+	if err != nil {
+		t.Fatalf("ReadRoot: %v", err)
+	}
+	txKey := "tenants/" + env.tenant + "/repos/" + env.repo + "/tx/" + view.Header.LatestTx + ".json"
+	obj, err := env.objStore.Get(ctx, txKey, nil)
+	if err != nil {
+		t.Fatalf("get tx record %q: %v", txKey, err)
+	}
+	defer obj.Body.Close()
+	raw, err := io.ReadAll(obj.Body)
+	if err != nil {
+		t.Fatalf("read tx record body: %v", err)
+	}
+	var txDoc map[string]any
+	if err := json.Unmarshal(raw, &txDoc); err != nil {
+		t.Fatalf("unmarshal tx record: %v", err)
+	}
+	if got := txDoc["type"]; got != "push" {
+		t.Errorf("tx type = %v, want \"push\"", got)
+	}
+	if got := txDoc["actor"]; got != "alice" {
+		t.Errorf("tx actor = %v, want \"alice\"", got)
 	}
 }
 

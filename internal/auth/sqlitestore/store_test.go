@@ -141,6 +141,56 @@ func TestDeleteUser_RefusesLastAdmin(t *testing.T) {
 	}
 }
 
+// TestSetUserDisabled_RefusesLastEnabledAdmin verifies that disabling the
+// only enabled admin is rejected with ErrLastAdmin (M4 ship-gate roborev
+// iteration 3 finding 3a). Without this guard an operator could lock
+// themselves out of the system by accident.
+func TestSetUserDisabled_RefusesLastEnabledAdmin(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+	if _, err := s.CreateUser(ctx, "root", true); err != nil {
+		t.Fatalf("create admin: %v", err)
+	}
+	err := s.SetUserDisabled(ctx, "root", true)
+	if err == nil || !errors.Is(err, ErrLastAdmin) {
+		t.Fatalf("want ErrLastAdmin, got %v", err)
+	}
+	// Re-enabling (the no-op equivalent here) must still succeed; the
+	// guard only fires on the disable path.
+	if err := s.SetUserDisabled(ctx, "root", false); err != nil {
+		t.Fatalf("re-enable on already-enabled admin: %v", err)
+	}
+}
+
+// TestDeleteUser_DisabledAdminDoesntCount verifies that DeleteUser's
+// last-admin guard counts only ENABLED admins (M4 ship-gate roborev
+// iteration 3 finding 3b). Before the fix, two admins where one was
+// disabled satisfied the "another admin exists" count, so deleting the
+// remaining ENABLED admin succeeded — leaving the system with no usable
+// admin account.
+func TestDeleteUser_DisabledAdminDoesntCount(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+	if _, err := s.CreateUser(ctx, "root", true); err != nil {
+		t.Fatalf("create root admin: %v", err)
+	}
+	if _, err := s.CreateUser(ctx, "alice", true); err != nil {
+		t.Fatalf("create alice admin: %v", err)
+	}
+	// Disable alice. With two enabled admins this is allowed.
+	if err := s.SetUserDisabled(ctx, "alice", true); err != nil {
+		t.Fatalf("disable alice: %v", err)
+	}
+	// Now deleting root should fail: alice is admin but disabled, so the
+	// remaining-enabled-admin count is zero.
+	err := s.DeleteUser(ctx, "root")
+	if err == nil || !errors.Is(err, ErrLastAdmin) {
+		t.Fatalf("DeleteUser(root) want ErrLastAdmin, got %v", err)
+	}
+}
+
 func TestListUsers(t *testing.T) {
 	s := mustOpen(t)
 	defer s.Close()
