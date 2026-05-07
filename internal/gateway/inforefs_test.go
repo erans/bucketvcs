@@ -183,3 +183,59 @@ func TestInfoRefs_RepoNotFound(t *testing.T) {
 		t.Fatalf("not-found: status %d, want 404", resp.StatusCode)
 	}
 }
+
+func TestWantsV2(t *testing.T) {
+	cases := []struct {
+		header string
+		want   bool
+	}{
+		{"", false},
+		{"version=1", false},
+		{"version=2", true},
+		{"version=2:other=foo", true},
+		{"other=foo:version=2", true},
+		{" version=2 ", true},
+		{"version=20", false},
+	}
+	for _, c := range cases {
+		if got := wantsV2(c.header); got != c.want {
+			t.Errorf("wantsV2(%q) = %v, want %v", c.header, got, c.want)
+		}
+	}
+}
+
+func TestInfoRefs_V2WithExtraProtocolTokens(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeRepoInStore(t, storeDir, "acme", "demo")
+	store, _ := localfs.Open(storeDir)
+	t.Cleanup(func() { _ = store.Close() })
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	req, _ := http.NewRequest("GET", ts.URL+"/acme/demo.git/info/refs?service=git-upload-pack", nil)
+	req.Header.Set("Git-Protocol", "version=2:object-format=sha1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !bytes.Contains(body, []byte("version 2")) {
+		t.Fatalf("colon-list Git-Protocol downgraded to v0: %q", body)
+	}
+}
+
+func TestNewServer_RejectsBadVersion(t *testing.T) {
+	storeDir := t.TempDir()
+	store, _ := localfs.Open(storeDir)
+	t.Cleanup(func() { _ = store.Close() })
+	for _, bad := range []string{"1.0\n", "1.0\r2", "with space", "x\x00y"} {
+		if _, err := NewServer(store, Options{MirrorDir: t.TempDir(), Version: bad}); err == nil {
+			t.Errorf("NewServer accepted bad Version %q", bad)
+		}
+	}
+}

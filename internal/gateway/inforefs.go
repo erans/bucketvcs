@@ -46,7 +46,7 @@ func (s *Server) handleInfoRefs(w http.ResponseWriter, r *http.Request, tenant, 
 	w.Header().Set("Content-Type", "application/x-"+service+"-advertisement")
 	w.Header().Set("Cache-Control", "no-cache")
 
-	if service == "git-upload-pack" && r.Header.Get("Git-Protocol") == "version=2" {
+	if service == "git-upload-pack" && wantsV2(r.Header.Get("Git-Protocol")) {
 		_ = v2proto.WriteV2Advertisement(w, service, s.opts.Version)
 		return
 	}
@@ -110,4 +110,19 @@ func receivePackV0Caps(version string) string {
 		"agent=" + v2proto.AgentName + "/" + version,
 		"object-format=sha1",
 	}, " ")
+}
+
+// wantsV2 reports whether the Git-Protocol header advertises protocol v2.
+// Per gitprotocol-v2(5), the header is a colon-separated list of key=value
+// tokens (e.g. "version=2:other=foo"); we accept any presence of "version=2".
+func wantsV2(header string) bool {
+	if header == "" {
+		return false
+	}
+	for _, tok := range strings.Split(header, ":") {
+		if strings.TrimSpace(tok) == "version=2" {
+			return true
+		}
+	}
+	return false
 }
