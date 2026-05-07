@@ -16,12 +16,19 @@ import (
 // non-bool flags) to the front of the arg list so Go's stdlib flag.Parse
 // — which stops at the first non-flag — accepts CLI styles like
 // `bucketvcs user add alice --admin`.
+//
+// A literal `--` terminator is preserved at the boundary between the
+// reordered flags and the positionals so that flag.Parse stops there and
+// treats any dash-prefixed positional (e.g. a user name like `-foo`,
+// allowed by validName) as a literal argument rather than an unknown flag.
 func reorderFlagsFirst(args []string, boolFlags map[string]bool) []string {
 	flagsArgs := make([]string, 0, len(args))
 	positional := make([]string, 0, len(args))
+	sawTerminator := false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if a == "--" {
+			sawTerminator = true
 			positional = append(positional, args[i+1:]...)
 			break
 		}
@@ -41,7 +48,11 @@ func reorderFlagsFirst(args []string, boolFlags map[string]bool) []string {
 		}
 		positional = append(positional, a)
 	}
-	return append(flagsArgs, positional...)
+	out := flagsArgs
+	if sawTerminator {
+		out = append(out, "--")
+	}
+	return append(out, positional...)
 }
 
 func runUser(ctx context.Context, args []string, stdout, stderr io.Writer) int {
