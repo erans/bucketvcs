@@ -8,23 +8,21 @@ import (
 	"testing"
 )
 
-// httptestServer returns a server whose handler records the most recent
-// request and returns 404 for everything. It is the mock substrate for
-// SDK-call assertions across all method tests.
-func httptestServer(t *testing.T) (*httptest.Server, *http.Request) {
+// httptestServer returns a server that responds 404 to any request.
+// It is the simplest mock substrate for asserting that Open() wires
+// the SDK client to a configurable endpoint (no AWS reachability
+// required). Per-method tests in T7+ use newMockBackend instead.
+func httptestServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	var lastReq *http.Request
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		lastReq = r
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	t.Cleanup(srv.Close)
-	_ = lastReq
-	return srv, lastReq
+	return srv
 }
 
 func TestOpenAppliesPathStyle(t *testing.T) {
-	srv, _ := httptestServer(t)
+	srv := httptestServer(t)
 	cfg := Config{
 		Bucket:          "test-bucket",
 		Region:          "us-east-1",

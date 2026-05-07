@@ -51,9 +51,8 @@ func Open(ctx context.Context, cfg Config) (*S3Compat, error) {
 		func(o *s3.Options) { o.UsePathStyle = cfg.ForcePathStyle },
 	}
 	if cfg.Endpoint != "" {
-		ep := cfg.Endpoint
 		clientOpts = append(clientOpts, func(o *s3.Options) {
-			o.BaseEndpoint = aws.String(ep)
+			o.BaseEndpoint = aws.String(cfg.Endpoint)
 		})
 	}
 
