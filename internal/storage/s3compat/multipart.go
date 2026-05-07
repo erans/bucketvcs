@@ -61,14 +61,19 @@ func (u *upload) UploadPart(ctx context.Context, partNumber int, body io.Reader)
 		Token:      aws.ToString(out.ETag),
 		Size:       size,
 	}
-	u.recordPart(part)
-	return part, nil
-}
 
-func (u *upload) recordPart(p storage.MultipartPart) {
+	// Recheck terminated under lock and record the part atomically.
+	// If a concurrent Complete or Abort terminated the upload while
+	// our SDK call was in flight, refuse to record the part and
+	// surface ErrInvalidArgument. The part may be orphaned on S3 —
+	// M8 GC reclaims orphan multipart parts.
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	u.parts[p.PartNumber] = p
+	if u.terminated {
+		return storage.MultipartPart{}, fmt.Errorf("%w: upload %s was terminated during UploadPart", storage.ErrInvalidArgument, u.uploadID)
+	}
+	u.parts[partNumber] = part
+	return part, nil
 }
 
 // checkActive returns ErrInvalidArgument if the upload was already

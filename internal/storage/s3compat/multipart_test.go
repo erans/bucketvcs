@@ -290,3 +290,29 @@ func TestConcurrentCompleteSerializes(t *testing.T) {
 		t.Fatalf("terminated = %d, want 1 (loser must report ErrInvalidArgument, not pass through to NoSuchUpload)", terminated)
 	}
 }
+
+func TestUploadPartLosesRaceToComplete(t *testing.T) {
+	// This test exercises the narrow race between an in-flight
+	// UploadPart and a concurrent Complete that wins. The mock makes
+	// UploadPart fast and Complete also fast, but the race is hard
+	// to force deterministically. We approximate by:
+	//  1. Calling Complete first (which terminates the upload)
+	//  2. Then calling UploadPart and asserting it sees terminated.
+	// This exercises the post-SDK lock recheck.
+	s, _ := newMockBackend(t)
+	up, err := s.CreateMultipart(context.Background(), "k", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p1, _ := up.UploadPart(context.Background(), 1, strings.NewReader("hi"))
+	if _, err := s.CompleteMultipartIfAbsent(context.Background(), up,
+		[]storage.MultipartPart{p1}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	// Now upload another part. It must fail at the entry checkActive,
+	// since terminated was set by Complete.
+	_, err = up.UploadPart(context.Background(), 2, strings.NewReader("nope"))
+	if !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Fatalf("UploadPart after Complete: err = %v, want ErrInvalidArgument", err)
+	}
+}
