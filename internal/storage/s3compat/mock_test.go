@@ -66,6 +66,27 @@ func newMockBackend(t *testing.T) (*S3Compat, *mockBackend) {
 	return s, mb
 }
 
+func newMockBackendWithPrefix(t *testing.T, prefix string) (*S3Compat, *mockBackend, *httptest.Server) {
+	t.Helper()
+	mb := &mockBackend{t: t, objects: map[string]mockObject{}, uploads: map[string]*mockUpload{}}
+	srv := httptest.NewServer(http.HandlerFunc(mb.serve))
+	t.Cleanup(srv.Close)
+	cfg := Config{
+		Bucket:          "test-bucket",
+		Prefix:          prefix,
+		Region:          "us-east-1",
+		Endpoint:        srv.URL,
+		ForcePathStyle:  true,
+		AccessKeyID:     "AKID",
+		SecretAccessKey: "SECRET",
+	}
+	s, err := Open(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	return s, mb, srv
+}
+
 func (m *mockBackend) put(key string, body []byte, etag string) {
 	m.objects[key] = mockObject{body: body, etag: etag}
 }

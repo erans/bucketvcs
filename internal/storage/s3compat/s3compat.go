@@ -1,14 +1,9 @@
 package s3compat
 
 import (
-	"context"
-	"errors"
-
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
-
-// NOTE: Get, Head, and GetRange are implemented in get.go.
 
 // S3Compat is the S3-compatible storage.ObjectStore implementation.
 type S3Compat struct {
@@ -30,14 +25,4 @@ func (s *S3Compat) Capabilities() storage.Capabilities {
 		MultipartMaxParts:    10000,
 		MaxObjectSize:        5 << 40,
 	}
-}
-
-// All other ObjectStore methods return errNotImpl until their
-// dedicated tasks land. This keeps the package buildable while
-// individual methods land one at a time.
-
-var errNotImpl = errors.New("s3compat: not yet implemented (skeleton)")
-
-func (s *S3Compat) SignedGetURL(ctx context.Context, key string, opts storage.SignedURLOptions) (string, error) {
-	return "", errNotImpl
 }
