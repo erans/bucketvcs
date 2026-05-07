@@ -72,3 +72,51 @@ func TestParseToken_Invalid(t *testing.T) {
 		}
 	}
 }
+
+func TestHashAndVerify_Roundtrip(t *testing.T) {
+	secret := "ABCDEFGHJKMNPQRSTVWXYZ0123456789ABCDEFGHJKMNPQRSTVWX"
+	enc, err := HashSecret(secret)
+	if err != nil {
+		t.Fatalf("HashSecret: %v", err)
+	}
+	if !strings.HasPrefix(enc, "$argon2id$") {
+		t.Fatalf("encoded form missing prefix: %q", enc)
+	}
+	if err := VerifyHash(secret, enc); err != nil {
+		t.Fatalf("VerifyHash same secret: %v", err)
+	}
+	if err := VerifyHash(secret+"X", enc); err == nil {
+		t.Fatal("VerifyHash mismatched secret: expected error")
+	}
+}
+
+func TestHashSecret_DifferentSaltsDifferentEncodings(t *testing.T) {
+	a, err := HashSecret("same-secret")
+	if err != nil {
+		t.Fatalf("HashSecret a: %v", err)
+	}
+	b, err := HashSecret("same-secret")
+	if err != nil {
+		t.Fatalf("HashSecret b: %v", err)
+	}
+	if a == b {
+		t.Fatal("two HashSecret calls produced identical encoding (salt should differ)")
+	}
+	if VerifyHash("same-secret", a) != nil || VerifyHash("same-secret", b) != nil {
+		t.Fatal("both encodings should verify")
+	}
+}
+
+func TestVerifyHash_Malformed(t *testing.T) {
+	bad := []string{
+		"",
+		"plaintext",
+		"$argon2id$",
+		"$argon2id$v=19$m=65536,t=3,p=4$bad-base64$bad-base64",
+	}
+	for _, b := range bad {
+		if err := VerifyHash("secret", b); err == nil {
+			t.Errorf("VerifyHash(_, %q): expected error", b)
+		}
+	}
+}

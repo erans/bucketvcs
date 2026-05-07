@@ -2,9 +2,13 @@ package auth
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
+
+	"golang.org/x/crypto/argon2"
 )
 
 // crockfordAlphabet is the standard Crockford base32 alphabet, uppercase,
@@ -74,4 +78,60 @@ func isCrockford(s string) bool {
 		}
 	}
 	return true
+}
+
+const (
+	argon2Memory  = 64 * 1024 // KiB -> 64 MiB
+	argon2Time    = 3
+	argon2Threads = 4
+	argon2KeyLen  = 32
+	argon2SaltLen = 16
+)
+
+// HashSecret returns a PHC-encoded argon2id hash of secret.
+func HashSecret(secret string) (string, error) {
+	salt := make([]byte, argon2SaltLen)
+	if _, err := rand.Read(salt); err != nil {
+		return "", fmt.Errorf("hash secret: salt: %w", err)
+	}
+	key := argon2.IDKey([]byte(secret), salt, argon2Time, argon2Memory, argon2Threads, argon2KeyLen)
+	enc := fmt.Sprintf(
+		"$argon2id$v=19$m=%d,t=%d,p=%d$%s$%s",
+		argon2Memory, argon2Time, argon2Threads,
+		base64.RawStdEncoding.EncodeToString(salt),
+		base64.RawStdEncoding.EncodeToString(key),
+	)
+	return enc, nil
+}
+
+// VerifyHash compares secret against a PHC-encoded argon2id encoded hash.
+// Returns nil on match; non-nil on mismatch or malformed encoding.
+func VerifyHash(secret, encoded string) error {
+	parts := strings.Split(encoded, "$")
+	// Expected layout: ["", "argon2id", "v=19", "m=...,t=...,p=...", salt, key]
+	if len(parts) != 6 || parts[1] != "argon2id" {
+		return errors.New("auth: malformed argon2id encoding")
+	}
+	var version int
+	if _, err := fmt.Sscanf(parts[2], "v=%d", &version); err != nil || version != 19 {
+		return errors.New("auth: unsupported argon2 version")
+	}
+	var memory, time uint32
+	var threads uint8
+	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &memory, &time, &threads); err != nil {
+		return errors.New("auth: malformed argon2id parameters")
+	}
+	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
+	if err != nil {
+		return errors.New("auth: malformed argon2id salt")
+	}
+	wantKey, err := base64.RawStdEncoding.DecodeString(parts[5])
+	if err != nil {
+		return errors.New("auth: malformed argon2id key")
+	}
+	gotKey := argon2.IDKey([]byte(secret), salt, time, memory, threads, uint32(len(wantKey)))
+	if subtle.ConstantTimeCompare(gotKey, wantKey) != 1 {
+		return ErrInvalidCredential
+	}
+	return nil
 }
