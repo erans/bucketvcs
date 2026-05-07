@@ -530,3 +530,64 @@ func (s *Store) ListRepos(ctx context.Context, tenant string) ([]*Repo, error) {
 	}
 	return out, rows.Err()
 }
+
+// VerifyCredential implements auth.Store.
+func (s *Store) VerifyCredential(ctx context.Context, c auth.Credential) (*auth.Actor, string, error) {
+	bp, ok := c.(auth.BasicPassword)
+	if !ok {
+		// M6 will add SSHKeyFingerprint handling.
+		return nil, "", auth.ErrInvalidCredential
+	}
+	tokenID, secret, err := auth.ParseToken(bp.Password)
+	if err != nil {
+		return nil, "", auth.ErrInvalidCredential
+	}
+	tok, err := s.GetTokenByID(ctx, tokenID)
+	if errors.Is(err, auth.ErrNoSuchToken) {
+		return nil, "", auth.ErrInvalidCredential
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	if err := auth.VerifyHash(secret, tok.SecretHash); err != nil {
+		return nil, "", auth.ErrInvalidCredential
+	}
+	if tok.RevokedAt != nil {
+		return nil, "", auth.ErrTokenRevoked
+	}
+	if tok.ExpiresAt != nil && *tok.ExpiresAt <= time.Now().Unix() {
+		return nil, "", auth.ErrTokenExpired
+	}
+	// Lookup the user; check name match and disabled state.
+	row := s.db.QueryRowContext(ctx,
+		`SELECT name, is_admin, disabled_at FROM users WHERE id = ?`, tok.UserID,
+	)
+	var name string
+	var adminInt int
+	var disabled sql.NullInt64
+	if err := row.Scan(&name, &adminInt, &disabled); err != nil {
+		return nil, "", auth.ErrInvalidCredential
+	}
+	if disabled.Valid {
+		return nil, "", auth.ErrUserDisabled
+	}
+	if bp.Username != name {
+		return nil, "", auth.ErrInvalidCredential
+	}
+	return &auth.Actor{
+		UserID:  tok.UserID,
+		Name:    name,
+		IsAdmin: adminInt != 0,
+	}, tokenID, nil
+}
+
+// TouchTokenUsage implements auth.Store. A missing tokenID is not an error.
+func (s *Store) TouchTokenUsage(ctx context.Context, tokenID string) error {
+	if tokenID == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE tokens SET last_used_at = ? WHERE id = ?`, time.Now().Unix(), tokenID,
+	)
+	return err
+}

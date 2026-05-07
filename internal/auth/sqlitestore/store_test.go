@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -398,6 +399,138 @@ func TestLookupRepoPerm_NilActorIsPermNone(t *testing.T) {
 	}
 	if perm != auth.PermNone {
 		t.Fatalf("perm = %v, want PermNone", perm)
+	}
+}
+
+func TestVerifyCredential_HappyPath(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+	uid, _ := s.CreateUser(ctx, "alice", false)
+	tok, id, secret, _ := auth.GenerateToken()
+	hash, _ := auth.HashSecret(secret)
+	_ = s.CreateToken(ctx, id, uid, hash, "laptop", nil)
+
+	got, gotID, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
+	if err != nil {
+		t.Fatalf("VerifyCredential: %v", err)
+	}
+	if got == nil || got.UserID != uid || got.Name != "alice" {
+		t.Fatalf("actor = %+v", got)
+	}
+	if gotID != id {
+		t.Fatalf("returned tokenID = %q want %q", gotID, id)
+	}
+}
+
+func TestVerifyCredential_BadPassword(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+	uid, _ := s.CreateUser(ctx, "alice", false)
+	_, id, _, _ := auth.GenerateToken()
+	hash, _ := auth.HashSecret("real-secret-string")
+	_ = s.CreateToken(ctx, id, uid, hash, "", nil)
+
+	_, _, err := s.VerifyCredential(ctx, auth.BasicPassword{
+		Username: "alice",
+		Password: "bvts_" + id + "_" + strings.Repeat("A", 52),
+	})
+	if !errors.Is(err, auth.ErrInvalidCredential) {
+		t.Fatalf("want ErrInvalidCredential, got %v", err)
+	}
+}
+
+func TestVerifyCredential_UnknownTokenID(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+	tok, _, _, _ := auth.GenerateToken()
+	_, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
+	if !errors.Is(err, auth.ErrInvalidCredential) {
+		t.Fatalf("want ErrInvalidCredential, got %v", err)
+	}
+}
+
+func TestVerifyCredential_Expired(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+	uid, _ := s.CreateUser(ctx, "alice", false)
+	tok, id, secret, _ := auth.GenerateToken()
+	hash, _ := auth.HashSecret(secret)
+	past := time.Now().Add(-time.Hour).Unix()
+	_ = s.CreateToken(ctx, id, uid, hash, "", &past)
+	_, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
+	if !errors.Is(err, auth.ErrTokenExpired) {
+		t.Fatalf("want ErrTokenExpired, got %v", err)
+	}
+}
+
+func TestVerifyCredential_Revoked(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+	uid, _ := s.CreateUser(ctx, "alice", false)
+	tok, id, secret, _ := auth.GenerateToken()
+	hash, _ := auth.HashSecret(secret)
+	_ = s.CreateToken(ctx, id, uid, hash, "", nil)
+	_ = s.RevokeToken(ctx, id)
+	_, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
+	if !errors.Is(err, auth.ErrTokenRevoked) {
+		t.Fatalf("want ErrTokenRevoked, got %v", err)
+	}
+}
+
+func TestVerifyCredential_Disabled(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+	uid, _ := s.CreateUser(ctx, "alice", false)
+	tok, id, secret, _ := auth.GenerateToken()
+	hash, _ := auth.HashSecret(secret)
+	_ = s.CreateToken(ctx, id, uid, hash, "", nil)
+	_ = s.SetUserDisabled(ctx, "alice", true)
+	_, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
+	if !errors.Is(err, auth.ErrUserDisabled) {
+		t.Fatalf("want ErrUserDisabled, got %v", err)
+	}
+	_ = uid
+}
+
+func TestVerifyCredential_UsernameMustMatch(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+	uid, _ := s.CreateUser(ctx, "alice", false)
+	tok, id, secret, _ := auth.GenerateToken()
+	hash, _ := auth.HashSecret(secret)
+	_ = s.CreateToken(ctx, id, uid, hash, "", nil)
+	// Wrong username, valid token: reject. (Spec §30.1: username + token-as-password.)
+	_, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "bob", Password: tok})
+	if !errors.Is(err, auth.ErrInvalidCredential) {
+		t.Fatalf("want ErrInvalidCredential, got %v", err)
+	}
+}
+
+func TestTouchTokenUsage(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+	uid, _ := s.CreateUser(ctx, "alice", false)
+	_, id, secret, _ := auth.GenerateToken()
+	hash, _ := auth.HashSecret(secret)
+	_ = s.CreateToken(ctx, id, uid, hash, "", nil)
+	if err := s.TouchTokenUsage(ctx, id); err != nil {
+		t.Fatalf("TouchTokenUsage: %v", err)
+	}
+	tok, _ := s.GetTokenByID(ctx, id)
+	if tok.LastUsedAt == nil {
+		t.Fatal("LastUsedAt not set")
+	}
+	// Missing id = no error.
+	if err := s.TouchTokenUsage(ctx, "noSuchAAAAAAAAAAAAAAAAAA"); err != nil {
+		t.Fatalf("TouchTokenUsage missing id: %v", err)
 	}
 }
 
