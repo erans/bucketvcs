@@ -81,18 +81,3 @@ func TestServer_UnknownPathReturns404(t *testing.T) {
 		t.Fatalf("status: %d", resp.StatusCode)
 	}
 }
-
-func TestServer_StubsReturn501(t *testing.T) {
-	srv := newTestServer(t)
-	ts := httptest.NewServer(srv)
-	t.Cleanup(ts.Close)
-	// Only receive-pack remains stubbed in M3 (Task 17). upload-pack is
-	// implemented and would return 400 for a missing v2 header; see
-	// upload_pack_test.go for its coverage.
-	for _, path := range []string{"/foo/bar.git/git-receive-pack"} {
-		resp, _ := http.Post(ts.URL+path, "application/octet-stream", nil)
-		if resp.StatusCode != 501 {
-			t.Fatalf("POST %s: status %d, want 501", path, resp.StatusCode)
-		}
-	}
-}
