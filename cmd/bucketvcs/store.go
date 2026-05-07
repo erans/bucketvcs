@@ -34,8 +34,9 @@ func parseStoreURL(s string) (scheme, path string, err error) {
 			return "", "", fmt.Errorf(`--store: %s URL must use the form %s://<bucket>[/<prefix>] (got %q)`, scheme, scheme, s)
 		}
 		bucketPath := strings.TrimPrefix(rest, "//")
-		if bucketPath == "" {
-			return "", "", fmt.Errorf(`--store: %s:// requires a bucket name`, scheme)
+		bucket, _, _ := strings.Cut(bucketPath, "/")
+		if bucket == "" {
+			return "", "", fmt.Errorf(`--store: %s:// requires a bucket name (got %q)`, scheme, s)
 		}
 		return scheme, bucketPath, nil
 	case "gcs", "azureblob":

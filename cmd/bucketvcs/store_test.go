@@ -71,3 +71,15 @@ func TestParseStoreURL_RejectsCloudReservations(t *testing.T) {
 		}
 	}
 }
+
+func TestParseStoreURL_RejectsEmptyBucket(t *testing.T) {
+	for _, url := range []string{"s3:///prefix", "r2:///prefix", "s3://", "r2://"} {
+		_, _, err := parseStoreURL(url)
+		if err == nil {
+			t.Fatalf("parseStoreURL(%q) must reject empty bucket", url)
+		}
+		if !strings.Contains(err.Error(), "bucket") {
+			t.Fatalf("parseStoreURL(%q) error %q does not mention 'bucket'", url, err.Error())
+		}
+	}
+}
