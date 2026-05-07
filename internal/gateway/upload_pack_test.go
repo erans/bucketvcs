@@ -480,6 +480,88 @@ func TestUploadPack_RejectsOversizedBody(t *testing.T) {
 	}
 }
 
+// TestUploadPack_RejectsHiddenAnnotatedTag verifies that an annotated tag
+// object whose underlying COMMIT is reachable from advertised refs is still
+// rejected as a want when the tag object itself is not reachable from any
+// ref. This guards against a reviewer-flagged scenario: hiding a tag that
+// targets a public commit. The check works because rev-list --objects
+// --not --all reports the tag object itself in the unreachable output
+// (the tag object is distinct from its peeled commit), so the reachability
+// probe catches it cleanly.
+func TestUploadPack_RejectsHiddenAnnotatedTag(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeRepoInStore(t, storeDir, "acme", "demo")
+	store, _ := localfs.Open(storeDir)
+	t.Cleanup(func() { _ = store.Close() })
+	mirrorDir := t.TempDir()
+	srv, _ := NewServer(store, Options{MirrorDir: mirrorDir, Version: "test"})
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	// Materialize the mirror.
+	dst := t.TempDir() + "/clone.git"
+	if out, err := exec.Command("git", "clone", "--bare", "-c", "protocol.version=2", ts.URL+"/acme/demo.git", dst).CombinedOutput(); err != nil {
+		t.Fatalf("seed clone: %v\n%s", err, out)
+	}
+	bareDir := filepath.Join(mirrorDir, "acme", "demo", "bare")
+
+	// Resolve the public commit (refs/heads/main).
+	pubCommit := mustGitOutput(t, bareDir, nil, "rev-parse", "refs/heads/main")
+
+	// Create an annotated tag pointing at the public commit, then delete
+	// the tag REF without GC. The tag OBJECT survives in the loose store
+	// but is not reachable from any advertised ref.
+	env := append(os.Environ(),
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+	)
+	cmd := exec.Command("git", "tag", "-a", "tmp-hidden", pubCommit, "-m", "to be hidden")
+	cmd.Dir = bareDir
+	cmd.Env = env
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("tag create: %v\n%s", err, out)
+	}
+	hiddenTagOID := mustGitOutput(t, bareDir, nil, "rev-parse", "tmp-hidden")
+	if out, err := exec.Command("git", "-C", bareDir, "update-ref", "-d", "refs/tags/tmp-hidden").CombinedOutput(); err != nil {
+		t.Fatalf("delete tag ref: %v\n%s", err, out)
+	}
+	// Sanity: tag object survives.
+	if k, err := exec.Command("git", "-C", bareDir, "cat-file", "-t", hiddenTagOID).CombinedOutput(); err != nil || strings.TrimSpace(string(k)) != "tag" {
+		t.Fatalf("hidden tag object missing: %v %s", err, k)
+	}
+	// Sanity: peeled commit IS reachable from advertised refs (refs/heads/main).
+	if hiddenTagOID == pubCommit {
+		t.Fatalf("tag did not get its own OID; not annotated?")
+	}
+
+	// Try to fetch the hidden tag — must be rejected.
+	body := pktBody(
+		dataLine("command=fetch\n"),
+		delim,
+		dataLine("want "+hiddenTagOID+"\n"),
+		dataLine("done\n"),
+		flush,
+	)
+	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-upload-pack", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-git-upload-pack-request")
+	req.Header.Set("Git-Protocol", "version=2")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	if resp.StatusCode != 400 {
+		t.Fatalf("hidden-tag want: status %d, want 400", resp.StatusCode)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if !bytes.Contains(got, []byte("not our ref")) {
+		t.Fatalf("expected 'not our ref' message, got %q", got)
+	}
+}
+
 // helpers
 type pktChunk []byte
 
