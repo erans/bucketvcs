@@ -18,6 +18,7 @@ func newTestServer(t *testing.T) *Server {
 	srv, err := NewServer(store, Options{
 		MirrorDir: t.TempDir(),
 		Version:   "0.1-test",
+		AuthStore: newAnonymousTestAuthStore(t, "acme", "demo", true),
 	})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)

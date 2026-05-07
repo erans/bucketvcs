@@ -367,7 +367,23 @@ func (s *Server) completeReceivePack(
 	// uploads pack/idx/.bvom/.bvcg, and CAS-commits a new manifest body.
 	// Stale-manifest losers (concurrent pushes that won the CAS race) are
 	// surfaced via err message "stale manifest" / "lost CAS".
-	if _, err := importer.BuildAndCommit(ctx, s.store, tenant, repoID, m.BareDir(), refUpdates, "push"); err != nil {
+	//
+	// Actor: pull from RunAuth's request context so the tx record carries
+	// per-user attribution. After M4 Task 18, receive-pack always runs
+	// behind the auth middleware with ActionWrite, so a non-nil actor is
+	// the expected path; the "anonymous" fallback is defensive only
+	// (RunAuth's Decide rejects nil-actor writes with 401 before we get
+	// here).
+	actorName := "anonymous"
+	if a := ActorFromContext(ctx); a != nil {
+		switch {
+		case a.Name != "":
+			actorName = a.Name
+		case a.UserID != "":
+			actorName = a.UserID
+		}
+	}
+	if _, err := importer.BuildAndCommit(ctx, s.store, tenant, repoID, m.BareDir(), refUpdates, actorName); err != nil {
 		// Refs are already applied to the local bare (step 9b above), but
 		// the bucket commit failed. Sentinel still matches the OLD bucket
 		// version, so SyncToCurrent would falsely consider the mirror

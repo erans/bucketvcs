@@ -31,7 +31,7 @@ func TestReceivePack_AcceptsDeleteOnly(t *testing.T) {
 	makeRepoInStore(t, storeDir, "acme", "demo")
 	store, _ := localfs.Open(storeDir)
 	t.Cleanup(func() { _ = store.Close() })
-	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test", AuthStore: newPermissiveAuthStore(t, "acme", "demo")})
 	t.Cleanup(func() { _ = srv.Close() })
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
@@ -42,6 +42,7 @@ func TestReceivePack_AcceptsDeleteOnly(t *testing.T) {
 		flush,
 	)
 	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	req.SetBasicAuth("perm", "perm")
 	req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -66,13 +67,14 @@ func TestReceivePack_AcceptsLargeRequestProbe(t *testing.T) {
 	makeRepoInStore(t, storeDir, "acme", "demo")
 	store, _ := localfs.Open(storeDir)
 	t.Cleanup(func() { _ = store.Close() })
-	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test", AuthStore: newPermissiveAuthStore(t, "acme", "demo")})
 	t.Cleanup(func() { _ = srv.Close() })
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 
 	body := pktBody(flush) // exactly 4 bytes: "0000"
 	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	req.SetBasicAuth("perm", "perm")
 	req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -97,7 +99,7 @@ func TestReceivePack_RejectsBadRefName(t *testing.T) {
 	makeRepoInStore(t, storeDir, "acme", "demo")
 	store, _ := localfs.Open(storeDir)
 	t.Cleanup(func() { _ = store.Close() })
-	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test", AuthStore: newPermissiveAuthStore(t, "acme", "demo")})
 	t.Cleanup(func() { _ = srv.Close() })
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
@@ -109,6 +111,7 @@ func TestReceivePack_RejectsBadRefName(t *testing.T) {
 		flush,
 	)
 	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	req.SetBasicAuth("perm", "perm")
 	resp, _ := http.DefaultClient.Do(req)
 	if resp.StatusCode != 400 {
 		t.Fatalf("bad ref name: status %d, want 400", resp.StatusCode)
@@ -123,7 +126,7 @@ func TestReceivePack_RejectsRefsReplace(t *testing.T) {
 	makeRepoInStore(t, storeDir, "acme", "demo")
 	store, _ := localfs.Open(storeDir)
 	t.Cleanup(func() { _ = store.Close() })
-	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test", AuthStore: newPermissiveAuthStore(t, "acme", "demo")})
 	t.Cleanup(func() { _ = srv.Close() })
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
@@ -135,6 +138,7 @@ func TestReceivePack_RejectsRefsReplace(t *testing.T) {
 		flush,
 	)
 	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	req.SetBasicAuth("perm", "perm")
 	resp, _ := http.DefaultClient.Do(req)
 	if resp.StatusCode != 400 {
 		t.Fatalf("refs/replace: status %d, want 400", resp.StatusCode)
@@ -149,7 +153,7 @@ func TestReceivePack_RejectsBadOID(t *testing.T) {
 	makeRepoInStore(t, storeDir, "acme", "demo")
 	store, _ := localfs.Open(storeDir)
 	t.Cleanup(func() { _ = store.Close() })
-	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test", AuthStore: newPermissiveAuthStore(t, "acme", "demo")})
 	t.Cleanup(func() { _ = srv.Close() })
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
@@ -159,6 +163,7 @@ func TestReceivePack_RejectsBadOID(t *testing.T) {
 		flush,
 	)
 	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	req.SetBasicAuth("perm", "perm")
 	resp, _ := http.DefaultClient.Do(req)
 	if resp.StatusCode != 400 {
 		t.Fatalf("bad oid: status %d, want 400", resp.StatusCode)
@@ -173,7 +178,7 @@ func TestReceivePack_StagesPackToIncomingDir(t *testing.T) {
 	makeRepoInStore(t, storeDir, "acme", "demo")
 	store, _ := localfs.Open(storeDir)
 	t.Cleanup(func() { _ = store.Close() })
-	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test", AuthStore: newPermissiveAuthStore(t, "acme", "demo")})
 	t.Cleanup(func() { _ = srv.Close() })
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
@@ -189,6 +194,7 @@ func TestReceivePack_StagesPackToIncomingDir(t *testing.T) {
 	body = append(body, []byte("PACK\x00\x00\x00\x02fakebytes")...)
 
 	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	req.SetBasicAuth("perm", "perm")
 	resp, _ := http.DefaultClient.Do(req)
 	// Task 16 emits placeholder report (200); Task 17 will validate the
 	// pack and may return ng. For now we just want != 4xx for valid framing.
@@ -210,7 +216,7 @@ func TestReceivePack_ReportEmitsUnpackOkAndNgForStale(t *testing.T) {
 	makeRepoInStore(t, storeDir, "acme", "demo")
 	store, _ := localfs.Open(storeDir)
 	t.Cleanup(func() { _ = store.Close() })
-	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test", AuthStore: newPermissiveAuthStore(t, "acme", "demo")})
 	t.Cleanup(func() { _ = srv.Close() })
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
@@ -221,6 +227,7 @@ func TestReceivePack_ReportEmitsUnpackOkAndNgForStale(t *testing.T) {
 		flush,
 	)
 	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	req.SetBasicAuth("perm", "perm")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST: %v", err)
@@ -253,7 +260,7 @@ func TestReceivePack_ReportUsesSidebandWhenNegotiated(t *testing.T) {
 	makeRepoInStore(t, storeDir, "acme", "demo")
 	store, _ := localfs.Open(storeDir)
 	t.Cleanup(func() { _ = store.Close() })
-	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test", AuthStore: newPermissiveAuthStore(t, "acme", "demo")})
 	t.Cleanup(func() { _ = srv.Close() })
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
@@ -264,6 +271,7 @@ func TestReceivePack_ReportUsesSidebandWhenNegotiated(t *testing.T) {
 		flush,
 	)
 	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	req.SetBasicAuth("perm", "perm")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST: %v", err)
@@ -304,7 +312,7 @@ func TestReceivePack_RejectsTrailingBytesAfterDeleteOnly(t *testing.T) {
 	makeRepoInStore(t, storeDir, "acme", "demo")
 	store, _ := localfs.Open(storeDir)
 	t.Cleanup(func() { _ = store.Close() })
-	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test", AuthStore: newPermissiveAuthStore(t, "acme", "demo")})
 	t.Cleanup(func() { _ = srv.Close() })
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
@@ -317,6 +325,7 @@ func TestReceivePack_RejectsTrailingBytesAfterDeleteOnly(t *testing.T) {
 	body = append(body, []byte("PACK\x00\x00\x00\x02junk")...)
 
 	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	req.SetBasicAuth("perm", "perm")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST: %v", err)
@@ -343,7 +352,7 @@ func TestReceivePack_RejectsExtraTrailingNewline(t *testing.T) {
 	makeRepoInStore(t, storeDir, "acme", "demo")
 	store, _ := localfs.Open(storeDir)
 	t.Cleanup(func() { _ = store.Close() })
-	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test", AuthStore: newPermissiveAuthStore(t, "acme", "demo")})
 	t.Cleanup(func() { _ = srv.Close() })
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
@@ -358,6 +367,7 @@ func TestReceivePack_RejectsExtraTrailingNewline(t *testing.T) {
 		flush,
 	)
 	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	req.SetBasicAuth("perm", "perm")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST: %v", err)
@@ -382,7 +392,7 @@ func TestReceivePack_AcceptsMissingLFTerminator(t *testing.T) {
 	makeRepoInStore(t, storeDir, "acme", "demo")
 	store, _ := localfs.Open(storeDir)
 	t.Cleanup(func() { _ = store.Close() })
-	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test", AuthStore: newPermissiveAuthStore(t, "acme", "demo")})
 	t.Cleanup(func() { _ = srv.Close() })
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
@@ -394,6 +404,7 @@ func TestReceivePack_AcceptsMissingLFTerminator(t *testing.T) {
 		flush,
 	)
 	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	req.SetBasicAuth("perm", "perm")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST: %v", err)
@@ -415,7 +426,7 @@ func TestReceivePack_RejectsTooManyCommands(t *testing.T) {
 	makeRepoInStore(t, storeDir, "acme", "demo")
 	store, _ := localfs.Open(storeDir)
 	t.Cleanup(func() { _ = store.Close() })
-	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test", AuthStore: newPermissiveAuthStore(t, "acme", "demo")})
 	t.Cleanup(func() { _ = srv.Close() })
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
@@ -436,6 +447,7 @@ func TestReceivePack_RejectsTooManyCommands(t *testing.T) {
 	body := pktBody(chunks...)
 
 	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	req.SetBasicAuth("perm", "perm")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST: %v", err)
@@ -477,7 +489,7 @@ func TestReceivePack_GitPushEndToEnd(t *testing.T) {
 		t.Fatalf("seed Import: %v", err)
 	}
 
-	srv, err := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	srv, err := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test", AuthStore: newPermissiveAuthStore(t, "acme", "demo")})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -494,8 +506,9 @@ func TestReceivePack_GitPushEndToEnd(t *testing.T) {
 	mustExecGW(t, work, "git", "add", ".")
 	mustExecGW(t, work, "git", "-c", "user.email=t@t", "-c", "user.name=t",
 		"commit", "-m", "init")
+	pushURL := strings.Replace(ts.URL, "http://", "http://perm:perm@", 1) + "/acme/demo.git"
 	cmd := exec.Command("git", "-C", work, "push",
-		ts.URL+"/acme/demo.git", "HEAD:refs/heads/main")
+		pushURL, "HEAD:refs/heads/main")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git push: %v\n%s", err, out)
@@ -535,7 +548,7 @@ func TestReceivePack_RejectsStaleOldOID(t *testing.T) {
 		t.Fatalf("localfs.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	srv, err := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	srv, err := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test", AuthStore: newPermissiveAuthStore(t, "acme", "demo")})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -551,6 +564,7 @@ func TestReceivePack_RejectsStaleOldOID(t *testing.T) {
 	)
 	body = append(body, []byte("PACK\x00\x00\x00\x02fakebytes")...)
 	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	req.SetBasicAuth("perm", "perm")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST: %v", err)
@@ -587,7 +601,7 @@ func TestReceivePack_AcceptsEmptyPackBody(t *testing.T) {
 	makeRepoInStore(t, storeDir, "acme", "demo")
 	store, _ := localfs.Open(storeDir)
 	t.Cleanup(func() { _ = store.Close() })
-	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test", AuthStore: newPermissiveAuthStore(t, "acme", "demo")})
 	t.Cleanup(func() { _ = srv.Close() })
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
@@ -612,6 +626,7 @@ func TestReceivePack_AcceptsEmptyPackBody(t *testing.T) {
 		flush,
 	)
 	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	req.SetBasicAuth("perm", "perm")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST: %v", err)
@@ -648,7 +663,7 @@ func TestReceivePack_RejectsDuplicateRefnames(t *testing.T) {
 	makeRepoInStore(t, storeDir, "acme", "demo")
 	store, _ := localfs.Open(storeDir)
 	t.Cleanup(func() { _ = store.Close() })
-	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test", AuthStore: newPermissiveAuthStore(t, "acme", "demo")})
 	t.Cleanup(func() { _ = srv.Close() })
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
@@ -661,6 +676,7 @@ func TestReceivePack_RejectsDuplicateRefnames(t *testing.T) {
 		flush,
 	)
 	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	req.SetBasicAuth("perm", "perm")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST: %v", err)
@@ -707,7 +723,7 @@ func TestReceivePack_RejectsNoPackPushOfUnreachableObject(t *testing.T) {
 	makeRepoInStore(t, storeDir, "acme", "demo")
 	store, _ := localfs.Open(storeDir)
 	t.Cleanup(func() { _ = store.Close() })
-	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test", AuthStore: newPermissiveAuthStore(t, "acme", "demo")})
 	t.Cleanup(func() { _ = srv.Close() })
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
@@ -720,6 +736,7 @@ func TestReceivePack_RejectsNoPackPushOfUnreachableObject(t *testing.T) {
 		flush,
 	)
 	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	req.SetBasicAuth("perm", "perm")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST: %v", err)
@@ -766,7 +783,7 @@ func TestReceivePack_AlwaysMarksMirrorStaleAfterSuccess(t *testing.T) {
 	}
 
 	mirrorDir := t.TempDir()
-	srv, err := NewServer(store, Options{MirrorDir: mirrorDir, Version: "test"})
+	srv, err := NewServer(store, Options{MirrorDir: mirrorDir, Version: "test", AuthStore: newPermissiveAuthStore(t, "acme", "demo")})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -782,8 +799,9 @@ func TestReceivePack_AlwaysMarksMirrorStaleAfterSuccess(t *testing.T) {
 	mustExecGW(t, work, "git", "add", ".")
 	mustExecGW(t, work, "git", "-c", "user.email=t@t", "-c", "user.name=t",
 		"commit", "-m", "init")
+	pushURL := strings.Replace(ts.URL, "http://", "http://perm:perm@", 1) + "/acme/demo.git"
 	cmd := exec.Command("git", "-C", work, "push",
-		ts.URL+"/acme/demo.git", "HEAD:refs/heads/main")
+		pushURL, "HEAD:refs/heads/main")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git push: %v\n%s", err, out)
 	}

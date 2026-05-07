@@ -1,100 +1,173 @@
 package gateway
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
-	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
+	"github.com/bucketvcs/bucketvcs/internal/auth"
 )
 
-func newTestServerWithAuth(t *testing.T, mode AuthMode, token string) *httptest.Server {
+// fakeStore is an in-memory minimal auth.Store for middleware tests.
+type fakeStore struct {
+	credActor *auth.Actor
+	credToken string
+	credErr   error
+	perm      auth.Perm
+	flags     auth.RepoFlags
+	flagsErr  error
+}
+
+func (f *fakeStore) VerifyCredential(ctx context.Context, c auth.Credential) (*auth.Actor, string, error) {
+	return f.credActor, f.credToken, f.credErr
+}
+func (f *fakeStore) LookupRepoPerm(ctx context.Context, a *auth.Actor, t, r string) (auth.Perm, error) {
+	if a == nil {
+		return auth.PermNone, nil
+	}
+	return f.perm, nil
+}
+func (f *fakeStore) GetRepoFlags(ctx context.Context, t, r string) (auth.RepoFlags, error) {
+	return f.flags, f.flagsErr
+}
+func (f *fakeStore) TouchTokenUsage(ctx context.Context, id string) error { return nil }
+func (f *fakeStore) Close() error                                         { return nil }
+
+func req(t *testing.T, method, path, query, basicUser, basicPass string) *http.Request {
 	t.Helper()
-	store, _ := localfs.Open(t.TempDir())
-	t.Cleanup(func() { _ = store.Close() })
-	srv, err := NewServer(store, Options{
-		MirrorDir: t.TempDir(),
-		Version:   "test",
-		AuthMode:  mode,
-		AuthToken: token,
-	})
-	if err != nil {
-		t.Fatalf("NewServer: %v", err)
+	r := httptest.NewRequest(method, "http://x"+path+"?"+query, nil)
+	if basicUser != "" || basicPass != "" {
+		r.SetBasicAuth(basicUser, basicPass)
 	}
-	t.Cleanup(func() { _ = srv.Close() })
-	ts := httptest.NewServer(srv)
-	t.Cleanup(ts.Close)
-	return ts
+	return r
 }
 
-func TestAuth_AnonymousMode_AllowsBoth(t *testing.T) {
-	ts := newTestServerWithAuth(t, AuthAnonymous, "")
-	for _, svc := range []string{"git-upload-pack", "git-receive-pack"} {
-		resp, err := http.Get(ts.URL + "/acme/demo.git/info/refs?service=" + svc)
-		if err != nil {
-			t.Fatalf("GET: %v", err)
-		}
-		// 501 (stub) is acceptable — we just want != 401.
-		if resp.StatusCode == 401 {
-			t.Fatalf("svc=%s: got 401 in anonymous mode", svc)
-		}
+func TestRunAuth_AnonymousReadPublic(t *testing.T) {
+	st := &fakeStore{flags: auth.RepoFlags{PublicRead: true}}
+	rr := &RoutedRequest{Tenant: "a", Repo: "b", Op: OpUploadPack, RequiredAction: auth.ActionRead}
+	w := httptest.NewRecorder()
+	r := req(t, "POST", "/a/b.git/git-upload-pack", "", "", "")
+	actor, ok := RunAuth(w, r, st, rr)
+	if !ok {
+		t.Fatalf("expected allow, got status %d", w.Code)
+	}
+	if actor != nil {
+		t.Fatalf("expected anonymous, got %+v", actor)
 	}
 }
 
-func TestAuth_WriteOnlyMode_AllowsAnonRead_RejectsAnonWrite(t *testing.T) {
-	ts := newTestServerWithAuth(t, AuthWriteOnly, "secret")
-	resp, _ := http.Get(ts.URL + "/acme/demo.git/info/refs?service=git-upload-pack")
-	if resp.StatusCode == 401 {
-		t.Fatalf("anon read in write-only mode: 401")
+func TestRunAuth_AnonymousWritePublic_Challenge(t *testing.T) {
+	st := &fakeStore{flags: auth.RepoFlags{PublicRead: true}}
+	rr := &RoutedRequest{Tenant: "a", Repo: "b", Op: OpReceivePack, RequiredAction: auth.ActionWrite}
+	w := httptest.NewRecorder()
+	r := req(t, "POST", "/a/b.git/git-receive-pack", "", "", "")
+	if _, ok := RunAuth(w, r, st, rr); ok {
+		t.Fatal("expected deny")
 	}
-	resp, _ = http.Get(ts.URL + "/acme/demo.git/info/refs?service=git-receive-pack")
-	if resp.StatusCode != 401 {
-		t.Fatalf("anon write in write-only mode: got %d, want 401", resp.StatusCode)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
 	}
-}
-
-func TestAuth_AllMode_RequiresTokenForBoth(t *testing.T) {
-	ts := newTestServerWithAuth(t, AuthAll, "secret")
-	for _, svc := range []string{"git-upload-pack", "git-receive-pack"} {
-		resp, _ := http.Get(ts.URL + "/acme/demo.git/info/refs?service=" + svc)
-		if resp.StatusCode != 401 {
-			t.Fatalf("svc=%s anon: got %d, want 401", svc, resp.StatusCode)
-		}
-	}
-	for _, svc := range []string{"git-upload-pack", "git-receive-pack"} {
-		req, _ := http.NewRequest("GET", ts.URL+"/acme/demo.git/info/refs?service="+svc, nil)
-		req.SetBasicAuth("bucketvcs", "secret")
-		resp, _ := http.DefaultClient.Do(req)
-		if resp.StatusCode == 401 {
-			t.Fatalf("svc=%s with token: 401", svc)
-		}
+	if !strings.HasPrefix(w.Header().Get("WWW-Authenticate"), "Basic ") {
+		t.Fatalf("missing WWW-Authenticate: %q", w.Header().Get("WWW-Authenticate"))
 	}
 }
 
-func TestAuth_AllMode_RejectsWrongToken(t *testing.T) {
-	ts := newTestServerWithAuth(t, AuthAll, "secret")
-	req, _ := http.NewRequest("GET", ts.URL+"/acme/demo.git/info/refs?service=git-upload-pack", nil)
-	req.SetBasicAuth("bucketvcs", "wrong")
-	resp, _ := http.DefaultClient.Do(req)
-	if resp.StatusCode != 401 {
-		t.Fatalf("wrong token: got %d, want 401", resp.StatusCode)
+func TestRunAuth_AnonymousReadPrivate_Challenge(t *testing.T) {
+	st := &fakeStore{flags: auth.RepoFlags{PublicRead: false}}
+	rr := &RoutedRequest{Tenant: "a", Repo: "b", Op: OpUploadPack, RequiredAction: auth.ActionRead}
+	w := httptest.NewRecorder()
+	r := req(t, "POST", "/a/b.git/git-upload-pack", "", "", "")
+	if _, ok := RunAuth(w, r, st, rr); ok {
+		t.Fatal("expected deny")
+	}
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
 	}
 }
 
-func TestAuth_AllMode_RejectsWrongUser(t *testing.T) {
-	ts := newTestServerWithAuth(t, AuthAll, "secret")
-	req, _ := http.NewRequest("GET", ts.URL+"/acme/demo.git/info/refs?service=git-upload-pack", nil)
-	req.SetBasicAuth("notbucketvcs", "secret")
-	resp, _ := http.DefaultClient.Do(req)
-	if resp.StatusCode != 401 {
-		t.Fatalf("wrong user: got %d, want 401", resp.StatusCode)
+func TestRunAuth_NoSuchRepo404(t *testing.T) {
+	st := &fakeStore{flagsErr: auth.ErrNoSuchRepo}
+	rr := &RoutedRequest{Tenant: "a", Repo: "b", Op: OpUploadPack, RequiredAction: auth.ActionRead}
+	w := httptest.NewRecorder()
+	r := req(t, "POST", "/a/b.git/git-upload-pack", "", "", "")
+	if _, ok := RunAuth(w, r, st, rr); ok {
+		t.Fatal("expected deny")
+	}
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", w.Code)
 	}
 }
 
-func TestAuth_AllMode_PostReceivePackAlsoRequiresToken(t *testing.T) {
-	ts := newTestServerWithAuth(t, AuthAll, "secret")
-	resp, _ := http.Post(ts.URL+"/acme/demo.git/git-receive-pack", "application/octet-stream", nil)
-	if resp.StatusCode != 401 {
-		t.Fatalf("POST receive-pack anon: got %d, want 401", resp.StatusCode)
+func TestRunAuth_BadCredentials_401(t *testing.T) {
+	st := &fakeStore{credErr: auth.ErrInvalidCredential, flags: auth.RepoFlags{}}
+	rr := &RoutedRequest{Tenant: "a", Repo: "b", Op: OpUploadPack, RequiredAction: auth.ActionRead}
+	w := httptest.NewRecorder()
+	r := req(t, "POST", "/a/b.git/git-upload-pack", "", "alice", "bvts_BAD")
+	if _, ok := RunAuth(w, r, st, rr); ok {
+		t.Fatal("expected deny")
+	}
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+}
+
+func TestRunAuth_AuthenticatedUnauthorized_403(t *testing.T) {
+	actor := &auth.Actor{UserID: "u1", Name: "alice"}
+	st := &fakeStore{credActor: actor, credToken: "tokid", flags: auth.RepoFlags{}, perm: auth.PermRead}
+	rr := &RoutedRequest{Tenant: "a", Repo: "b", Op: OpReceivePack, RequiredAction: auth.ActionWrite}
+	w := httptest.NewRecorder()
+	r := req(t, "POST", "/a/b.git/git-receive-pack", "", "alice", "bvts_OK")
+	if _, ok := RunAuth(w, r, st, rr); ok {
+		t.Fatal("expected deny")
+	}
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", w.Code)
+	}
+}
+
+func TestRunAuth_AuthenticatedAuthorized_AttachesActor(t *testing.T) {
+	actor := &auth.Actor{UserID: "u1", Name: "alice"}
+	st := &fakeStore{credActor: actor, credToken: "tokid", flags: auth.RepoFlags{}, perm: auth.PermWrite}
+	rr := &RoutedRequest{Tenant: "a", Repo: "b", Op: OpReceivePack, RequiredAction: auth.ActionWrite}
+	w := httptest.NewRecorder()
+	r := req(t, "POST", "/a/b.git/git-receive-pack", "", "alice", "bvts_OK")
+	got, ok := RunAuth(w, r, st, rr)
+	if !ok {
+		t.Fatalf("expected allow, status=%d", w.Code)
+	}
+	if got != actor {
+		t.Fatalf("got actor %+v want %+v", got, actor)
+	}
+}
+
+func TestRunAuth_PassesContextErrors(t *testing.T) {
+	st := &fakeStore{flagsErr: errors.New("internal-disk")}
+	rr := &RoutedRequest{Tenant: "a", Repo: "b", Op: OpUploadPack, RequiredAction: auth.ActionRead}
+	w := httptest.NewRecorder()
+	r := req(t, "POST", "/a/b.git/git-upload-pack", "", "", "")
+	if _, ok := RunAuth(w, r, st, rr); ok {
+		t.Fatal("expected deny on internal error")
+	}
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", w.Code)
+	}
+}
+
+// TestRunAuth_VerifyCredentialBackendError_500 ensures non-credential
+// errors from VerifyCredential surface as 500, not 401. A DB outage
+// should never be reported to the client as "bad credentials."
+func TestRunAuth_VerifyCredentialBackendError_500(t *testing.T) {
+	st := &fakeStore{credErr: errors.New("db unreachable"), flags: auth.RepoFlags{}}
+	rr := &RoutedRequest{Tenant: "a", Repo: "b", Op: OpUploadPack, RequiredAction: auth.ActionRead}
+	w := httptest.NewRecorder()
+	r := req(t, "POST", "/a/b.git/git-upload-pack", "", "alice", "bvts_OK")
+	if _, ok := RunAuth(w, r, st, rr); ok {
+		t.Fatal("expected deny")
+	}
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (got challenge instead?)", w.Code)
 	}
 }

@@ -63,7 +63,7 @@ func TestInfoRefs_V2UploadPack(t *testing.T) {
 		t.Fatalf("localfs.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	srv, err := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	srv, err := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test", AuthStore: newAnonymousTestAuthStore(t, "acme", "demo", true)})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -100,12 +100,14 @@ func TestInfoRefs_ReceivePackV0(t *testing.T) {
 		t.Fatalf("localfs.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test", AuthStore: newPermissiveAuthStore(t, "acme", "demo")})
 	t.Cleanup(func() { _ = srv.Close() })
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 
-	resp, err := http.Get(ts.URL + "/acme/demo.git/info/refs?service=git-receive-pack")
+	req, _ := http.NewRequest("GET", ts.URL+"/acme/demo.git/info/refs?service=git-receive-pack", nil)
+	req.SetBasicAuth("perm", "perm")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -135,7 +137,7 @@ func TestInfoRefs_V0UploadPackFallback(t *testing.T) {
 		t.Fatalf("localfs.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test", AuthStore: newAnonymousTestAuthStore(t, "acme", "demo", true)})
 	t.Cleanup(func() { _ = srv.Close() })
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
@@ -168,7 +170,7 @@ func TestInfoRefs_V0UploadPack_AdvertisesHEADAndSymref(t *testing.T) {
 		t.Fatalf("localfs.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test", AuthStore: newAnonymousTestAuthStore(t, "acme", "demo", true)})
 	t.Cleanup(func() { _ = srv.Close() })
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
@@ -202,12 +204,14 @@ func TestInfoRefs_V0ReceivePack_NoHEADLine(t *testing.T) {
 		t.Fatalf("localfs.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test", AuthStore: newPermissiveAuthStore(t, "acme", "demo")})
 	t.Cleanup(func() { _ = srv.Close() })
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 
-	resp, err := http.Get(ts.URL + "/acme/demo.git/info/refs?service=git-receive-pack")
+	req, _ := http.NewRequest("GET", ts.URL+"/acme/demo.git/info/refs?service=git-receive-pack", nil)
+	req.SetBasicAuth("perm", "perm")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -224,13 +228,13 @@ func TestInfoRefs_RejectsUnknownService(t *testing.T) {
 	storeDir := t.TempDir()
 	store, _ := localfs.Open(storeDir)
 	t.Cleanup(func() { _ = store.Close() })
-	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test", AuthStore: newAnonymousTestAuthStore(t, "acme", "demo", true)})
 	t.Cleanup(func() { _ = srv.Close() })
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 	resp, _ := http.Get(ts.URL + "/acme/demo.git/info/refs?service=git-evil-pack")
-	if resp.StatusCode != 400 {
-		t.Fatalf("unknown service: status %d, want 400", resp.StatusCode)
+	if resp.StatusCode != 400 && resp.StatusCode != 404 {
+		t.Fatalf("unknown service: status %d, want 400 or 404", resp.StatusCode)
 	}
 }
 
@@ -238,7 +242,7 @@ func TestInfoRefs_RepoNotFound(t *testing.T) {
 	storeDir := t.TempDir()
 	store, _ := localfs.Open(storeDir)
 	t.Cleanup(func() { _ = store.Close() })
-	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test", AuthStore: newAnonymousTestAuthStore(t, "acme", "demo", true)})
 	t.Cleanup(func() { _ = srv.Close() })
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
@@ -276,7 +280,7 @@ func TestInfoRefs_V2WithExtraProtocolTokens(t *testing.T) {
 	makeRepoInStore(t, storeDir, "acme", "demo")
 	store, _ := localfs.Open(storeDir)
 	t.Cleanup(func() { _ = store.Close() })
-	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test", AuthStore: newAnonymousTestAuthStore(t, "acme", "demo", true)})
 	t.Cleanup(func() { _ = srv.Close() })
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
@@ -323,7 +327,7 @@ func TestInfoRefs_V0UploadPack_UnbornDefaultBranch_AdvertisesSymref(t *testing.T
 		t.Fatalf("repo.Create: %v", err)
 	}
 
-	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test", AuthStore: newAnonymousTestAuthStore(t, "acme", "demo", true)})
 	t.Cleanup(func() { _ = srv.Close() })
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)

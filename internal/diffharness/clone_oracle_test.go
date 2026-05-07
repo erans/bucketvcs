@@ -58,7 +58,7 @@ func TestOracle_CloneEquivalence(t *testing.T) {
 			srv, err := gateway.NewServer(store, gateway.Options{
 				MirrorDir: t.TempDir(),
 				Version:   "test",
-				AuthMode:  gateway.AuthAnonymous,
+				AuthStore: newDiffharnessAuthStore(t, tenant, repoID),
 			})
 			if err != nil {
 				t.Fatalf("NewServer: %v", err)

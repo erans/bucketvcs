@@ -33,9 +33,9 @@ func parseStoreURL(s string) (scheme, path string, err error) {
 }
 
 // openStore parses the --store URL and returns a constructed
-// ObjectStore. Caller is responsible for any cleanup (localfs has none
-// in M1 — the Open constructor binds the directory but does not hold
-// process-global state that needs explicit Close).
+// ObjectStore. Caller is responsible for releasing it via closeStore on
+// shutdown — localfs holds a process-wide lockfile that must be released.
+// closeStore is defined in init.go and asserts io.Closer at runtime.
 func openStore(url string) (storage.ObjectStore, error) {
 	scheme, path, err := parseStoreURL(url)
 	if err != nil {
