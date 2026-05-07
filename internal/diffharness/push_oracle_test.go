@@ -3,6 +3,7 @@ package diffharness
 import (
 	"context"
 	"net/http/httptest"
+	"net/url"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -68,10 +69,11 @@ func TestOracle_PushEquivalence(t *testing.T) {
 				t.Fatalf("seed Import: %v", err)
 			}
 
+			authStore, adminUser, adminToken := newDiffharnessAuthStoreWithAdminToken(t, tenant, repoID)
 			srv, err := gateway.NewServer(store, gateway.Options{
 				MirrorDir: t.TempDir(),
 				Version:   "test",
-				AuthMode:  gateway.AuthAnonymous,
+				AuthStore: authStore,
 			})
 			if err != nil {
 				t.Fatalf("NewServer: %v", err)
@@ -80,8 +82,13 @@ func TestOracle_PushEquivalence(t *testing.T) {
 			ts := httptest.NewServer(srv)
 			t.Cleanup(ts.Close)
 
-			pushCmd := exec.Command("git", "-C", srcDir, "push", "--mirror",
-				ts.URL+"/"+tenant+"/"+repoID+".git")
+			// Embed Basic-auth credentials in the push URL: `git push`
+			// runs credential helpers only on a 401 challenge, so for the
+			// non-interactive harness path we precompute the URL with
+			// user:token. The token grants admin (no Grant call needed —
+			// admins short-circuit Decide).
+			pushURL := withDiffharnessBasicAuth(ts.URL+"/"+tenant+"/"+repoID+".git", adminUser, adminToken)
+			pushCmd := exec.Command("git", "-C", srcDir, "push", "--mirror", pushURL)
 			if out, err := pushCmd.CombinedOutput(); err != nil {
 				t.Fatalf("git push --mirror: %v\n%s", err, out)
 			}
@@ -113,4 +120,17 @@ func TestOracle_PushEquivalence(t *testing.T) {
 			}
 		})
 	}
+}
+
+// withDiffharnessBasicAuth rewrites a remote URL to embed user:pass
+// credentials. `git push` only invokes credential helpers on a 401
+// challenge, so the harness embeds creds directly to keep the path
+// non-interactive.
+func withDiffharnessBasicAuth(remote, user, pass string) string {
+	u, err := url.Parse(remote)
+	if err != nil {
+		return remote
+	}
+	u.User = url.UserPassword(user, pass)
+	return u.String()
 }
