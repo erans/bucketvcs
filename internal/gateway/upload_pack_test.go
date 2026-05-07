@@ -406,7 +406,7 @@ func mustGitOutput(t *testing.T, dir string, stdin io.Reader, args ...string) st
 // TestUploadPack_RejectsTooManyWants verifies the want-count cap that
 // bounds per-request CPU / argv / memory cost. Each want forces a cat-file
 // probe + an entry in the rev-list argv, so an unbounded count is a DoS
-// vector. The 4096 cap is enforced with a clean 400.
+// vector. The 256 cap is enforced with a clean 400.
 func TestUploadPack_RejectsTooManyWants(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires git binary")
@@ -421,9 +421,9 @@ func TestUploadPack_RejectsTooManyWants(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	chunks := []pktChunk{dataLine("command=fetch\n"), delim}
-	// Spam 4097 distinct wants. We use a deterministic counter so each
+	// Spam 257 distinct wants. We use a deterministic counter so each
 	// OID is unique (dedupOIDs would otherwise collapse them).
-	for i := 0; i <= 4096; i++ {
+	for i := 0; i <= 256; i++ {
 		// 40-char hex: pad an integer to 40 chars with leading zeros.
 		oid := strings.Repeat("0", 40-8) + fmt.Sprintf("%08x", i)
 		chunks = append(chunks, dataLine("want "+oid+"\n"))

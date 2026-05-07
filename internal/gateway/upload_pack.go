@@ -106,17 +106,18 @@ func (s *Server) handleUploadPack(w http.ResponseWriter, r *http.Request, tenant
 }
 
 // maxWants is the upper bound on want OIDs accepted in a single fetch.
-// Real Git clients send one want per remote ref they are interested in;
-// even a megarepo rarely exceeds a few thousand. We pick 4096 as a
-// generous ceiling that still bounds CPU (per-want kind probe), argv
-// size (rev-list <wants> --not --all), and memory.
-const maxWants = 4096
+// Each want incurs a `git cat-file -t` subprocess for type validation
+// plus an entry in the rev-list argv; the cap is sized to bound the
+// total subprocess count rather than the OID count alone. A future task
+// can lift this once a batched cat-file --batch-check helper lands.
+const maxWants = 256
 
 // maxHaves is the upper bound on have OIDs accepted in a single fetch.
-// Clients negotiate haves in rounds of 256-512 by default; a single
-// request rarely exceeds 4-8K. Bounding both prevents an attacker from
-// turning a malformed POST into per-request CPU/argv exhaustion.
-const maxHaves = 8192
+// Same per-OID subprocess cost as wants. Real Git clients negotiate
+// haves in 256-sized rounds (the libgit2/CGit default), so 256 covers
+// the usual round size; a multi-round negotiation re-enters this
+// handler for each subsequent round, so 256 per request is sufficient.
+const maxHaves = 256
 
 // dedupOIDs returns oids with duplicates removed in first-seen order.
 // Both wants and haves are validated as 40-char hex by ParseFetchArgs,
