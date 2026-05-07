@@ -2,6 +2,7 @@ package diffharness
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -17,6 +18,14 @@ import (
 
 func newTestStore(t *testing.T) storage.ObjectStore {
 	t.Helper()
+	if url := os.Getenv("BUCKETVCS_DIFFHARNESS_STORE"); url != "" {
+		s, err := openStoreFromURL(t, url)
+		if err != nil {
+			t.Fatalf("BUCKETVCS_DIFFHARNESS_STORE=%q: %v", url, err)
+		}
+		t.Cleanup(func() { _ = closeStore(s) })
+		return s
+	}
 	s, err := localfs.Open(t.TempDir())
 	if err != nil {
 		t.Fatalf("localfs.Open: %v", err)
