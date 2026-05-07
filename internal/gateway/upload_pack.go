@@ -164,9 +164,18 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request, tenant, rep
 	// Acknowledgments section — emitted whenever the client sent haves.
 	// Per protocol-v2 §fetch the section is REQUIRED in that case (with
 	// "NAK" when nothing is common); omitting it makes follow-on framing
-	// ambiguous. We split the haves into commons (we have them) and
-	// unknowns (we don't), and feed both into WriteAcknowledgments so
-	// it can NAK when commons is empty.
+	// ambiguous. We split the haves into commons (we have them AND they
+	// are reachable from advertised refs) and unknowns (everything else),
+	// and feed both into WriteAcknowledgments so it can NAK when commons
+	// is empty.
+	//
+	// Reachability matters for haves the same way it matters for wants:
+	// if we ACK an OID merely because the object exists in the mirror's
+	// pack files (e.g. a deleted-but-not-GC'd commit), we leak the
+	// existence of hidden objects to a probing client. We also must NOT
+	// forward such hidden OIDs to pack-objects as ^<oid> exclusions —
+	// they would either falsely trim history (if reachable from a want
+	// via the hidden subgraph) or invalidly reference unreachable revs.
 	//
 	// We track ackEmitted so the delim before "packfile\n" is only
 	// written when the acknowledgments section actually ran.
@@ -176,11 +185,39 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request, tenant, rep
 		ackEmitted bool
 	)
 	if len(req.Haves) > 0 {
+		// First pass: keep only haves that are commit-or-tag AND present
+		// in the mirror. Trees, blobs, and missing objects are treated as
+		// "unknown" — they never get ACKed and never reach pack-objects.
+		var candidates []string
 		for _, h := range req.Haves {
-			if _, err := gitcli.RevParseObjectKind(r.Context(), m.BareDir(), h); err == nil {
-				commons = append(commons, h)
-			} else {
+			kind, err := gitcli.RevParseObjectKind(r.Context(), m.BareDir(), h)
+			if err != nil || (kind != "commit" && kind != "tag") {
 				unknown = append(unknown, h)
+				continue
+			}
+			candidates = append(candidates, h)
+		}
+		// Second pass: confirm reachability from the advertised refset.
+		// rev-list <candidates> --not --all returns the candidates'
+		// objects that are reachable but NOT covered by --all; any
+		// candidate that appears in that output is unreachable from any
+		// advertised ref and must be treated as unknown.
+		if len(candidates) > 0 {
+			leaked, err := gitcli.RevListNotAll(r.Context(), m.BareDir(), candidates)
+			if err != nil {
+				http.Error(w, "fetch: have-reachability check failed: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			leakedSet := make(map[string]struct{}, len(leaked))
+			for _, oid := range leaked {
+				leakedSet[oid] = struct{}{}
+			}
+			for _, c := range candidates {
+				if _, hidden := leakedSet[c]; hidden {
+					unknown = append(unknown, c)
+					continue
+				}
+				commons = append(commons, c)
 			}
 		}
 		// "ready" tells the client we have enough to proceed to the packfile

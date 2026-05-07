@@ -258,6 +258,150 @@ func TestUploadPack_RejectsExistingButUnreachableObject(t *testing.T) {
 	}
 }
 
+// TestUploadPack_RejectsExistingButUnreachableCommit covers the
+// reachability-guard path for commits, not blobs: a commit object that
+// physically exists in the mirror but is NOT reachable from any advertised
+// ref must be refused. We materialize the mirror, then synthesize a commit
+// via plumbing (write tree + commit-tree, no ref update), then attempt to
+// fetch its OID.
+func TestUploadPack_RejectsExistingButUnreachableCommit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeRepoInStore(t, storeDir, "acme", "demo")
+	store, _ := localfs.Open(storeDir)
+	t.Cleanup(func() { _ = store.Close() })
+	mirrorDir := t.TempDir()
+	srv, _ := NewServer(store, Options{MirrorDir: mirrorDir, Version: "test"})
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	dst := t.TempDir() + "/clone.git"
+	if out, err := exec.Command("git", "clone", "--bare", "-c", "protocol.version=2", ts.URL+"/acme/demo.git", dst).CombinedOutput(); err != nil {
+		t.Fatalf("seed clone: %v\n%s", err, out)
+	}
+	bareDir := filepath.Join(mirrorDir, "acme", "demo", "bare")
+
+	// Synthesize a commit with no ref pointing at it. Steps:
+	//  1) hash-object a blob.
+	//  2) mktree pointing at that blob.
+	//  3) commit-tree on that tree (no parent, no ref update).
+	blobOID := mustGitOutput(t, bareDir, bytes.NewReader([]byte("hidden\n")), "hash-object", "-w", "--stdin")
+	treeIn := bytes.NewReader([]byte("100644 blob " + blobOID + "\thidden.txt\n"))
+	treeOID := mustGitOutput(t, bareDir, treeIn, "mktree")
+	env := append(os.Environ(),
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+	)
+	cmd := exec.Command("git", "commit-tree", treeOID, "-m", "hidden commit")
+	cmd.Dir = bareDir
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("commit-tree: %v\n%s", err, out)
+	}
+	hiddenCommitOID := strings.TrimSpace(string(out))
+	if len(hiddenCommitOID) != 40 {
+		t.Fatalf("unexpected commit-tree output: %q", out)
+	}
+
+	// Sanity check: the commit IS in the mirror.
+	if k, err := exec.Command("git", "-C", bareDir, "cat-file", "-t", hiddenCommitOID).CombinedOutput(); err != nil || strings.TrimSpace(string(k)) != "commit" {
+		t.Fatalf("hidden commit not in mirror: %v %s", err, k)
+	}
+
+	// Subtest 1: hidden commit as want — must be rejected by the rev-list
+	// reachability probe (kind check passes).
+	t.Run("AsWant", func(t *testing.T) {
+		body := pktBody(
+			dataLine("command=fetch\n"),
+			delim,
+			dataLine("want "+hiddenCommitOID+"\n"),
+			dataLine("done\n"),
+			flush,
+		)
+		req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-upload-pack", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-git-upload-pack-request")
+		req.Header.Set("Git-Protocol", "version=2")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST: %v", err)
+		}
+		if resp.StatusCode != 400 {
+			t.Fatalf("hidden-commit want: status %d, want 400", resp.StatusCode)
+		}
+		got, _ := io.ReadAll(resp.Body)
+		if !bytes.Contains(got, []byte("not our ref")) {
+			t.Fatalf("expected 'not our ref' message, got %q", got)
+		}
+	})
+
+	// Subtest 2: hidden commit as have — must NOT be ACKed (no leakage),
+	// alongside a valid reachable want. The response should contain a
+	// NAK acknowledgments section, then the packfile.
+	t.Run("AsHaveNotACKed", func(t *testing.T) {
+		// Resolve refs/heads/main to OID via info/refs (v0 fallback).
+		ir, _ := http.Get(ts.URL + "/acme/demo.git/info/refs?service=git-upload-pack")
+		advert, _ := io.ReadAll(ir.Body)
+		idx := bytes.Index(advert, []byte(" refs/heads/main"))
+		if idx < 0 {
+			t.Fatalf("info/refs missing main: %q", advert)
+		}
+		mainOID := string(advert[idx-40 : idx])
+
+		body := pktBody(
+			dataLine("command=fetch\n"),
+			delim,
+			dataLine("want "+mainOID+"\n"),
+			dataLine("have "+hiddenCommitOID+"\n"),
+			dataLine("done\n"),
+			flush,
+		)
+		req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-upload-pack", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-git-upload-pack-request")
+		req.Header.Set("Git-Protocol", "version=2")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST: %v", err)
+		}
+		if resp.StatusCode != 200 {
+			t.Fatalf("status %d, want 200 (acks + packfile)", resp.StatusCode)
+		}
+		got, _ := io.ReadAll(resp.Body)
+		// The hidden OID must NOT appear in the response (it would mean
+		// we ACKed it, leaking its existence).
+		if bytes.Contains(got, []byte(hiddenCommitOID)) {
+			t.Fatalf("response leaked hidden have OID: %q", got)
+		}
+		// Acknowledgments section should contain "NAK" (no commons).
+		if !bytes.Contains(got, []byte("NAK")) {
+			t.Fatalf("expected NAK in acks section, got %q", got)
+		}
+	})
+}
+
+// mustGitOutput runs `git <args...>` in dir, optionally feeding stdin, and
+// returns the trimmed first-line output. Fatals on error or empty output.
+func mustGitOutput(t *testing.T, dir string, stdin io.Reader, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if stdin != nil {
+		cmd.Stdin = stdin
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	s := strings.TrimSpace(string(out))
+	if s == "" {
+		t.Fatalf("git %v: empty output", args)
+	}
+	return s
+}
+
 // helpers
 type pktChunk []byte
 
