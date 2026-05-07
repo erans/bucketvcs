@@ -2,6 +2,7 @@ package s3compat
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -155,5 +156,30 @@ func TestListReturnsLastModified(t *testing.T) {
 	}
 	if page.Objects[0].ModifiedAt.IsZero() {
 		t.Fatalf("ModifiedAt is zero; expected populated from List response")
+	}
+}
+
+func TestListRejectsInvalidPrefix(t *testing.T) {
+	s, _ := newMockBackend(t)
+	bad := []string{"/abs", "a/../b", "a/./b", "foo\\bar", "foo\x00bar"}
+	for _, p := range bad {
+		t.Run(p, func(t *testing.T) {
+			_, err := s.List(context.Background(), p, nil)
+			if !errors.Is(err, storage.ErrInvalidArgument) {
+				t.Fatalf("List(%q) err = %v, want ErrInvalidArgument", p, err)
+			}
+		})
+	}
+}
+
+func TestListEmptyPrefixIsValid(t *testing.T) {
+	s, mb := newMockBackend(t)
+	mb.put("k", []byte("v"), `"e"`)
+	page, err := s.List(context.Background(), "", nil)
+	if err != nil {
+		t.Fatalf("List with empty prefix: %v", err)
+	}
+	if len(page.Objects) != 1 {
+		t.Fatalf("Objects len = %d, want 1", len(page.Objects))
 	}
 }

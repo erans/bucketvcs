@@ -9,6 +9,9 @@ import (
 )
 
 func (s *S3Compat) List(ctx context.Context, prefix string, opts *storage.ListOptions) (*storage.ListPage, error) {
+	if err := validateListPrefix(prefix); err != nil {
+		return nil, err
+	}
 	in := &s3.ListObjectsV2Input{
 		Bucket: aws.String(s.cfg.Bucket),
 		Prefix: aws.String(applyPrefix(s.cfg.Prefix, prefix)),

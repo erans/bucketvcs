@@ -51,3 +51,32 @@ func validateKey(key string) error {
 	}
 	return nil
 }
+
+// validateListPrefix checks that a List prefix is well-formed for
+// S3-compatible storage. Differs from validateKey: empty prefix is
+// allowed (matches everything under the adapter prefix), and the
+// prefix need not end with a path separator.
+func validateListPrefix(prefix string) error {
+	if prefix == "" {
+		return nil
+	}
+	if len(prefix) > maxKeyBytes {
+		return fmt.Errorf("%w: list prefix exceeds %d bytes (got %d)", storage.ErrInvalidArgument, maxKeyBytes, len(prefix))
+	}
+	if strings.HasPrefix(prefix, "/") {
+		return fmt.Errorf("%w: list prefix must not start with '/' (got %q)", storage.ErrInvalidArgument, prefix)
+	}
+	if strings.Contains(prefix, "\x00") {
+		return fmt.Errorf("%w: list prefix contains NUL byte", storage.ErrInvalidArgument)
+	}
+	if strings.Contains(prefix, "\\") {
+		return fmt.Errorf("%w: list prefix must not contain backslash (got %q)", storage.ErrInvalidArgument, prefix)
+	}
+	// Path traversal segments: split on "/" and reject "." / ".." segments.
+	for _, seg := range strings.Split(prefix, "/") {
+		if seg == "." || seg == ".." {
+			return fmt.Errorf("%w: list prefix must not contain '.' or '..' segments (got %q)", storage.ErrInvalidArgument, prefix)
+		}
+	}
+	return nil
+}
