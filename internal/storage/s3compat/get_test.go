@@ -120,3 +120,48 @@ func TestGetWithIfVersionMatchesMismatch(t *testing.T) {
 		t.Fatalf("err = %v, want ErrVersionMismatch (412 should classify as VersionMismatch on If-Match)", err)
 	}
 }
+
+func TestGetRangePastEOFReturnsEmpty(t *testing.T) {
+	s, mb := newMockBackend(t)
+	mb.put("foo", []byte("hello"), `"v0"`)
+
+	// Range 100-200 is past EOF (object is 5 bytes).
+	rc, err := s.GetRange(context.Background(), "foo", 100, 200)
+	if err != nil {
+		t.Fatalf("GetRange past EOF: unexpected error %v (want nil + empty reader)", err)
+	}
+	defer rc.Close()
+	body, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(body) != 0 {
+		t.Fatalf("body = %q, want empty", body)
+	}
+}
+
+func TestReadMethodsRejectInvalidKey(t *testing.T) {
+	s, _ := newMockBackend(t)
+	bad := []string{"", "/foo", "foo/", "foo\x00bar"}
+
+	for _, k := range bad {
+		t.Run("Get_"+k, func(t *testing.T) {
+			_, err := s.Get(context.Background(), k, nil)
+			if !errors.Is(err, storage.ErrInvalidArgument) {
+				t.Fatalf("Get(%q) err = %v, want ErrInvalidArgument", k, err)
+			}
+		})
+		t.Run("Head_"+k, func(t *testing.T) {
+			_, err := s.Head(context.Background(), k)
+			if !errors.Is(err, storage.ErrInvalidArgument) {
+				t.Fatalf("Head(%q) err = %v, want ErrInvalidArgument", k, err)
+			}
+		})
+		t.Run("GetRange_"+k, func(t *testing.T) {
+			_, err := s.GetRange(context.Background(), k, 0, 1)
+			if !errors.Is(err, storage.ErrInvalidArgument) {
+				t.Fatalf("GetRange(%q) err = %v, want ErrInvalidArgument", k, err)
+			}
+		})
+	}
+}
