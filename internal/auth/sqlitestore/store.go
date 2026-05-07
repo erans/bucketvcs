@@ -431,6 +431,76 @@ func (s *Store) SetRepoPublic(ctx context.Context, tenant, repo string, public b
 	return nil
 }
 
+// Grant creates or replaces a permission row. perm must be "read", "write",
+// or "admin". Refuses if the (tenant, repo) is not registered.
+func (s *Store) Grant(ctx context.Context, userName, tenant, repo, perm string) error {
+	if perm != "read" && perm != "write" && perm != "admin" {
+		return fmt.Errorf("grant: invalid perm %q", perm)
+	}
+	u, err := s.GetUserByName(ctx, userName)
+	if err != nil {
+		return err
+	}
+	if _, err := s.GetRepoFlags(ctx, tenant, repo); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO repo_permissions (user_id, tenant, repo, perm, granted_at)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(user_id, tenant, repo) DO UPDATE SET perm = excluded.perm,
+		                                                  granted_at = excluded.granted_at`,
+		u.ID, tenant, repo, perm, time.Now().Unix(),
+	)
+	return err
+}
+
+// RevokeRepoPermission removes the permission row for (userName, tenant, repo).
+// No error if the row didn't exist.
+func (s *Store) RevokeRepoPermission(ctx context.Context, userName, tenant, repo string) error {
+	u, err := s.GetUserByName(ctx, userName)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx,
+		`DELETE FROM repo_permissions WHERE user_id = ? AND tenant = ? AND repo = ?`,
+		u.ID, tenant, repo,
+	)
+	return err
+}
+
+// LookupRepoPerm returns the actor's permission level on (tenant, repo).
+// Implements auth.Store.
+func (s *Store) LookupRepoPerm(ctx context.Context, actor *auth.Actor, tenant, repo string) (auth.Perm, error) {
+	if actor == nil {
+		return auth.PermNone, nil
+	}
+	if actor.IsAdmin {
+		return auth.PermAdmin, nil
+	}
+	row := s.db.QueryRowContext(ctx,
+		`SELECT perm FROM repo_permissions
+		   WHERE user_id = ? AND tenant = ? AND repo = ?`,
+		actor.UserID, tenant, repo,
+	)
+	var p string
+	if err := row.Scan(&p); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return auth.PermNone, nil
+		}
+		return auth.PermNone, err
+	}
+	switch p {
+	case "read":
+		return auth.PermRead, nil
+	case "write":
+		return auth.PermWrite, nil
+	case "admin":
+		return auth.PermAdmin, nil
+	default:
+		return auth.PermNone, fmt.Errorf("lookup repo perm: unknown perm %q", p)
+	}
+}
+
 // ListRepos returns repos in `tenant`, or all repos if tenant == "".
 // Ordered by (tenant, name).
 func (s *Store) ListRepos(ctx context.Context, tenant string) ([]*Repo, error) {

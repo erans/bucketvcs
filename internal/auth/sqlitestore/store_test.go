@@ -324,6 +324,83 @@ func TestListRepos(t *testing.T) {
 	}
 }
 
+func TestGrantAndLookup(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+	_, _ = s.CreateUser(ctx, "alice", false)
+	_ = s.RegisterRepo(ctx, "acme", "foo")
+	if err := s.Grant(ctx, "alice", "acme", "foo", "write"); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	u, _ := s.GetUserByName(ctx, "alice")
+	a := &auth.Actor{UserID: u.ID, Name: u.Name}
+	perm, err := s.LookupRepoPerm(ctx, a, "acme", "foo")
+	if err != nil {
+		t.Fatalf("LookupRepoPerm: %v", err)
+	}
+	if perm != auth.PermWrite {
+		t.Fatalf("perm = %v, want PermWrite", perm)
+	}
+}
+
+func TestGrant_RefusesUnregisteredRepo(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+	_, _ = s.CreateUser(ctx, "alice", false)
+	if err := s.Grant(ctx, "alice", "acme", "foo", "read"); !errors.Is(err, auth.ErrNoSuchRepo) {
+		t.Fatalf("want ErrNoSuchRepo, got %v", err)
+	}
+}
+
+func TestRevokeRepoPermission(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+	_, _ = s.CreateUser(ctx, "alice", false)
+	_ = s.RegisterRepo(ctx, "acme", "foo")
+	_ = s.Grant(ctx, "alice", "acme", "foo", "read")
+	if err := s.RevokeRepoPermission(ctx, "alice", "acme", "foo"); err != nil {
+		t.Fatalf("RevokeRepoPermission: %v", err)
+	}
+	u, _ := s.GetUserByName(ctx, "alice")
+	a := &auth.Actor{UserID: u.ID}
+	perm, _ := s.LookupRepoPerm(ctx, a, "acme", "foo")
+	if perm != auth.PermNone {
+		t.Fatalf("perm = %v, want PermNone after revoke", perm)
+	}
+}
+
+func TestLookupRepoPerm_AdminShortCircuits(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+	uid, _ := s.CreateUser(ctx, "root", true)
+	_ = s.RegisterRepo(ctx, "acme", "foo")
+	a := &auth.Actor{UserID: uid, IsAdmin: true}
+	perm, err := s.LookupRepoPerm(ctx, a, "acme", "foo")
+	if err != nil {
+		t.Fatalf("LookupRepoPerm: %v", err)
+	}
+	if perm != auth.PermAdmin {
+		t.Fatalf("perm = %v, want PermAdmin", perm)
+	}
+}
+
+func TestLookupRepoPerm_NilActorIsPermNone(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+	perm, err := s.LookupRepoPerm(ctx, nil, "acme", "foo")
+	if err != nil {
+		t.Fatalf("LookupRepoPerm(nil): %v", err)
+	}
+	if perm != auth.PermNone {
+		t.Fatalf("perm = %v, want PermNone", perm)
+	}
+}
+
 // mustOpen is a tiny test helper.
 func mustOpen(t *testing.T) *Store {
 	t.Helper()
