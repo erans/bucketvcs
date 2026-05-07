@@ -21,21 +21,25 @@ import (
 const defaultMirrorSubdir = "bucketvcs/mirrors"
 const buildVersion = "0.1-dev" // matches gateway agent= advertisement
 
+// runServe is the M3-era serve entry point. M4 Task 23 will rewire it with
+// a proper --auth-db flag and remove the deprecated --auth-token /
+// --auth-scope flags. For now this is a minimal scaffold that:
+//   - keeps cmd/bucketvcs/ buildable (so user/token/repo subcommand tests run)
+//   - opens a default sqlitestore for AuthStore (gateway requires it)
+//   - accepts but rejects/warns about the deprecated --auth-token /
+//     --auth-scope flags so existing serve_test.go behaviour is preserved
 func runServe(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	return runServeWithListener(ctx, args, stdout, stderr, nil)
 }
 
-// runServeWithListener is the real implementation. When ln is non-nil the
-// server uses Serve(ln) instead of ListenAndServe, which lets tests inject
-// an ephemeral listener without touching production flag parsing.
 func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.Writer, ln net.Listener) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	addr := fs.String("addr", "127.0.0.1:8080", "Listen address (host:port); defaults to loopback to avoid unintended network exposure")
 	storeURL := fs.String("store", "", `Store URL (e.g. "localfs:/var/lib/bucketvcs")`)
 	mirrorDir := fs.String("mirror-dir", "", "Mirror cache directory (default $XDG_CACHE_HOME/bucketvcs/mirrors)")
-	authToken := fs.String("auth-token", "", "HTTP Basic auth password (user=bucketvcs); also via BUCKETVCS_AUTH_TOKEN env")
-	authScope := fs.String("auth-scope", "", `"write-only" (default if --auth-token set) or "all"`)
+	authToken := fs.String("auth-token", "", "DEPRECATED: ignored in M4; configure tokens via `bucketvcs user`/`bucketvcs token`")
+	authScope := fs.String("auth-scope", "", "DEPRECATED: ignored in M4; per-repo permissions via `bucketvcs repo grant`")
 	maxBody := fs.Int64("max-body-bytes", 1<<30, "Per-request body limit in bytes")
 	shutdownTimeout := fs.Duration("shutdown-timeout", 30*time.Second, "Graceful shutdown deadline")
 	if err := fs.Parse(args); err != nil {
@@ -48,24 +52,18 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	if *mirrorDir == "" {
 		*mirrorDir = defaultMirrorDir()
 	}
-	token := *authToken
-	if token == "" {
-		token = os.Getenv("BUCKETVCS_AUTH_TOKEN")
+	// Preserve the M3 contract that --auth-scope=all without a token is
+	// a usage error. T23 will replace this with --auth-db wiring.
+	tok := *authToken
+	if tok == "" {
+		tok = os.Getenv("BUCKETVCS_AUTH_TOKEN")
 	}
-	mode := gateway.AuthAnonymous
-	if token != "" {
-		switch strings.ToLower(*authScope) {
-		case "", "write-only":
-			mode = gateway.AuthWriteOnly
-		case "all":
-			mode = gateway.AuthAll
-		default:
-			fmt.Fprintf(stderr, "serve: invalid --auth-scope %q\n", *authScope)
-			return 2
-		}
-	} else if *authScope != "" && strings.ToLower(*authScope) != "anonymous" {
+	if tok == "" && *authScope != "" && strings.ToLower(*authScope) != "anonymous" {
 		fmt.Fprintf(stderr, "serve: --auth-scope=%q without --auth-token\n", *authScope)
 		return 2
+	}
+	if *authToken != "" || *authScope != "" {
+		fmt.Fprintln(stderr, "serve: --auth-token/--auth-scope are deprecated in M4; use `bucketvcs user`/`bucketvcs token` (T23 will wire --auth-db)")
 	}
 
 	store, err := openStore(*storeURL)
@@ -73,13 +71,19 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 		fmt.Fprintf(stderr, "serve: open store: %v\n", err)
 		return 1
 	}
-	defer closeStore(store)
+	_ = store // localfs has no Close
+
+	authS, _, err := openAuthDB("")
+	if err != nil {
+		fmt.Fprintf(stderr, "serve: auth-db: %v\n", err)
+		return 1
+	}
+	defer authS.Close()
 
 	srv, err := gateway.NewServer(store, gateway.Options{
 		MirrorDir:    *mirrorDir,
 		Version:      buildVersion,
-		AuthMode:     mode,
-		AuthToken:    token,
+		AuthStore:    authS,
 		MaxBodyBytes: *maxBody,
 	})
 	if err != nil {
