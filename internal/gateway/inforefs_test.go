@@ -156,6 +156,69 @@ func TestInfoRefs_V0UploadPackFallback(t *testing.T) {
 	}
 }
 
+func TestInfoRefs_V0UploadPack_AdvertisesHEADAndSymref(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeRepoInStore(t, storeDir, "acme", "demo")
+	store, err := localfs.Open(storeDir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	resp, err := http.Get(ts.URL + "/acme/demo.git/info/refs?service=git-upload-pack")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !bytes.Contains(body, []byte(" HEAD\x00")) {
+		t.Fatalf("v0 upload-pack missing HEAD advertisement: %q", body)
+	}
+	if !bytes.Contains(body, []byte("symref=HEAD:refs/heads/main")) {
+		t.Fatalf("v0 upload-pack missing symref capability: %q", body)
+	}
+	hi := bytes.Index(body, []byte(" HEAD\x00"))
+	ri := bytes.Index(body, []byte("refs/heads/main\n"))
+	if hi < 0 || ri < 0 || hi >= ri {
+		t.Fatalf("HEAD must precede refs/heads/main: HEAD@%d ref@%d body=%q", hi, ri, body)
+	}
+}
+
+func TestInfoRefs_V0ReceivePack_NoHEADLine(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeRepoInStore(t, storeDir, "acme", "demo")
+	store, err := localfs.Open(storeDir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	resp, err := http.Get(ts.URL + "/acme/demo.git/info/refs?service=git-receive-pack")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if bytes.Contains(body, []byte(" HEAD\x00")) || bytes.Contains(body, []byte(" HEAD\n")) {
+		t.Fatalf("v0 receive-pack should not advertise HEAD: %q", body)
+	}
+	if bytes.Contains(body, []byte("symref=")) {
+		t.Fatalf("v0 receive-pack should not advertise symref: %q", body)
+	}
+}
+
 func TestInfoRefs_RejectsUnknownService(t *testing.T) {
 	storeDir := t.TempDir()
 	store, _ := localfs.Open(storeDir)

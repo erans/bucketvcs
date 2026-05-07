@@ -55,16 +55,20 @@ func (s *Server) handleInfoRefs(w http.ResponseWriter, r *http.Request, tenant, 
 		return
 	}
 
-	caps := uploadPackV0Caps(s.opts.Version)
-	if service == "git-receive-pack" {
-		caps = receivePackV0Caps(s.opts.Version)
+	if service == "git-upload-pack" {
+		writeV0UploadPackAdvertisement(w, &body, s.opts.Version)
+		return
 	}
-	writeV0Advertisement(w, service, &body, caps)
+	writeV0ReceivePackAdvertisement(w, &body, s.opts.Version)
 }
 
-func writeV0Advertisement(w http.ResponseWriter, service string, body *manifest.Body, caps string) {
+// writeV0UploadPackAdvertisement writes the v0 "smart" upload-pack advertisement.
+// When body.DefaultBranch resolves to a known ref, HEAD is advertised first with
+// capabilities and a symref=HEAD:<target> attribute so v0 clients can determine
+// the remote default branch.
+func writeV0UploadPackAdvertisement(w http.ResponseWriter, body *manifest.Body, version string) {
 	pw := pktline.NewWriter(w)
-	_ = pw.WriteString("# service=" + service + "\n")
+	_ = pw.WriteString("# service=git-upload-pack\n")
 	_ = pw.WriteFlush()
 
 	names := make([]string, 0, len(body.Refs))
@@ -72,6 +76,58 @@ func writeV0Advertisement(w http.ResponseWriter, service string, body *manifest.
 		names = append(names, n)
 	}
 	sort.Strings(names)
+
+	headOID, hasHead := "", false
+	if body.DefaultBranch != "" {
+		if oid, ok := body.Refs[body.DefaultBranch]; ok {
+			headOID, hasHead = oid, true
+		}
+	}
+
+	baseCaps := uploadPackV0Caps(version)
+	if hasHead {
+		caps := baseCaps + " symref=HEAD:" + body.DefaultBranch
+		_ = pw.WriteString(headOID + " HEAD\x00" + caps + "\n")
+		for _, n := range names {
+			_ = pw.WriteString(body.Refs[n] + " " + n + "\n")
+		}
+		_ = pw.WriteFlush()
+		return
+	}
+
+	if len(names) == 0 {
+		_ = pw.WriteString("0000000000000000000000000000000000000000 capabilities^{}\x00" + baseCaps + "\n")
+		_ = pw.WriteFlush()
+		return
+	}
+
+	first := true
+	for _, n := range names {
+		oid := body.Refs[n]
+		if first {
+			_ = pw.WriteString(oid + " " + n + "\x00" + baseCaps + "\n")
+			first = false
+			continue
+		}
+		_ = pw.WriteString(oid + " " + n + "\n")
+	}
+	_ = pw.WriteFlush()
+}
+
+// writeV0ReceivePackAdvertisement writes the v0 receive-pack advertisement.
+// receive-pack does not advertise HEAD (push targets are real refs).
+func writeV0ReceivePackAdvertisement(w http.ResponseWriter, body *manifest.Body, version string) {
+	pw := pktline.NewWriter(w)
+	_ = pw.WriteString("# service=git-receive-pack\n")
+	_ = pw.WriteFlush()
+
+	names := make([]string, 0, len(body.Refs))
+	for n := range body.Refs {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+
+	caps := receivePackV0Caps(version)
 
 	if len(names) == 0 {
 		_ = pw.WriteString("0000000000000000000000000000000000000000 capabilities^{}\x00" + caps + "\n")
