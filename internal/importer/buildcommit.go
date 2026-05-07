@@ -7,7 +7,6 @@ package importer
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -157,21 +156,30 @@ func BuildAndCommit(
 
 	// Upload pack/idx/.bvom/.bvcg via PutIfAbsent.
 	//
-	// Pack/idx use uploadCanonicalArtifact, which treats ErrAlreadyExists as
-	// success: the canonical pack key embeds the pack_id, which is the SHA-1
-	// of the sorted reachable object set. Two BuildAndCommit calls covering
-	// the same object set (e.g. a ref-only push that adds no new objects)
-	// always produce the same pack_id even if deltification differs. The
-	// already-uploaded bytes therefore cover the same objects and are
-	// semantically interchangeable; the loser's bytes become an orphan that
-	// M8 GC sweeps. Erroring here would block legitimate ref-only pushes.
+	// Pack/idx use the strict uploadFile (errors on ErrAlreadyExists). Note
+	// that the pack_id returned by pack-objects is git's trailing SHA-1
+	// over the assembled pack BYTES (header + sorted objects + their
+	// compressed deltas), NOT a hash of the abstract object set — repeated
+	// repacks of the same reachable set normally yield different pack_ids
+	// because delta search is non-deterministic across threads / memory
+	// conditions. So in the common case the canonical key for a fresh
+	// pack_id is empty and PutIfAbsent succeeds.
+	//
+	// If ErrAlreadyExists DOES fire here, it indicates a collision against
+	// pre-existing bytes (orphan from a crashed prior run, replay, or an
+	// extremely lucky deterministic repack). We surface it as an error
+	// because our locally-built .bvom encodes pack offsets specific to OUR
+	// bytes; committing a manifest whose .bvom expects our offsets but
+	// whose pack key resolves to different stored bytes would corrupt
+	// object lookup. CAS-loser detection in the mutator catches the
+	// concurrent-racer variant before any damage.
 	//
 	// .bvom/.bvcg are content-addressed by SHA-256 of their bytes, so
 	// ErrAlreadyExists trivially means "same bytes already there".
-	if err := uploadCanonicalArtifact(ctx, store, canonicalPack, k.CanonicalPackKey(packID)); err != nil {
+	if err := uploadFile(ctx, store, canonicalPack, k.CanonicalPackKey(packID)); err != nil {
 		return nil, fmt.Errorf("importer: BuildAndCommit: upload pack: %w", err)
 	}
-	if err := uploadCanonicalArtifact(ctx, store, canonicalIdx, k.PackIdxKey(packID, "canonical")); err != nil {
+	if err := uploadFile(ctx, store, canonicalIdx, k.PackIdxKey(packID, "canonical")); err != nil {
 		return nil, fmt.Errorf("importer: BuildAndCommit: upload idx: %w", err)
 	}
 	bvomKey := k.ObjectMapKey(idx.ObjectMapHash)
@@ -268,33 +276,6 @@ func mergeRefs(prev, updates map[string]string) (map[string]string, error) {
 		out[ref] = oid
 	}
 	return out, nil
-}
-
-// uploadCanonicalArtifact uploads a canonical pack or idx file via
-// PutIfAbsent and treats ErrAlreadyExists as success.
-//
-// Why this is safe even though pack bytes are not byte-deterministic:
-// the canonical pack key embeds pack_id, which git computes as the SHA-1
-// of the sorted reachable object set. Two repacks of the same logical
-// object set always yield the same pack_id even if the deltification
-// they choose differs. So an existing object at this key necessarily
-// covers the same set of git objects we are about to upload — the bytes
-// may differ but they are semantically interchangeable. Without this
-// behaviour, a ref-only push (which adds no objects, hence the same
-// pack_id as the existing canonical pack) would always fail the upload.
-func uploadCanonicalArtifact(ctx context.Context, store storage.ObjectStore, srcPath, dstKey string) error {
-	f, err := os.Open(srcPath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if _, err := store.PutIfAbsent(ctx, dstKey, f, nil); err != nil {
-		if errors.Is(err, storage.ErrAlreadyExists) {
-			return nil
-		}
-		return err
-	}
-	return nil
 }
 
 // removeKeepFiles deletes any *.keep files left in <bareDir>/objects/pack

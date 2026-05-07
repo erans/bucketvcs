@@ -596,16 +596,21 @@ func TestBuildAndCommit_RejectsDeletingDefaultBranch(t *testing.T) {
 	}
 }
 
-// TestBuildAndCommit_RefOnlyUpdateReusesPack covers the ref-only push
-// case: the second BuildAndCommit adds a new branch pointing at an
-// already-reachable commit. No new objects, so PackObjectsAll returns
-// the same pack_id as the first push, and the canonical pack key
-// already exists in the bucket. uploadCanonicalArtifact must treat
-// that ErrAlreadyExists as success rather than failing the push.
-func TestBuildAndCommit_RefOnlyUpdateReusesPack(t *testing.T) {
+// TestBuildAndCommit_RefOnlyUpdateSucceeds covers the ref-only push
+// case: the second BuildAndCommit creates a new branch pointing at an
+// already-reachable commit. No new objects are added to the reachable
+// set. This must succeed end-to-end (the original concern was that an
+// ErrAlreadyExists on the canonical pack key would block the push).
+//
+// Note: pack-objects' pack_id is the SHA-1 of the assembled pack BYTES,
+// not a hash of the abstract object set. Repeated repacks of the same
+// reachable set yield different pack_ids in practice (delta search is
+// non-deterministic across threads). So in the common case the canonical
+// key for a fresh repack is empty and the upload just succeeds.
+func TestBuildAndCommit_RefOnlyUpdateSucceeds(t *testing.T) {
 	ir := setupImportedRepo(t)
 
-	// First push: advance main to a second commit. This uploads a fresh
+	// First push: advance main to a second commit. Uploads a fresh
 	// canonical pack covering both commits.
 	newOID := ir.addSecondCommit(t)
 	body1, err := BuildAndCommit(context.Background(), ir.store, ir.tenant, ir.repo, ir.bareDir,
@@ -616,32 +621,48 @@ func TestBuildAndCommit_RefOnlyUpdateReusesPack(t *testing.T) {
 	if len(body1.Packs) != 1 {
 		t.Fatalf("first body packs len = %d, want 1", len(body1.Packs))
 	}
-	firstPackID := body1.Packs[0].PackID
 
 	// Create a new ref locally pointing at the SAME object set (the older
-	// commit, already reachable). No new objects to send.
+	// commit, already reachable from refs/heads/main).
 	if out, err := gitcli.RunForTest(ir.bareDir, "update-ref",
 		"refs/heads/feature", ir.mainOID); err != nil {
 		t.Fatalf("update-ref feature: %v: %s", err, out)
 	}
 
-	// Second BuildAndCommit: ref-only update. Same object set, so
-	// PackObjectsAll returns the same pack_id. Without the fix this
-	// fails on ErrAlreadyExists for the canonical pack key.
+	// Second BuildAndCommit: ref-only update. Must succeed and the body
+	// must contain both refs.
 	body2, err := BuildAndCommit(context.Background(), ir.store, ir.tenant, ir.repo, ir.bareDir,
 		map[string]string{"refs/heads/feature": ir.mainOID}, "pusher")
 	if err != nil {
 		t.Fatalf("ref-only BuildAndCommit: %v", err)
 	}
-	if body2.Packs[0].PackID != firstPackID {
-		t.Logf("note: pack_id changed across same-object-set repacks: %q -> %q (delta variance)",
-			firstPackID, body2.Packs[0].PackID)
+	if len(body2.Packs) != 1 {
+		t.Fatalf("ref-only body packs len = %d, want 1", len(body2.Packs))
 	}
 	if body2.Refs["refs/heads/feature"] != ir.mainOID {
 		t.Fatalf("post body feature: got %q, want %q", body2.Refs["refs/heads/feature"], ir.mainOID)
 	}
 	if body2.Refs["refs/heads/main"] != newOID {
 		t.Fatalf("post body main: got %q, want %q", body2.Refs["refs/heads/main"], newOID)
+	}
+	// All canonical artifacts referenced by the post body must exist.
+	if _, err := ir.store.Head(context.Background(), body2.Packs[0].PackKey); err != nil {
+		t.Fatalf("ref-only post pack head: %v", err)
+	}
+	if _, err := ir.store.Head(context.Background(), body2.Packs[0].IdxKey); err != nil {
+		t.Fatalf("ref-only post idx head: %v", err)
+	}
+	if body2.Indexes.ObjectMap == nil {
+		t.Fatalf("ref-only post body missing .bvom")
+	}
+	if _, err := ir.store.Head(context.Background(), body2.Indexes.ObjectMap.Key); err != nil {
+		t.Fatalf("ref-only post .bvom head: %v", err)
+	}
+	if body2.Indexes.CommitGraph == nil {
+		t.Fatalf("ref-only post body missing .bvcg")
+	}
+	if _, err := ir.store.Head(context.Background(), body2.Indexes.CommitGraph.Key); err != nil {
+		t.Fatalf("ref-only post .bvcg head: %v", err)
 	}
 }
 
