@@ -29,6 +29,10 @@ func (s *Server) handleInfoRefs(w http.ResponseWriter, r *http.Request, tenant, 
 			http.Error(w, "repository not found", http.StatusNotFound)
 			return
 		}
+		if errors.Is(err, repoerrs.ErrInvalidTenantID) || errors.Is(err, repoerrs.ErrInvalidRepoID) {
+			http.Error(w, "invalid tenant or repository name", http.StatusBadRequest)
+			return
+		}
 		http.Error(w, "internal storage error", http.StatusInternalServerError)
 		return
 	}

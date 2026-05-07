@@ -4,7 +4,7 @@ package gateway
 import (
 	"fmt"
 	"net/http"
-	"strings"
+	"unicode"
 
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
@@ -33,8 +33,10 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 	if opts.Version == "" {
 		opts.Version = "0.0-dev"
 	}
-	if strings.ContainsAny(opts.Version, "\r\n\x00 ") {
-		return nil, fmt.Errorf("gateway: Version must not contain whitespace or control characters")
+	for _, r := range opts.Version {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return nil, fmt.Errorf("gateway: Version must not contain whitespace or control characters")
+		}
 	}
 	if opts.MaxBodyBytes <= 0 {
 		opts.MaxBodyBytes = 1 << 30 // 1 GiB
