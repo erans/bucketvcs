@@ -27,6 +27,15 @@ import (
 // We define it locally to avoid an import cycle with internal/mirror.
 const gatewayNullOID = "0000000000000000000000000000000000000000"
 
+// errReceivePackProbe signals that the request body contained only a flush
+// packet (no update commands and no pack data). git-remote-curl's
+// "stateless RPC" code (remote-curl.c::probe_rpc) issues such a request as
+// an authentication/connectivity probe BEFORE sending a large push body in
+// chunked encoding. The server must respond 200 OK with an empty body so
+// the client proceeds with the real POST. Treating it as a parse error
+// (HTTP 400) breaks every push above http.postBuffer (default 1 MiB).
+var errReceivePackProbe = errors.New("receive-pack probe (flush-only body)")
+
 // maxUpdateCommands caps the number of update commands a single
 // receive-pack request can carry. Each command spawns a
 // `git check-ref-format` subprocess for refname validation, so an
@@ -129,6 +138,15 @@ func (s *Server) handleReceivePack(w http.ResponseWriter, r *http.Request, tenan
 	if err != nil {
 		if req != nil && req.PackPath != "" {
 			_ = os.Remove(req.PackPath)
+		}
+		if errors.Is(err, errReceivePackProbe) {
+			// Large-request probe: respond 200 OK with an empty body so
+			// the client proceeds to send the real chunked POST. The
+			// content-type advertises receive-pack-result for clients
+			// that may inspect it before issuing the follow-up request.
+			w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
+			w.WriteHeader(http.StatusOK)
+			return
 		}
 		http.Error(w, "receive-pack: "+err.Error(), http.StatusBadRequest)
 		return
@@ -469,12 +487,23 @@ func parseReceivePackRequest(ctx context.Context, body io.Reader, incoming strin
 	for {
 		tok, err := pr.Read()
 		if err == io.EOF {
+			// A body that ends without any pkt-lines at all is the
+			// large-request probe described in errReceivePackProbe — but
+			// real git-remote-curl probes carry a single flush packet
+			// (handled in the Flush branch below). A bare EOF without any
+			// bytes read is an invalid client request.
 			return nil, errors.New("unexpected EOF before flush")
 		}
 		if err != nil {
 			return nil, fmt.Errorf("read commands: %w", err)
 		}
 		if tok.Type == pktline.Flush {
+			// Flush as the very first (and so far only) token with no
+			// commands accumulated is the large-request probe; signal the
+			// caller to short-circuit with a 200 instead of HTTP 400.
+			if first && len(req.Updates) == 0 {
+				return req, errReceivePackProbe
+			}
 			break
 		}
 		if tok.Type != pktline.Data {

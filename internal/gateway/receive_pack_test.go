@@ -52,6 +52,43 @@ func TestReceivePack_AcceptsDeleteOnly(t *testing.T) {
 	}
 }
 
+// TestReceivePack_AcceptsLargeRequestProbe verifies that a flush-only POST
+// body — git-remote-curl's auth/connectivity probe issued before pushing a
+// body larger than http.postBuffer — is answered with 200 OK rather than a
+// 400 "no update commands" error. Regression coverage for the
+// errReceivePackProbe path: without it, every push above ~1 MiB fails with
+// "RPC failed; HTTP 400" before sending a single command.
+func TestReceivePack_AcceptsLargeRequestProbe(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeRepoInStore(t, storeDir, "acme", "demo")
+	store, _ := localfs.Open(storeDir)
+	t.Cleanup(func() { _ = store.Close() })
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	body := pktBody(flush) // exactly 4 bytes: "0000"
+	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("probe status: %d, body=%q", resp.StatusCode, b)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if len(got) != 0 {
+		t.Fatalf("probe body should be empty, got %q", got)
+	}
+}
+
 func TestReceivePack_RejectsBadRefName(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires git binary")
