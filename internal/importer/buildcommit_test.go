@@ -571,6 +571,31 @@ func TestRemoveKeepFiles_Idempotent(t *testing.T) {
 	}
 }
 
+func TestBuildAndCommit_RejectsDeletingDefaultBranch(t *testing.T) {
+	ir := setupImportedRepo(t)
+
+	// Confirm default branch is refs/heads/main and the ref exists.
+	body, _ := ir.readBody(t)
+	if body.DefaultBranch == "" {
+		t.Fatalf("test fixture missing DefaultBranch")
+	}
+	if _, ok := body.Refs[body.DefaultBranch]; !ok {
+		t.Fatalf("test fixture missing the default branch ref %q", body.DefaultBranch)
+	}
+
+	// Attempt to delete the default branch via a null-OID update.
+	updates := map[string]string{
+		body.DefaultBranch: nullOIDHex,
+	}
+	_, err := BuildAndCommit(context.Background(), ir.store, ir.tenant, ir.repo, ir.bareDir, updates, "tester")
+	if err == nil {
+		t.Fatalf("BuildAndCommit: expected error on deleting default branch, got nil")
+	}
+	if !strings.Contains(err.Error(), "default branch") {
+		t.Fatalf("error should mention default branch: %v", err)
+	}
+}
+
 func equalRefMap(a, b map[string]string) bool {
 	if len(a) != len(b) {
 		return false

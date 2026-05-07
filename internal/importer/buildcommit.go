@@ -45,6 +45,12 @@ const nullOIDHex = "0000000000000000000000000000000000000000"
 // Returns the committed manifest body. Old packs become orphans in the
 // bucket; M8 GC sweeps them.
 //
+// Pack non-determinism: git's pack-objects does not produce a deterministic
+// pack ID for identical inputs across runs (delta selection can vary).
+// Two concurrent BuildAndCommit calls with the same merged refs may upload
+// DIFFERENT pack files before CAS resolves. The losing call's pack becomes
+// an orphan in the bucket. M8 GC sweeps these.
+//
 // Cost: O(repo size) per push. For M3 OSS scope this is acceptable;
 // incremental .bvom merge is a future M9 optimization.
 func BuildAndCommit(
@@ -81,6 +87,15 @@ func BuildAndCommit(
 	newRefs, err := mergeRefs(currentBody.Refs, refUpdates)
 	if err != nil {
 		return nil, fmt.Errorf("importer: BuildAndCommit: merge refs: %w", err)
+	}
+
+	// Refuse to commit a body where DefaultBranch points at a deleted ref.
+	// This matches git's "deny-delete-current" behavior. M14 may add an
+	// override flag.
+	if currentBody.DefaultBranch != "" {
+		if _, ok := newRefs[currentBody.DefaultBranch]; !ok {
+			return nil, fmt.Errorf("BuildAndCommit: refuses to delete current default branch %q", currentBody.DefaultBranch)
+		}
 	}
 
 	// Sanity defense: every non-deleted ref OID in newRefs must resolve
