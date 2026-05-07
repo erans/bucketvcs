@@ -268,17 +268,11 @@ func isUniqueViolation(err error) bool {
 		strings.Contains(err.Error(), "constraint failed: UNIQUE")
 }
 
-// crockfordTokenAlphabet matches the alphabet used by auth.GenerateToken.
-// We use it as a defense-in-depth check for prefix queries, but the
-// substr()-based lookup is the primary protection against SQL LIKE
-// metacharacters in user input.
-const crockfordTokenAlphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-
 // isSafeTokenIDPrefix accepts any non-empty ASCII alphanumeric prefix.
-// Real token IDs use the Crockford-base32 alphabet above; the broader
-// alphanumeric check still excludes SQL LIKE metacharacters (% _) and
-// any other shell/SQL-special characters while remaining permissive
-// enough for synthetic IDs used in tests.
+// Real token IDs use the Crockford-base32 alphabet (auth.GenerateToken),
+// which is a strict subset; the broader alphanumeric check still excludes
+// SQL LIKE metacharacters (% _) and any other shell/SQL-special characters
+// while remaining permissive enough for synthetic IDs used in tests.
 func isSafeTokenIDPrefix(s string) bool {
 	if s == "" {
 		return false

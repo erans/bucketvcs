@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,7 +64,11 @@ func TestStress_Push1000Commits(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	cmd := exec.CommandContext(ctx, "git", "-C", work, "push", ts.URL+"/fx/stress.git", "HEAD:refs/heads/main")
+	// M4: receive-pack requires auth. permissiveAuthStore returns a
+	// synthetic admin actor for any Basic credentials, so embed dummy
+	// creds in the URL.
+	pushURL := strings.Replace(ts.URL, "http://", "http://perm:perm@", 1) + "/fx/stress.git"
+	cmd := exec.CommandContext(ctx, "git", "-C", work, "push", pushURL, "HEAD:refs/heads/main")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if ctx.Err() != nil {
