@@ -41,10 +41,19 @@ func (s *Server) routeRepo(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case r.Method == http.MethodGet && rest == "info/refs":
+		if !s.authorize(w, r) {
+			return
+		}
 		s.handleInfoRefs(w, r, tenant, repoID)
 	case r.Method == http.MethodPost && rest == "git-upload-pack":
+		if !s.authorize(w, r) {
+			return
+		}
 		s.handleUploadPack(w, r, tenant, repoID)
 	case r.Method == http.MethodPost && rest == "git-receive-pack":
+		if !s.authorize(w, r) {
+			return
+		}
 		s.handleReceivePack(w, r, tenant, repoID)
 	default:
 		http.NotFound(w, r)

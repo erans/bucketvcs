@@ -9,9 +9,6 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
 
-// AuthMode placeholder — Task 13 defines values.
-type AuthMode int
-
 // Options configures a Server.
 type Options struct {
 	MirrorDir    string
