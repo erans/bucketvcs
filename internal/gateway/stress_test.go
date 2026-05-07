@@ -58,17 +58,20 @@ func TestStress_Push1000Commits(t *testing.T) {
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 
+	const limit = 120 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
+	defer cancel()
+
 	start := time.Now()
-	cmd := exec.Command("git", "-C", work, "push", ts.URL+"/fx/stress.git", "HEAD:refs/heads/main")
+	cmd := exec.CommandContext(ctx, "git", "-C", work, "push", ts.URL+"/fx/stress.git", "HEAD:refs/heads/main")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if ctx.Err() != nil {
+			t.Fatalf("git push timed out after %v (limit=%v)\n%s", time.Since(start), limit, out)
+		}
 		t.Fatalf("git push: %v\n%s", err, out)
 	}
 	elapsed := time.Since(start)
-	const limit = 120 * time.Second
-	if elapsed > limit {
-		t.Fatalf("stress push took %v, expected <%v", elapsed, limit)
-	}
 	t.Logf("stress push of %d commits completed in %v", N, elapsed)
 }
 
