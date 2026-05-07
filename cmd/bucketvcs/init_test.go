@@ -43,11 +43,11 @@ func TestRunInit_AlreadyExists(t *testing.T) {
 
 func TestRunInit_BadFlags(t *testing.T) {
 	cases := [][]string{
-		{}, // missing positional + missing --store
-		{"--store=localfs:/tmp/x"},                  // missing positional
-		{"--store=", "a", "b"},                      // empty store
-		{"--store=localfs:/tmp/x", "a"},             // missing repo
-		{"--store=localfs:/tmp/x", "a", "b", "c"},   // too many
+		{},                              // missing positional + missing --store
+		{"--store=localfs:/tmp/x"},      // missing positional
+		{"--store=", "a", "b"},          // empty store
+		{"--store=localfs:/tmp/x", "a"}, // missing repo
+		{"--store=localfs:/tmp/x", "a", "b", "c"}, // too many
 	}
 	for i, c := range cases {
 		var stdout, stderr bytes.Buffer
