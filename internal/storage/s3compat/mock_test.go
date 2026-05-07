@@ -147,6 +147,13 @@ func (m *mockBackend) serveMultipart(w http.ResponseWriter, r *http.Request) boo
 				return true
 			}
 		}
+		// NOTE: This mock ignores the CompleteMultipartUpload XML body and
+		// assembles all uploaded parts in part-number order. That hides the
+		// case where production code submits the wrong CompletedPart list to
+		// S3. We accept this divergence because (a) validateCompletePartsLocked
+		// already enforces the part contract locally before any SDK call, and
+		// (b) live conformance at T13 against real S3/R2 exercises the full
+		// XML round-trip.
 		// Reassemble parts in part-number order.
 		var pns []int
 		for pn := range up.parts {

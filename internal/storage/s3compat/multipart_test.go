@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -314,5 +315,82 @@ func TestUploadPartLosesRaceToComplete(t *testing.T) {
 	_, err = up.UploadPart(context.Background(), 2, strings.NewReader("nope"))
 	if !errors.Is(err, storage.ErrInvalidArgument) {
 		t.Fatalf("UploadPart after Complete: err = %v, want ErrInvalidArgument", err)
+	}
+}
+
+func TestUploadPartHonorsReaderOffset(t *testing.T) {
+	// readerSize must measure from the caller's current offset, not
+	// rewind to absolute 0. This test passes a *bytes.Reader that is
+	// positioned partway through, and asserts UploadPart sends only
+	// the trailing bytes.
+	s, mb := newMockBackend(t)
+	up, err := s.CreateMultipart(context.Background(), "k", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	full := bytes.NewReader([]byte("hello world!!"))
+	if _, err := full.Seek(6, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	// At this point full.Pos = 6; the slice from here is "world!!" (7 bytes).
+	p, err := up.UploadPart(context.Background(), 1, full)
+	if err != nil {
+		t.Fatalf("UploadPart: %v", err)
+	}
+	if p.Size != 7 {
+		t.Fatalf("Size = %d, want 7 (only trailing bytes after offset 6)", p.Size)
+	}
+	v, err := s.CompleteMultipartIfAbsent(context.Background(), up,
+		[]storage.MultipartPart{p})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	_ = v
+	if got := string(mb.objects["k"].body); got != "world!!" {
+		t.Fatalf("assembled body = %q, want \"world!!\"", got)
+	}
+}
+
+func TestAbortAndCompleteRaceConsistent(t *testing.T) {
+	// Two goroutines: one Aborts, one Completes. Exactly one should
+	// succeed (the first to acquire the mutex); the other should
+	// see terminated=true and return success-equivalent (Abort
+	// idempotent, Complete returns ErrInvalidArgument).
+	s, _ := newMockBackend(t)
+	up, err := s.CreateMultipart(context.Background(), "k", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p1, _ := up.UploadPart(context.Background(), 1, strings.NewReader("hi"))
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	abortErr := make(chan error, 1)
+	completeErr := make(chan error, 1)
+	go func() {
+		defer wg.Done()
+		abortErr <- up.Abort(context.Background())
+	}()
+	go func() {
+		defer wg.Done()
+		_, err := s.CompleteMultipartIfAbsent(context.Background(), up,
+			[]storage.MultipartPart{p1})
+		completeErr <- err
+	}()
+	wg.Wait()
+	close(abortErr)
+	close(completeErr)
+
+	ae := <-abortErr
+	ce := <-completeErr
+
+	// Acceptable outcomes:
+	//  - Abort wins: abort returns nil; complete sees terminated -> ErrInvalidArgument
+	//  - Complete wins: complete returns nil; abort returns nil (idempotent terminated)
+	if ae != nil {
+		t.Fatalf("Abort returned non-nil: %v", ae)
+	}
+	if ce != nil && !errors.Is(ce, storage.ErrInvalidArgument) {
+		t.Fatalf("Complete returned %v, want nil or ErrInvalidArgument", ce)
 	}
 }

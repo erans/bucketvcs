@@ -97,21 +97,24 @@ func (u *upload) markTerminated() {
 }
 
 func (u *upload) Abort(ctx context.Context) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.terminated {
+		return nil // idempotent: already aborted/completed
+	}
 	_, err := u.parent.client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
 		Bucket:   aws.String(u.parent.cfg.Bucket),
 		Key:      aws.String(u.storeKey),
 		UploadId: aws.String(u.uploadID),
 	})
 	if err == nil {
-		u.markTerminated()
+		u.terminated = true
 		return nil
 	}
 	classified := classify(opAbortMultipart, err)
-	// Abort is idempotent: a NoSuchUpload / 404 means the upload was
-	// already aborted or completed. Treat as success.
+	// Already aborted/completed remotely is also terminal.
 	if errors.Is(classified, storage.ErrNotFound) {
-		// Already aborted/completed — also terminal.
-		u.markTerminated()
+		u.terminated = true
 		return nil
 	}
 	return classified
@@ -200,22 +203,29 @@ func (s *S3Compat) CompleteMultipartIfAbsent(ctx context.Context, mu storage.Mul
 	}, nil
 }
 
-// readerSize returns the byte length of body. Body must be a Seeker
-// (which materializeForRetry guarantees today). After this returns,
-// body is rewound to its start.
+// readerSize returns the byte length remaining in body from its
+// current position. body must be a Seeker (which materializeForRetry
+// guarantees today). After this returns, body is rewound to the
+// position it was at when called — NOT to absolute zero, so callers
+// who pass a partially-consumed ReadSeeker get the expected slice
+// uploaded.
 func readerSize(r io.Reader) (int64, error) {
 	seeker, ok := r.(io.Seeker)
 	if !ok {
 		return 0, fmt.Errorf("s3compat: body is not seekable")
 	}
+	start, err := seeker.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, err
+	}
 	end, err := seeker.Seek(0, io.SeekEnd)
 	if err != nil {
 		return 0, err
 	}
-	if _, err := seeker.Seek(0, io.SeekStart); err != nil {
+	if _, err := seeker.Seek(start, io.SeekStart); err != nil {
 		return 0, err
 	}
-	return end, nil
+	return end - start, nil
 }
 
 // validateCompletePartsLocked is the helper used by CompleteMultipartIfAbsent
