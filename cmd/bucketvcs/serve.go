@@ -61,7 +61,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 		fmt.Fprintf(stderr, "serve: open store: %v\n", err)
 		return 1
 	}
-	_ = store // localfs has no Close
+	defer closeStore(store)
 
 	authS, _, err := openAuthDB(*authDB)
 	if err != nil {

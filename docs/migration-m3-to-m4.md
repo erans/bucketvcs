@@ -60,7 +60,7 @@ bucketvcs repo public <tenant>/<repo> on
 ### 5. Start serve
 
 ```bash
-bucketvcs serve --addr 127.0.0.1:8080 --bucket-root /var/lib/bucketvcs
+bucketvcs serve --addr 127.0.0.1:8080 --store localfs:/var/lib/bucketvcs
 ```
 
 `--auth-mode`, `--auth-token`, and `--auth-scope` are no longer recognized.

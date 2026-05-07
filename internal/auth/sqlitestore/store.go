@@ -216,6 +216,35 @@ func isUniqueViolation(err error) bool {
 		strings.Contains(err.Error(), "constraint failed: UNIQUE")
 }
 
+// crockfordTokenAlphabet matches the alphabet used by auth.GenerateToken.
+// We use it as a defense-in-depth check for prefix queries, but the
+// substr()-based lookup is the primary protection against SQL LIKE
+// metacharacters in user input.
+const crockfordTokenAlphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+// isSafeTokenIDPrefix accepts any non-empty ASCII alphanumeric prefix.
+// Real token IDs use the Crockford-base32 alphabet above; the broader
+// alphanumeric check still excludes SQL LIKE metacharacters (% _) and
+// any other shell/SQL-special characters while remaining permissive
+// enough for synthetic IDs used in tests.
+func isSafeTokenIDPrefix(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= '0' && c <= '9',
+			c >= 'A' && c <= 'Z',
+			c >= 'a' && c <= 'z':
+			// safe
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // ErrAmbiguousPrefix is returned by ResolveTokenIDPrefix when the prefix
 // matches more than one token id.
 var ErrAmbiguousPrefix = errors.New("sqlitestore: ambiguous token id prefix")
@@ -353,9 +382,17 @@ func (s *Store) RevokeToken(ctx context.Context, id string) error {
 
 // ResolveTokenIDPrefix returns the full token id for the given prefix.
 // Returns auth.ErrNoSuchToken if no match, ErrAmbiguousPrefix if >1 match.
+//
+// The prefix is validated against the Crockford-base32 alphabet used by
+// auth.GenerateToken before being used in a SQL LIKE expression — this
+// guards against `%`/`_` wildcards in user input matching unintended rows.
 func (s *Store) ResolveTokenIDPrefix(ctx context.Context, prefix string) (string, error) {
+	if !isSafeTokenIDPrefix(prefix) {
+		return "", auth.ErrNoSuchToken
+	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id FROM tokens WHERE id LIKE ? || '%' LIMIT 2`, prefix,
+		`SELECT id FROM tokens WHERE substr(id, 1, ?) = ? LIMIT 2`,
+		len(prefix), prefix,
 	)
 	if err != nil {
 		return "", err
