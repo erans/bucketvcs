@@ -176,7 +176,19 @@ func buildIndexesLocal(ctx context.Context, prep *preparedPack) (*localIndexes, 
 			PackSizeBytes:    0,
 		}, nil
 	}
-	store, err := newLocalFilePackStore(prep.PackPath, prep.IdxPath)
+	return buildIndexesFromPack(ctx, prep.PackPath, prep.IdxPath, prep.PackID, prep.Refs)
+}
+
+// buildIndexesFromPack is the granular core of buildIndexesLocal. It
+// takes a single canonical pack on local disk + the manifest-truth ref
+// map and produces the .bvom / .bvcg bytes plus their SHA-256 hashes.
+//
+// Both Import (via buildIndexesLocal) and BuildAndCommit call this. The
+// pack is assumed to contain every object reachable from refs — caller
+// is responsible for ensuring that (Import uses pack-objects --all on a
+// fresh clone; BuildAndCommit uses repackToCanonical on the bare mirror).
+func buildIndexesFromPack(ctx context.Context, packPath, idxPath, packID string, refs map[string]string) (*localIndexes, error) {
+	store, err := newLocalFilePackStore(packPath, idxPath)
 	if err != nil {
 		return nil, fmt.Errorf("importer: localfile pack store: %w", err)
 	}
@@ -187,14 +199,14 @@ func buildIndexesLocal(ctx context.Context, prep *preparedPack) (*localIndexes, 
 	defer r.Close()
 
 	// .bvom from pack idx.
-	bvom, err := objindex.Build(r, prep.PackID)
+	bvom, err := objindex.Build(r, packID)
 	if err != nil {
 		return nil, fmt.Errorf("importer: objindex.Build: %w", err)
 	}
 	bvomSum := sha256.Sum256(bvom)
 
 	// .bvcg from pack: derive ref tips that point at commits.
-	tips, err := buildTipsFromRefs(ctx, r, prep.Refs)
+	tips, err := buildTipsFromRefs(ctx, r, refs)
 	if err != nil {
 		return nil, fmt.Errorf("importer: buildTipsFromRefs: %w", err)
 	}
@@ -204,7 +216,7 @@ func buildIndexesLocal(ctx context.Context, prep *preparedPack) (*localIndexes, 
 	}
 	bvcgSum := sha256.Sum256(bvcg)
 
-	st, err := os.Stat(prep.PackPath)
+	st, err := os.Stat(packPath)
 	if err != nil {
 		return nil, fmt.Errorf("importer: stat pack: %w", err)
 	}

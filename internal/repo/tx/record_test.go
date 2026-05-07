@@ -93,7 +93,6 @@ func TestMarshal_RejectsExtraKnownBodyKeyEvenWhenBodyFieldOmitted(t *testing.T) 
 	}
 }
 
-
 func TestWrite_PutIfAbsentSemantics(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -633,5 +634,618 @@ func TestCatFile_RejectsDashOID(t *testing.T) {
 	}
 	if _, err := CatFilePretty(context.Background(), dir, "--config=foo"); err == nil {
 		t.Fatalf("expected rejection of dash-prefixed oid")
+	}
+}
+
+// mustGit is a top-level test helper that runs git with the given args in dir
+// and fails the test on error.
+func mustGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	bin, err := resolveBinary()
+	if err != nil {
+		t.Fatalf("resolveBinary: %v", err)
+	}
+	cmd := exec.Command(bin, args...)
+	cmd.Dir = dir
+	cmd.Env = scrubGitRepoEnv(os.Environ())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// mustGitCapture runs git with the given args in dir and returns stdout,
+// failing the test on error.
+func mustGitCapture(t *testing.T, dir string, args ...string) []byte {
+	t.Helper()
+	out, err := RunForTest(dir, args...)
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return out
+}
+
+func TestPackObjectsForFetch_RoundTrip(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "src.git")
+
+	mustGit(t, dir, "init", "--bare", bare)
+	work := filepath.Join(dir, "wt")
+	mustGit(t, dir, "clone", bare, work)
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "init")
+	mustGit(t, work, "push", "origin", "HEAD:refs/heads/main")
+	tip := strings.TrimSpace(string(mustGitCapture(t, work, "rev-parse", "HEAD")))
+
+	ctx := context.Background()
+	out, err := PackObjectsForFetch(ctx, bare, PackForFetchOptions{
+		Wants:      []string{tip},
+		Haves:      nil,
+		ThinPack:   true,
+		IncludeTag: true,
+		OfsDelta:   true,
+	})
+	if err != nil {
+		t.Fatalf("PackObjectsForFetch: %v", err)
+	}
+	defer out.Close()
+
+	dst := filepath.Join(dir, "dst.git")
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		t.Fatalf("mkdir dst: %v", err)
+	}
+	if err := InitBare(ctx, dst); err != nil {
+		t.Fatalf("InitBare: %v", err)
+	}
+	packDir := filepath.Join(dst, "objects", "pack")
+	if err := os.MkdirAll(packDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	packPath := filepath.Join(packDir, "pack-test.pack")
+	f, err := os.Create(packPath)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := io.Copy(f, out); err != nil {
+		t.Fatalf("copy: %v", err)
+	}
+	f.Close()
+	if err := IndexPack(ctx, dst, packPath); err != nil {
+		t.Fatalf("IndexPack: %v", err)
+	}
+}
+
+func TestRevParseObjectKind_CommitTagBlob(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "src.git")
+	mustGit(t, dir, "init", "--bare", bare)
+	work := filepath.Join(dir, "wt")
+	mustGit(t, dir, "clone", bare, work)
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "x")
+	mustGit(t, work, "tag", "v1")
+	mustGit(t, work, "push", "origin", "HEAD:refs/heads/main", "tag", "v1")
+
+	ctx := context.Background()
+	commitOID := strings.TrimSpace(string(mustGitCapture(t, work, "rev-parse", "HEAD")))
+	tagOID := strings.TrimSpace(string(mustGitCapture(t, work, "rev-parse", "v1")))
+
+	if k, err := RevParseObjectKind(ctx, bare, commitOID); err != nil || k != "commit" {
+		t.Fatalf("commit: kind=%q err=%v", k, err)
+	}
+	if k, err := RevParseObjectKind(ctx, bare, tagOID); err != nil {
+		t.Fatalf("tag: err=%v", err)
+	} else if k != "commit" && k != "tag" {
+		t.Fatalf("tag kind=%q", k)
+	}
+}
+
+func TestPackObjectsForFetch_IncrementalWithHaves(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "src.git")
+	mustGit(t, dir, "init", "--bare", bare)
+	work := filepath.Join(dir, "wt")
+	mustGit(t, dir, "clone", bare, work)
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("v1\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "v1")
+	firstOID := strings.TrimSpace(string(mustGitCapture(t, work, "rev-parse", "HEAD")))
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("v2\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "v2")
+	secondOID := strings.TrimSpace(string(mustGitCapture(t, work, "rev-parse", "HEAD")))
+	mustGit(t, work, "push", "origin", "HEAD:refs/heads/main")
+
+	// Incremental fetch: have firstOID, want secondOID. The result should be
+	// non-empty (at least the new commit and modified blob) and indexable.
+	ctx := context.Background()
+	out, err := PackObjectsForFetch(ctx, bare, PackForFetchOptions{
+		Wants:    []string{secondOID},
+		Haves:    []string{firstOID},
+		ThinPack: true,
+		OfsDelta: true,
+	})
+	if err != nil {
+		t.Fatalf("PackObjectsForFetch: %v", err)
+	}
+
+	dst := filepath.Join(dir, "dst.git")
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := InitBare(ctx, dst); err != nil {
+		t.Fatalf("InitBare: %v", err)
+	}
+	packDir := filepath.Join(dst, "objects", "pack")
+	if err := os.MkdirAll(packDir, 0o755); err != nil {
+		t.Fatalf("mkdir pack: %v", err)
+	}
+	packPath := filepath.Join(packDir, "pack-incr.pack")
+	f, err := os.Create(packPath)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	n, err := io.Copy(f, out)
+	if err != nil {
+		t.Fatalf("copy: %v", err)
+	}
+	if n == 0 {
+		t.Fatalf("incremental pack was empty")
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close pack file: %v", err)
+	}
+	// Close() is the only place pack-objects exit status is surfaced —
+	// call it explicitly (not deferred) and fail on non-clean exit.
+	if err := out.Close(); err != nil {
+		t.Fatalf("Close (pack-objects exit): %v", err)
+	}
+	// Thin packs need --fix-thin to be indexable into a fresh repo. We don't
+	// have IndexPackStrict here yet (Task 10), so just verify nonzero size
+	// and clean subprocess exit (asserted above).
+}
+
+func TestPackObjectsForFetch_BogusWantSurfacesError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "src.git")
+	mustGit(t, dir, "init", "--bare", bare)
+
+	ctx := context.Background()
+	out, err := PackObjectsForFetch(ctx, bare, PackForFetchOptions{
+		Wants: []string{"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"},
+	})
+	if err != nil {
+		// Acceptable: the start path may detect the bogus want and fail early.
+		return
+	}
+	_, _ = io.Copy(io.Discard, out)
+	if err := out.Close(); err == nil {
+		t.Fatalf("Close: expected error for bogus want OID")
+	}
+}
+
+func TestRevParseObjectKind_MissingOIDReturnsError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "src.git")
+	mustGit(t, dir, "init", "--bare", bare)
+	if _, err := RevParseObjectKind(context.Background(), bare, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"); err == nil {
+		t.Fatalf("RevParseObjectKind: expected error for missing oid")
+	}
+}
+
+// TestRevParseObjectKind_RejectsNonHexInputs ensures RevParseObjectKind
+// refuses ref names, short OIDs, and revision syntax — only strict hex
+// OIDs are accepted, matching the godoc contract.
+func TestRevParseObjectKind_RejectsNonHexInputs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "src.git")
+	mustGit(t, dir, "init", "--bare", bare)
+	work := filepath.Join(dir, "wt")
+	mustGit(t, dir, "clone", bare, work)
+	if err := os.WriteFile(filepath.Join(work, "x.txt"), []byte("y"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "x")
+	mustGit(t, work, "push", "origin", "HEAD:refs/heads/main")
+	ctx := context.Background()
+	for _, in := range []string{
+		"",
+		"HEAD",
+		"main",
+		"HEAD^{tree}",
+		"HEAD:x.txt",
+		"deadbeef",                          // short OID
+		"-deadbeefdeadbeefdeadbeefdeadbeef", // dash-prefixed
+		"DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF", // uppercase
+		"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\nmain",
+	} {
+		if _, err := RevParseObjectKind(ctx, bare, in); err == nil {
+			t.Fatalf("RevParseObjectKind(%q): expected validation error, got nil", in)
+		}
+	}
+}
+
+func TestPackObjectsForFetch_ShallowFileForwardedAsConfig(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "src.git")
+	mustGit(t, dir, "init", "--bare", bare)
+	work := filepath.Join(dir, "wt")
+	mustGit(t, dir, "clone", bare, work)
+	// Build A -> B -> C so we can prove the shallow boundary excludes
+	// ancestors from the resulting pack.
+	for i, txt := range []string{"a", "b", "c"} {
+		if err := os.WriteFile(filepath.Join(work, "f.txt"), []byte(txt), 0o644); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+		mustGit(t, work, "add", ".")
+		mustGit(t, work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", txt)
+	}
+	mustGit(t, work, "push", "origin", "HEAD:refs/heads/main")
+	tip := strings.TrimSpace(string(mustGitCapture(t, work, "rev-parse", "HEAD")))
+
+	// countCommits returns how many commit objects are present in the
+	// pack stream produced by PackObjectsForFetch.
+	countCommits := func(t *testing.T, opts PackForFetchOptions) int {
+		t.Helper()
+		ctx := context.Background()
+		rc, err := PackObjectsForFetch(ctx, bare, opts)
+		if err != nil {
+			t.Fatalf("PackObjectsForFetch: %v", err)
+		}
+		packDir := t.TempDir()
+		packPath := filepath.Join(packDir, "in.pack")
+		f, err := os.Create(packPath)
+		if err != nil {
+			t.Fatalf("create pack: %v", err)
+		}
+		if _, err := io.Copy(f, rc); err != nil {
+			t.Fatalf("copy pack: %v", err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatalf("close pack file: %v", err)
+		}
+		if err := rc.Close(); err != nil {
+			t.Fatalf("close pack reader: %v", err)
+		}
+		// Index the pack so we can list its objects.
+		mustGit(t, packDir, "index-pack", "in.pack")
+		out := mustGitCapture(t, packDir, "verify-pack", "-v", "in.pack")
+		commits := 0
+		for _, line := range strings.Split(string(out), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 && fields[1] == "commit" {
+				commits++
+			}
+		}
+		return commits
+	}
+
+	// Baseline: no shallow file -> all 3 commits in the pack.
+	full := countCommits(t, PackForFetchOptions{Wants: []string{tip}})
+	if full != 3 {
+		t.Fatalf("baseline pack: expected 3 commits, got %d", full)
+	}
+
+	// With a shallow file that marks the tip itself as shallow, history
+	// is cut at C and pack-objects must NOT include C's ancestors. If
+	// the shallow file is silently ignored (the prior `-c core.shallow=`
+	// bug), the pack would still contain all 3 commits.
+	shallow := filepath.Join(t.TempDir(), "shallow")
+	if err := os.WriteFile(shallow, []byte(tip+"\n"), 0o644); err != nil {
+		t.Fatalf("write shallow: %v", err)
+	}
+	got := countCommits(t, PackForFetchOptions{
+		Wants:       []string{tip},
+		ShallowFile: shallow,
+	})
+	if got != 1 {
+		t.Fatalf("shallow pack: expected 1 commit (boundary at tip), got %d (shallow file likely ignored)", got)
+	}
+}
+
+// TestPackObjectsForFetch_RejectsNonHexWantsAndHaves verifies that
+// PackObjectsForFetch rejects untrusted-looking want/have values before
+// invoking git, so newline injection, leading-dash flag injection, or
+// revision syntax (`^`, `..`, `:`, `~`) cannot smuggle extra revs or
+// exclusions into `git pack-objects --revs` stdin.
+func TestPackObjectsForFetch_RejectsNonHexWantsAndHaves(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "src.git")
+	mustGit(t, dir, "init", "--bare", bare)
+	ctx := context.Background()
+
+	cases := []struct {
+		name string
+		opts PackForFetchOptions
+	}{
+		{"empty want", PackForFetchOptions{Wants: []string{""}}},
+		{"newline want", PackForFetchOptions{Wants: []string{"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\nHEAD"}}},
+		{"dash want", PackForFetchOptions{Wants: []string{"--all"}}},
+		{"caret rev want", PackForFetchOptions{Wants: []string{"^deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}}},
+		{"branch name want", PackForFetchOptions{Wants: []string{"main"}}},
+		{"short oid want", PackForFetchOptions{Wants: []string{"deadbeef"}}},
+		{"uppercase want", PackForFetchOptions{Wants: []string{"DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF"}}},
+		{"non-hex char want", PackForFetchOptions{Wants: []string{"zeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}}},
+		{"newline have", PackForFetchOptions{
+			Wants: []string{"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"},
+			Haves: []string{"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n--all"},
+		}},
+		{"dash have", PackForFetchOptions{
+			Wants: []string{"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"},
+			Haves: []string{"--shallow-exclude=main"},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := PackObjectsForFetch(ctx, bare, tc.opts)
+			if err == nil {
+				if out != nil {
+					_ = out.Close()
+				}
+				t.Fatalf("PackObjectsForFetch: expected validation error, got nil")
+			}
+		})
+	}
+}
+
+func TestIndexPackStrict_RoundTrip(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "src.git")
+	mustGit(t, dir, "init", "--bare", bare)
+	work := filepath.Join(dir, "wt")
+	mustGit(t, dir, "clone", bare, work)
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "x")
+	mustGit(t, work, "push", "origin", "HEAD:refs/heads/main")
+	tip := strings.TrimSpace(string(mustGitCapture(t, work, "rev-parse", "HEAD")))
+
+	// Build a thin pack from src/bare into a tempfile.
+	ctx := context.Background()
+	r, err := PackObjectsForFetch(ctx, bare, PackForFetchOptions{Wants: []string{tip}, ThinPack: true, OfsDelta: true})
+	if err != nil {
+		t.Fatalf("PackObjectsForFetch: %v", err)
+	}
+	defer r.Close()
+	tmp := filepath.Join(dir, "incoming.pack")
+	f, err := os.Create(tmp)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := io.Copy(f, r); err != nil {
+		t.Fatalf("copy: %v", err)
+	}
+	f.Close()
+
+	// Index it into a fresh bare.
+	dst := filepath.Join(dir, "dst.git")
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := InitBare(ctx, dst); err != nil {
+		t.Fatalf("InitBare: %v", err)
+	}
+	idxPath, err := IndexPackStrict(ctx, dst, tmp)
+	if err != nil {
+		t.Fatalf("IndexPackStrict: %v", err)
+	}
+	if _, err := os.Stat(idxPath); err != nil {
+		t.Fatalf("idx not present: %v", err)
+	}
+}
+
+func TestIndexPackStrict_RejectsCorruptPack(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "dst.git")
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := InitBare(context.Background(), dst); err != nil {
+		t.Fatalf("InitBare: %v", err)
+	}
+	bad := filepath.Join(dir, "bad.pack")
+	if err := os.WriteFile(bad, []byte("PACK\x00\x00\x00\x02not a real pack"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := IndexPackStrict(context.Background(), dst, bad); err == nil {
+		t.Fatalf("IndexPackStrict: expected error on corrupt pack")
+	}
+}
+
+func TestRevListNotAll_EmptyMeansClean(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "src.git")
+	mustGit(t, dir, "init", "--bare", bare)
+	work := filepath.Join(dir, "wt")
+	mustGit(t, dir, "clone", bare, work)
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "x")
+	mustGit(t, work, "push", "origin", "HEAD:refs/heads/main")
+	tip := strings.TrimSpace(string(mustGitCapture(t, work, "rev-parse", "HEAD")))
+
+	missing, err := RevListNotAll(context.Background(), bare, []string{tip})
+	if err != nil {
+		t.Fatalf("RevListNotAll: %v", err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("RevListNotAll: expected empty, got %v", missing)
+	}
+}
+
+func TestFsckConnectivityOnly_PassesOnCleanRepo(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "src.git")
+	mustGit(t, dir, "init", "--bare", bare)
+	work := filepath.Join(dir, "wt")
+	mustGit(t, dir, "clone", bare, work)
+	_ = os.WriteFile(filepath.Join(work, "a.txt"), []byte("x"), 0o644)
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "x")
+	mustGit(t, work, "push", "origin", "HEAD:refs/heads/main")
+
+	if err := FsckConnectivityOnly(context.Background(), bare); err != nil {
+		t.Fatalf("FsckConnectivityOnly: %v", err)
+	}
+}
+
+func TestUpdateRefDelete_Removes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "src.git")
+	mustGit(t, dir, "init", "--bare", bare)
+	work := filepath.Join(dir, "wt")
+	mustGit(t, dir, "clone", bare, work)
+	_ = os.WriteFile(filepath.Join(work, "a.txt"), []byte("x"), 0o644)
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "x")
+	mustGit(t, work, "push", "origin", "HEAD:refs/heads/temp")
+	oid := strings.TrimSpace(string(mustGitCapture(t, work, "rev-parse", "HEAD")))
+
+	if err := UpdateRefDelete(context.Background(), bare, "refs/heads/temp", oid); err != nil {
+		t.Fatalf("UpdateRefDelete: %v", err)
+	}
+	out, err := RunForTest(bare, "rev-parse", "--verify", "refs/heads/temp")
+	if err == nil {
+		t.Fatalf("ref not deleted: %s", out)
+	}
+}
+
+func TestUpdateRefDelete_RejectsBadInput(t *testing.T) {
+	ctx := context.Background()
+	if err := UpdateRefDelete(ctx, t.TempDir(), "bad ref", "1111111111111111111111111111111111111111"); err == nil {
+		t.Fatalf("expected error on bad ref name")
+	}
+	if err := UpdateRefDelete(ctx, t.TempDir(), "refs/heads/main", "not-an-oid"); err == nil {
+		t.Fatalf("expected error on bad oid")
+	}
+}
+
+func TestUpdateRefCAS_HappyPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "src.git")
+	mustGit(t, dir, "init", "--bare", bare)
+	work := filepath.Join(dir, "wt")
+	mustGit(t, dir, "clone", bare, work)
+	_ = os.WriteFile(filepath.Join(work, "a.txt"), []byte("v1"), 0o644)
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "v1")
+	mustGit(t, work, "push", "origin", "HEAD:refs/heads/main")
+	oldOID := strings.TrimSpace(string(mustGitCapture(t, bare, "rev-parse", "refs/heads/main")))
+	_ = os.WriteFile(filepath.Join(work, "a.txt"), []byte("v2"), 0o644)
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "v2")
+	newOID := strings.TrimSpace(string(mustGitCapture(t, work, "rev-parse", "HEAD")))
+	mustGit(t, work, "push", "origin", "HEAD:refs/heads/main")
+
+	// Reset bare's main back to oldOID so the CAS has work to do.
+	mustGit(t, bare, "update-ref", "refs/heads/main", oldOID)
+	if err := UpdateRefCAS(context.Background(), bare, "refs/heads/main", newOID, oldOID); err != nil {
+		t.Fatalf("UpdateRefCAS: %v", err)
+	}
+	got := strings.TrimSpace(string(mustGitCapture(t, bare, "rev-parse", "refs/heads/main")))
+	if got != newOID {
+		t.Fatalf("ref not updated: %s vs %s", got, newOID)
+	}
+}
+
+func TestUpdateRefCAS_RejectsStaleOldOID(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "src.git")
+	mustGit(t, dir, "init", "--bare", bare)
+	work := filepath.Join(dir, "wt")
+	mustGit(t, dir, "clone", bare, work)
+	_ = os.WriteFile(filepath.Join(work, "a.txt"), []byte("v1"), 0o644)
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "v1")
+	mustGit(t, work, "push", "origin", "HEAD:refs/heads/main")
+	currentOID := strings.TrimSpace(string(mustGitCapture(t, bare, "rev-parse", "refs/heads/main")))
+
+	// Try CAS with a wrong oldOID — should fail.
+	wrongOldOID := "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	someNewOID := currentOID // doesn't matter what we set, the CAS check fails first
+	if err := UpdateRefCAS(context.Background(), bare, "refs/heads/main", someNewOID, wrongOldOID); err == nil {
+		t.Fatalf("UpdateRefCAS: expected error on stale oldOID")
+	}
+}
+
+func TestRevListNotAll_RejectsNonHexInputs(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "bare.git")
+	mustGit(t, dir, "init", "--bare", bare)
+	for _, bad := range []string{
+		"HEAD",
+		"refs/heads/main",
+		"main",
+		"deadbeef", // short
+		"HEAD^",
+		"main..feature",
+		"DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF", // uppercase
+		"deadbeefdeadbeefdeadbeefdeadbeefdeadbee",  // 39 chars
+		"-evil",
+		"\nevil",
+	} {
+		if _, err := RevListNotAll(ctx, bare, []string{bad}); err == nil {
+			t.Fatalf("RevListNotAll(%q): expected error", bad)
+		}
 	}
 }

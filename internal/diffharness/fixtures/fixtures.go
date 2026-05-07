@@ -23,17 +23,22 @@ type Builder func(t *testing.T, dir string) Fixture
 
 // Registry maps fixture names to builders.
 var Registry = map[string]Builder{
-	"empty":            buildEmpty,
-	"single_commit":    buildSingleCommit,
-	"linear_3_commits": buildLinear3,
-	"branch_and_merge": buildBranchAndMerge,
-	"lightweight_tag":  buildLightweightTag,
-	"annotated_tag":    buildAnnotatedTag,
-	"symref_head":      buildSymrefHead,
-	"two_branches":     buildTwoBranchesDivergent,
-	"binary_blob":      buildBlobWithBinaryContent,
-	"deep_tree":        buildDeepNestedTrees,
-	"replace_ref":      buildReplaceRef,
+	"empty":                        buildEmpty,
+	"single_commit":                buildSingleCommit,
+	"linear_3_commits":             buildLinear3,
+	"branch_and_merge":             buildBranchAndMerge,
+	"lightweight_tag":              buildLightweightTag,
+	"annotated_tag":                buildAnnotatedTag,
+	"symref_head":                  buildSymrefHead,
+	"two_branches":                 buildTwoBranchesDivergent,
+	"binary_blob":                  buildBlobWithBinaryContent,
+	"deep_tree":                    buildDeepNestedTrees,
+	"replace_ref":                  buildReplaceRef,
+	"force_push_overwrite":         buildForcePushOverwrite,
+	"delete_branch":                buildDeleteBranch,
+	"atomic_multi_ref_push":        buildAtomicMultiRefPush,
+	"incremental_fetch_after_push": buildIncrementalFetchAfterPush,
+	"shallow_clone_depth_1":        buildShallowCloneDepth1,
 }
 
 // buildBareFromWork clones a non-bare working repo into a bare repo at dir.

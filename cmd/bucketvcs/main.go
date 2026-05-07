@@ -38,6 +38,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return runExport(ctx, rest, stdout, stderr)
 	case "cat-object":
 		return runCatObject(ctx, rest, stdout, stderr)
+	case "serve":
+		return runServe(ctx, rest, stdout, stderr)
 	case "-h", "--help", "help":
 		usage(stdout)
 		return 0
@@ -57,6 +59,7 @@ Subcommands:
   import             Round-trip a bare git repo into bucketvcs storage
   export             Materialize a bare git repo from bucketvcs storage
   cat-object         Read a Git object from a bucketvcs repo
+  serve              Run the HTTP smart-Git gateway
 
 Run "bucketvcs <subcommand> --help" for subcommand flags.
 `)

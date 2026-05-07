@@ -152,3 +152,54 @@ func buildReplaceRef(t *testing.T, dir string) Fixture {
 	buildBareFromWork(t, work, dir)
 	return finalize(t, "replace_ref", dir)
 }
+
+func buildForcePushOverwrite(t *testing.T, dir string) Fixture {
+	work := initWork(t)
+	commitFile(t, work, "a.txt", "first\n", "first")
+	mustGit(t, work, "branch", "before")
+	mustGit(t, work, "checkout", "-B", "after")
+	// Diverge from "before" by amending the commit (different commit OID,
+	// same tree shape would also work but amend is simpler).
+	mustGit(t, work, "commit", "--amend", "-m", "first-amended")
+	mustGit(t, work, "checkout", "before")
+	buildBareFromWork(t, work, dir)
+	return finalize(t, "force_push_overwrite", dir)
+}
+
+func buildDeleteBranch(t *testing.T, dir string) Fixture {
+	work := initWork(t)
+	commitFile(t, work, "a.txt", "main\n", "init")
+	mustGit(t, work, "branch", "to-delete")
+	buildBareFromWork(t, work, dir)
+	return finalize(t, "delete_branch", dir)
+}
+
+func buildAtomicMultiRefPush(t *testing.T, dir string) Fixture {
+	work := initWork(t)
+	commitFile(t, work, "a.txt", "main\n", "init")
+	mustGit(t, work, "checkout", "-B", "topic-a")
+	commitFile(t, work, "a.txt", "topic-a\n", "topic-a")
+	mustGit(t, work, "checkout", "main")
+	mustGit(t, work, "checkout", "-B", "topic-b")
+	commitFile(t, work, "b.txt", "topic-b\n", "topic-b")
+	mustGit(t, work, "checkout", "main")
+	buildBareFromWork(t, work, dir)
+	return finalize(t, "atomic_multi_ref_push", dir)
+}
+
+func buildIncrementalFetchAfterPush(t *testing.T, dir string) Fixture {
+	work := initWork(t)
+	commitFile(t, work, "a.txt", "first\n", "first")
+	commitFile(t, work, "a.txt", "second\n", "second")
+	buildBareFromWork(t, work, dir)
+	return finalize(t, "incremental_fetch_after_push", dir)
+}
+
+func buildShallowCloneDepth1(t *testing.T, dir string) Fixture {
+	work := initWork(t)
+	commitFile(t, work, "a.txt", "v1\n", "v1")
+	commitFile(t, work, "a.txt", "v2\n", "v2")
+	commitFile(t, work, "a.txt", "v3\n", "v3")
+	buildBareFromWork(t, work, dir)
+	return finalize(t, "shallow_clone_depth_1", dir)
+}

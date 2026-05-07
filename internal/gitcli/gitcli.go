@@ -6,12 +6,15 @@
 package gitcli
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -165,6 +168,26 @@ func validRefOrOID(s string) bool {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// validHexOID reports whether s is a strict lowercase-hex object ID of
+// SHA-1 (40 chars) or SHA-256 (64 chars) length. Unlike validRefOrOID it
+// rejects any character that is not [0-9a-f], which makes it safe to feed
+// untrusted client input to git commands that consume revision lists on
+// stdin (e.g. `git pack-objects --revs`), where leading dashes, newlines,
+// or revision-syntax (`^`, `..`, `:`, `~`) could otherwise inject extra
+// revs or options.
+func validHexOID(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
 			return false
 		}
 	}
@@ -493,5 +516,310 @@ func CheckRefFormat(ctx context.Context, name string) error {
 		return fmt.Errorf("gitcli: CheckRefFormat: invalid name %q", name)
 	}
 	_, err := run(ctx, "", "check-ref-format", name)
+	return err
+}
+
+// PackForFetchOptions configures PackObjectsForFetch.
+type PackForFetchOptions struct {
+	Wants       []string
+	Haves       []string // ^<oid> exclusion list
+	ThinPack    bool
+	IncludeTag  bool
+	OfsDelta    bool
+	NoProgress  bool   // suppress stderr-as-progress
+	ShallowFile string // optional path to a shallow file (passed via GIT_SHALLOW_FILE)
+	// Depth is informational only — actual depth handling for shallow fetches
+	// is via the ShallowFile contents written by the caller before invocation.
+	// Stored for caller bookkeeping; not consumed by this package.
+	Depth int
+}
+
+// PackObjectsForFetch invokes "git pack-objects --revs --stdout" against the
+// bare repo at dir, feeding wants and ^haves via stdin and returning an
+// io.ReadCloser over the resulting pack stream. The caller MUST Close() the
+// returned reader (which waits for git to exit and surfaces nonzero exit
+// status as an error).
+//
+// Wants/haves are validated as strict hex object IDs before invocation;
+// callers do NOT need to pre-sanitize for shell metacharacters.
+//
+// SECURITY — REACHABILITY IS THE CALLER'S JOB. This wrapper does NOT verify
+// that wants are advertised, reachable from advertised refs, or otherwise
+// authorized. `git pack-objects --revs` will happily pack any object the
+// caller names if it exists in the repo, so a client that knows or guesses
+// an OID could exfiltrate hidden objects. Callers (the v2proto fetch
+// handler / gateway) MUST enforce upload-pack-style allow-tip / allow-reachable-sha1
+// semantics against an advertised want set BEFORE handing OIDs to this
+// function. See M3 Tasks 14-15 (gateway info/refs + git-upload-pack).
+//
+// Any output on stderr is captured into the returned error on close-failure;
+// it is NOT streamed to a side-band by this layer (the caller wraps it).
+func PackObjectsForFetch(ctx context.Context, dir string, opts PackForFetchOptions) (io.ReadCloser, error) {
+	bin, err := resolveBinary()
+	if err != nil {
+		return nil, err
+	}
+	// Strict OID validation: wants/haves are written to `git pack-objects
+	// --revs` stdin. They may be client-controlled, so reject anything that
+	// is not a strict hex OID — otherwise newlines, leading dashes, or
+	// revision syntax (^, .., :, ~) could inject extra revs or exclusions
+	// and cause git to pack unintended objects.
+	for i, w := range opts.Wants {
+		if !validHexOID(w) {
+			return nil, fmt.Errorf("pack-objects: invalid want[%d] %q (must be hex object id)", i, w)
+		}
+	}
+	for i, h := range opts.Haves {
+		if !validHexOID(h) {
+			return nil, fmt.Errorf("pack-objects: invalid have[%d] %q (must be hex object id)", i, h)
+		}
+	}
+	args := []string{"--no-replace-objects", "pack-objects", "--revs", "--stdout"}
+	if opts.ThinPack {
+		args = append(args, "--thin")
+	}
+	if opts.IncludeTag {
+		args = append(args, "--include-tag")
+	}
+	if opts.OfsDelta {
+		args = append(args, "--delta-base-offset")
+	}
+	if opts.NoProgress {
+		args = append(args, "-q")
+	}
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Dir = dir
+	env := scrubGitRepoEnv(os.Environ())
+	if opts.ShallowFile != "" {
+		// GIT_SHALLOW_FILE is the documented, supported mechanism for
+		// pointing pack-objects (and other plumbing) at an alternate
+		// shallow boundary. The previously used `-c core.shallow=...`
+		// is silently ignored by git — there is no such config key.
+		env = append(env, "GIT_SHALLOW_FILE="+opts.ShallowFile)
+	}
+	cmd.Env = env
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("pack-objects: stdin pipe: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("pack-objects: stdout pipe: %w", err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("pack-objects: start: %w", err)
+	}
+
+	go func() {
+		defer stdin.Close()
+		bw := bufio.NewWriter(stdin)
+		for _, w := range opts.Wants {
+			fmt.Fprintf(bw, "%s\n", w)
+		}
+		for _, h := range opts.Haves {
+			fmt.Fprintf(bw, "^%s\n", h)
+		}
+		_ = bw.Flush()
+	}()
+
+	return &packObjectsReader{r: stdout, cmd: cmd, dir: dir, stderr: &stderr}, nil
+}
+
+type packObjectsReader struct {
+	r      io.ReadCloser
+	cmd    *exec.Cmd
+	dir    string
+	stderr *bytes.Buffer
+}
+
+func (p *packObjectsReader) Read(b []byte) (int, error) { return p.r.Read(b) }
+
+func (p *packObjectsReader) Close() error {
+	closeErr := p.r.Close()
+	waitErr := p.cmd.Wait()
+	if waitErr != nil {
+		exit := -1
+		var ee *exec.ExitError
+		if errors.As(waitErr, &ee) {
+			exit = ee.ExitCode()
+		}
+		return &runError{
+			cmd:    p.cmd.Path,
+			args:   p.cmd.Args[1:],
+			dir:    p.dir,
+			exit:   exit,
+			cause:  waitErr,
+			stderr: redactCreds(p.stderr.String()),
+		}
+	}
+	return closeErr
+}
+
+// RevParseObjectKind returns the object type ("commit", "tag", "tree",
+// "blob") for the OID in the bare repo at dir, or an error if the object is
+// missing or unparseable. The oid argument MUST be a strict hex object ID
+// (40-char SHA-1 or 64-char SHA-256, lowercase). Ref names, short OIDs, and
+// revision syntax (HEAD, main, HEAD^{tree}, HEAD:path, etc.) are rejected
+// — callers that want to resolve a name to a kind must first translate it
+// to an OID via a path that performs its own authorization.
+func RevParseObjectKind(ctx context.Context, dir, oid string) (string, error) {
+	if !validHexOID(oid) {
+		return "", fmt.Errorf("rev-parse: invalid oid %q (must be hex object id)", oid)
+	}
+	out, err := run(ctx, dir, "--no-replace-objects", "cat-file", "-t", oid)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// UpdateRefDelete deletes ref atomically, asserting that ref currently
+// resolves to oldOID. Equivalent to "git update-ref -d <ref> <oldOID>".
+//
+// Stub for M3 Task 9 (mirror.IngestPack); Task 10 promotes this with
+// dedicated tests and any additional hardening the push path needs.
+func UpdateRefDelete(ctx context.Context, dir, ref, oldOID string) error {
+	if !validRefOrOID(ref) {
+		return fmt.Errorf("gitcli: UpdateRefDelete: invalid ref %q", ref)
+	}
+	if !validRefOrOID(oldOID) {
+		return fmt.Errorf("gitcli: UpdateRefDelete: invalid oldOID %q", oldOID)
+	}
+	_, err := run(ctx, dir, "update-ref", "-d", "--", ref, oldOID)
+	return err
+}
+
+// UpdateRefCAS updates ref to newOID, asserting it currently resolves to
+// oldOID. Equivalent to "git update-ref <ref> <newOID> <oldOID>".
+//
+// Stub for M3 Task 9 (mirror.IngestPack); Task 10 promotes this with
+// dedicated tests and any additional hardening the push path needs.
+func UpdateRefCAS(ctx context.Context, dir, ref, newOID, oldOID string) error {
+	if !validRefOrOID(ref) {
+		return fmt.Errorf("gitcli: UpdateRefCAS: invalid ref %q", ref)
+	}
+	if !validRefOrOID(newOID) {
+		return fmt.Errorf("gitcli: UpdateRefCAS: invalid newOID %q", newOID)
+	}
+	if !validRefOrOID(oldOID) {
+		return fmt.Errorf("gitcli: UpdateRefCAS: invalid oldOID %q", oldOID)
+	}
+	_, err := run(ctx, dir, "update-ref", "--", ref, newOID, oldOID)
+	return err
+}
+
+// IndexPackStrict runs `git index-pack --stdin --strict --fix-thin --keep`
+// against the bare repo at dir, streaming packPath via stdin. The pack is
+// written into dir/objects/pack/pack-<hash>.{pack,idx,keep}. Returns the
+// path to the produced .idx file.
+//
+// The .keep file is intentionally left in place to prevent `git gc` /
+// `git repack` from racing the caller; callers MUST remove the .keep file
+// after they have either advertised the new objects via a ref update
+// (mirror.IngestPack) or decided to abandon the pack. `--fix-thin` requires
+// `--stdin`, so this helper unconditionally streams the input file rather
+// than passing it as a positional argument.
+func IndexPackStrict(ctx context.Context, dir, packPath string) (string, error) {
+	if packPath == "" || packPath[0] == '-' {
+		return "", fmt.Errorf("gitcli: IndexPackStrict: invalid packPath %q", packPath)
+	}
+	bin, err := resolveBinary()
+	if err != nil {
+		return "", err
+	}
+	f, err := os.Open(packPath)
+	if err != nil {
+		return "", fmt.Errorf("gitcli: IndexPackStrict: open pack: %w", err)
+	}
+	defer f.Close()
+	cmd := exec.CommandContext(ctx, bin, "-C", dir,
+		"--no-replace-objects", "index-pack",
+		"--stdin", "--strict", "--fix-thin", "--keep")
+	cmd.Env = scrubGitRepoEnv(os.Environ())
+	cmd.Stdin = f
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		exit := -1
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			exit = ee.ExitCode()
+		}
+		return "", &runError{
+			cmd:    bin,
+			args:   []string{"-C", dir, "--no-replace-objects", "index-pack", "--stdin", "--strict", "--fix-thin", "--keep"},
+			dir:    dir,
+			exit:   exit,
+			cause:  err,
+			stderr: stderr.String(),
+		}
+	}
+	// Stdout is "<pack-hash>\n" without --keep, or "keep\t<pack-hash>\n"
+	// when --keep is in effect. Strip the optional "keep\t" prefix and
+	// validate.
+	hash := strings.TrimSpace(stdout.String())
+	hash = strings.TrimPrefix(hash, "keep\t")
+	if !validHexOID(hash) {
+		return "", fmt.Errorf("gitcli: IndexPackStrict: unexpected stdout %q", stdout.String())
+	}
+	idx := filepath.Join(dir, "objects", "pack", "pack-"+hash+".idx")
+	if _, err := os.Stat(idx); err != nil {
+		return "", fmt.Errorf("gitcli: IndexPackStrict: idx not produced at %s: %w", idx, err)
+	}
+	return idx, nil
+}
+
+// RevListNotAll runs `git rev-list --objects <oids...> --not --all` against
+// the bare repo at dir. Returns the list of OIDs that are reachable from
+// the given oids but NOT from any current ref. After a successful
+// IndexPackStrict, the inbound pack's contents should be the only members
+// of this set; if any "missing" OIDs from the pack don't appear, connectivity
+// is intact.
+//
+// In the validation flow we typically just want "any output ⇒ unreachable
+// objects exist"; the caller intersects with pack contents to detect
+// missing parents/trees/blobs.
+func RevListNotAll(ctx context.Context, dir string, oids []string) ([]string, error) {
+	for _, o := range oids {
+		if !validHexOID(o) {
+			return nil, fmt.Errorf("gitcli: RevListNotAll: invalid oid %q", o)
+		}
+	}
+	args := []string{"--no-replace-objects", "rev-list", "--objects"}
+	args = append(args, oids...)
+	args = append(args, "--not", "--all")
+	out, err := run(ctx, dir, args...)
+	if err != nil {
+		return nil, err
+	}
+	trimmed := strings.TrimSpace(string(out))
+	if trimmed == "" {
+		return nil, nil
+	}
+	var found []string
+	for _, line := range strings.Split(trimmed, "\n") {
+		if line == "" {
+			continue
+		}
+		// "<oid> [<path>]"
+		if i := strings.IndexByte(line, ' '); i >= 0 {
+			found = append(found, line[:i])
+		} else {
+			found = append(found, line)
+		}
+	}
+	return found, nil
+}
+
+// FsckConnectivityOnly runs `git fsck --connectivity-only --no-dangling
+// --no-progress` against dir. Used as a defensive double-check after
+// IndexPackStrict.
+func FsckConnectivityOnly(ctx context.Context, dir string) error {
+	_, err := run(ctx, dir, "--no-replace-objects", "fsck", "--connectivity-only", "--no-dangling", "--no-progress")
 	return err
 }

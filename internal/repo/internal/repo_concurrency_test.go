@@ -68,8 +68,8 @@ func RunPropertyManifestVersionMonotonic(t *testing.T, factory StoreFactory) {
 				key := "k_" + strconv.Itoa(w*commitsPerWriter+i)
 				const logicalRetryCap = 100
 				var (
-					txID  string
-					cerr  error
+					txID string
+					cerr error
 				)
 				for attempt := 0; attempt < logicalRetryCap; attempt++ {
 					txID, cerr = r.Commit(ctx,
@@ -214,7 +214,7 @@ func TestCommit_Scenario_TwoWritersOneWins(t *testing.T) {
 		err  error
 	}
 	var (
-		barrier        sync.WaitGroup
+		barrier          sync.WaitGroup
 		firstAttemptDone [2]atomic.Bool
 	)
 	barrier.Add(2)
