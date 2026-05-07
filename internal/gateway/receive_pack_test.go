@@ -2,13 +2,21 @@ package gateway
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/bucketvcs/bucketvcs/internal/importer"
+	"github.com/bucketvcs/bucketvcs/internal/repo"
+	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 )
 
@@ -151,11 +159,12 @@ func TestReceivePack_StagesPackToIncomingDir(t *testing.T) {
 	}
 }
 
-// TestReceivePack_ReportSignalsNotImplemented verifies the placeholder
-// report-status emits "unpack ng" and per-ref "ng" so a real Git client
-// surfaces the push as failed (commit logic lands in Task 17). HTTP is
-// 200 because report-status framing requires a 2xx response.
-func TestReceivePack_ReportSignalsNotImplemented(t *testing.T) {
+// TestReceivePack_ReportEmitsUnpackOkAndNgForStale verifies that the
+// report-status framing is well-formed: "unpack ok" header (the pack
+// itself was processed; here there's no pack so unpack is trivially OK)
+// followed by "ng <ref> stale info" for the rejected delete (the
+// supplied old-OID does not match the actual ref tip).
+func TestReceivePack_ReportEmitsUnpackOkAndNgForStale(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires git binary")
 	}
@@ -168,9 +177,9 @@ func TestReceivePack_ReportSignalsNotImplemented(t *testing.T) {
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 
-	const oldOID = "1111111111111111111111111111111111111111"
+	const wrongOldOID = "1111111111111111111111111111111111111111"
 	body := pktBody(
-		dataLine(oldOID+" "+testNullOID+" refs/heads/feature\x00report-status\n"),
+		dataLine(wrongOldOID+" "+testNullOID+" refs/heads/feature\x00report-status\n"),
 		flush,
 	)
 	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
@@ -182,11 +191,14 @@ func TestReceivePack_ReportSignalsNotImplemented(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("status %d, want 200", resp.StatusCode)
 	}
-	if !bytes.Contains(got, []byte("unpack not-implemented")) {
-		t.Fatalf("expected 'unpack not-implemented' in report, got %q", got)
+	if !bytes.Contains(got, []byte("unpack ok")) {
+		t.Fatalf("expected 'unpack ok' in report, got %q", got)
 	}
 	if !bytes.Contains(got, []byte("ng refs/heads/feature")) {
 		t.Fatalf("expected 'ng refs/heads/feature' in report, got %q", got)
+	}
+	if !bytes.Contains(got, []byte("stale info")) {
+		t.Fatalf("expected 'stale info' reason, got %q", got)
 	}
 }
 
@@ -233,8 +245,11 @@ func TestReceivePack_ReportUsesSidebandWhenNegotiated(t *testing.T) {
 	}
 	// Even though the pkt-line is band-1 wrapped, the inner stream still
 	// contains the report — verify by substring.
-	if !bytes.Contains(got, []byte("unpack not-implemented")) {
-		t.Fatalf("inner report missing 'unpack not-implemented': %q", got)
+	if !bytes.Contains(got, []byte("unpack ok")) {
+		t.Fatalf("inner report missing 'unpack ok': %q", got)
+	}
+	if !bytes.Contains(got, []byte("ng refs/heads/feature")) {
+		t.Fatalf("inner report missing 'ng refs/heads/feature': %q", got)
 	}
 }
 
@@ -314,11 +329,14 @@ func TestReceivePack_RejectsExtraTrailingNewline(t *testing.T) {
 	}
 }
 
-// TestReceivePack_RejectsMissingLFTerminator verifies the strict
-// terminator rule from the other direction: pack-protocol(5) requires
-// each command to end with exactly one LF, and a frame with no
-// terminator at all must be rejected rather than silently accepted.
-func TestReceivePack_RejectsMissingLFTerminator(t *testing.T) {
+// TestReceivePack_AcceptsMissingLFTerminator verifies the relaxed
+// terminator policy: pack-protocol(5) describes the command line as
+// "<old> <new> <name>" with the LF permitted but optional. Real `git
+// push` clients (observed: git 2.54) omit the LF entirely, so the parser
+// MUST accept commands without a trailing newline. We still reject
+// anything else malformed downstream (OID/refname validation runs after
+// the optional LF strip).
+func TestReceivePack_AcceptsMissingLFTerminator(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires git binary")
 	}
@@ -332,7 +350,7 @@ func TestReceivePack_RejectsMissingLFTerminator(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	const oldOID = "1111111111111111111111111111111111111111"
-	// No trailing LF on the (only) command line.
+	// No trailing LF on the (only) command line — must be accepted.
 	body := pktBody(
 		dataLine(oldOID+" "+testNullOID+" refs/heads/feature\x00report-status"),
 		flush,
@@ -342,12 +360,8 @@ func TestReceivePack_RejectsMissingLFTerminator(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
-	if resp.StatusCode != 400 {
-		t.Fatalf("missing LF: status %d, want 400", resp.StatusCode)
-	}
-	got, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(got), "missing LF") {
-		t.Fatalf("expected 'missing LF' message, got %q", got)
+	if resp.StatusCode != 200 {
+		t.Fatalf("missing LF (now permitted): status %d, want 200", resp.StatusCode)
 	}
 }
 
@@ -394,5 +408,120 @@ func TestReceivePack_RejectsTooManyCommands(t *testing.T) {
 	got, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(got), "too many update commands") {
 		t.Fatalf("expected 'too many update commands' message, got %q", got)
+	}
+}
+
+// TestReceivePack_GitPushEndToEnd drives a real `git push` against the
+// gateway and verifies the new ref appears in the bucket manifest. This
+// is the keystone test for Task 17: the placeholder report-status from
+// Task 16 reported every push as "ng not-implemented", which would cause
+// `git push` to exit with a failure status. After Task 17 the push must
+// succeed end-to-end through the full validate + repack + commit +
+// IngestPack pipeline.
+func TestReceivePack_GitPushEndToEnd(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	store, err := localfs.Open(storeDir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	// Seed an empty bucket repo. The push will create refs/heads/main
+	// where there was no ref before (unborn default branch).
+	srcBare := filepath.Join(t.TempDir(), "seed.git")
+	mustExecGW(t, "", "git", "init", "--bare", srcBare)
+	if _, err := importer.Import(context.Background(), store, importer.Options{
+		Tenant: "acme", Repo: "demo", SourceDir: srcBare, DefaultBranch: "refs/heads/main",
+	}); err != nil {
+		t.Fatalf("seed Import: %v", err)
+	}
+
+	srv, err := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	// Build a populated working repo to push from.
+	work := filepath.Join(t.TempDir(), "wt")
+	mustExecGW(t, "", "git", "init", work)
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustExecGW(t, work, "git", "add", ".")
+	mustExecGW(t, work, "git", "-c", "user.email=t@t", "-c", "user.name=t",
+		"commit", "-m", "init")
+	cmd := exec.Command("git", "-C", work, "push",
+		ts.URL+"/acme/demo.git", "HEAD:refs/heads/main")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git push: %v\n%s", err, out)
+	}
+
+	// Verify ref now lives in manifest body.
+	r2, err := repo.Open(context.Background(), store, "acme", "demo")
+	if err != nil {
+		t.Fatalf("repo.Open: %v", err)
+	}
+	view, err := r2.ReadRoot(context.Background())
+	if err != nil {
+		t.Fatalf("ReadRoot: %v", err)
+	}
+	var body manifest.Body
+	if err := json.Unmarshal(view.Body, &body); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if _, ok := body.Refs["refs/heads/main"]; !ok {
+		t.Fatalf("expected refs/heads/main in manifest after push: %+v", body.Refs)
+	}
+}
+
+// TestReceivePack_RejectsStaleOldOID asserts that a non-create command
+// whose old-OID does not match the bucket's current ref tip is rejected
+// with "ng <ref> stale info". The push body still includes a (fake)
+// pack body so the parser exercises the full read path; the validation
+// must reject before any pack ingest is attempted.
+func TestReceivePack_RejectsStaleOldOID(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeRepoInStore(t, storeDir, "acme", "demo")
+	store, err := localfs.Open(storeDir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	srv, err := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	const wrongOldOID = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	const fakeNewOID = "1111111111111111111111111111111111111111"
+	body := pktBody(
+		dataLine(wrongOldOID+" "+fakeNewOID+" refs/heads/main\x00report-status\n"),
+		flush,
+	)
+	body = append(body, []byte("PACK\x00\x00\x00\x02fakebytes")...)
+	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	respBody, _ := io.ReadAll(resp.Body)
+	if !bytes.Contains(respBody, []byte("ng refs/heads/main")) {
+		t.Fatalf("expected 'ng refs/heads/main' in response, got: %q", respBody)
+	}
+	if !bytes.Contains(respBody, []byte("stale info")) {
+		t.Fatalf("expected 'stale info' reason: %q", respBody)
 	}
 }

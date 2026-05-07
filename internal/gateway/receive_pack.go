@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,8 +15,11 @@ import (
 	"strings"
 
 	"github.com/bucketvcs/bucketvcs/internal/gitcli"
+	"github.com/bucketvcs/bucketvcs/internal/importer"
+	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/pktline"
 	"github.com/bucketvcs/bucketvcs/internal/repo"
+	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
 	"github.com/bucketvcs/bucketvcs/internal/repo/repoerrs"
 )
 
@@ -46,12 +50,31 @@ type receivePackRequest struct {
 }
 
 // handleReceivePack implements POST /<tenant>/<repo>.git/git-receive-pack
-// for the v0 receive-pack protocol. Task 16's responsibility is parsing
-// only: capture the update commands and capability set, stream any inbound
-// pack to the mirror's incoming/ staging dir, then emit a placeholder
-// "ok everything" report. Task 17 will replace the placeholder with full
-// validation + commit logic (pack ingest via index-pack, ref-update CAS,
-// connectivity checks, atomic-mode handling).
+// for the v0 receive-pack protocol. It parses update commands + capability
+// set, stages any inbound pack to the mirror's incoming/ dir, then runs
+// the full validate + commit + IngestPack pipeline:
+//
+//  1. Sync mirror to current bucket state (via mgr.Open) and acquire the
+//     per-repo write lock for the rest of the request.
+//  2. Validate every command's old-OID against the manifest body. In atomic
+//     mode any failure poisons the entire batch.
+//  3. If a pack accompanied the request: index-pack --strict --fix-thin
+//     into the bare, then a `rev-list <new-oids> --not --all` connectivity
+//     check.
+//  4. Hand the accepted commands to importer.BuildAndCommit, which repacks
+//     the bare into one canonical pack, uploads to the bucket, and CAS-
+//     commits a new manifest version. Stale-manifest losers fail the CAS
+//     and are reported as "stale-manifest".
+//  5. Re-read the manifest header to grab the post-commit version + tx ID,
+//     then mirror.IngestPack to bump local refs + sentinel. The pack itself
+//     is already in the bare from step 3, so IngestPack is called with
+//     packPath="" (refs+sentinel only, per Task 10's ARCH-1 review note).
+//  6. Emit a report-status pkt-line stream (side-band-wrapped if the client
+//     advertised side-band-64k).
+//
+// Failure modes are signaled via the report rather than HTTP status: a 200
+// with "ng <ref> <reason>" is the wire protocol's failure channel, since
+// report-status framing requires a 2xx response.
 func (s *Server) handleReceivePack(w http.ResponseWriter, r *http.Request, tenant, repoID string) {
 	defer r.Body.Close()
 	body := http.MaxBytesReader(w, r.Body, s.opts.MaxBodyBytes)
@@ -71,6 +94,13 @@ func (s *Server) handleReceivePack(w http.ResponseWriter, r *http.Request, tenan
 		http.Error(w, "internal storage error", http.StatusInternalServerError)
 		return
 	}
+	// mgr.Open runs SyncToCurrent under its own RLock/Lock, leaving the
+	// mirror current at this point. We deliberately do NOT call
+	// SyncToCurrent again under our own write lock — RWMutex is not
+	// reentrant and SyncToCurrent's fast path takes RLock, which would
+	// deadlock. Any TOCTOU between Open's sync and our Lock() below is
+	// resolved by re-reading the manifest body under the write lock and by
+	// BuildAndCommit's CAS, which is the authoritative gate for ref drift.
 	m, err := s.mgr.Open(r.Context(), tenant, repoID)
 	if err != nil {
 		http.Error(w, "mirror: "+err.Error(), http.StatusInternalServerError)
@@ -86,34 +116,258 @@ func (s *Server) handleReceivePack(w http.ResponseWriter, r *http.Request, tenan
 		return
 	}
 
-	// Acquire the per-repo write lock. Task 17's commit logic will run
-	// while this lock is held; for Task 16 there is no mutation, but we
-	// still acquire the lock to exercise the same lifecycle and surface
-	// any future deadlock at parse time rather than first-commit time.
+	// Acquire the per-repo write lock. Held for the entire validate +
+	// commit + IngestPack pipeline so two concurrent pushes serialize
+	// against the local bare. (CAS at the bucket layer is the broader
+	// guarantee for cross-process concurrency.)
 	m.Lock()
 	defer m.Unlock()
 
-	// Task 17 will replace this with full validation + commit. For Task 16
-	// we MUST NOT report success — no pack ingest, no ref update, no CAS
-	// has actually happened. We emit an honest report-status of "unpack ng
-	// not-implemented" + per-ref "ng <ref> not-implemented" so a real Git
-	// client surfaces the push as failed. The HTTP layer still returns 200
-	// because report-status framing requires a 2xx response; the failure
-	// is communicated via the report itself per pack-protocol(5).
+	// The staged pack in incoming/ is consumed by IndexPackStrict (which
+	// reads it via stdin and writes pack-<hash>.{pack,idx,keep} into the
+	// bare's objects/pack/). On every exit path we remove the staging
+	// file. The bare's pack files have separate ownership and are NOT
+	// removed here — BuildAndCommit's removeKeepFiles handles the .keep
+	// on the success path; on failure paths the .keep stays and the next
+	// successful push (or M9 stale-detection rebuild) reconciles.
+	defer func() {
+		if req.PackPath != "" {
+			_ = os.Remove(req.PackPath)
+		}
+	}()
+
 	w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
-	if err := writeReportNotImplemented(w, req); err != nil {
-		// best-effort — the response is already partially written and
-		// surfacing an error here would corrupt the report.
-		_ = err
+	s.completeReceivePack(r.Context(), w, m, req, tenant, repoID)
+}
+
+// completeReceivePack runs steps 4-13 of the push pipeline. The caller
+// MUST hold m.Lock() and is responsible for the lifecycle of req.PackPath
+// (the staged inbound pack file in incoming/).
+func (s *Server) completeReceivePack(
+	ctx context.Context,
+	w http.ResponseWriter,
+	m *mirror.Mirror,
+	req *receivePackRequest,
+	tenant, repoID string,
+) {
+	// Read the current manifest body under our write lock so old-OID
+	// validation sees a snapshot consistent with the BuildAndCommit CAS
+	// that follows.
+	r2, err := repo.Open(ctx, s.store, tenant, repoID)
+	if err != nil {
+		writeReceiveReport(w, "internal-error: "+err.Error(), nil, req.Caps)
+		return
+	}
+	view, err := r2.ReadRoot(ctx)
+	if err != nil {
+		writeReceiveReport(w, "internal-error: "+err.Error(), nil, req.Caps)
+		return
+	}
+	var currentBody manifest.Body
+	if err := json.Unmarshal(view.Body, &currentBody); err != nil {
+		writeReceiveReport(w, "internal-error: "+err.Error(), nil, req.Caps)
+		return
 	}
 
-	// Always clean up the staged pack at the end of Task 16's path. Task 17
-	// will rename/move it (e.g. via git index-pack) BEFORE this defer fires,
-	// at which point os.Remove on the original name becomes a no-op.
-	if req.PackPath != "" {
-		_ = os.Remove(req.PackPath)
-		_ = os.Remove(strings.TrimSuffix(req.PackPath, ".pack") + ".idx")
+	// Step 5: validate old-OID for each command.
+	statuses := make([]string, len(req.Updates)) // "" = ok-so-far, else "ng <ref> <reason>"
+	allOK := true
+	for i, u := range req.Updates {
+		if u.OldOID == gatewayNullOID {
+			// Create: ref must NOT exist.
+			if _, exists := currentBody.Refs[u.Refname]; exists {
+				statuses[i] = "ng " + u.Refname + " ref already exists"
+				allOK = false
+			}
+		} else {
+			cur, ok := currentBody.Refs[u.Refname]
+			if !ok || cur != u.OldOID {
+				statuses[i] = "ng " + u.Refname + " stale info"
+				allOK = false
+			}
+		}
 	}
+
+	// Step 6: atomic batch handling — any failure poisons the whole batch.
+	if req.IsAtomic && !allOK {
+		for i, u := range req.Updates {
+			if statuses[i] == "" {
+				statuses[i] = "ng " + u.Refname + " atomic-batch-failed"
+			}
+		}
+		writeReceiveReport(w, "ok", statuses, req.Caps)
+		return
+	}
+
+	// If non-atomic and EVERY command failed pre-pack-validation, there's
+	// nothing to ingest. Emit the report and return.
+	allFailed := true
+	for _, s := range statuses {
+		if s == "" {
+			allFailed = false
+			break
+		}
+	}
+	if allFailed {
+		writeReceiveReport(w, "ok", statuses, req.Caps)
+		return
+	}
+
+	// Step 7: index any inbound pack into the bare. IndexPackStrict places
+	// pack-<hash>.{pack,idx,keep} under <bare>/objects/pack/. The .keep
+	// guards the new objects from a racing GC; BuildAndCommit's
+	// removeKeepFiles clears it on the happy path. On error paths below
+	// we leave the .keep + pack in place — a subsequent successful push
+	// or stale-detection rebuild reconciles. (Cleaner cleanup is deferred
+	// to M9.)
+	if req.PackPath != "" {
+		if _, err := gitcli.IndexPackStrict(ctx, m.BareDir(), req.PackPath); err != nil {
+			writeReceiveReport(w, "invalid-pack: "+err.Error(), nil, req.Caps)
+			return
+		}
+	}
+
+	// Step 8: connectivity. After IndexPackStrict has placed the inbound
+	// pack into the bare with --strict --fix-thin (which itself validates
+	// the pack is self-contained and closed under reachability), we run
+	// `git rev-list --objects <new-oids> --not --all` as a defensive
+	// double-check that walking from the new tips hits no missing objects.
+	//
+	// CRITICAL: a NON-empty rev-list output is normal — it lists exactly
+	// the objects newly introduced by this push (reachable from new-oids
+	// but not from any prior ref; for a first push to an empty repo this
+	// is every object in the pack). What we care about is whether rev-list
+	// SUCCEEDED. A non-zero exit means the walk hit a missing object,
+	// which is the connectivity failure we're guarding against. Empty
+	// output with success is fine; non-empty output with success is also
+	// fine.
+	if req.PackPath != "" {
+		var newOIDs []string
+		for i, u := range req.Updates {
+			if statuses[i] == "" && u.NewOID != gatewayNullOID {
+				newOIDs = append(newOIDs, u.NewOID)
+			}
+		}
+		if len(newOIDs) > 0 {
+			if _, err := gitcli.RevListNotAll(ctx, m.BareDir(), newOIDs); err != nil {
+				writeReceiveReport(w, "missing-connectivity: "+err.Error(), nil, req.Caps)
+				return
+			}
+		}
+	}
+
+	// Step 9: build the refUpdates map for accepted commands.
+	refUpdates := map[string]string{}
+	for i, u := range req.Updates {
+		if statuses[i] != "" {
+			continue
+		}
+		refUpdates[u.Refname] = u.NewOID
+	}
+	if len(refUpdates) == 0 {
+		// Defensive — covered by the allFailed branch above, but the
+		// invariant matters: never call BuildAndCommit with an empty map
+		// and an existing repo (it would CAS a no-op manifest version).
+		writeReceiveReport(w, "ok", statuses, req.Caps)
+		return
+	}
+
+	// Step 9b: apply ref updates to the LOCAL bare BEFORE BuildAndCommit.
+	// BuildAndCommit's contract (importer/buildcommit.go header) requires
+	// "the inbound validated pack and any new ref tips already applied"
+	// — its repack uses `git pack-objects` driven by `rev-list --all`,
+	// which would emit nothing if the new tip's ref doesn't yet exist in
+	// the bare, leaving the canonical pack empty and buildTipsFromRefs
+	// failing with "oid not in idx".
+	//
+	// We use gitcli directly rather than mirror.IngestPack because IngestPack
+	// also writes a sentinel — and at this point we don't yet know the
+	// post-commit manifest version. The sentinel is written at the end of
+	// the pipeline via a separate IngestPack(refs=nil) call.
+	//
+	// On failure here the local bare is in an undefined state (some refs
+	// may have been applied). We report internal-mirror-error; a follow-up
+	// SyncToCurrent will rebuild from the bucket on the next request.
+	for i, u := range req.Updates {
+		if statuses[i] != "" {
+			continue
+		}
+		mu := mirror.RefUpdate{Refname: u.Refname, OldOID: u.OldOID, NewOID: u.NewOID}
+		if err := applyRefUpdateInBare(ctx, m.BareDir(), mu); err != nil {
+			for j, uu := range req.Updates {
+				if statuses[j] == "" {
+					statuses[j] = "ng " + uu.Refname + " internal-mirror-error"
+				}
+			}
+			writeReceiveReport(w, "ok", statuses, req.Caps)
+			return
+		}
+	}
+
+	// Step 10: BuildAndCommit. This repacks the bare into a canonical pack,
+	// uploads pack/idx/.bvom/.bvcg, and CAS-commits a new manifest body.
+	// Stale-manifest losers (concurrent pushes that won the CAS race) are
+	// surfaced via err message "stale manifest" / "lost CAS".
+	if _, err := importer.BuildAndCommit(ctx, s.store, tenant, repoID, m.BareDir(), refUpdates, "push"); err != nil {
+		reason := "internal-storage-error"
+		emsg := err.Error()
+		if strings.Contains(emsg, "stale manifest") || strings.Contains(emsg, "lost the CAS race") {
+			reason = "stale-manifest"
+		}
+		for i, u := range req.Updates {
+			if statuses[i] == "" {
+				statuses[i] = "ng " + u.Refname + " " + reason
+			}
+		}
+		writeReceiveReport(w, "ok", statuses, req.Caps)
+		return
+	}
+
+	// Step 11: re-read manifest to get the post-commit version + tx ID for
+	// the mirror sentinel. BuildAndCommit returns the body but not the
+	// header; we need ReadRoot for ManifestVersion + LatestTx.
+	viewAfter, err := r2.ReadRoot(ctx)
+	if err != nil {
+		// Bucket-side commit succeeded; the mirror sentinel won't be
+		// updated, but the next request's SyncToCurrent will rebuild
+		// from the new authoritative root. Report success — the durable
+		// commit happened.
+		for i, u := range req.Updates {
+			if statuses[i] == "" {
+				statuses[i] = "ok " + u.Refname
+			}
+		}
+		writeReceiveReport(w, "ok", statuses, req.Caps)
+		return
+	}
+
+	// Step 12-13: bump the mirror sentinel to record that local bare is
+	// in sync with the new manifest version. Refs are already applied
+	// (step 9b), pack is already in the bare (step 7) — IngestPack with
+	// empty updates and packPath="" is effectively a sentinel-only write.
+	if err := m.IngestPack(ctx, "", nil, viewAfter.Header.ManifestVersion, viewAfter.Header.LatestTx); err != nil {
+		// Bucket succeeded; mirror sentinel write failed. The mismatch
+		// will trigger a SyncToCurrent rebuild on the next request. The
+		// durable commit already happened, so report success — the
+		// alternative ("ng internal-mirror-error") would tell the client
+		// the push failed when in fact the bucket has it.
+		for i, u := range req.Updates {
+			if statuses[i] == "" {
+				statuses[i] = "ok " + u.Refname
+			}
+		}
+		writeReceiveReport(w, "ok", statuses, req.Caps)
+		return
+	}
+
+	// Step 15: success. Fill in "ok <ref>" for every accepted command;
+	// rejected ones already carry their "ng <ref> <reason>".
+	for i, u := range req.Updates {
+		if statuses[i] == "" {
+			statuses[i] = "ok " + u.Refname
+		}
+	}
+	writeReceiveReport(w, "ok", statuses, req.Caps)
 }
 
 // parseReceivePackRequest drains the v0 receive-pack request body. It reads
@@ -143,15 +397,19 @@ func parseReceivePackRequest(ctx context.Context, body io.Reader, incoming strin
 		}
 		// Copy payload because pktline reuses its internal buffer.
 		line := string(append([]byte{}, tok.Payload...))
-		// pack-protocol(5) requires each command to end with exactly one
-		// LF. We enforce both halves of that contract: the LF MUST be
-		// present (HasSuffix), and we strip exactly one (TrimSuffix). A
-		// missing terminator is rejected, and any extra trailing newlines
-		// fail the OID/refname checks below rather than parse as valid.
-		if !strings.HasSuffix(line, "\n") {
-			return nil, fmt.Errorf("missing LF terminator in command %q", line)
+		// pack-protocol(5) describes each receive-pack command as
+		// "<old> <new> <name>" — the trailing LF is permitted but not
+		// required, and real `git push` clients (observed: git 2.54)
+		// omit it on the wire. Strip at most one LF if present; reject
+		// any further trailing newlines so a malformed payload (e.g.
+		// `...main\n\n`) doesn't sneak past the OID/refname checks
+		// below.
+		if strings.HasSuffix(line, "\n") {
+			line = line[:len(line)-1]
+			if strings.HasSuffix(line, "\n") {
+				return nil, fmt.Errorf("extra LF in command")
+			}
 		}
-		line = strings.TrimSuffix(line, "\n")
 		if first {
 			first = false
 			if i := strings.IndexByte(line, '\x00'); i >= 0 {
@@ -261,61 +519,80 @@ func validHexOID40(s string) bool {
 	return true
 }
 
-// writeReportNotImplemented emits a report-status indicating that the
-// receive-pack handler accepted and parsed the request but has not yet
-// implemented commit logic (Task 17). This is honest signaling so a real
-// Git client surfaces the push as failed rather than silently succeeding.
+// applyRefUpdateInBare dispatches a single ref change (create/update/
+// delete) directly via gitcli against the bare repo. Mirrors the logic
+// of mirror.applyRefUpdate (which is unexported) so we can apply refs
+// to the bare BEFORE calling importer.BuildAndCommit, whose repack
+// requires the new tips to be reachable from a ref.
+func applyRefUpdateInBare(ctx context.Context, bareDir string, u mirror.RefUpdate) error {
+	switch {
+	case u.NewOID == gatewayNullOID:
+		return gitcli.UpdateRefDelete(ctx, bareDir, u.Refname, u.OldOID)
+	case u.OldOID == "" || u.OldOID == gatewayNullOID:
+		return gitcli.UpdateRef(ctx, bareDir, u.Refname, u.NewOID)
+	default:
+		return gitcli.UpdateRefCAS(ctx, bareDir, u.Refname, u.NewOID, u.OldOID)
+	}
+}
+
+// writeReceiveReport emits a report-status pkt-line stream per
+// pack-protocol(5):
 //
-// Format per pack-protocol(5):
-//
-//	unpack <error-string-or-"ok">\n
-//	(ok <ref>\n | ng <ref> <error>\n)+
+//	"unpack <header>\n"   (header == "ok" on success, else an error
+//	                       string; clients display this verbatim)
+//	per-ref status line   (each entry is either "ok <ref>\n" or
+//	                       "ng <ref> <reason>\n"; pre-built by the
+//	                       caller in the statuses slice)
 //	flush
 //
-// We send "unpack <reason>" and a per-ref "ng <ref> <reason>" for every
-// command, which clients render as a failed push.
+// When the client negotiated side-band-64k the entire pkt-line stream is
+// multiplexed on band 1, terminated by a band-level flush, then a final
+// outer pkt-line flush. We can't side-band each pkt-line individually
+// because the client's report-status parser expects a contiguous pkt-line
+// stream on band 1.
 //
-// When the client negotiated side-band-64k (advertised in info/refs as a
-// receive-pack capability) the entire report sequence is multiplexed on
-// band 1, terminated by a band-level flush, then a final outer pkt-line
-// flush. Otherwise the report is written as raw pkt-lines.
-func writeReportNotImplemented(w io.Writer, req *receivePackRequest) error {
-	const reason = "not-implemented-yet-task-17"
+// Best-effort: if a Write fails we cannot recover (the response is
+// partially written and surfacing an error would corrupt framing
+// further). Errors are silently dropped; the client will see an EOF and
+// surface the partial report.
+func writeReceiveReport(w io.Writer, header string, statuses []string, caps map[string]bool) {
 	pw := pktline.NewWriter(w)
 
-	if req.Caps["side-band-64k"] {
-		// Buffer the report-status pkt-line stream, then chunk it onto
-		// band 1. We can't side-band each pkt-line individually because
-		// the client's report-status parser expects a contiguous
-		// pkt-line stream on band 1 (terminated by an inner flush, then
-		// the side-band stream itself ends with an outer flush).
+	if caps["side-band-64k"] {
 		var inner bytes.Buffer
 		ipw := pktline.NewWriter(&inner)
-		if err := ipw.WriteString("unpack " + reason + "\n"); err != nil {
-			return err
+		if err := ipw.WriteString("unpack " + header + "\n"); err != nil {
+			return
 		}
-		for _, u := range req.Updates {
-			if err := ipw.WriteString("ng " + u.Refname + " " + reason + "\n"); err != nil {
-				return err
+		for _, s := range statuses {
+			if s == "" {
+				continue
+			}
+			if err := ipw.WriteString(s + "\n"); err != nil {
+				return
 			}
 		}
 		if err := ipw.WriteFlush(); err != nil {
-			return err
+			return
 		}
 		sb := pktline.NewSidebandWriter(pw)
 		if _, err := sb.WriteData(inner.Bytes()); err != nil {
-			return err
+			return
 		}
-		return pw.WriteFlush()
+		_ = pw.WriteFlush()
+		return
 	}
 
-	if err := pw.WriteString("unpack " + reason + "\n"); err != nil {
-		return err
+	if err := pw.WriteString("unpack " + header + "\n"); err != nil {
+		return
 	}
-	for _, u := range req.Updates {
-		if err := pw.WriteString("ng " + u.Refname + " " + reason + "\n"); err != nil {
-			return err
+	for _, s := range statuses {
+		if s == "" {
+			continue
+		}
+		if err := pw.WriteString(s + "\n"); err != nil {
+			return
 		}
 	}
-	return pw.WriteFlush()
+	_ = pw.WriteFlush()
 }
