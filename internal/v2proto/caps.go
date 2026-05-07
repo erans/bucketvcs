@@ -31,9 +31,16 @@ const AgentName = "bucketvcs"
 //	pkt-line: "version 2\n"
 //	pkt-line: "agent=bucketvcs/<version>\n"
 //	pkt-line: "ls-refs=unborn\n"
-//	pkt-line: "fetch=shallow\n"
+//	pkt-line: "fetch\n"
 //	pkt-line: "object-format=sha1\n"
 //	flush
+//
+// Note: "fetch" is advertised without the "=shallow" feature qualifier
+// because the gateway does not (yet) implement shallow-info plumbing.
+// Compliant clients MUST NOT send shallow/deepen arguments unless the
+// server advertises that feature, so this prevents protocol-level failures
+// for shallow clones. The fetch handler still defensively rejects shallow
+// arguments in case a non-compliant client sends them.
 func WriteV2Advertisement(w io.Writer, service, version string) error {
 	if strings.ContainsAny(version, "\r\n\x00") {
 		return fmt.Errorf("v2proto: agent version contains forbidden control characters")
@@ -63,7 +70,7 @@ func V2Capabilities(version string) []string {
 		"version 2",
 		"agent=" + AgentName + "/" + version,
 		"ls-refs=unborn",
-		"fetch=shallow",
+		"fetch",
 		"object-format=sha1",
 	}
 }

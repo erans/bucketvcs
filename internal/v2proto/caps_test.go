@@ -20,7 +20,7 @@ func TestWriteV2Advertisement_ContainsExpectedLines(t *testing.T) {
 		"version 2\n",
 		"agent=bucketvcs/0.1\n",
 		"ls-refs=unborn\n",
-		"fetch=shallow\n",
+		"fetch\n",
 		"object-format=sha1\n",
 		"", // flush
 	}

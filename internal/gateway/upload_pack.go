@@ -148,15 +148,12 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request, tenant, rep
 		return
 	}
 
-	// Reject shallow/deepen arguments until M3+ adds proper shallow-info
-	// handling. We currently have no shallow-boundary plumbing (no
-	// shallow-info section in the response, no shallow file written for
-	// pack-objects), and pack-objects' Depth knob is informational-only
-	// per the gitcli contract. Rather than silently serve a full pack to
-	// a shallow request — which would corrupt the client's view of
-	// history — we 400 with a precise reason. A future task will
-	// implement the shallow path end-to-end and (only then) honor the
-	// fetch=shallow capability we advertise.
+	// Defensively reject shallow/deepen arguments. The v2 advertisement no
+	// longer exposes the "shallow" feature qualifier on "fetch", so a
+	// compliant client will not send these — but a misbehaving or
+	// downgraded-cache client might, and silently serving a full pack to a
+	// depth-bounded fetch would corrupt the client's history view. A future
+	// task will add shallow-info plumbing and re-advertise the capability.
 	if req.Depth > 0 || req.DeepenSince != "" || len(req.DeepenNot) > 0 || req.DeepenRelative || len(req.Shallow) > 0 {
 		http.Error(w, "fetch: shallow/deepen arguments not yet supported by gateway", http.StatusBadRequest)
 		return
@@ -227,9 +224,15 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request, tenant, rep
 	})
 	if err != nil {
 		// If we already wrote acknowledgments, we have to surface this on
-		// the side-band as the response body has begun. Otherwise we can
-		// emit a clean HTTP error.
+		// the side-band — but the side-band lives inside the packfile
+		// section, so we must first emit the protocol-required delim and
+		// "packfile\n" header to keep framing valid. Otherwise the client
+		// sees side-band frames where it expects a section header and
+		// reports a malformed response. Pre-ack failures take the clean
+		// HTTP error path because the body is still empty.
 		if ackEmitted {
+			_ = pw.WriteDelim()
+			_ = pw.WriteString("packfile\n")
 			sb := pktline.NewSidebandWriter(pw)
 			_, _ = sb.WriteFatal([]byte("pack-objects: " + err.Error()))
 			return
