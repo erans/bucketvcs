@@ -59,6 +59,10 @@ const (
 // Callers that may pass a non-trailing-slash Prefix must call
 // applyDefaults() before any operation that uses Prefix as a key
 // boundary (Open() does this in the documented order).
+//
+// Region is required, but Open() may populate it from the resolved AWS
+// SDK config (env, shared-config profile, instance metadata) BEFORE
+// calling Validate. Direct callers of Validate must set Region themselves.
 func (c *Config) Validate() error {
 	if c.Bucket == "" {
 		return fmt.Errorf("s3compat: bucket is required")

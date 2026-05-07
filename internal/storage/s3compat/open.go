@@ -10,25 +10,26 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
-// Open builds an S3Compat from cfg. cfg.Validate must succeed; defaults
-// are applied here so callers do not need to call applyDefaults
-// themselves.
+// Open builds an S3Compat from cfg. The order of operations is:
+//  1. applyDefaults (populates tunables; does not mutate Region).
+//  2. LoadDefaultConfig (resolves env, profile, instance metadata).
+//  3. If cfg.Region is empty, fall back to awsCfg.Region.
+//  4. Validate.
+//  5. Build the SDK client.
+//
+// Step 3 ensures profile- and env-supplied regions reach Validate.
 //
 // Credential precedence:
 //  1. Static (cfg.AccessKeyID + cfg.SecretAccessKey [+ SessionToken])
 //  2. Shared-config profile (cfg.Profile)
 //  3. SDK default chain (env, instance metadata, ...)
-//
-// Open calls applyDefaults BEFORE Validate so Prefix normalization is
-// applied before any field check (per the Validate docstring).
 func Open(ctx context.Context, cfg Config) (*S3Compat, error) {
 	cfg.applyDefaults()
-	if err := cfg.Validate(); err != nil {
-		return nil, err
-	}
 
-	loadOpts := []func(*awsconfig.LoadOptions) error{
-		awsconfig.WithRegion(cfg.Region),
+	// Collect SDK config-load options.
+	loadOpts := []func(*awsconfig.LoadOptions) error{}
+	if cfg.Region != "" {
+		loadOpts = append(loadOpts, awsconfig.WithRegion(cfg.Region))
 	}
 	switch {
 	case cfg.AccessKeyID != "":
@@ -45,6 +46,19 @@ func Open(ctx context.Context, cfg Config) (*S3Compat, error) {
 	if err != nil {
 		return nil, fmt.Errorf("s3compat: load AWS config: %w", err)
 	}
+
+	// If the caller didn't supply a region, fall back to whatever the
+	// resolved AWS config picked up (env, profile, instance metadata).
+	if cfg.Region == "" {
+		cfg.Region = awsCfg.Region
+	}
+
+	// Validate AFTER resolving region so profile-supplied regions
+	// satisfy the "region is required" check.
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
 	awsCfg.Retryer = func() aws.Retryer { return newRetryer(cfg.MaxRetries) }
 
 	clientOpts := []func(*s3.Options){

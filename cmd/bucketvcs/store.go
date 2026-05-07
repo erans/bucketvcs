@@ -88,9 +88,6 @@ func applyEnvToConfig(cfg *s3compat.Config, scheme string) {
 	} else if v := os.Getenv("AWS_REGION"); v != "" && cfg.Region == "" {
 		cfg.Region = v
 	}
-	if cfg.Region == "" && scheme == "s3" {
-		cfg.Region = "us-east-1"
-	}
 	if v := os.Getenv("BUCKETVCS_S3_ENDPOINT"); v != "" {
 		cfg.Endpoint = v
 	}

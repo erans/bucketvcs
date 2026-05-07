@@ -67,3 +67,45 @@ func TestOpenRejectsBadConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestOpenAcceptsRegionFromEnv(t *testing.T) {
+	t.Setenv("AWS_REGION", "ap-southeast-2")
+	srv := httptestServer(t)
+	cfg := Config{
+		Bucket:          "test-bucket",
+		Endpoint:        srv.URL,
+		ForcePathStyle:  true,
+		AccessKeyID:     "AKID",
+		SecretAccessKey: "SECRET",
+	}
+	s, err := Open(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if s == nil {
+		t.Fatalf("Open returned nil S3Compat")
+	}
+	// We can't directly inspect the resolved region without exporting
+	// s.cfg, but Open succeeding here proves Validate did not fail
+	// with "region is required" — the env-supplied region was honored.
+}
+
+func TestOpenStillRejectsEmptyRegion(t *testing.T) {
+	// No AWS_REGION env, no static region. The SDK default chain
+	// won't find one (assuming the test env doesn't have it), so
+	// Validate should fail.
+	t.Setenv("AWS_REGION", "")
+	t.Setenv("AWS_DEFAULT_REGION", "")
+	cfg := Config{
+		Bucket:          "test-bucket",
+		AccessKeyID:     "AKID",
+		SecretAccessKey: "SECRET",
+	}
+	_, err := Open(context.Background(), cfg)
+	if err == nil {
+		t.Fatalf("Open with no region anywhere: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "region") {
+		t.Fatalf("err %q does not mention region", err.Error())
+	}
+}
