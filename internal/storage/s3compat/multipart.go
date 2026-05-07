@@ -144,10 +144,30 @@ func (s *S3Compat) CompleteMultipartIfAbsent(ctx context.Context, mu storage.Mul
 	if u.parent != s {
 		return storage.ObjectVersion{}, fmt.Errorf("%w: CompleteMultipartIfAbsent: upload was created by a different S3Compat instance", storage.ErrInvalidArgument)
 	}
-	if err := u.checkActive(); err != nil {
-		return storage.ObjectVersion{}, err
+
+	// Hold the lock across the entire Complete operation (active check,
+	// validation, SDK call, terminal-state update). This fully
+	// serializes concurrent Complete attempts on the same upload, so a
+	// loser observes the terminated flag at checkActive instead of
+	// racing through to a NoSuchUpload from S3.
+	//
+	// Cost: blocks other goroutines holding a reference to the same
+	// upload during the SDK round-trip. Complete is a rare terminal
+	// operation; UploadPart still uses short-lived locks and is not
+	// blocked by an in-flight Complete on a different goroutine
+	// (since UploadPart's own checkActive() takes a separate brief
+	// lock — note that this means an UploadPart can race a Complete:
+	// they will be ordered, but if Complete wins UploadPart will see
+	// terminated=true and fail; if UploadPart wins it will record a
+	// part that Complete then sees in validateCompletePartsLocked
+	// before the SDK call). Documented behavior.
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	if u.terminated {
+		return storage.ObjectVersion{}, fmt.Errorf("%w: upload %s has already been completed or aborted", storage.ErrInvalidArgument, u.uploadID)
 	}
-	if err := validateCompleteParts(u, parts); err != nil {
+	if err := validateCompletePartsLocked(u, parts); err != nil {
 		return storage.ObjectVersion{}, err
 	}
 	completed := make([]types.CompletedPart, 0, len(parts))
@@ -165,15 +185,9 @@ func (s *S3Compat) CompleteMultipartIfAbsent(ctx context.Context, mu storage.Mul
 		MultipartUpload: &types.CompletedMultipartUpload{Parts: completed},
 	})
 	if err != nil {
-		// On NoSuchUpload-after-complete (a concurrent racer won), the
-		// caller would otherwise see ErrNotFound which is misleading.
-		// We still classify here; the terminated-state guard above
-		// catches the fast path. The race window between checkActive
-		// and the SDK call is narrow but possible — leave as-is and
-		// document.
 		return storage.ObjectVersion{}, classify(opCompleteIfAbsent, err)
 	}
-	u.markTerminated()
+	u.terminated = true // already locked above; no need for markTerminated.
 	return storage.ObjectVersion{
 		Provider: "s3compat",
 		Token:    aws.ToString(out.ETag),
@@ -199,16 +213,13 @@ func readerSize(r io.Reader) (int64, error) {
 	return end, nil
 }
 
-// validateCompleteParts checks that parts is non-empty, contiguous from 1,
-// has non-empty tokens that match recorded uploads, and matches the
-// recorded sizes. The latter catches callers tampering with Part.Size
-// after UploadPart returned.
-func validateCompleteParts(u *upload, parts []storage.MultipartPart) error {
+// validateCompletePartsLocked is the helper used by CompleteMultipartIfAbsent
+// while holding u.mu. It assumes the caller holds the lock and checks
+// the parts list against the recorded uploads.
+func validateCompletePartsLocked(u *upload, parts []storage.MultipartPart) error {
 	if len(parts) == 0 {
 		return fmt.Errorf("%w: CompleteMultipartIfAbsent: parts list is empty", storage.ErrInvalidArgument)
 	}
-	u.mu.Lock()
-	defer u.mu.Unlock()
 	for i, p := range parts {
 		if p.PartNumber != i+1 {
 			return fmt.Errorf("%w: CompleteMultipartIfAbsent: parts must be contiguous starting at 1; parts[%d].PartNumber = %d", storage.ErrInvalidArgument, i, p.PartNumber)

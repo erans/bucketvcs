@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/bucketvcs/bucketvcs/internal/storage"
@@ -242,5 +243,50 @@ func TestCompleteAfterAbortRejects(t *testing.T) {
 		[]storage.MultipartPart{p1})
 	if !errors.Is(err, storage.ErrInvalidArgument) {
 		t.Fatalf("Complete after Abort: err = %v, want ErrInvalidArgument", err)
+	}
+}
+
+func TestConcurrentCompleteSerializes(t *testing.T) {
+	s, _ := newMockBackend(t)
+	up, err := s.CreateMultipart(context.Background(), "k", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p1, _ := up.UploadPart(context.Background(), 1, strings.NewReader("hi"))
+
+	// Two goroutines race to Complete.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	results := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			defer wg.Done()
+			_, err := s.CompleteMultipartIfAbsent(context.Background(), up,
+				[]storage.MultipartPart{p1})
+			results <- err
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	// Exactly one should succeed; the other should report
+	// ErrInvalidArgument (terminated state), NOT ErrNotFound (which
+	// would be a leak of provider lifecycle state).
+	var successes, terminated int
+	for err := range results {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, storage.ErrInvalidArgument):
+			terminated++
+		default:
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successes = %d, want 1", successes)
+	}
+	if terminated != 1 {
+		t.Fatalf("terminated = %d, want 1 (loser must report ErrInvalidArgument, not pass through to NoSuchUpload)", terminated)
 	}
 }
