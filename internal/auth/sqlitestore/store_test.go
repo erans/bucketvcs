@@ -248,6 +248,82 @@ func TestDeleteUser_CascadesTokens(t *testing.T) {
 	}
 }
 
+func TestRegisterRepo_AndGetFlags(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+	if err := s.RegisterRepo(ctx, "acme", "foo"); err != nil {
+		t.Fatalf("RegisterRepo: %v", err)
+	}
+	flags, err := s.GetRepoFlags(ctx, "acme", "foo")
+	if err != nil {
+		t.Fatalf("GetRepoFlags: %v", err)
+	}
+	if flags.PublicRead {
+		t.Fatal("default should be private")
+	}
+}
+
+func TestSetRepoPublic(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+	_ = s.RegisterRepo(ctx, "acme", "foo")
+	if err := s.SetRepoPublic(ctx, "acme", "foo", true); err != nil {
+		t.Fatalf("SetRepoPublic on: %v", err)
+	}
+	flags, _ := s.GetRepoFlags(ctx, "acme", "foo")
+	if !flags.PublicRead {
+		t.Fatal("expected PublicRead = true")
+	}
+	_ = s.SetRepoPublic(ctx, "acme", "foo", false)
+	flags, _ = s.GetRepoFlags(ctx, "acme", "foo")
+	if flags.PublicRead {
+		t.Fatal("expected PublicRead = false after toggle off")
+	}
+}
+
+func TestGetRepoFlags_NoSuchRepo(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+	if _, err := s.GetRepoFlags(ctx, "ghost", "x"); !errors.Is(err, auth.ErrNoSuchRepo) {
+		t.Fatalf("want ErrNoSuchRepo, got %v", err)
+	}
+}
+
+func TestRegisterRepo_Idempotent(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+	if err := s.RegisterRepo(ctx, "acme", "foo"); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if err := s.RegisterRepo(ctx, "acme", "foo"); err != nil {
+		t.Fatalf("second (should be idempotent): %v", err)
+	}
+}
+
+func TestListRepos(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+	_ = s.RegisterRepo(ctx, "acme", "foo")
+	_ = s.RegisterRepo(ctx, "acme", "bar")
+	_ = s.RegisterRepo(ctx, "other", "x")
+	got, err := s.ListRepos(ctx, "acme")
+	if err != nil {
+		t.Fatalf("ListRepos: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+	all, _ := s.ListRepos(ctx, "")
+	if len(all) != 3 {
+		t.Fatalf("len = %d, want 3", len(all))
+	}
+}
+
 // mustOpen is a tiny test helper.
 func mustOpen(t *testing.T) *Store {
 	t.Helper()

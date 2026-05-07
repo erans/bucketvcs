@@ -378,3 +378,85 @@ func (s *Store) ResolveTokenIDPrefix(ctx context.Context, prefix string) (string
 		return "", ErrAmbiguousPrefix
 	}
 }
+
+// Repo is the registry row shape.
+type Repo struct {
+	Tenant     string
+	Name       string
+	PublicRead bool
+	CreatedAt  int64
+}
+
+// RegisterRepo idempotently inserts a (tenant, name) into repos.
+func (s *Store) RegisterRepo(ctx context.Context, tenant, name string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO repos (tenant, name, public_read, created_at)
+		 VALUES (?, ?, 0, ?)`,
+		tenant, name, time.Now().Unix(),
+	)
+	return err
+}
+
+// GetRepoFlags returns the per-repo authorization flags.
+func (s *Store) GetRepoFlags(ctx context.Context, tenant, repo string) (auth.RepoFlags, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT public_read FROM repos WHERE tenant = ? AND name = ?`, tenant, repo,
+	)
+	var pub int
+	if err := row.Scan(&pub); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return auth.RepoFlags{}, auth.ErrNoSuchRepo
+		}
+		return auth.RepoFlags{}, err
+	}
+	return auth.RepoFlags{PublicRead: pub != 0}, nil
+}
+
+// SetRepoPublic toggles repos.public_read.
+func (s *Store) SetRepoPublic(ctx context.Context, tenant, repo string, public bool) error {
+	v := 0
+	if public {
+		v = 1
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE repos SET public_read = ? WHERE tenant = ? AND name = ?`, v, tenant, repo,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return auth.ErrNoSuchRepo
+	}
+	return nil
+}
+
+// ListRepos returns repos in `tenant`, or all repos if tenant == "".
+// Ordered by (tenant, name).
+func (s *Store) ListRepos(ctx context.Context, tenant string) ([]*Repo, error) {
+	var rows *sql.Rows
+	var err error
+	if tenant == "" {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT tenant, name, public_read, created_at FROM repos ORDER BY tenant, name`)
+	} else {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT tenant, name, public_read, created_at FROM repos WHERE tenant = ? ORDER BY name`,
+			tenant)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*Repo{}
+	for rows.Next() {
+		r := &Repo{}
+		var pub int
+		if err := rows.Scan(&r.Tenant, &r.Name, &pub, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		r.PublicRead = pub != 0
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
