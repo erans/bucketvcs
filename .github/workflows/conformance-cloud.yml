@@ -33,8 +33,8 @@ jobs:
           AWS_ACCESS_KEY_ID:      ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY:  ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
-          if [[ -z "$BUCKETVCS_R2_BUCKET" || -z "$BUCKETVCS_R2_ENDPOINT" ]]; then
-            echo "==> R2: SKIPPED (R2_BUCKET / R2_ENDPOINT secret unset)"
+          if [[ -z "$BUCKETVCS_R2_BUCKET" || -z "$BUCKETVCS_R2_ENDPOINT" || -z "$AWS_ACCESS_KEY_ID" || -z "$AWS_SECRET_ACCESS_KEY" ]]; then
+            echo "==> R2: SKIPPED (one of R2_BUCKET / R2_ENDPOINT / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY secrets unset)"
             exit 0
           fi
           echo "==> R2 conformance"
@@ -50,8 +50,8 @@ jobs:
           AWS_ACCESS_KEY_ID:      ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY:  ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
-          if [[ -z "$BUCKETVCS_S3_BUCKET" || -z "$BUCKETVCS_S3_REGION" ]]; then
-            echo "==> S3: SKIPPED (AWS_S3_BUCKET / AWS_REGION secret unset)"
+          if [[ -z "$BUCKETVCS_S3_BUCKET" || -z "$BUCKETVCS_S3_REGION" || -z "$AWS_ACCESS_KEY_ID" || -z "$AWS_SECRET_ACCESS_KEY" ]]; then
+            echo "==> S3: SKIPPED (one of AWS_S3_BUCKET / AWS_REGION / AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY secrets unset)"
             exit 0
           fi
           echo "==> S3 conformance"
