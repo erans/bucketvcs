@@ -64,6 +64,20 @@ func TestParseURLR2DefaultsRegion(t *testing.T) {
 	}
 }
 
+func TestParseURL_CredentialErrorDoesNotLeakSecret(t *testing.T) {
+	const secret = "supersecret123"
+	_, err := ParseURL("s3://access:" + secret + "@bucket/prefix")
+	if err == nil {
+		t.Fatalf("ParseURL must reject credential-bearing URL")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("error %q leaked the secret", err.Error())
+	}
+	if strings.Contains(err.Error(), "access") {
+		t.Fatalf("error %q leaked the access key", err.Error())
+	}
+}
+
 func TestParseURL_RejectsCredentials(t *testing.T) {
 	bad := []string{
 		"s3://key:secret@bucket/prefix",
