@@ -1,41 +1,53 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
+	"github.com/bucketvcs/bucketvcs/internal/storage/s3compat"
 )
 
 // parseStoreURL parses a --store value into (scheme, scheme-specific
-// path). M1 supports only "localfs:<path>"; cloud schemes ("s3:",
-// "gcs:", "r2:", "azureblob:") are recognized but rejected with an
-// explanatory error pointing at the milestone that will add them.
+// remainder). M5 supports localfs:, s3:, and r2:; gcs and azureblob
+// are reserved for M7.
 func parseStoreURL(s string) (scheme, path string, err error) {
 	colon := strings.IndexByte(s, ':')
 	if colon <= 0 {
-		return "", "", fmt.Errorf(`--store: missing scheme; want "localfs:<path>"`)
+		return "", "", fmt.Errorf(`--store: missing scheme; want "localfs:<path>", "s3://<bucket>[/<prefix>]", or "r2://<bucket>[/<prefix>]"`)
 	}
 	scheme = s[:colon]
-	path = s[colon+1:]
-	if path == "" {
-		return "", "", fmt.Errorf(`--store: %q scheme requires a non-empty path (got %q)`, scheme, s)
-	}
+	rest := s[colon+1:]
 	switch scheme {
 	case "localfs":
-		return scheme, path, nil
-	case "s3", "gcs", "r2", "azureblob":
-		return "", "", fmt.Errorf(`--store: scheme %q is reserved; cloud adapters land at M5/M7`, scheme)
+		if rest == "" {
+			return "", "", fmt.Errorf(`--store: %q scheme requires a non-empty path (got %q)`, scheme, s)
+		}
+		return scheme, rest, nil
+	case "s3", "r2":
+		// rest should be "//bucket[/prefix]"
+		if !strings.HasPrefix(rest, "//") {
+			return "", "", fmt.Errorf(`--store: %s URL must use the form %s://<bucket>[/<prefix>] (got %q)`, scheme, scheme, s)
+		}
+		bucketPath := strings.TrimPrefix(rest, "//")
+		if bucketPath == "" {
+			return "", "", fmt.Errorf(`--store: %s:// requires a bucket name`, scheme)
+		}
+		return scheme, bucketPath, nil
+	case "gcs", "azureblob":
+		return "", "", fmt.Errorf(`--store: scheme %q is reserved; cloud adapter for this provider lands at M7`, scheme)
 	default:
-		return "", "", fmt.Errorf(`--store: unknown scheme %q; want "localfs:<path>"`, scheme)
+		return "", "", fmt.Errorf(`--store: unknown scheme %q; want "localfs:<path>", "s3://<bucket>[/<prefix>]", or "r2://<bucket>[/<prefix>]"`, scheme)
 	}
 }
 
 // openStore parses the --store URL and returns a constructed
 // ObjectStore. Caller is responsible for releasing it via closeStore on
-// shutdown — localfs holds a process-wide lockfile that must be released.
-// closeStore is defined in init.go and asserts io.Closer at runtime.
+// shutdown.
 func openStore(url string) (storage.ObjectStore, error) {
 	scheme, path, err := parseStoreURL(url)
 	if err != nil {
@@ -48,7 +60,50 @@ func openStore(url string) (storage.ObjectStore, error) {
 			return nil, fmt.Errorf("localfs: %w", err)
 		}
 		return s, nil
+	case "s3", "r2":
+		cfg, err := s3compat.ParseURL(url)
+		if err != nil {
+			return nil, err
+		}
+		applyEnvToConfig(&cfg, scheme)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		s, err := s3compat.Open(ctx, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("s3compat: %w", err)
+		}
+		return s, nil
 	default:
 		return nil, fmt.Errorf("unreachable: scheme %q passed parseStoreURL but openStore has no constructor", scheme)
+	}
+}
+
+// applyEnvToConfig layers env vars onto a Config seed produced by
+// ParseURL. Standard AWS_* env vars are honored by the SDK default
+// chain when AccessKeyID is left empty.
+func applyEnvToConfig(cfg *s3compat.Config, scheme string) {
+	if v := os.Getenv("BUCKETVCS_S3_REGION"); v != "" {
+		cfg.Region = v
+	} else if v := os.Getenv("AWS_REGION"); v != "" && cfg.Region == "" {
+		cfg.Region = v
+	}
+	if cfg.Region == "" && scheme == "s3" {
+		cfg.Region = "us-east-1"
+	}
+	if v := os.Getenv("BUCKETVCS_S3_ENDPOINT"); v != "" {
+		cfg.Endpoint = v
+	}
+	if v := os.Getenv("BUCKETVCS_S3_FORCE_PATH_STYLE"); v != "" {
+		cfg.ForcePathStyle = (v == "true" || v == "1")
+	}
+	if v := os.Getenv("BUCKETVCS_S3_PROFILE"); v != "" {
+		cfg.Profile = v
+	} else if v := os.Getenv("AWS_PROFILE"); v != "" && cfg.Profile == "" {
+		cfg.Profile = v
+	}
+	if v := os.Getenv("AWS_ACCESS_KEY_ID"); v != "" {
+		cfg.AccessKeyID = v
+		cfg.SecretAccessKey = os.Getenv("AWS_SECRET_ACCESS_KEY")
+		cfg.SessionToken = os.Getenv("AWS_SESSION_TOKEN")
 	}
 }

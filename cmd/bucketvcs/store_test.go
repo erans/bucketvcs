@@ -26,10 +26,48 @@ func TestParseStoreURL_LocalFS(t *testing.T) {
 }
 
 func TestParseStoreURL_Errors(t *testing.T) {
-	cases := []string{"", "localfs", "s3://bucket/key", "http://x", "localfs:"}
+	cases := []string{"", "localfs", "http://x", "localfs:"}
 	for _, in := range cases {
 		if _, _, err := parseStoreURL(in); err == nil {
 			t.Errorf("%q: want error", in)
+		}
+	}
+}
+
+func TestParseStoreURL_S3(t *testing.T) {
+	scheme, path, err := parseStoreURL("s3://my-bucket/data")
+	if err != nil {
+		t.Fatalf("parseStoreURL: %v", err)
+	}
+	if scheme != "s3" {
+		t.Fatalf("scheme = %q, want s3", scheme)
+	}
+	if path != "my-bucket/data" {
+		t.Fatalf("path = %q, want my-bucket/data", path)
+	}
+}
+
+func TestParseStoreURL_R2(t *testing.T) {
+	scheme, path, err := parseStoreURL("r2://my-bucket")
+	if err != nil {
+		t.Fatalf("parseStoreURL: %v", err)
+	}
+	if scheme != "r2" {
+		t.Fatalf("scheme = %q, want r2", scheme)
+	}
+	if path != "my-bucket" {
+		t.Fatalf("path = %q, want my-bucket", path)
+	}
+}
+
+func TestParseStoreURL_RejectsCloudReservations(t *testing.T) {
+	for _, scheme := range []string{"gcs", "azureblob"} {
+		_, _, err := parseStoreURL(scheme + "://x")
+		if err == nil {
+			t.Fatalf("%s:// must still be reserved", scheme)
+		}
+		if !strings.Contains(err.Error(), "M7") {
+			t.Fatalf("%s:// error %q does not mention M7", scheme, err.Error())
 		}
 	}
 }
