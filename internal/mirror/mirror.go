@@ -230,19 +230,6 @@ func (mg *Manager) Close() error {
 	return releaseLock(lock)
 }
 
-// openForTest is the in-package entry point used by tests. It wraps
-// NewManager + Manager.Open so the same code path is exercised. The
-// Manager is intentionally leaked: the test process exits soon after and
-// releases the flock. Tests that need to assert on flock semantics or
-// reuse a manager across calls should use NewManager directly.
-func openForTest(ctx context.Context, rootDir string, store storage.ObjectStore, tenant, repoID string) (*Mirror, error) {
-	mg, err := NewManager(rootDir, store)
-	if err != nil {
-		return nil, err
-	}
-	return mg.Open(ctx, tenant, repoID)
-}
-
 // SyncToCurrent compares the on-disk sentinel against the bucket's
 // current root manifest identity. If they match and bare/ exists,
 // returns nil. Otherwise wipes and rebuilds bare/ via the M2 exporter
@@ -343,8 +330,8 @@ func (m *Mirror) syncToHeld(ctx context.Context, view *repo.RootView) error {
 }
 
 // syncTo is the inner sync routine that takes an already-fetched
-// RootView. openForTest reuses this after pre-opening the repo for
-// validation.
+// RootView. Called by SyncToCurrent after pre-fetching the repo view
+// for validation.
 func (m *Mirror) syncTo(ctx context.Context, view *repo.RootView) error {
 	want := sentinel{
 		ManifestVersion: view.Header.ManifestVersion,
