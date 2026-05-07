@@ -1,10 +1,11 @@
 package s3compat
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -19,6 +20,9 @@ type upload struct {
 	uploadID string
 	key      string // logical (caller-visible) key
 	storeKey string // adapter-prefixed key on the wire
+
+	mu    sync.Mutex
+	parts map[int]storage.MultipartPart // partNumber -> recorded metadata
 }
 
 var _ storage.MultipartUpload = (*upload)(nil)
@@ -31,6 +35,10 @@ func (u *upload) UploadPart(ctx context.Context, partNumber int, body io.Reader)
 	if err != nil {
 		return storage.MultipartPart{}, err
 	}
+	size, err := readerSize(seekable)
+	if err != nil {
+		return storage.MultipartPart{}, fmt.Errorf("s3compat: determine part size: %w", err)
+	}
 	out, err := u.parent.client.UploadPart(ctx, &s3.UploadPartInput{
 		Bucket:     aws.String(u.parent.cfg.Bucket),
 		Key:        aws.String(u.storeKey),
@@ -41,12 +49,19 @@ func (u *upload) UploadPart(ctx context.Context, partNumber int, body io.Reader)
 	if err != nil {
 		return storage.MultipartPart{}, classify(opUploadPart, err)
 	}
-	size := bodyKnownSize(seekable)
-	return storage.MultipartPart{
+	part := storage.MultipartPart{
 		PartNumber: partNumber,
 		Token:      aws.ToString(out.ETag),
 		Size:       size,
-	}, nil
+	}
+	u.recordPart(part)
+	return part, nil
+}
+
+func (u *upload) recordPart(p storage.MultipartPart) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.parts[p.PartNumber] = p
 }
 
 func (u *upload) Abort(ctx context.Context) error {
@@ -55,10 +70,16 @@ func (u *upload) Abort(ctx context.Context) error {
 		Key:      aws.String(u.storeKey),
 		UploadId: aws.String(u.uploadID),
 	})
-	if err != nil {
-		return classify(opAbortMultipart, err)
+	if err == nil {
+		return nil
 	}
-	return nil
+	classified := classify(opAbortMultipart, err)
+	// Abort is idempotent: a NoSuchUpload / 404 means the upload was
+	// already aborted or completed. Treat as success.
+	if errors.Is(classified, storage.ErrNotFound) {
+		return nil
+	}
+	return classified
 }
 
 func (s *S3Compat) CreateMultipart(ctx context.Context, key string, opts *storage.MultipartOptions) (storage.MultipartUpload, error) {
@@ -81,6 +102,7 @@ func (s *S3Compat) CreateMultipart(ctx context.Context, key string, opts *storag
 		uploadID: aws.ToString(out.UploadId),
 		key:      key,
 		storeKey: applyPrefix(s.cfg.Prefix, key),
+		parts:    map[int]storage.MultipartPart{},
 	}, nil
 }
 
@@ -88,6 +110,12 @@ func (s *S3Compat) CompleteMultipartIfAbsent(ctx context.Context, mu storage.Mul
 	u, ok := mu.(*upload)
 	if !ok {
 		return storage.ObjectVersion{}, fmt.Errorf("%w: CompleteMultipartIfAbsent: upload is %T, want *s3compat.upload", storage.ErrInvalidArgument, mu)
+	}
+	if u.parent != s {
+		return storage.ObjectVersion{}, fmt.Errorf("%w: CompleteMultipartIfAbsent: upload was created by a different S3Compat instance", storage.ErrInvalidArgument)
+	}
+	if err := validateCompleteParts(u, parts); err != nil {
+		return storage.ObjectVersion{}, err
 	}
 	completed := make([]types.CompletedPart, 0, len(parts))
 	for _, p := range parts {
@@ -97,7 +125,7 @@ func (s *S3Compat) CompleteMultipartIfAbsent(ctx context.Context, mu storage.Mul
 		})
 	}
 	out, err := s.client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
-		Bucket:          aws.String(u.parent.cfg.Bucket),
+		Bucket:          aws.String(s.cfg.Bucket),
 		Key:             aws.String(u.storeKey),
 		UploadId:        aws.String(u.uploadID),
 		IfNoneMatch:     aws.String("*"),
@@ -113,14 +141,51 @@ func (s *S3Compat) CompleteMultipartIfAbsent(ctx context.Context, mu storage.Mul
 	}, nil
 }
 
-// bodyKnownSize attempts to determine the byte length of an
-// already-seekable body. Returns 0 if unknown.
-func bodyKnownSize(r io.Reader) int64 {
-	switch v := r.(type) {
-	case *bytes.Reader:
-		return int64(v.Len())
-	case *bytes.Buffer:
-		return int64(v.Len())
+// readerSize returns the byte length of body. Body must be a Seeker
+// (which materializeForRetry guarantees today). After this returns,
+// body is rewound to its start.
+func readerSize(r io.Reader) (int64, error) {
+	seeker, ok := r.(io.Seeker)
+	if !ok {
+		return 0, fmt.Errorf("s3compat: body is not seekable")
 	}
-	return 0
+	end, err := seeker.Seek(0, io.SeekEnd)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := seeker.Seek(0, io.SeekStart); err != nil {
+		return 0, err
+	}
+	return end, nil
+}
+
+// validateCompleteParts checks that parts is non-empty, contiguous from 1,
+// has non-empty tokens that match recorded uploads, and matches the
+// recorded sizes. The latter catches callers tampering with Part.Size
+// after UploadPart returned.
+func validateCompleteParts(u *upload, parts []storage.MultipartPart) error {
+	if len(parts) == 0 {
+		return fmt.Errorf("%w: CompleteMultipartIfAbsent: parts list is empty", storage.ErrInvalidArgument)
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	for i, p := range parts {
+		if p.PartNumber != i+1 {
+			return fmt.Errorf("%w: CompleteMultipartIfAbsent: parts must be contiguous starting at 1; parts[%d].PartNumber = %d", storage.ErrInvalidArgument, i, p.PartNumber)
+		}
+		if p.Token == "" {
+			return fmt.Errorf("%w: CompleteMultipartIfAbsent: parts[%d].Token is empty", storage.ErrInvalidArgument, i)
+		}
+		recorded, ok := u.parts[p.PartNumber]
+		if !ok {
+			return fmt.Errorf("%w: CompleteMultipartIfAbsent: parts[%d].PartNumber %d was not uploaded", storage.ErrInvalidArgument, i, p.PartNumber)
+		}
+		if p.Token != recorded.Token {
+			return fmt.Errorf("%w: CompleteMultipartIfAbsent: parts[%d].Token does not match uploaded part", storage.ErrInvalidArgument, i)
+		}
+		if p.Size != recorded.Size {
+			return fmt.Errorf("%w: CompleteMultipartIfAbsent: parts[%d].Size = %d, recorded = %d", storage.ErrInvalidArgument, i, p.Size, recorded.Size)
+		}
+	}
+	return nil
 }

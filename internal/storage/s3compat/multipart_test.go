@@ -89,3 +89,92 @@ func TestCreateMultipartRejectsInvalidKey(t *testing.T) {
 		})
 	}
 }
+
+func TestUploadPartReportsCorrectSize(t *testing.T) {
+	s, _ := newMockBackend(t)
+	up, err := s.CreateMultipart(context.Background(), "k", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := strings.NewReader("hello world!!")
+	p, err := up.UploadPart(context.Background(), 1, body)
+	if err != nil {
+		t.Fatalf("UploadPart: %v", err)
+	}
+	if p.Size != int64(len("hello world!!")) {
+		t.Fatalf("Size = %d, want %d", p.Size, len("hello world!!"))
+	}
+}
+
+func TestCompleteMultipartIfAbsentRejectsEmptyParts(t *testing.T) {
+	s, _ := newMockBackend(t)
+	up, err := s.CreateMultipart(context.Background(), "k", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.CompleteMultipartIfAbsent(context.Background(), up, nil)
+	if !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Fatalf("err = %v, want ErrInvalidArgument (empty parts)", err)
+	}
+}
+
+func TestCompleteMultipartIfAbsentRejectsNonContiguousParts(t *testing.T) {
+	s, _ := newMockBackend(t)
+	up, err := s.CreateMultipart(context.Background(), "k", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p1, _ := up.UploadPart(context.Background(), 1, strings.NewReader("a"))
+	// Upload part 3 (skipping 2) — caller error
+	p3, _ := up.UploadPart(context.Background(), 3, strings.NewReader("c"))
+	_, err = s.CompleteMultipartIfAbsent(context.Background(), up,
+		[]storage.MultipartPart{p1, p3})
+	if !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Fatalf("err = %v, want ErrInvalidArgument (non-contiguous)", err)
+	}
+}
+
+func TestCompleteMultipartIfAbsentRejectsTamperedSize(t *testing.T) {
+	s, _ := newMockBackend(t)
+	up, err := s.CreateMultipart(context.Background(), "k", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p1, _ := up.UploadPart(context.Background(), 1, strings.NewReader("hi"))
+	p1.Size = 99999 // caller tampered
+	_, err = s.CompleteMultipartIfAbsent(context.Background(), up, []storage.MultipartPart{p1})
+	if !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Fatalf("err = %v, want ErrInvalidArgument (tampered size)", err)
+	}
+}
+
+func TestAbortIsIdempotent(t *testing.T) {
+	s, _ := newMockBackend(t)
+	up, err := s.CreateMultipart(context.Background(), "k", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := up.Abort(context.Background()); err != nil {
+		t.Fatalf("first Abort: %v", err)
+	}
+	// Second abort: upload no longer exists. Must succeed.
+	if err := up.Abort(context.Background()); err != nil {
+		t.Fatalf("second Abort: %v (must be idempotent)", err)
+	}
+}
+
+func TestCompleteMultipartRejectsCrossInstance(t *testing.T) {
+	s1, _ := newMockBackend(t)
+	s2, _ := newMockBackend(t)
+	up, err := s1.CreateMultipart(context.Background(), "k", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p1, _ := up.UploadPart(context.Background(), 1, strings.NewReader("hi"))
+	// Try to complete on the WRONG S3Compat instance.
+	_, err = s2.CompleteMultipartIfAbsent(context.Background(), up,
+		[]storage.MultipartPart{p1})
+	if !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Fatalf("err = %v, want ErrInvalidArgument (cross-instance)", err)
+	}
+}

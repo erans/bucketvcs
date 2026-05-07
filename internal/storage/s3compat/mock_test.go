@@ -167,7 +167,12 @@ func (m *mockBackend) serveMultipart(w http.ResponseWriter, r *http.Request) boo
 
 	case r.Method == http.MethodDelete && q.Has("uploadId"):
 		// AbortMultipartUpload
-		delete(m.uploads, q.Get("uploadId"))
+		id := q.Get("uploadId")
+		if _, ok := m.uploads[id]; !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return true
+		}
+		delete(m.uploads, id)
 		w.WriteHeader(http.StatusNoContent)
 		return true
 	}
