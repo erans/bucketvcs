@@ -21,8 +21,9 @@ type upload struct {
 	key      string // logical (caller-visible) key
 	storeKey string // adapter-prefixed key on the wire
 
-	mu    sync.Mutex
-	parts map[int]storage.MultipartPart // partNumber -> recorded metadata
+	mu         sync.Mutex
+	parts      map[int]storage.MultipartPart // partNumber -> recorded metadata
+	terminated bool
 }
 
 var _ storage.MultipartUpload = (*upload)(nil)
@@ -31,6 +32,12 @@ func (u *upload) UploadID() string { return u.uploadID }
 func (u *upload) Key() string      { return u.key }
 
 func (u *upload) UploadPart(ctx context.Context, partNumber int, body io.Reader) (storage.MultipartPart, error) {
+	if partNumber < 1 || partNumber > 10000 {
+		return storage.MultipartPart{}, fmt.Errorf("%w: partNumber must be in [1, 10000] (got %d)", storage.ErrInvalidArgument, partNumber)
+	}
+	if err := u.checkActive(); err != nil {
+		return storage.MultipartPart{}, err
+	}
 	seekable, err := materializeForRetry(body, u.parent.cfg.UploadPartSize)
 	if err != nil {
 		return storage.MultipartPart{}, err
@@ -64,6 +71,26 @@ func (u *upload) recordPart(p storage.MultipartPart) {
 	u.parts[p.PartNumber] = p
 }
 
+// checkActive returns ErrInvalidArgument if the upload was already
+// completed or aborted. Per the storage contract, terminated uploads
+// must not accept further part uploads or completions.
+func (u *upload) checkActive() error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.terminated {
+		return fmt.Errorf("%w: upload %s has already been completed or aborted", storage.ErrInvalidArgument, u.uploadID)
+	}
+	return nil
+}
+
+// markTerminated flips the upload to terminated state under the
+// existing mutex. Idempotent; subsequent calls do nothing.
+func (u *upload) markTerminated() {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.terminated = true
+}
+
 func (u *upload) Abort(ctx context.Context) error {
 	_, err := u.parent.client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
 		Bucket:   aws.String(u.parent.cfg.Bucket),
@@ -71,12 +98,15 @@ func (u *upload) Abort(ctx context.Context) error {
 		UploadId: aws.String(u.uploadID),
 	})
 	if err == nil {
+		u.markTerminated()
 		return nil
 	}
 	classified := classify(opAbortMultipart, err)
 	// Abort is idempotent: a NoSuchUpload / 404 means the upload was
 	// already aborted or completed. Treat as success.
 	if errors.Is(classified, storage.ErrNotFound) {
+		// Already aborted/completed — also terminal.
+		u.markTerminated()
 		return nil
 	}
 	return classified
@@ -114,6 +144,9 @@ func (s *S3Compat) CompleteMultipartIfAbsent(ctx context.Context, mu storage.Mul
 	if u.parent != s {
 		return storage.ObjectVersion{}, fmt.Errorf("%w: CompleteMultipartIfAbsent: upload was created by a different S3Compat instance", storage.ErrInvalidArgument)
 	}
+	if err := u.checkActive(); err != nil {
+		return storage.ObjectVersion{}, err
+	}
 	if err := validateCompleteParts(u, parts); err != nil {
 		return storage.ObjectVersion{}, err
 	}
@@ -132,8 +165,15 @@ func (s *S3Compat) CompleteMultipartIfAbsent(ctx context.Context, mu storage.Mul
 		MultipartUpload: &types.CompletedMultipartUpload{Parts: completed},
 	})
 	if err != nil {
+		// On NoSuchUpload-after-complete (a concurrent racer won), the
+		// caller would otherwise see ErrNotFound which is misleading.
+		// We still classify here; the terminated-state guard above
+		// catches the fast path. The race window between checkActive
+		// and the SDK call is narrow but possible — leave as-is and
+		// document.
 		return storage.ObjectVersion{}, classify(opCompleteIfAbsent, err)
 	}
+	u.markTerminated()
 	return storage.ObjectVersion{
 		Provider: "s3compat",
 		Token:    aws.ToString(out.ETag),

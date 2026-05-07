@@ -178,3 +178,69 @@ func TestCompleteMultipartRejectsCrossInstance(t *testing.T) {
 		t.Fatalf("err = %v, want ErrInvalidArgument (cross-instance)", err)
 	}
 }
+
+func TestUploadPartRejectsInvalidPartNumber(t *testing.T) {
+	s, _ := newMockBackend(t)
+	up, err := s.CreateMultipart(context.Background(), "k", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := []int{0, -1, 10001, 1 << 30}
+	for _, pn := range bad {
+		_, err := up.UploadPart(context.Background(), pn, strings.NewReader("x"))
+		if !errors.Is(err, storage.ErrInvalidArgument) {
+			t.Fatalf("UploadPart(pn=%d): err = %v, want ErrInvalidArgument", pn, err)
+		}
+	}
+}
+
+func TestCompleteAfterCompleteRejects(t *testing.T) {
+	s, _ := newMockBackend(t)
+	up, err := s.CreateMultipart(context.Background(), "k", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p1, _ := up.UploadPart(context.Background(), 1, strings.NewReader("hi"))
+	if _, err := s.CompleteMultipartIfAbsent(context.Background(), up,
+		[]storage.MultipartPart{p1}); err != nil {
+		t.Fatalf("first Complete: %v", err)
+	}
+	// Second Complete on the same upload should fail fast as ErrInvalidArgument.
+	_, err = s.CompleteMultipartIfAbsent(context.Background(), up,
+		[]storage.MultipartPart{p1})
+	if !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Fatalf("second Complete: err = %v, want ErrInvalidArgument (terminated)", err)
+	}
+}
+
+func TestUploadPartAfterAbortRejects(t *testing.T) {
+	s, _ := newMockBackend(t)
+	up, err := s.CreateMultipart(context.Background(), "k", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := up.Abort(context.Background()); err != nil {
+		t.Fatalf("Abort: %v", err)
+	}
+	_, err = up.UploadPart(context.Background(), 1, strings.NewReader("x"))
+	if !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Fatalf("UploadPart after Abort: err = %v, want ErrInvalidArgument", err)
+	}
+}
+
+func TestCompleteAfterAbortRejects(t *testing.T) {
+	s, _ := newMockBackend(t)
+	up, err := s.CreateMultipart(context.Background(), "k", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p1, _ := up.UploadPart(context.Background(), 1, strings.NewReader("hi"))
+	if err := up.Abort(context.Background()); err != nil {
+		t.Fatalf("Abort: %v", err)
+	}
+	_, err = s.CompleteMultipartIfAbsent(context.Background(), up,
+		[]storage.MultipartPart{p1})
+	if !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Fatalf("Complete after Abort: err = %v, want ErrInvalidArgument", err)
+	}
+}
