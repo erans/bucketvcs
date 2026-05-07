@@ -27,8 +27,10 @@ import (
 // adapter. It exists ONLY for unit tests; live conformance covers real
 // S3/R2 behavior.
 type mockBackend struct {
-	t       *testing.T
-	objects map[string]mockObject // key (incl. bucket prefix) -> obj
+	t               *testing.T
+	objects         map[string]mockObject // key (incl. bucket prefix) -> obj
+	nextETag        uint64
+	lastContentType string
 }
 
 type mockObject struct {
@@ -128,7 +130,9 @@ func (m *mockBackend) servePut(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	etag := `"v` + strconv.Itoa(len(m.objects)+1) + `"`
+	m.nextETag++
+	etag := fmt.Sprintf(`"v%d"`, m.nextETag)
+	m.lastContentType = r.Header.Get("Content-Type")
 	m.objects[key] = mockObject{body: body, etag: etag}
 	w.Header().Set("ETag", etag)
 	w.WriteHeader(http.StatusOK)
