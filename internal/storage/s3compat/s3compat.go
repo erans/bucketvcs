@@ -9,6 +9,8 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
 
+// NOTE: Get, Head, and GetRange are implemented in get.go.
+
 // S3Compat is the S3-compatible storage.ObjectStore implementation.
 type S3Compat struct {
 	cfg     Config
@@ -36,18 +38,6 @@ func (s *S3Compat) Capabilities() storage.Capabilities {
 // individual methods land one at a time.
 
 var errNotImpl = errors.New("s3compat: not yet implemented (skeleton)")
-
-func (s *S3Compat) Get(ctx context.Context, key string, opts *storage.GetOptions) (*storage.Object, error) {
-	return nil, errNotImpl
-}
-
-func (s *S3Compat) Head(ctx context.Context, key string) (*storage.ObjectMetadata, error) {
-	return nil, errNotImpl
-}
-
-func (s *S3Compat) GetRange(ctx context.Context, key string, start, endInclusive int64) (io.ReadCloser, error) {
-	return nil, errNotImpl
-}
 
 func (s *S3Compat) PutIfAbsent(ctx context.Context, key string, body io.Reader, opts *storage.PutOptions) (storage.ObjectVersion, error) {
 	return storage.ObjectVersion{}, errNotImpl
