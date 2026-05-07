@@ -47,12 +47,25 @@ func makeFactory(t *testing.T, base s3compat.Config) conformance.Factory {
 // best-effort semantics: failures are logged, never fatal, since
 // cleanup must not block other tests in the same suite from running.
 //
-// Cleanup uses Head + DeleteObject directly via the storage interface:
-// we list, and for each returned object call DeleteIfVersionMatches
-// with the listed Version. If a delete fails (race with another
-// goroutine, transient error), we log and move on.
+// Step 1 aborts any in-progress multipart uploads that the conformance
+// suite may have left behind (e.g. the "multipart complete cannot
+// silently overwrite" tests). These accumulate cost on real S3/R2 if
+// not reclaimed.
+//
+// Step 2 deletes listed objects page-by-page via DeleteIfVersionMatches.
+// If a delete fails (race with another goroutine, transient error), we
+// log and move on.
 func cleanupPrefix(tb testing.TB, s storage.ObjectStore, ctx context.Context) {
 	tb.Helper()
+
+	// Step 1: Abort orphan multipart uploads.
+	if sc, ok := s.(*s3compat.S3Compat); ok {
+		if err := sc.AbortMultipartsUnderPrefix(ctx); err != nil {
+			tb.Logf("conformance cleanup: abort multiparts: %v", err)
+		}
+	}
+
+	// Step 2: Delete listed objects, page-by-page.
 	for {
 		page, err := s.List(ctx, "", nil)
 		if err != nil {
@@ -86,6 +99,7 @@ func TestConformance_R2(t *testing.T) {
 		ForcePathStyle:  true,
 		AccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
 		SecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
+		SessionToken:    os.Getenv("AWS_SESSION_TOKEN"),
 	}
 	conformance.Run(t, makeFactory(t, cfg))
 }
@@ -103,6 +117,7 @@ func TestConformance_S3(t *testing.T) {
 		ForcePathStyle:  os.Getenv("BUCKETVCS_S3_FORCE_PATH_STYLE") == "true",
 		AccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
 		SecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
+		SessionToken:    os.Getenv("AWS_SESSION_TOKEN"),
 	}
 	conformance.Run(t, makeFactory(t, cfg))
 }
