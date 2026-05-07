@@ -39,8 +39,26 @@ func (s *S3Compat) PutIfAbsent(ctx context.Context, key string, body io.Reader, 
 	}, nil
 }
 
+// matchesAdapterShape returns nil if expected has the shape s3compat
+// produces (Provider="s3compat" or empty, Kind=VersionEtag or zero),
+// or wraps storage.ErrVersionMismatch otherwise. Empty Provider/Kind
+// are accepted charitably for callers who built ObjectVersion inline
+// without round-tripping through the adapter.
+func matchesAdapterShape(expected storage.ObjectVersion) error {
+	if expected.Provider != "" && expected.Provider != "s3compat" {
+		return fmt.Errorf("%w: ObjectVersion.Provider=%q (s3compat requires \"s3compat\")", storage.ErrVersionMismatch, expected.Provider)
+	}
+	if expected.Kind != storage.VersionUnknown && expected.Kind != storage.VersionEtag {
+		return fmt.Errorf("%w: ObjectVersion.Kind=%v (s3compat requires VersionEtag)", storage.ErrVersionMismatch, expected.Kind)
+	}
+	return nil
+}
+
 func (s *S3Compat) PutIfVersionMatches(ctx context.Context, key string, expected storage.ObjectVersion, body io.Reader, opts *storage.PutOptions) (storage.ObjectVersion, error) {
 	if err := validateKey(key); err != nil {
+		return storage.ObjectVersion{}, err
+	}
+	if err := matchesAdapterShape(expected); err != nil {
 		return storage.ObjectVersion{}, err
 	}
 	seekable, err := materializeForRetry(body, s.cfg.UploadPartSize)

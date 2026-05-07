@@ -122,3 +122,49 @@ func TestPutIfVersionMatchesNonexistentKey(t *testing.T) {
 		t.Fatalf("PutIfVersionMatches against missing key: err = %v, want ErrVersionMismatch", err)
 	}
 }
+
+func TestPutIfVersionMatchesRejectsWrongProvider(t *testing.T) {
+	s, mb := newMockBackend(t)
+	mb.put("k", []byte("v0"), `"v0"`)
+
+	expected := storage.ObjectVersion{
+		Provider: "localfs", // wrong provider
+		Token:    `"v0"`,    // right token
+		Kind:     storage.VersionEtag,
+	}
+	_, err := s.PutIfVersionMatches(context.Background(), "k", expected,
+		strings.NewReader("v1"), nil)
+	if !errors.Is(err, storage.ErrVersionMismatch) {
+		t.Fatalf("err = %v, want ErrVersionMismatch (wrong Provider)", err)
+	}
+}
+
+func TestPutIfVersionMatchesRejectsWrongKind(t *testing.T) {
+	s, mb := newMockBackend(t)
+	mb.put("k", []byte("v0"), `"v0"`)
+
+	expected := storage.ObjectVersion{
+		Provider: "s3compat",
+		Token:    `"v0"`,
+		Kind:     storage.VersionGeneration, // wrong kind
+	}
+	_, err := s.PutIfVersionMatches(context.Background(), "k", expected,
+		strings.NewReader("v1"), nil)
+	if !errors.Is(err, storage.ErrVersionMismatch) {
+		t.Fatalf("err = %v, want ErrVersionMismatch (wrong Kind)", err)
+	}
+}
+
+func TestPutIfVersionMatchesAcceptsEmptyShape(t *testing.T) {
+	s, mb := newMockBackend(t)
+	mb.put("k", []byte("v0"), `"v0"`)
+
+	// Caller-built OV with empty Provider/Kind is accepted charitably:
+	// s3compat must not reject naively-constructed callers.
+	expected := storage.ObjectVersion{Token: `"v0"`}
+	_, err := s.PutIfVersionMatches(context.Background(), "k", expected,
+		strings.NewReader("v1"), nil)
+	if err != nil {
+		t.Fatalf("PutIfVersionMatches with empty Provider/Kind: %v (should accept)", err)
+	}
+}
