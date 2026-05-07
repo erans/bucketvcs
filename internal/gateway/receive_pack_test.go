@@ -2,8 +2,11 @@ package gateway
 
 import (
 	"bytes"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
@@ -145,5 +148,138 @@ func TestReceivePack_StagesPackToIncomingDir(t *testing.T) {
 	// pack and may return ng. For now we just want != 4xx for valid framing.
 	if resp.StatusCode != 200 {
 		t.Fatalf("staging: status %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestReceivePack_ReportSignalsNotImplemented verifies the placeholder
+// report-status emits "unpack ng" and per-ref "ng" so a real Git client
+// surfaces the push as failed (commit logic lands in Task 17). HTTP is
+// 200 because report-status framing requires a 2xx response.
+func TestReceivePack_ReportSignalsNotImplemented(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeRepoInStore(t, storeDir, "acme", "demo")
+	store, _ := localfs.Open(storeDir)
+	t.Cleanup(func() { _ = store.Close() })
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	const oldOID = "1111111111111111111111111111111111111111"
+	body := pktBody(
+		dataLine(oldOID+" "+testNullOID+" refs/heads/feature\x00report-status\n"),
+		flush,
+	)
+	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d, want 200", resp.StatusCode)
+	}
+	if !bytes.Contains(got, []byte("unpack not-implemented")) {
+		t.Fatalf("expected 'unpack not-implemented' in report, got %q", got)
+	}
+	if !bytes.Contains(got, []byte("ng refs/heads/feature")) {
+		t.Fatalf("expected 'ng refs/heads/feature' in report, got %q", got)
+	}
+}
+
+// TestReceivePack_ReportUsesSidebandWhenNegotiated verifies that when the
+// client requests side-band-64k, the report-status is multiplexed on
+// band 1 rather than written as raw pkt-lines. Without this the response
+// is malformed for a side-band-aware client (it expects framed channel
+// payloads, not naked status lines).
+func TestReceivePack_ReportUsesSidebandWhenNegotiated(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeRepoInStore(t, storeDir, "acme", "demo")
+	store, _ := localfs.Open(storeDir)
+	t.Cleanup(func() { _ = store.Close() })
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	const oldOID = "1111111111111111111111111111111111111111"
+	body := pktBody(
+		dataLine(oldOID+" "+testNullOID+" refs/heads/feature\x00report-status side-band-64k\n"),
+		flush,
+	)
+	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d, want 200", resp.StatusCode)
+	}
+	// The first pkt-line must be a side-band Data frame: 4 hex length
+	// bytes, then a band-id byte (0x01), then payload. The naked-pkt-line
+	// path would start with a 4-hex length followed by "unpack" directly.
+	if len(got) < 5 {
+		t.Fatalf("response too short: %q", got)
+	}
+	if got[4] != 0x01 {
+		t.Fatalf("first pkt-line is not side-band band-1; got byte 0x%02x in payload (full: %q)", got[4], got)
+	}
+	// Even though the pkt-line is band-1 wrapped, the inner stream still
+	// contains the report — verify by substring.
+	if !bytes.Contains(got, []byte("unpack not-implemented")) {
+		t.Fatalf("inner report missing 'unpack not-implemented': %q", got)
+	}
+}
+
+// TestReceivePack_RejectsTooManyCommands enforces the per-request command
+// cap that bounds CPU / subprocess cost. Each command invokes
+// `git check-ref-format`, so an uncapped count is a DoS even at small
+// per-command body sizes.
+func TestReceivePack_RejectsTooManyCommands(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeRepoInStore(t, storeDir, "acme", "demo")
+	store, _ := localfs.Open(storeDir)
+	t.Cleanup(func() { _ = store.Close() })
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test"})
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	// Build maxUpdateCommands+1 = 4097 delete commands.
+	chunks := make([]pktChunk, 0, 4099)
+	const oldOID = "1111111111111111111111111111111111111111"
+	for i := 0; i < 4097; i++ {
+		ref := fmt.Sprintf("refs/heads/branch-%05d", i)
+		line := oldOID + " " + testNullOID + " " + ref
+		if i == 0 {
+			line += "\x00report-status"
+		}
+		line += "\n"
+		chunks = append(chunks, dataLine(line))
+	}
+	chunks = append(chunks, flush)
+	body := pktBody(chunks...)
+
+	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	if resp.StatusCode != 400 {
+		t.Fatalf("too-many-commands: status %d, want 400", resp.StatusCode)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(got), "too many update commands") {
+		t.Fatalf("expected 'too many update commands' message, got %q", got)
 	}
 }

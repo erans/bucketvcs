@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -21,6 +22,15 @@ import (
 // gatewayNullOID is the 40-zero OID sentinel for create/delete commands.
 // We define it locally to avoid an import cycle with internal/mirror.
 const gatewayNullOID = "0000000000000000000000000000000000000000"
+
+// maxUpdateCommands caps the number of update commands a single
+// receive-pack request can carry. Each command spawns a
+// `git check-ref-format` subprocess for refname validation, so an
+// uncapped count is a CPU/process DoS even at delete-only sizes well
+// below the request body limit. 4096 is well above any realistic push
+// (the largest known repos advertise <1k branches/tags) and below the
+// point where the slice itself is a memory pressure source.
+const maxUpdateCommands = 4096
 
 type updateCommand struct {
 	OldOID  string
@@ -84,10 +94,14 @@ func (s *Server) handleReceivePack(w http.ResponseWriter, r *http.Request, tenan
 	defer m.Unlock()
 
 	// Task 17 will replace this with full validation + commit. For Task 16
-	// we emit a placeholder ok-everything report so the parsing path is
-	// independently testable.
+	// we MUST NOT report success — no pack ingest, no ref update, no CAS
+	// has actually happened. We emit an honest report-status of "unpack ng
+	// not-implemented" + per-ref "ng <ref> not-implemented" so a real Git
+	// client surfaces the push as failed. The HTTP layer still returns 200
+	// because report-status framing requires a 2xx response; the failure
+	// is communicated via the report itself per pack-protocol(5).
 	w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
-	if err := writeReportPlaceholder(w, req); err != nil {
+	if err := writeReportNotImplemented(w, req); err != nil {
 		// best-effort — the response is already partially written and
 		// surfacing an error here would corrupt the report.
 		_ = err
@@ -161,6 +175,9 @@ func parseReceivePackRequest(ctx context.Context, body io.Reader, incoming strin
 			return nil, fmt.Errorf("noop command (both OIDs are zero)")
 		}
 		req.Updates = append(req.Updates, updateCommand{OldOID: old, NewOID: neu, Refname: ref})
+		if len(req.Updates) > maxUpdateCommands {
+			return nil, fmt.Errorf("too many update commands (>%d)", maxUpdateCommands)
+		}
 	}
 	if len(req.Updates) == 0 {
 		return nil, errors.New("no update commands")
@@ -218,16 +235,59 @@ func validHexOID40(s string) bool {
 	return true
 }
 
-// writeReportPlaceholder emits an "unpack ok" + per-ref "ok" report. This
-// is a placeholder for Task 16 only; Task 17 will replace it with a real
-// report whose per-ref status reflects actual ref-update outcomes.
-func writeReportPlaceholder(w io.Writer, req *receivePackRequest) error {
+// writeReportNotImplemented emits a report-status indicating that the
+// receive-pack handler accepted and parsed the request but has not yet
+// implemented commit logic (Task 17). This is honest signaling so a real
+// Git client surfaces the push as failed rather than silently succeeding.
+//
+// Format per pack-protocol(5):
+//
+//	unpack <error-string-or-"ok">\n
+//	(ok <ref>\n | ng <ref> <error>\n)+
+//	flush
+//
+// We send "unpack <reason>" and a per-ref "ng <ref> <reason>" for every
+// command, which clients render as a failed push.
+//
+// When the client negotiated side-band-64k (advertised in info/refs as a
+// receive-pack capability) the entire report sequence is multiplexed on
+// band 1, terminated by a band-level flush, then a final outer pkt-line
+// flush. Otherwise the report is written as raw pkt-lines.
+func writeReportNotImplemented(w io.Writer, req *receivePackRequest) error {
+	const reason = "not-implemented-yet-task-17"
 	pw := pktline.NewWriter(w)
-	if err := pw.WriteString("unpack ok\n"); err != nil {
+
+	if req.Caps["side-band-64k"] {
+		// Buffer the report-status pkt-line stream, then chunk it onto
+		// band 1. We can't side-band each pkt-line individually because
+		// the client's report-status parser expects a contiguous
+		// pkt-line stream on band 1 (terminated by an inner flush, then
+		// the side-band stream itself ends with an outer flush).
+		var inner bytes.Buffer
+		ipw := pktline.NewWriter(&inner)
+		if err := ipw.WriteString("unpack " + reason + "\n"); err != nil {
+			return err
+		}
+		for _, u := range req.Updates {
+			if err := ipw.WriteString("ng " + u.Refname + " " + reason + "\n"); err != nil {
+				return err
+			}
+		}
+		if err := ipw.WriteFlush(); err != nil {
+			return err
+		}
+		sb := pktline.NewSidebandWriter(pw)
+		if _, err := sb.WriteData(inner.Bytes()); err != nil {
+			return err
+		}
+		return pw.WriteFlush()
+	}
+
+	if err := pw.WriteString("unpack " + reason + "\n"); err != nil {
 		return err
 	}
 	for _, u := range req.Updates {
-		if err := pw.WriteString("ok " + u.Refname + "\n"); err != nil {
+		if err := pw.WriteString("ng " + u.Refname + " " + reason + "\n"); err != nil {
 			return err
 		}
 	}
