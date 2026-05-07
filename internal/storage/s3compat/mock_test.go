@@ -107,6 +107,8 @@ func (m *mockBackend) serve(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			_, _ = w.Write(obj.body)
 		}
+	case http.MethodDelete:
+		m.serveDelete(w, r)
 	default:
 		w.WriteHeader(http.StatusNotImplemented)
 	}
@@ -136,6 +138,22 @@ func (m *mockBackend) servePut(w http.ResponseWriter, r *http.Request) {
 	m.objects[key] = mockObject{body: body, etag: etag}
 	w.Header().Set("ETag", etag)
 	w.WriteHeader(http.StatusOK)
+}
+
+// serveDelete handles DELETE with optional If-Match ETag check.
+func (m *mockBackend) serveDelete(w http.ResponseWriter, r *http.Request) {
+	key := m.keyFromPath(r.URL.Path)
+	existing, exists := m.objects[key]
+	if !exists {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	if im := r.Header.Get("If-Match"); im != "" && existing.etag != im {
+		w.WriteHeader(http.StatusPreconditionFailed)
+		return
+	}
+	delete(m.objects, key)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // parseSimpleRange handles "bytes=start-end" only.
