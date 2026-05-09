@@ -58,7 +58,7 @@ func mustExecUP(t *testing.T, dir string, args ...string) {
 	}
 }
 
-func TestAdvertise_V0_EmitsServicePreamble(t *testing.T) {
+func TestAdvertise_V0_RefAdvertisementShape(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires git binary")
 	}
@@ -85,15 +85,31 @@ func TestAdvertise_V0_EmitsServicePreamble(t *testing.T) {
 		t.Fatalf("Advertise: %v", err)
 	}
 
-	// The pkt-line for "# service=git-upload-pack\n" must appear first.
-	// pkt-line format: 4-hex-digit length (includes itself) + payload.
-	// len("# service=git-upload-pack\n") = 26, + 4 = 30 = 0x1e → "001e"
-	want := []byte("001e# service=git-upload-pack\n0000")
-	if !bytes.Contains(buf.Bytes(), want) {
-		t.Fatalf("output missing service preamble %q; got:\n%q", want, buf.Bytes())
+	// The V0 output must NOT begin with the Smart-HTTP service preamble.
+	// That preamble is HTTP-specific framing emitted by the gateway adapter;
+	// the transport-neutral engine starts directly with the ref advertisement.
+	servicePreamble := []byte("001e# service=git-upload-pack\n0000")
+	if bytes.HasPrefix(buf.Bytes(), servicePreamble) {
+		t.Fatalf("Advertise must not emit service preamble; it is HTTP-only framing: %q", buf.Bytes())
 	}
-	if !bytes.HasPrefix(buf.Bytes(), want) {
-		t.Fatalf("service preamble not at start of output; got:\n%q", buf.Bytes())
+
+	// The output must begin with a valid pkt-line ref entry.  The repo has a
+	// HEAD pointing at refs/heads/main, so expect: "<oid> HEAD\x00<caps>".
+	// A pkt-line ref line starts with a 4-hex-digit length prefix followed by
+	// a 40-hex-digit OID, a space, and the ref name.
+	output := buf.Bytes()
+	if len(output) < 4 {
+		t.Fatalf("output too short: %q", output)
+	}
+	// After the 4-byte pkt-line length the next 40 bytes are the OID.
+	// We just verify the first non-pktlen byte is a hex digit (OID start),
+	// not '#' (which would indicate a service preamble).
+	if output[4] == '#' {
+		t.Fatalf("first pkt-line payload starts with '#'; service preamble must not be in engine output: %q", output)
+	}
+	// The ref advertisement must contain HEAD with capabilities.
+	if !bytes.Contains(output, []byte(" HEAD\x00")) {
+		t.Fatalf("V0 advertisement missing HEAD line: %q", output)
 	}
 }
 

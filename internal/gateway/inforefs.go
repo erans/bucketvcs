@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -29,32 +30,44 @@ func (s *Server) handleInfoRefs(w http.ResponseWriter, r *http.Request, tenant, 
 		if wantsV2(r.Header.Get("Git-Protocol")) {
 			proto = 2
 		}
+
+		// Buffer the engine output so we can return HTTP errors on failure
+		// without having committed response headers. For V0 we prepend the
+		// Smart-HTTP service preamble (HTTP-specific framing that the
+		// transport-neutral engine does not emit; SSH clients expect the ref
+		// advertisement to begin immediately without it).
+		var body bytes.Buffer
 		req := &uploadpack.EngineRequest{
 			Ctx:             r.Context(),
 			Tenant:          tenant,
 			Repo:            repoID,
-			Stdout:          w,
+			Stdout:          &body,
 			ProtocolVersion: proto,
 			Store:           s.store,
 			AgentVersion:    s.opts.Version,
 		}
-		// Set response headers before writing any body bytes. If Advertise
-		// returns an error we can still write an HTTP error response because
-		// Advertise only writes to req.Stdout (== w) on success.
-		//
-		// We must set the headers here, before Advertise, so that when
-		// Advertise writes its first byte the correct Content-Type is in
-		// place. ResponseWriter buffers headers until the first Write.
-		w.Header().Set("Content-Type", "application/x-git-upload-pack-advertisement")
-		w.Header().Set("Cache-Control", "no-cache")
 		if err := uploadpack.Advertise(req); err != nil {
 			if errors.Is(err, uploadpack.ErrRepoNotFound) {
 				http.Error(w, "repository not found", http.StatusNotFound)
 				return
 			}
+			if errors.Is(err, uploadpack.ErrInvalidName) {
+				http.Error(w, "invalid tenant or repository name", http.StatusBadRequest)
+				return
+			}
 			http.Error(w, "internal storage error", http.StatusInternalServerError)
 			return
 		}
+
+		w.Header().Set("Content-Type", "application/x-git-upload-pack-advertisement")
+		w.Header().Set("Cache-Control", "no-cache")
+		if proto == 0 {
+			// Write the Smart-HTTP service preamble before the ref advertisement.
+			pw := pktline.NewWriter(w)
+			_ = pw.WriteString("# service=git-upload-pack\n")
+			_ = pw.WriteFlush()
+		}
+		_, _ = w.Write(body.Bytes())
 		return
 	}
 
