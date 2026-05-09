@@ -2,18 +2,13 @@ package gateway
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"net/http"
-	"sort"
 	"strings"
 
+	"github.com/bucketvcs/bucketvcs/internal/gitproto/receivepack"
 	"github.com/bucketvcs/bucketvcs/internal/gitproto/uploadpack"
 	"github.com/bucketvcs/bucketvcs/internal/pktline"
-	"github.com/bucketvcs/bucketvcs/internal/repo"
-	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
-	"github.com/bucketvcs/bucketvcs/internal/repo/repoerrs"
-	"github.com/bucketvcs/bucketvcs/internal/v2proto"
 )
 
 func (s *Server) handleInfoRefs(w http.ResponseWriter, r *http.Request, tenant, repoID string) {
@@ -71,80 +66,37 @@ func (s *Server) handleInfoRefs(w http.ResponseWriter, r *http.Request, tenant, 
 		return
 	}
 
-	// git-receive-pack: open repo, read manifest, write v0 advertisement.
-	r2, err := repo.Open(r.Context(), s.store, tenant, repoID)
-	if err != nil {
-		if errors.Is(err, repoerrs.ErrRepoNotFound) {
+	// git-receive-pack: delegate to the transport-neutral engine.
+	// The Smart-HTTP "# service=git-receive-pack\n" preamble is HTTP-specific
+	// framing that we emit here; the engine does not emit it.
+	var body bytes.Buffer
+	rreq := &receivepack.EngineRequest{
+		Ctx:          r.Context(),
+		Tenant:       tenant,
+		Repo:         repoID,
+		Stdout:       &body,
+		Store:        s.store,
+		AgentVersion: s.opts.Version,
+	}
+	if err := receivepack.Advertise(rreq); err != nil {
+		if errors.Is(err, receivepack.ErrRepoNotFound) {
 			http.Error(w, "repository not found", http.StatusNotFound)
 			return
 		}
-		if errors.Is(err, repoerrs.ErrInvalidTenantID) || errors.Is(err, repoerrs.ErrInvalidRepoID) {
+		if errors.Is(err, receivepack.ErrInvalidName) {
 			http.Error(w, "invalid tenant or repository name", http.StatusBadRequest)
 			return
 		}
 		http.Error(w, "internal storage error", http.StatusInternalServerError)
 		return
 	}
-	view, err := r2.ReadRoot(r.Context())
-	if err != nil {
-		http.Error(w, "internal storage error", http.StatusInternalServerError)
-		return
-	}
-	var body manifest.Body
-	if err := json.Unmarshal(view.Body, &body); err != nil {
-		http.Error(w, "manifest decode error", http.StatusInternalServerError)
-		return
-	}
 
 	w.Header().Set("Content-Type", "application/x-git-receive-pack-advertisement")
 	w.Header().Set("Cache-Control", "no-cache")
-	writeV0ReceivePackAdvertisement(w, &body, s.opts.Version)
-}
-
-// writeV0ReceivePackAdvertisement writes the v0 receive-pack advertisement.
-// receive-pack does not advertise HEAD (push targets are real refs).
-func writeV0ReceivePackAdvertisement(w http.ResponseWriter, body *manifest.Body, version string) {
 	pw := pktline.NewWriter(w)
 	_ = pw.WriteString("# service=git-receive-pack\n")
 	_ = pw.WriteFlush()
-
-	names := make([]string, 0, len(body.Refs))
-	for n := range body.Refs {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-
-	caps := receivePackV0Caps(version)
-
-	if len(names) == 0 {
-		_ = pw.WriteString("0000000000000000000000000000000000000000 capabilities^{}\x00" + caps + "\n")
-		_ = pw.WriteFlush()
-		return
-	}
-
-	first := true
-	for _, n := range names {
-		oid := body.Refs[n]
-		if first {
-			_ = pw.WriteString(oid + " " + n + "\x00" + caps + "\n")
-			first = false
-			continue
-		}
-		_ = pw.WriteString(oid + " " + n + "\n")
-	}
-	_ = pw.WriteFlush()
-}
-
-func receivePackV0Caps(version string) string {
-	return strings.Join([]string{
-		"report-status",
-		"delete-refs",
-		"ofs-delta",
-		"atomic",
-		"side-band-64k",
-		"agent=" + v2proto.AgentName + "/" + version,
-		"object-format=sha1",
-	}, " ")
+	_, _ = w.Write(body.Bytes())
 }
 
 // wantsV2 reports whether the Git-Protocol header advertises protocol v2.

@@ -34,9 +34,6 @@ type EngineRequest struct {
 // ErrNotImplemented is returned by stubs until later tasks port the M3 logic.
 var ErrNotImplemented = errors.New("receivepack: not implemented")
 
-// Advertise writes the receive-pack ref/capability advertisement to req.Stdout.
-func Advertise(req *EngineRequest) error { return ErrNotImplemented }
-
 // Service runs the command-list + pack ingest + report-status loop.
 func Service(req *EngineRequest) error { return ErrNotImplemented }
 
