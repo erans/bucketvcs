@@ -616,11 +616,18 @@ func (s *Store) ListRepos(ctx context.Context, tenant string) ([]*Repo, error) {
 
 // VerifyCredential implements auth.Store.
 func (s *Store) VerifyCredential(ctx context.Context, c auth.Credential) (*auth.Actor, string, *auth.Scope, error) {
-	bp, ok := c.(auth.BasicPassword)
-	if !ok {
-		// M6 will add SSHKeyFingerprint handling.
+	switch c := c.(type) {
+	case auth.SSHKeyFingerprint:
+		return s.verifySSHKey(ctx, c.Fingerprint)
+	case auth.BasicPassword:
+		return s.verifyBasicPassword(ctx, c)
+	default:
 		return nil, "", nil, auth.ErrInvalidCredential
 	}
+}
+
+// verifyBasicPassword handles the BasicPassword credential case.
+func (s *Store) verifyBasicPassword(ctx context.Context, bp auth.BasicPassword) (*auth.Actor, string, *auth.Scope, error) {
 	tokenID, secret, err := auth.ParseToken(bp.Password)
 	if err != nil {
 		return nil, "", nil, auth.ErrInvalidCredential
@@ -664,6 +671,79 @@ func (s *Store) VerifyCredential(ctx context.Context, c auth.Credential) (*auth.
 	}, tokenID, nil, nil
 }
 
+// verifySSHKey handles the SSHKeyFingerprint credential case.
+// It performs a single join to resolve both user keys and deploy keys.
+// The schema enforces an XOR constraint: either user_id is set (user key) or
+// scope_* fields are set (deploy key) — never both, never neither.
+// We branch on userID.Valid after scanning to distinguish the two cases.
+func (s *Store) verifySSHKey(ctx context.Context, fingerprint string) (*auth.Actor, string, *auth.Scope, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT k.id,
+		       k.user_id, k.scope_tenant, k.scope_repo, k.scope_perm,
+		       k.revoked_at, k.label,
+		       u.id, u.name, u.is_admin, u.disabled_at
+		FROM ssh_keys k
+		LEFT JOIN users u ON u.id = k.user_id
+		WHERE k.fingerprint = ?
+	`, fingerprint)
+
+	var (
+		keyID                                     string
+		userID, scopeTenant, scopeRepo, scopePerm sql.NullString
+		revokedAt                                 sql.NullInt64
+		keyLabel                                  sql.NullString
+		uID, uName                                sql.NullString
+		uIsAdmin                                  sql.NullInt64
+		uDisabledAt                               sql.NullInt64
+	)
+	err := row.Scan(&keyID,
+		&userID, &scopeTenant, &scopeRepo, &scopePerm,
+		&revokedAt, &keyLabel,
+		&uID, &uName, &uIsAdmin, &uDisabledAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, "", nil, auth.ErrInvalidCredential
+	}
+	if err != nil {
+		return nil, "", nil, err
+	}
+	if revokedAt.Valid {
+		return nil, "", nil, auth.ErrTokenRevoked
+	}
+
+	if userID.Valid {
+		// User key. The user row must exist (JOIN guarantees it if user_id is
+		// set and the FK is intact) and not be disabled.
+		if uDisabledAt.Valid {
+			return nil, "", nil, auth.ErrUserDisabled
+		}
+		actor := &auth.Actor{
+			UserID:  uID.String,
+			Name:    uName.String,
+			IsAdmin: uIsAdmin.Valid && uIsAdmin.Int64 != 0,
+		}
+		return actor, keyID, nil, nil
+	}
+
+	// Deploy key. Build a synthetic actor; scope drives permission.
+	label := keyLabel.String
+	if label == "" {
+		label = "(unlabeled)"
+	}
+	actor := &auth.Actor{
+		UserID: "deploy:" + keyID,
+		Name:   "deploy-key:" + label,
+	}
+	perm, err := permFromText(scopePerm.String)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	return actor, keyID, &auth.Scope{
+		Tenant: scopeTenant.String,
+		Repo:   scopeRepo.String,
+		Perm:   perm,
+	}, nil
+}
+
 // TouchTokenUsage implements auth.Store. A missing tokenID is not an error.
 func (s *Store) TouchTokenUsage(ctx context.Context, tokenID string) error {
 	if tokenID == "" {
@@ -690,6 +770,23 @@ func permToText(p auth.Perm) string {
 		return "write"
 	default:
 		return ""
+	}
+}
+
+// permFromText is the inverse of permToText. It also handles "admin" because
+// the repo_permissions table (used by LookupRepoPerm) can carry that value.
+// The ssh_keys.scope_perm CHECK constraint prevents admin from appearing
+// there, so callers of verifySSHKey are safe against admin deploy keys.
+func permFromText(s string) (auth.Perm, error) {
+	switch s {
+	case "read":
+		return auth.PermRead, nil
+	case "write":
+		return auth.PermWrite, nil
+	case "admin":
+		return auth.PermAdmin, nil
+	default:
+		return auth.PermNone, fmt.Errorf("unknown perm %q", s)
 	}
 }
 

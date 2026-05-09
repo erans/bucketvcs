@@ -3,6 +3,7 @@ package sqlitestore
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
@@ -132,5 +133,127 @@ func TestAddSSHKey_RejectsNeitherScope(t *testing.T) {
 	k := auth.SSHKey{ID: "knone", Fingerprint: "SHA256:none", PublicKey: []byte{0x01}, KeyType: "ssh-ed25519"}
 	if err := s.AddSSHKey(ctx, k); err == nil {
 		t.Fatal("expected error for shape with neither user_id nor scope_*")
+	}
+}
+
+func TestVerifyCredential_UserKey_Success(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	userID, err := seedUser(t, s, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp := "SHA256:user1"
+	if err := s.AddSSHKey(context.Background(), auth.SSHKey{
+		ID: "bvsk_user1", Fingerprint: fp, PublicKey: []byte{0x01},
+		KeyType: "ssh-ed25519", UserID: userID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	actor, credID, scope, err := s.VerifyCredential(context.Background(),
+		auth.SSHKeyFingerprint{Fingerprint: fp})
+	if err != nil {
+		t.Fatalf("VerifyCredential: %v", err)
+	}
+	if scope != nil {
+		t.Fatalf("scope = %+v, want nil for user key", scope)
+	}
+	if actor == nil || actor.Name != "alice" {
+		t.Fatalf("actor = %+v, want alice", actor)
+	}
+	if credID != "bvsk_user1" {
+		t.Fatalf("credID = %q, want bvsk_user1", credID)
+	}
+}
+
+func TestVerifyCredential_DeployKey_Success(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	if err := seedRepo(t, s, "acme", "web"); err != nil {
+		t.Fatal(err)
+	}
+	fp := "SHA256:dep1"
+	if err := s.AddSSHKey(context.Background(), auth.SSHKey{
+		ID: "bvsk_dep1", Fingerprint: fp, PublicKey: []byte{0x01},
+		KeyType: "ssh-ed25519", Label: "ci",
+		ScopeTenant: "acme", ScopeRepo: "web", ScopePerm: auth.PermWrite,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	actor, credID, scope, err := s.VerifyCredential(context.Background(),
+		auth.SSHKeyFingerprint{Fingerprint: fp})
+	if err != nil {
+		t.Fatalf("VerifyCredential: %v", err)
+	}
+	if scope == nil {
+		t.Fatal("scope = nil, want set for deploy key")
+	}
+	if scope.Tenant != "acme" || scope.Repo != "web" || scope.Perm != auth.PermWrite {
+		t.Fatalf("scope = %+v, want acme/web write", scope)
+	}
+	if actor == nil || !strings.HasPrefix(actor.UserID, "deploy:") {
+		t.Fatalf("actor = %+v, want synthetic deploy actor", actor)
+	}
+	if credID != "bvsk_dep1" {
+		t.Fatalf("credID = %q, want bvsk_dep1", credID)
+	}
+}
+
+func TestVerifyCredential_RevokedSSHKey(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	userID, err := seedUser(t, s, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp := "SHA256:rev"
+	ctx := context.Background()
+	if err := s.AddSSHKey(ctx, auth.SSHKey{
+		ID: "k1", Fingerprint: fp, PublicKey: []byte{0x01}, KeyType: "ssh-ed25519", UserID: userID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Manually set revoked_at since RevokeSSHKey isn't implemented yet.
+	if _, err := s.db.Exec(`UPDATE ssh_keys SET revoked_at = strftime('%s','now') WHERE id = 'k1'`); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, err = s.VerifyCredential(ctx, auth.SSHKeyFingerprint{Fingerprint: fp})
+	if !errors.Is(err, auth.ErrTokenRevoked) {
+		t.Fatalf("got %v, want ErrTokenRevoked", err)
+	}
+}
+
+func TestVerifyCredential_DisabledUserSSHKey(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	userID, err := seedUser(t, s, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Manually disable the user.
+	if _, err := s.db.Exec(`UPDATE users SET disabled_at = strftime('%s','now') WHERE id = ?`, userID); err != nil {
+		t.Fatal(err)
+	}
+	fp := "SHA256:disab"
+	ctx := context.Background()
+	if err := s.AddSSHKey(ctx, auth.SSHKey{
+		ID: "k1", Fingerprint: fp, PublicKey: []byte{0x01}, KeyType: "ssh-ed25519", UserID: userID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, err = s.VerifyCredential(ctx, auth.SSHKeyFingerprint{Fingerprint: fp})
+	if !errors.Is(err, auth.ErrUserDisabled) {
+		t.Fatalf("got %v, want ErrUserDisabled", err)
+	}
+}
+
+func TestVerifyCredential_UnknownFingerprint(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	_, _, _, err := s.VerifyCredential(context.Background(), auth.SSHKeyFingerprint{Fingerprint: "SHA256:none"})
+	if !errors.Is(err, auth.ErrInvalidCredential) {
+		t.Fatalf("got %v, want ErrInvalidCredential", err)
 	}
 }
