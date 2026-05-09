@@ -65,10 +65,10 @@ type sshHTTPOracle struct {
 	httpURL string // "http://user:token@127.0.0.1:PORT/tenant/repo.git"
 
 	// SSH side
-	sshAddr       string // "127.0.0.1:PORT"
-	sshScript     string // path to the GIT_SSH_COMMAND wrapper script
-	sshRemoteURL  string // "ssh://git@127.0.0.1:PORT/tenant/repo.git"
-	sshTempHome   string // hermetic HOME for git-over-SSH
+	sshAddr      string // "127.0.0.1:PORT"
+	sshScript    string // path to the GIT_SSH_COMMAND wrapper script
+	sshRemoteURL string // "ssh://git@127.0.0.1:PORT/tenant/repo.git"
+	sshTempHome  string // hermetic HOME for git-over-SSH
 
 	// Set only for non-empty fixtures.
 	hasRefs bool
