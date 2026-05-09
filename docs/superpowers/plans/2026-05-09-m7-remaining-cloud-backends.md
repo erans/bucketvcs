@@ -2870,4 +2870,1202 @@ git commit -m "M7 task 2.5: azureblob error classification"
 
 ---
 
-(Tasks 2.6–2.16 — retry, Open, get/put/delete/list, multipart, signed, cleanup, conformance, README — added next.)
+### Task 2.6: retry.go (Azure SDK options hook)
+
+**Files:**
+- Create: `internal/storage/azureblob/retry.go`
+- Create: `internal/storage/azureblob/retry_test.go`
+
+The Azure SDK has its own `policy.RetryOptions`. We expose a single helper used by Open.
+
+- [ ] **Step 1: Write the test**
+
+```go
+package azureblob
+
+import "testing"
+
+func TestRetryOptionsApplied(t *testing.T) {
+	cfg := Config{MaxRetries: 7}
+	cfg.applyDefaults()
+	opts := retryOpts(cfg)
+	if opts.MaxRetries != 7 {
+		t.Errorf("MaxRetries = %d, want 7", opts.MaxRetries)
+	}
+}
+```
+
+- [ ] **Step 2: Write `retry.go`**
+
+```go
+package azureblob
+
+import (
+	"time"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
+)
+
+// retryOpts returns the policy used by the Azure pipeline. 412 is NOT
+// retried — that case is the conditional-write contract we rely on.
+// The Azure SDK does not retry 4xx by default, so no explicit opt-out
+// is required.
+func retryOpts(cfg Config) policy.RetryOptions {
+	return policy.RetryOptions{
+		MaxRetries:    int32(cfg.MaxRetries),
+		TryTimeout:    cfg.RequestTimeout,
+		RetryDelay:    250 * time.Millisecond,
+		MaxRetryDelay: 30 * time.Second,
+	}
+}
+```
+
+- [ ] **Step 3: Run, then commit**
+
+```bash
+go test ./internal/storage/azureblob -run TestRetryOptionsApplied -v
+git add internal/storage/azureblob/retry.go internal/storage/azureblob/retry_test.go
+git commit -m "M7 task 2.6: azureblob retry options hook"
+```
+
+---
+
+### Task 2.7: Open + client wiring
+
+**Files:**
+- Create: `internal/storage/azureblob/open.go`
+- Create: `internal/storage/azureblob/open_test.go`
+
+Credential precedence: `ConnectionString` > `AccountKey` > `DefaultAzureCredential`.
+
+- [ ] **Step 1: Write `open.go`**
+
+```go
+package azureblob
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
+)
+
+func Open(ctx context.Context, cfg Config) (*AzureBlob, error) {
+	cfg.applyDefaults()
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
+	clientOpts := &azblob.ClientOptions{
+		ClientOptions: policy.ClientOptions{Retry: retryOpts(cfg)},
+	}
+
+	var (
+		svc *azblob.Client
+		err error
+	)
+	switch {
+	case cfg.ConnectionString != "":
+		svc, err = azblob.NewClientFromConnectionString(cfg.ConnectionString, clientOpts)
+	case cfg.AccountKey != "":
+		cred, kerr := azblob.NewSharedKeyCredential(cfg.Account, cfg.AccountKey)
+		if kerr != nil {
+			return nil, fmt.Errorf("azureblob: shared key credential: %w", kerr)
+		}
+		svc, err = azblob.NewClientWithSharedKeyCredential(serviceURL(cfg), cred, clientOpts)
+	default:
+		cred, derr := azidentity.NewDefaultAzureCredential(nil)
+		if derr != nil {
+			return nil, fmt.Errorf("azureblob: default credential: %w", derr)
+		}
+		svc, err = azblob.NewClient(serviceURL(cfg), cred, clientOpts)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("azureblob: new client: %w", err)
+	}
+
+	return &AzureBlob{
+		cfg:       cfg,
+		service:   svc,
+		container: svc.ServiceClient().NewContainerClient(cfg.Container),
+	}, nil
+}
+
+// serviceURL returns either cfg.ServiceURL or the default account URL.
+func serviceURL(cfg Config) string {
+	if cfg.ServiceURL != "" {
+		return cfg.ServiceURL
+	}
+	return fmt.Sprintf("https://%s.blob.core.windows.net/", cfg.Account)
+}
+
+func (a *AzureBlob) Close() error { return nil }
+```
+
+- [ ] **Step 2: Write `open_test.go`**
+
+```go
+package azureblob_test
+
+import (
+	"context"
+	"testing"
+
+	"github.com/bucketvcs/bucketvcs/internal/storage/azureblob"
+)
+
+func TestOpenRejectsBadConfig(t *testing.T) {
+	_, err := azureblob.Open(context.Background(), azureblob.Config{})
+	if err == nil {
+		t.Fatal("Open: want error for empty config")
+	}
+}
+
+func TestOpenWithConnectionString(t *testing.T) {
+	cfg := azureblob.Config{
+		Container:        "test",
+		ConnectionString: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;",
+	}
+	a, err := azureblob.Open(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer a.Close()
+}
+```
+
+- [ ] **Step 3: Run, then commit**
+
+```bash
+go test ./internal/storage/azureblob -run TestOpen -v
+git add internal/storage/azureblob/open.go internal/storage/azureblob/open_test.go
+git commit -m "M7 task 2.7: azureblob Open + credential precedence"
+```
+
+---
+
+### Task 2.8: Get / Head / GetRange
+
+**Files:**
+- Create: `internal/storage/azureblob/get.go`
+- Create: `internal/storage/azureblob/get_test.go`
+
+- [ ] **Step 1: Write `get.go`**
+
+```go
+package azureblob
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"strings"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
+
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+func (a *AzureBlob) Get(ctx context.Context, key string, opts *bvstorage.GetOptions) (*bvstorage.Object, error) {
+	if err := validateKey(key); err != nil {
+		return nil, err
+	}
+	bb := a.container.NewBlockBlobClient(applyPrefix(a.cfg.Prefix, key))
+	dlOpts := &blob.DownloadStreamOptions{}
+	if opts != nil && opts.IfVersionMatches != nil {
+		etag := parseETag(*opts.IfVersionMatches)
+		dlOpts.AccessConditions = &blob.AccessConditions{
+			ModifiedAccessConditions: &blob.ModifiedAccessConditions{IfMatch: &etag},
+		}
+	}
+	resp, err := bb.DownloadStream(ctx, dlOpts)
+	if err != nil {
+		return nil, classify(opGet, err)
+	}
+	return &bvstorage.Object{
+		Body: resp.Body,
+		Metadata: bvstorage.ObjectMetadata{
+			Key:         key,
+			Version:     versionFromETag(resp.ETag),
+			Size:        deref(resp.ContentLength),
+			ContentType: derefStr(resp.ContentType),
+			ModifiedAt:  derefTime(resp.LastModified),
+		},
+	}, nil
+}
+
+func (a *AzureBlob) Head(ctx context.Context, key string) (*bvstorage.ObjectMetadata, error) {
+	if err := validateKey(key); err != nil {
+		return nil, err
+	}
+	bb := a.container.NewBlockBlobClient(applyPrefix(a.cfg.Prefix, key))
+	resp, err := bb.GetProperties(ctx, nil)
+	if err != nil {
+		return nil, classify(opHead, err)
+	}
+	return &bvstorage.ObjectMetadata{
+		Key:         key,
+		Version:     versionFromETag(resp.ETag),
+		Size:        deref(resp.ContentLength),
+		ContentType: derefStr(resp.ContentType),
+		ModifiedAt:  derefTime(resp.LastModified),
+	}, nil
+}
+
+func (a *AzureBlob) GetRange(ctx context.Context, key string, start, endInclusive int64) (io.ReadCloser, error) {
+	if err := validateKey(key); err != nil {
+		return nil, err
+	}
+	if start < 0 || endInclusive < start {
+		return nil, fmt.Errorf("%w: invalid range [%d,%d]", bvstorage.ErrInvalidArgument, start, endInclusive)
+	}
+	bb := a.container.NewBlockBlobClient(applyPrefix(a.cfg.Prefix, key))
+	resp, err := bb.DownloadStream(ctx, &blob.DownloadStreamOptions{
+		Range: blob.HTTPRange{Offset: start, Count: endInclusive - start + 1},
+	})
+	if err != nil {
+		return nil, classify(opGetRange, err)
+	}
+	return resp.Body, nil
+}
+
+// versionFromETag / parseETag round-trip Azure ETags (raw, quotes
+// stripped) through ObjectVersion.Token.
+func versionFromETag(etagPtr *azcore.ETag) bvstorage.ObjectVersion {
+	if etagPtr == nil {
+		return bvstorage.ObjectVersion{Provider: "azureblob", Kind: bvstorage.VersionEtag}
+	}
+	return bvstorage.ObjectVersion{
+		Provider: "azureblob",
+		Token:    strings.Trim(string(*etagPtr), `"`),
+		Kind:     bvstorage.VersionEtag,
+	}
+}
+
+func parseETag(v bvstorage.ObjectVersion) azcore.ETag {
+	if v.Provider != "" && v.Provider != "azureblob" {
+		return azcore.ETag("")
+	}
+	return azcore.ETag(`"` + v.Token + `"`)
+}
+
+// pointer-deref helpers. Azure SDK returns lots of *T fields.
+func deref[T any](p *T) T {
+	var zero T
+	if p == nil {
+		return zero
+	}
+	return *p
+}
+func derefStr(p *string) string { return deref(p) }
+func derefTime[T any](p *T) T   { return deref(p) }
+
+// silence import if to becomes unused
+var _ = to.Ptr[int]
+```
+
+(Add `"github.com/Azure/azure-sdk-for-go/sdk/azcore"` to imports.)
+
+- [ ] **Step 2: Write `get_test.go`**
+
+```go
+package azureblob
+
+import (
+	"testing"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+func TestVersionFromETagRoundTrip(t *testing.T) {
+	raw := azcore.ETag(`"0xABCDEF"`)
+	v := versionFromETag(&raw)
+	if v.Provider != "azureblob" {
+		t.Errorf("Provider = %q, want azureblob", v.Provider)
+	}
+	if v.Token != "0xABCDEF" {
+		t.Errorf("Token = %q, want 0xABCDEF (quotes stripped)", v.Token)
+	}
+	round := parseETag(v)
+	if round != raw {
+		t.Errorf("round-trip = %q, want %q", round, raw)
+	}
+}
+
+func TestParseETagRejectsWrongProvider(t *testing.T) {
+	got := parseETag(bvstorage.ObjectVersion{Provider: "gcs", Token: "1"})
+	if got != "" {
+		t.Errorf("expected empty ETag for wrong provider, got %q", got)
+	}
+}
+```
+
+- [ ] **Step 3: Run, then commit**
+
+```bash
+go test ./internal/storage/azureblob -run "TestVersionFromETag|TestParseETag" -v
+git add internal/storage/azureblob/get.go internal/storage/azureblob/get_test.go
+git commit -m "M7 task 2.8: azureblob Get + Head + GetRange + ETag codec"
+```
+
+---
+
+### Task 2.9: PutIfAbsent + PutIfVersionMatches
+
+**Files:**
+- Create: `internal/storage/azureblob/put.go`
+- Create: `internal/storage/azureblob/put_test.go`
+
+- [ ] **Step 1: Write `put.go`**
+
+```go
+package azureblob
+
+import (
+	"context"
+	"io"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blockblob"
+
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+const eTagAny = azcore.ETag("*")
+
+func (a *AzureBlob) PutIfAbsent(ctx context.Context, key string, body io.Reader, opts *bvstorage.PutOptions) (bvstorage.ObjectVersion, error) {
+	if err := validateKey(key); err != nil {
+		return bvstorage.ObjectVersion{}, err
+	}
+	buf, err := io.ReadAll(body)
+	if err != nil {
+		return bvstorage.ObjectVersion{}, err
+	}
+	bb := a.container.NewBlockBlobClient(applyPrefix(a.cfg.Prefix, key))
+
+	upOpts := &blockblob.UploadOptions{
+		AccessConditions: &blob.AccessConditions{
+			ModifiedAccessConditions: &blob.ModifiedAccessConditions{IfNoneMatch: to.Ptr(eTagAny)},
+		},
+	}
+	if opts != nil && opts.ContentType != "" {
+		upOpts.HTTPHeaders = &blob.HTTPHeaders{BlobContentType: to.Ptr(opts.ContentType)}
+	}
+
+	resp, err := bb.Upload(ctx, streamSeeker(buf), upOpts)
+	if err != nil {
+		return bvstorage.ObjectVersion{}, classify(opPutIfAbsent, err)
+	}
+	return versionFromETag(resp.ETag), nil
+}
+
+func (a *AzureBlob) PutIfVersionMatches(ctx context.Context, key string, expected bvstorage.ObjectVersion, body io.Reader, opts *bvstorage.PutOptions) (bvstorage.ObjectVersion, error) {
+	if err := validateKey(key); err != nil {
+		return bvstorage.ObjectVersion{}, err
+	}
+	if expected.Provider != "" && expected.Provider != "azureblob" {
+		return bvstorage.ObjectVersion{}, wrap(bvstorage.ErrVersionMismatch, nil)
+	}
+	buf, err := io.ReadAll(body)
+	if err != nil {
+		return bvstorage.ObjectVersion{}, err
+	}
+	bb := a.container.NewBlockBlobClient(applyPrefix(a.cfg.Prefix, key))
+
+	etag := parseETag(expected)
+	upOpts := &blockblob.UploadOptions{
+		AccessConditions: &blob.AccessConditions{
+			ModifiedAccessConditions: &blob.ModifiedAccessConditions{IfMatch: &etag},
+		},
+	}
+	if opts != nil && opts.ContentType != "" {
+		upOpts.HTTPHeaders = &blob.HTTPHeaders{BlobContentType: to.Ptr(opts.ContentType)}
+	}
+
+	resp, err := bb.Upload(ctx, streamSeeker(buf), upOpts)
+	if err != nil {
+		return bvstorage.ObjectVersion{}, classify(opPutIfMatch, err)
+	}
+	return versionFromETag(resp.ETag), nil
+}
+
+// streamSeeker wraps a byte slice in a ReadSeekCloser as Upload requires.
+func streamSeeker(b []byte) io.ReadSeekCloser {
+	return &nopCloser{r: bytesReadSeeker(b)}
+}
+
+type nopCloser struct{ r interface{ ReadSeeker } }
+
+func (n *nopCloser) Read(p []byte) (int, error)                   { return n.r.Read(p) }
+func (n *nopCloser) Seek(o int64, w int) (int64, error)           { return n.r.Seek(o, w) }
+func (n *nopCloser) Close() error                                 { return nil }
+
+// bytesReadSeeker is a minimal *bytes.Reader alias to avoid the import
+// cycle when keeping helpers local.
+func bytesReadSeeker(b []byte) interface{ ReadSeeker } {
+	return readSeeker{ReadSeeker: bytesNewReader(b)}
+}
+
+type readSeeker struct{ io.ReadSeeker }
+
+// — implementation note: replace the above stubs with the standard
+// `bytes.NewReader(buf)` returning a `*bytes.Reader` (which already
+// implements both `io.ReadSeeker` and `io.Closer` via a wrapper).
+// The helper above is only there to keep the file self-contained for
+// the plan reader; in the actual file just write:
+//
+//   func streamSeeker(b []byte) io.ReadSeekCloser {
+//       return &readSeekCloser{Reader: bytes.NewReader(b)}
+//   }
+//   type readSeekCloser struct{ *bytes.Reader }
+//   func (*readSeekCloser) Close() error { return nil }
+```
+
+Use the simpler form in the actual implementation (the comment block at the end shows it). Drop the `bytesReadSeeker` / `bytesNewReader` placeholders.
+
+- [ ] **Step 2: Write `put_test.go`**
+
+```go
+package azureblob
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"testing"
+
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+func TestPutIfAbsentRejectsBadKey(t *testing.T) {
+	a := &AzureBlob{}
+	_, err := a.PutIfAbsent(context.Background(), "", bytes.NewReader(nil), nil)
+	if err == nil || !errors.Is(err, bvstorage.ErrInvalidArgument) {
+		t.Fatalf("got %v, want ErrInvalidArgument", err)
+	}
+}
+
+func TestPutIfVersionMatchesRejectsWrongProvider(t *testing.T) {
+	a := &AzureBlob{}
+	_, err := a.PutIfVersionMatches(context.Background(), "k", bvstorage.ObjectVersion{Provider: "gcs", Token: "x"}, bytes.NewReader(nil), nil)
+	if err == nil || !errors.Is(err, bvstorage.ErrVersionMismatch) {
+		t.Fatalf("got %v, want ErrVersionMismatch", err)
+	}
+}
+```
+
+- [ ] **Step 3: Run, then commit**
+
+```bash
+go test ./internal/storage/azureblob -run TestPut -v
+git add internal/storage/azureblob/put.go internal/storage/azureblob/put_test.go
+git commit -m "M7 task 2.9: azureblob PutIfAbsent + PutIfVersionMatches"
+```
+
+---
+
+### Task 2.10: DeleteIfVersionMatches
+
+**Files:**
+- Create: `internal/storage/azureblob/delete.go`
+- Create: `internal/storage/azureblob/delete_test.go`
+
+- [ ] **Step 1: Write `delete.go`**
+
+```go
+package azureblob
+
+import (
+	"context"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
+
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+func (a *AzureBlob) DeleteIfVersionMatches(ctx context.Context, key string, expected bvstorage.ObjectVersion) error {
+	if err := validateKey(key); err != nil {
+		return err
+	}
+	if expected.Provider != "" && expected.Provider != "azureblob" {
+		return wrap(bvstorage.ErrVersionMismatch, nil)
+	}
+	bb := a.container.NewBlockBlobClient(applyPrefix(a.cfg.Prefix, key))
+	etag := parseETag(expected)
+	_, err := bb.Delete(ctx, &blob.DeleteOptions{
+		AccessConditions: &blob.AccessConditions{
+			ModifiedAccessConditions: &blob.ModifiedAccessConditions{IfMatch: &etag},
+		},
+	})
+	if err != nil {
+		return classify(opDeleteIfMatch, err)
+	}
+	return nil
+}
+```
+
+- [ ] **Step 2: Write `delete_test.go`**
+
+```go
+package azureblob
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+func TestDeleteRejectsBadKey(t *testing.T) {
+	a := &AzureBlob{}
+	err := a.DeleteIfVersionMatches(context.Background(), "/leading", bvstorage.ObjectVersion{Token: "x"})
+	if err == nil || !errors.Is(err, bvstorage.ErrInvalidArgument) {
+		t.Fatalf("got %v, want ErrInvalidArgument", err)
+	}
+}
+```
+
+- [ ] **Step 3: Run, then commit**
+
+```bash
+go test ./internal/storage/azureblob -run TestDelete -v
+git add internal/storage/azureblob/delete.go internal/storage/azureblob/delete_test.go
+git commit -m "M7 task 2.10: azureblob DeleteIfVersionMatches"
+```
+
+---
+
+### Task 2.11: List with delimiter and pagination
+
+**Files:**
+- Create: `internal/storage/azureblob/list.go`
+- Create: `internal/storage/azureblob/list_test.go`
+
+Azure exposes `NewListBlobsFlatPager` (no delimiter) and `NewListBlobsHierarchyPager` (with delimiter). We dispatch based on `opts.Delimiter`.
+
+- [ ] **Step 1: Write `list.go`**
+
+```go
+package azureblob
+
+import (
+	"context"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
+
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+func (a *AzureBlob) List(ctx context.Context, prefix string, opts *bvstorage.ListOptions) (*bvstorage.ListPage, error) {
+	full := applyPrefix(a.cfg.Prefix, prefix)
+	maxResults := int32(1000)
+	var marker string
+	var delimiter string
+	if opts != nil {
+		if opts.MaxKeys > 0 {
+			maxResults = int32(opts.MaxKeys)
+		}
+		marker = opts.ContinuationToken
+		delimiter = opts.Delimiter
+	}
+
+	page := &bvstorage.ListPage{}
+
+	if delimiter == "" {
+		pager := a.container.NewListBlobsFlatPager(&container.ListBlobsFlatOptions{
+			Prefix:     to.Ptr(full),
+			MaxResults: &maxResults,
+			Marker:     marker(),
+		})
+		if !pager.More() {
+			return page, nil
+		}
+		resp, err := pager.NextPage(ctx)
+		if err != nil {
+			return nil, classify(opList, err)
+		}
+		for _, item := range resp.Segment.BlobItems {
+			page.Objects = append(page.Objects, bvstorage.ObjectMetadata{
+				Key:         stripPrefix(a.cfg.Prefix, deref(item.Name)),
+				Version:     versionFromETag(item.Properties.ETag),
+				Size:        deref(item.Properties.ContentLength),
+				ContentType: derefStr(item.Properties.ContentType),
+				ModifiedAt:  derefTime(item.Properties.LastModified),
+			})
+		}
+		page.NextToken = derefStr(resp.NextMarker)
+		return page, nil
+	}
+
+	pager := a.container.NewListBlobsHierarchyPager(delimiter, &container.ListBlobsHierarchyOptions{
+		Prefix:     to.Ptr(full),
+		MaxResults: &maxResults,
+		Marker:     marker(),
+	})
+	if !pager.More() {
+		return page, nil
+	}
+	resp, err := pager.NextPage(ctx)
+	if err != nil {
+		return nil, classify(opList, err)
+	}
+	for _, item := range resp.Segment.BlobItems {
+		page.Objects = append(page.Objects, bvstorage.ObjectMetadata{
+			Key:         stripPrefix(a.cfg.Prefix, deref(item.Name)),
+			Version:     versionFromETag(item.Properties.ETag),
+			Size:        deref(item.Properties.ContentLength),
+			ContentType: derefStr(item.Properties.ContentType),
+			ModifiedAt:  derefTime(item.Properties.LastModified),
+		})
+	}
+	for _, p := range resp.Segment.BlobPrefixes {
+		page.CommonPrefixes = append(page.CommonPrefixes, stripPrefix(a.cfg.Prefix, derefStr(p.Name)))
+	}
+	page.NextToken = derefStr(resp.NextMarker)
+	return page, nil
+}
+
+// marker is a tiny helper because the Azure SDK takes *string for an
+// empty marker, not "" — they treat nil and "" differently.
+func markerPtr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+```
+
+(In the actual implementation, replace `marker()` calls with `markerPtr(marker)` — the placeholder above is to keep the snippet under the eye; the helper definition is at the bottom of the file.)
+
+- [ ] **Step 2: Write `list_test.go`** (unit-level only)
+
+```go
+package azureblob
+
+import "testing"
+
+func TestMarkerPtr(t *testing.T) {
+	if markerPtr("") != nil {
+		t.Errorf("markerPtr(\"\"): want nil")
+	}
+	got := markerPtr("abc")
+	if got == nil || *got != "abc" {
+		t.Errorf("markerPtr(\"abc\"): want pointer to \"abc\"")
+	}
+}
+```
+
+- [ ] **Step 3: Run, then commit**
+
+```bash
+go test ./internal/storage/azureblob -run TestMarkerPtr -v
+git add internal/storage/azureblob/list.go internal/storage/azureblob/list_test.go
+git commit -m "M7 task 2.11: azureblob List with delimiter and pagination"
+```
+
+---
+
+### Task 2.12: Multipart — StageBlock + CommitBlockList
+
+**Files:**
+- Create: `internal/storage/azureblob/multipart.go`
+- Create: `internal/storage/azureblob/multipart_test.go`
+
+- [ ] **Step 1: Write `multipart.go`**
+
+```go
+package azureblob
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"sort"
+	"sync"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blockblob"
+
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+// upload models a block-blob multipart upload. Each StageBlock gets a
+// fixed-length block ID that combines a per-upload GUID with a
+// zero-padded part number; the GUID prevents cross-upload collisions
+// to the same target key, the padding satisfies Azure's "all block
+// IDs must be the same length within a single CommitBlockList" rule.
+type upload struct {
+	parent *AzureBlob
+	id     string // per-upload GUID
+	key    string
+
+	mu         sync.Mutex
+	parts      map[int]string // partNumber -> staged block ID
+	terminated bool
+}
+
+var _ bvstorage.MultipartUpload = (*upload)(nil)
+
+func (u *upload) UploadID() string { return u.id }
+func (u *upload) Key() string      { return u.key }
+
+func (a *AzureBlob) CreateMultipart(ctx context.Context, key string, _ *bvstorage.MultipartOptions) (bvstorage.MultipartUpload, error) {
+	if err := validateKey(key); err != nil {
+		return nil, err
+	}
+	id, err := newUploadID()
+	if err != nil {
+		return nil, fmt.Errorf("azureblob: upload id: %w", err)
+	}
+	return &upload{
+		parent: a,
+		id:     id,
+		key:    key,
+		parts:  make(map[int]string),
+	}, nil
+}
+
+func (u *upload) UploadPart(ctx context.Context, partNumber int, body io.Reader) (bvstorage.MultipartPart, error) {
+	if partNumber < 1 || partNumber > 50000 {
+		return bvstorage.MultipartPart{}, fmt.Errorf("%w: partNumber must be in [1,50000] (got %d)", bvstorage.ErrInvalidArgument, partNumber)
+	}
+	u.mu.Lock()
+	if u.terminated {
+		u.mu.Unlock()
+		return bvstorage.MultipartPart{}, fmt.Errorf("%w: upload %s already terminated", bvstorage.ErrInvalidArgument, u.id)
+	}
+	u.mu.Unlock()
+
+	buf, err := io.ReadAll(body)
+	if err != nil {
+		return bvstorage.MultipartPart{}, fmt.Errorf("azureblob: read part: %w", err)
+	}
+	blockID := makeBlockID(u.id, partNumber)
+	bb := u.parent.container.NewBlockBlobClient(applyPrefix(u.parent.cfg.Prefix, u.key))
+	_, err = bb.StageBlock(ctx, blockID, &readSeekCloser{Reader: bytes.NewReader(buf)}, nil)
+	if err != nil {
+		return bvstorage.MultipartPart{}, classify(opStageBlock, err)
+	}
+
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.terminated {
+		return bvstorage.MultipartPart{}, fmt.Errorf("%w: upload %s terminated during stage", bvstorage.ErrInvalidArgument, u.id)
+	}
+	u.parts[partNumber] = blockID
+	return bvstorage.MultipartPart{
+		PartNumber: partNumber,
+		Token:      blockID,
+		Size:       int64(len(buf)),
+	}, nil
+}
+
+func (a *AzureBlob) CompleteMultipartIfAbsent(ctx context.Context, mu bvstorage.MultipartUpload, parts []bvstorage.MultipartPart) (bvstorage.ObjectVersion, error) {
+	u, ok := mu.(*upload)
+	if !ok {
+		return bvstorage.ObjectVersion{}, fmt.Errorf("%w: upload not produced by this adapter", bvstorage.ErrInvalidArgument)
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.terminated {
+		return bvstorage.ObjectVersion{}, fmt.Errorf("%w: upload %s already terminated", bvstorage.ErrInvalidArgument, u.id)
+	}
+	if len(parts) == 0 {
+		return bvstorage.ObjectVersion{}, fmt.Errorf("%w: complete called with empty parts list", bvstorage.ErrInvalidArgument)
+	}
+	sorted := append([]bvstorage.MultipartPart(nil), parts...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].PartNumber < sorted[j].PartNumber })
+
+	blockIDs := make([]string, 0, len(sorted))
+	seen := make(map[int]bool)
+	for _, p := range sorted {
+		if seen[p.PartNumber] {
+			return bvstorage.ObjectVersion{}, fmt.Errorf("%w: part %d listed twice", bvstorage.ErrInvalidArgument, p.PartNumber)
+		}
+		seen[p.PartNumber] = true
+		blockID, ok := u.parts[p.PartNumber]
+		if !ok {
+			return bvstorage.ObjectVersion{}, fmt.Errorf("%w: part %d was never staged", bvstorage.ErrInvalidArgument, p.PartNumber)
+		}
+		blockIDs = append(blockIDs, blockID)
+	}
+
+	bb := u.parent.container.NewBlockBlobClient(applyPrefix(u.parent.cfg.Prefix, u.key))
+	resp, err := bb.CommitBlockList(ctx, blockIDs, &blockblob.CommitBlockListOptions{
+		AccessConditions: &blob.AccessConditions{
+			ModifiedAccessConditions: &blob.ModifiedAccessConditions{IfNoneMatch: to.Ptr(eTagAny)},
+		},
+	})
+	if err != nil {
+		return bvstorage.ObjectVersion{}, classify(opCommitIfAbsent, err)
+	}
+	u.terminated = true
+	return versionFromETag(resp.ETag), nil
+}
+
+func (u *upload) Abort(ctx context.Context) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.terminated {
+		return nil
+	}
+	u.terminated = true
+	u.parts = nil
+	// Uncommitted blocks are GC'd by Azure after 7 days; no API call
+	// is needed in the abort path. If a partial commit happened (it
+	// should not — we only commit once), the caller can issue a
+	// conditional delete separately.
+	return nil
+}
+
+// makeBlockID returns base64(guid:zeroPad(partNumber)) — fixed length
+// for any single CommitBlockList call.
+func makeBlockID(uploadID string, partNumber int) string {
+	raw := fmt.Sprintf("%s:%010d", uploadID, partNumber)
+	return base64.StdEncoding.EncodeToString([]byte(raw))
+}
+
+func newUploadID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+type readSeekCloser struct{ *bytes.Reader }
+
+func (*readSeekCloser) Close() error { return nil }
+```
+
+- [ ] **Step 2: Write `multipart_test.go`**
+
+```go
+package azureblob
+
+import "testing"
+
+func TestMakeBlockIDFixedLength(t *testing.T) {
+	id, _ := newUploadID()
+	a := makeBlockID(id, 1)
+	b := makeBlockID(id, 12345)
+	if len(a) != len(b) {
+		t.Fatalf("block IDs must be equal length within an upload: len(a)=%d len(b)=%d", len(a), len(b))
+	}
+}
+
+func TestMakeBlockIDUploadIsolated(t *testing.T) {
+	idA, _ := newUploadID()
+	idB, _ := newUploadID()
+	a := makeBlockID(idA, 1)
+	b := makeBlockID(idB, 1)
+	if a == b {
+		t.Fatalf("block IDs from different uploads must differ even at same partNumber")
+	}
+}
+```
+
+- [ ] **Step 3: Run, then commit**
+
+```bash
+go test ./internal/storage/azureblob -run "TestMakeBlockID" -v
+git add internal/storage/azureblob/multipart.go internal/storage/azureblob/multipart_test.go
+git commit -m "M7 task 2.12: azureblob multipart via StageBlock + CommitBlockList"
+```
+
+---
+
+### Task 2.13: SignedGetURL via service SAS
+
+**Files:**
+- Create: `internal/storage/azureblob/signed.go`
+- Create: `internal/storage/azureblob/signed_test.go`
+
+SAS issuance requires a Shared Key credential. If the adapter was opened via DefaultAzureCredential (no key), we return `ErrNotSupported` so the conformance suite skips §29 #10.
+
+- [ ] **Step 1: Write `signed.go`**
+
+```go
+package azureblob
+
+import (
+	"context"
+	"time"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/sas"
+
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+func (a *AzureBlob) SignedGetURL(ctx context.Context, key string, opts bvstorage.SignedURLOptions) (string, error) {
+	if err := validateKey(key); err != nil {
+		return "", err
+	}
+	if a.cfg.AccountKey == "" && a.cfg.ConnectionString == "" {
+		return "", wrap(bvstorage.ErrNotSupported, nil)
+	}
+	ttl := opts.Expires
+	if ttl <= 0 {
+		ttl = a.cfg.PresignDefaultTTL
+	}
+	bb := a.container.NewBlockBlobClient(applyPrefix(a.cfg.Prefix, key))
+	url, err := bb.GetSASURL(
+		sas.BlobPermissions{Read: true},
+		time.Now().Add(ttl),
+		nil,
+	)
+	if err != nil {
+		return "", wrap(bvstorage.ErrNotSupported, err)
+	}
+	return url, nil
+}
+```
+
+- [ ] **Step 2: Write `signed_test.go`**
+
+```go
+package azureblob
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+func TestSignedGetURLNoKeyReturnsNotSupported(t *testing.T) {
+	a := &AzureBlob{}
+	_, err := a.SignedGetURL(context.Background(), "k", bvstorage.SignedURLOptions{})
+	if err == nil || !errors.Is(err, bvstorage.ErrNotSupported) {
+		t.Fatalf("got %v, want ErrNotSupported", err)
+	}
+}
+```
+
+- [ ] **Step 3: Run, then commit**
+
+```bash
+go test ./internal/storage/azureblob -run TestSignedGetURL -v
+git add internal/storage/azureblob/signed.go internal/storage/azureblob/signed_test.go
+git commit -m "M7 task 2.13: azureblob SignedGetURL via service SAS"
+```
+
+---
+
+### Task 2.14: cleanup.go — abort uncommitted blocks under prefix
+
+**Files:**
+- Create: `internal/storage/azureblob/cleanup.go`
+
+Azure has no server-side multipart sessions to enumerate; uncommitted blocks self-expire after 7 days. The cleanup helper is a no-op. Exists for symmetry with `s3compat`.
+
+- [ ] **Step 1: Write `cleanup.go`**
+
+```go
+package azureblob
+
+import "context"
+
+// AbortMultipartsUnderPrefix is a conformance-suite helper. Azure
+// Blob has no enumerable multipart-session abstraction — uncommitted
+// blocks expire automatically after 7 days. This is a no-op kept for
+// symmetry with s3compat.
+func (a *AzureBlob) AbortMultipartsUnderPrefix(ctx context.Context) error {
+	return nil
+}
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add internal/storage/azureblob/cleanup.go
+git commit -m "M7 task 2.14: azureblob AbortMultipartsUnderPrefix no-op"
+```
+
+---
+
+### Task 2.15: Conformance wiring — azureblob_conformance_test.go
+
+**Files:**
+- Create: `internal/storage/azureblob/azureblob_conformance_test.go`
+
+- [ ] **Step 1: Write the harness**
+
+```go
+package azureblob_test
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+	"github.com/bucketvcs/bucketvcs/internal/storage/azureblob"
+	"github.com/bucketvcs/bucketvcs/internal/storage/conformance"
+)
+
+func TestAzureBlobConformance(t *testing.T) {
+	cont := os.Getenv("BUCKETVCS_AZURE_TEST_CONTAINER")
+	if cont == "" {
+		t.Skip("BUCKETVCS_AZURE_TEST_CONTAINER unset — skipping live azureblob conformance")
+	}
+	base := azureblob.Config{
+		Container:        cont,
+		Account:          os.Getenv("BUCKETVCS_AZURE_ACCOUNT"),
+		AccountKey:       os.Getenv("BUCKETVCS_AZURE_ACCOUNT_KEY"),
+		ConnectionString: os.Getenv("BUCKETVCS_AZURE_CONNECTION_STRING"),
+		ServiceURL:       os.Getenv("BUCKETVCS_AZURE_SERVICE_URL"),
+	}
+	conformance.Run(t, makeFactory(t, base))
+}
+
+func makeFactory(t *testing.T, base azureblob.Config) conformance.Factory {
+	t.Helper()
+	if err := base.Validate(); err != nil {
+		t.Fatalf("base config invalid: %v", err)
+	}
+	return func(tb testing.TB) (bvstorage.ObjectStore, func()) {
+		tb.Helper()
+		cfg := base
+		cfg.Prefix = fmt.Sprintf("conformance/%s/", uuid.New().String())
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		s, err := azureblob.Open(ctx, cfg)
+		if err != nil {
+			tb.Fatalf("azureblob.Open: %v", err)
+		}
+		cleanup := func() {
+			cctx, ccancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer ccancel()
+			cleanupPrefix(tb, s, cctx)
+			_ = s.Close()
+		}
+		return s, cleanup
+	}
+}
+
+func cleanupPrefix(tb testing.TB, s bvstorage.ObjectStore, ctx context.Context) {
+	tb.Helper()
+	if a, ok := s.(*azureblob.AzureBlob); ok {
+		_ = a.AbortMultipartsUnderPrefix(ctx)
+	}
+	for {
+		page, err := s.List(ctx, "", nil)
+		if err != nil {
+			tb.Logf("conformance cleanup: list: %v", err)
+			return
+		}
+		if len(page.Objects) == 0 {
+			return
+		}
+		for _, o := range page.Objects {
+			if err := s.DeleteIfVersionMatches(ctx, o.Key, o.Version); err != nil {
+				tb.Logf("conformance cleanup: delete %q: %v", o.Key, err)
+			}
+		}
+		if page.NextToken == "" {
+			return
+		}
+	}
+}
+```
+
+- [ ] **Step 2: Run against Azurite**
+
+```bash
+docker compose -f docker-compose.cloud.yml up -d --wait
+export BUCKETVCS_AZURE_TEST_CONTAINER=bucketvcs-conformance
+export BUCKETVCS_AZURE_CONNECTION_STRING="DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
+go test -count=1 -timeout=10m ./internal/storage/azureblob
+```
+
+Expected: PASS. If conformance failures show up, fix the adapter — don't add skips.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add internal/storage/azureblob/azureblob_conformance_test.go
+git commit -m "M7 task 2.15: azureblob conformance harness — passes against Azurite"
+```
+
+---
+
+### Task 2.16: README for the azureblob package
+
+**Files:**
+- Create: `internal/storage/azureblob/README.md`
+
+- [ ] **Step 1: Write `README.md`**
+
+```markdown
+# internal/storage/azureblob
+
+Azure Blob Storage adapter for `storage.ObjectStore`. Canonical M7 backend (§11.1).
+
+## Capabilities
+
+- Strong read-after-write and read-after-delete consistency (§11.1).
+- Conditional writes via `If-None-Match: *` and `If-Match: <etag>` (§12.4).
+- Service SAS URLs (requires Shared Key credential; returns `ErrNotSupported` otherwise).
+- Block blobs only. Multipart uploads map to `StageBlock` + `CommitBlockList`
+  with `If-None-Match: *` on the commit (the §29 #8 invariant).
+
+## Configuration
+
+| Env var | Purpose |
+|---|---|
+| `BUCKETVCS_AZURE_ACCOUNT` | Storage account name |
+| `BUCKETVCS_AZURE_ACCOUNT_KEY` | Shared Key (enables SAS) |
+| `BUCKETVCS_AZURE_CONNECTION_STRING` | Full connection string (precedence; primary use is Azurite) |
+| `BUCKETVCS_AZURE_SERVICE_URL` | Override default service URL |
+
+## Running conformance against real Azure Blob
+
+```bash
+export BUCKETVCS_AZURE_TEST_CONTAINER=<your-container>
+export BUCKETVCS_AZURE_ACCOUNT=<account>
+export BUCKETVCS_AZURE_ACCOUNT_KEY=<key>
+go test -count=1 -timeout=15m ./internal/storage/azureblob
+```
+
+## Running conformance against Azurite
+
+```bash
+docker compose -f docker-compose.cloud.yml up -d --wait
+export BUCKETVCS_AZURE_TEST_CONTAINER=bucketvcs-conformance
+export BUCKETVCS_AZURE_CONNECTION_STRING="DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
+go test -count=1 -timeout=10m ./internal/storage/azureblob
+```
+
+`§29 #10 SignedURL` is exercised when an account key is present (Azurite's default dev key works).
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add internal/storage/azureblob/README.md
+git commit -m "M7 task 2.16: azureblob README"
+```
+
+---
+
+(Phase 3 — CLI integration — added next.)
