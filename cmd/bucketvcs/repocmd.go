@@ -28,6 +28,8 @@ func runRepo(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return repoPublic(ctx, rest, stdout, stderr)
 	case "list":
 		return repoList(ctx, rest, stdout, stderr)
+	case "deploy-key":
+		return runRepoDeployKey(ctx, rest, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "repo: unknown subcommand %q\n", sub)
 		return 2
