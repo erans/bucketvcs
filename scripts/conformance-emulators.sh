@@ -55,7 +55,7 @@ docker run --rm --network host \
 # helper reads these.
 
 # MinIO -> s3compat
-export BUCKETVCS_S3_TEST_BUCKET=bucketvcs-conformance
+export BUCKETVCS_S3_BUCKET=bucketvcs-conformance
 export BUCKETVCS_S3_REGION=us-east-1
 export BUCKETVCS_S3_ENDPOINT=http://localhost:9000
 export BUCKETVCS_S3_FORCE_PATH_STYLE=true
@@ -63,12 +63,12 @@ export AWS_ACCESS_KEY_ID=minioadmin
 export AWS_SECRET_ACCESS_KEY=minioadmin
 
 # fake-gcs -> gcs
-export BUCKETVCS_GCS_TEST_BUCKET=bucketvcs-conformance
+export BUCKETVCS_GCS_BUCKET=bucketvcs-conformance
 export BUCKETVCS_GCS_ENDPOINT=http://localhost:4443/storage/v1/
 export STORAGE_EMULATOR_HOST=localhost:4443
 
 # Azurite -> azureblob
-export BUCKETVCS_AZURE_TEST_CONTAINER=bucketvcs-conformance
+export BUCKETVCS_AZURE_CONTAINER=bucketvcs-conformance
 export BUCKETVCS_AZURE_CONNECTION_STRING="DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
 
 echo "==> Running storage conformance suite"
