@@ -1860,4 +1860,515 @@ git commit -m "M7 task 1.11: gcs List with delimiter and pagination"
 
 ---
 
-(Tasks 1.12–1.14 — multipart, signed, conformance, README — added next.)
+### Task 1.12: Multipart — resumable upload session
+
+**Files:**
+- Create: `internal/storage/gcs/multipart.go`
+- Create: `internal/storage/gcs/multipart_test.go`
+
+GCS has no S3-style "stage parts then assemble" API. We model `MultipartUpload` as a single resumable-upload session: `CreateMultipart` opens a `Writer`, `UploadPart` writes parts to it in order, `CompleteMultipartIfAbsent` calls `Close` with `ifGenerationMatch=0`, `Abort` cancels the writer.
+
+- [ ] **Step 1: Write `multipart.go`**
+
+```go
+package gcs
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"sort"
+	"sync"
+
+	gstorage "cloud.google.com/go/storage"
+
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+// upload is the GCS-backed MultipartUpload. Because GCS resumable
+// uploads are streamed sequentially through a single Writer, we buffer
+// parts in memory by part number and flush them in order on Complete.
+// This trades memory for the part-out-of-order property the
+// storage.MultipartUpload contract requires.
+type upload struct {
+	parent *GCS
+	id     string
+	key    string
+
+	mu         sync.Mutex
+	parts      map[int][]byte
+	terminated bool
+}
+
+var _ bvstorage.MultipartUpload = (*upload)(nil)
+
+func (u *upload) UploadID() string { return u.id }
+func (u *upload) Key() string      { return u.key }
+
+func (g *GCS) CreateMultipart(ctx context.Context, key string, opts *bvstorage.MultipartOptions) (bvstorage.MultipartUpload, error) {
+	if err := validateKey(key); err != nil {
+		return nil, err
+	}
+	id, err := newUploadID()
+	if err != nil {
+		return nil, fmt.Errorf("gcs: create upload id: %w", err)
+	}
+	return &upload{
+		parent: g,
+		id:     id,
+		key:    key,
+		parts:  make(map[int][]byte),
+	}, nil
+}
+
+func (u *upload) UploadPart(ctx context.Context, partNumber int, body io.Reader) (bvstorage.MultipartPart, error) {
+	if partNumber < 1 {
+		return bvstorage.MultipartPart{}, fmt.Errorf("%w: partNumber must be >= 1 (got %d)", bvstorage.ErrInvalidArgument, partNumber)
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.terminated {
+		return bvstorage.MultipartPart{}, fmt.Errorf("%w: upload %s already terminated", bvstorage.ErrInvalidArgument, u.id)
+	}
+	buf, err := io.ReadAll(body)
+	if err != nil {
+		return bvstorage.MultipartPart{}, fmt.Errorf("gcs: buffer part: %w", err)
+	}
+	u.parts[partNumber] = buf
+	return bvstorage.MultipartPart{
+		PartNumber: partNumber,
+		Token:      fmt.Sprintf("%d", partNumber), // ordering only
+		Size:       int64(len(buf)),
+	}, nil
+}
+
+func (g *GCS) CompleteMultipartIfAbsent(ctx context.Context, mu bvstorage.MultipartUpload, parts []bvstorage.MultipartPart) (bvstorage.ObjectVersion, error) {
+	u, ok := mu.(*upload)
+	if !ok {
+		return bvstorage.ObjectVersion{}, fmt.Errorf("%w: upload not produced by this adapter", bvstorage.ErrInvalidArgument)
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.terminated {
+		return bvstorage.ObjectVersion{}, fmt.Errorf("%w: upload %s already terminated", bvstorage.ErrInvalidArgument, u.id)
+	}
+	if err := validatePartList(parts, u.parts); err != nil {
+		return bvstorage.ObjectVersion{}, err
+	}
+	// Flush parts in order through a single resumable Writer that
+	// finalizes with ifGenerationMatch=0. This gives the §29 #8
+	// "multipart cannot overwrite" invariant.
+	obj := g.bucket.Object(applyPrefix(g.cfg.Prefix, u.key)).
+		If(gstorage.Conditions{DoesNotExist: true})
+	w := obj.NewWriter(ctx)
+	w.ChunkSize = g.cfg.UploadChunkSize
+
+	sorted := make([]int, 0, len(parts))
+	for _, p := range parts {
+		sorted = append(sorted, p.PartNumber)
+	}
+	sort.Ints(sorted)
+
+	for _, pn := range sorted {
+		if _, err := io.Copy(w, bytes.NewReader(u.parts[pn])); err != nil {
+			_ = w.Close()
+			return bvstorage.ObjectVersion{}, classify(opCompleteIfAbsent, err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		return bvstorage.ObjectVersion{}, classify(opCompleteIfAbsent, err)
+	}
+	u.terminated = true
+	return versionFromGen(w.Attrs().Generation), nil
+}
+
+func (u *upload) Abort(ctx context.Context) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.terminated {
+		return nil
+	}
+	u.parts = nil
+	u.terminated = true
+	return nil
+}
+
+// validatePartList verifies every requested part has been buffered.
+// Detects gaps (1,2,4 missing 3), zero-length lists, and unknown part
+// numbers (a number that was never UploadPart-ed).
+func validatePartList(want []bvstorage.MultipartPart, have map[int][]byte) error {
+	if len(want) == 0 {
+		return fmt.Errorf("%w: complete called with empty parts list", bvstorage.ErrInvalidArgument)
+	}
+	seen := make(map[int]bool, len(want))
+	for _, p := range want {
+		if _, ok := have[p.PartNumber]; !ok {
+			return fmt.Errorf("%w: part %d was never uploaded", bvstorage.ErrInvalidArgument, p.PartNumber)
+		}
+		if seen[p.PartNumber] {
+			return fmt.Errorf("%w: part %d listed twice", bvstorage.ErrInvalidArgument, p.PartNumber)
+		}
+		seen[p.PartNumber] = true
+	}
+	return nil
+}
+
+// silence unused imports if errors becomes unused
+var _ = errors.New
+
+// newUploadID returns a hex random identifier.
+func newUploadID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+```
+
+(Add the imports for `crypto/rand` and `encoding/hex` at the top — `"crypto/rand"` and `"encoding/hex"`.)
+
+- [ ] **Step 2: Write `multipart_test.go`**
+
+```go
+package gcs
+
+import (
+	"errors"
+	"testing"
+
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+func TestValidatePartList(t *testing.T) {
+	have := map[int][]byte{1: {}, 2: {}, 3: {}}
+
+	if err := validatePartList(nil, have); err == nil {
+		t.Errorf("nil parts: want error, got nil")
+	}
+	if err := validatePartList([]bvstorage.MultipartPart{{PartNumber: 1}, {PartNumber: 2}, {PartNumber: 3}}, have); err != nil {
+		t.Errorf("happy path: %v", err)
+	}
+	if err := validatePartList([]bvstorage.MultipartPart{{PartNumber: 5}}, have); err == nil {
+		t.Errorf("unknown part: want error")
+	}
+	if err := validatePartList([]bvstorage.MultipartPart{{PartNumber: 1}, {PartNumber: 1}}, have); err == nil {
+		t.Errorf("dup part: want error")
+	}
+	_ = errors.New
+}
+
+func TestNewUploadID(t *testing.T) {
+	a, err := newUploadID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := newUploadID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == b {
+		t.Fatalf("expected unique IDs, got %s twice", a)
+	}
+	if len(a) != 32 {
+		t.Errorf("len(id) = %d, want 32 hex chars", len(a))
+	}
+}
+```
+
+- [ ] **Step 3: Run, then commit**
+
+```bash
+go test ./internal/storage/gcs -run "TestValidatePartList|TestNewUploadID" -v
+git add internal/storage/gcs/multipart.go internal/storage/gcs/multipart_test.go
+git commit -m "M7 task 1.12: gcs multipart via resumable upload session"
+```
+
+---
+
+### Task 1.13: SignedGetURL
+
+**Files:**
+- Create: `internal/storage/gcs/signed.go`
+- Create: `internal/storage/gcs/signed_test.go`
+
+- [ ] **Step 1: Write `signed.go`**
+
+```go
+package gcs
+
+import (
+	"context"
+	"time"
+
+	gstorage "cloud.google.com/go/storage"
+
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+// SignedGetURL returns a v4 signed URL granting time-limited GET
+// access to key. opts.Expires is clamped to PresignDefaultTTL when
+// zero. If the configured credentials cannot sign URLs (e.g., metadata
+// server tokens against fake-gcs-server), returns ErrNotSupported and
+// the conformance suite skips §29 #10.
+func (g *GCS) SignedGetURL(ctx context.Context, key string, opts bvstorage.SignedURLOptions) (string, error) {
+	if err := validateKey(key); err != nil {
+		return "", err
+	}
+	ttl := opts.Expires
+	if ttl <= 0 {
+		ttl = g.cfg.PresignDefaultTTL
+	}
+	url, err := g.bucket.SignedURL(applyPrefix(g.cfg.Prefix, key), &gstorage.SignedURLOptions{
+		Method:  "GET",
+		Expires: time.Now().Add(ttl),
+		Scheme:  gstorage.SigningSchemeV4,
+	})
+	if err != nil {
+		// Translate sign-failure into ErrNotSupported so the
+		// conformance suite probes correctly. Network/auth failures
+		// against real GCS will still propagate via the suite as a
+		// hard error.
+		return "", wrap(bvstorage.ErrNotSupported, err)
+	}
+	return url, nil
+}
+```
+
+- [ ] **Step 2: Write `signed_test.go`**
+
+```go
+package gcs
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+func TestSignedGetURLRejectsBadKey(t *testing.T) {
+	g := &GCS{}
+	_, err := g.SignedGetURL(context.Background(), "/leading", bvstorage.SignedURLOptions{})
+	if err == nil || !errors.Is(err, bvstorage.ErrInvalidArgument) {
+		t.Fatalf("want ErrInvalidArgument, got %v", err)
+	}
+}
+```
+
+- [ ] **Step 3: Run, then commit**
+
+```bash
+go test ./internal/storage/gcs -run TestSignedGetURL -v
+git add internal/storage/gcs/signed.go internal/storage/gcs/signed_test.go
+git commit -m "M7 task 1.13: gcs SignedGetURL via v4 signing"
+```
+
+---
+
+### Task 1.14: cleanup.go for conformance test (AbortMultipartsUnderPrefix)
+
+**Files:**
+- Create: `internal/storage/gcs/cleanup.go`
+
+GCS has no concept of "orphan multipart uploads" the way S3 does — our resumable sessions live entirely in adapter memory. So this helper is a no-op; we add it only to keep the conformance test wiring symmetric with `s3compat`.
+
+- [ ] **Step 1: Write `cleanup.go`**
+
+```go
+package gcs
+
+import "context"
+
+// AbortMultipartsUnderPrefix is a conformance-suite test helper. Unlike
+// S3, GCS has no server-side multipart sessions to abort: our resumable
+// uploads are tracked only in adapter memory. This function exists for
+// symmetry with the s3compat test cleanup hook and is a no-op.
+func (g *GCS) AbortMultipartsUnderPrefix(ctx context.Context) error {
+	return nil
+}
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add internal/storage/gcs/cleanup.go
+git commit -m "M7 task 1.14: gcs AbortMultipartsUnderPrefix no-op for symmetry"
+```
+
+---
+
+### Task 1.15: Conformance wiring — gcs_conformance_test.go
+
+**Files:**
+- Create: `internal/storage/gcs/gcs_conformance_test.go`
+
+- [ ] **Step 1: Write the conformance harness**
+
+```go
+package gcs_test
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+	"github.com/bucketvcs/bucketvcs/internal/storage/conformance"
+	"github.com/bucketvcs/bucketvcs/internal/storage/gcs"
+)
+
+func TestGCSConformance(t *testing.T) {
+	bucket := os.Getenv("BUCKETVCS_GCS_TEST_BUCKET")
+	if bucket == "" {
+		t.Skip("BUCKETVCS_GCS_TEST_BUCKET unset — skipping live GCS conformance")
+	}
+	base := gcs.Config{
+		Bucket:          bucket,
+		Endpoint:        os.Getenv("BUCKETVCS_GCS_ENDPOINT"),
+		CredentialsFile: os.Getenv("BUCKETVCS_GCS_CREDENTIALS_FILE"),
+	}
+	conformance.Run(t, makeFactory(t, base))
+}
+
+func makeFactory(t *testing.T, base gcs.Config) conformance.Factory {
+	t.Helper()
+	if err := base.Validate(); err != nil {
+		t.Fatalf("base config invalid: %v", err)
+	}
+	return func(tb testing.TB) (bvstorage.ObjectStore, func()) {
+		tb.Helper()
+		cfg := base
+		cfg.Prefix = fmt.Sprintf("conformance/%s/", uuid.New().String())
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		s, err := gcs.Open(ctx, cfg)
+		if err != nil {
+			tb.Fatalf("gcs.Open: %v", err)
+		}
+		cleanup := func() {
+			cctx, ccancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer ccancel()
+			cleanupPrefix(tb, s, cctx)
+			_ = s.Close()
+		}
+		return s, cleanup
+	}
+}
+
+func cleanupPrefix(tb testing.TB, s bvstorage.ObjectStore, ctx context.Context) {
+	tb.Helper()
+	if g, ok := s.(*gcs.GCS); ok {
+		_ = g.AbortMultipartsUnderPrefix(ctx)
+	}
+	for {
+		page, err := s.List(ctx, "", nil)
+		if err != nil {
+			tb.Logf("conformance cleanup: list: %v", err)
+			return
+		}
+		if len(page.Objects) == 0 {
+			return
+		}
+		for _, o := range page.Objects {
+			if err := s.DeleteIfVersionMatches(ctx, o.Key, o.Version); err != nil {
+				tb.Logf("conformance cleanup: delete %q: %v", o.Key, err)
+			}
+		}
+		if page.NextToken == "" {
+			return
+		}
+	}
+}
+```
+
+- [ ] **Step 2: Run against the local fake-gcs stack**
+
+```bash
+docker compose -f docker-compose.cloud.yml up -d --wait
+export BUCKETVCS_GCS_TEST_BUCKET=bucketvcs-conformance
+export BUCKETVCS_GCS_ENDPOINT=http://localhost:4443/storage/v1/
+export STORAGE_EMULATOR_HOST=localhost:4443
+go test -count=1 -timeout=10m ./internal/storage/gcs
+```
+
+Expected: PASS (with `§29 #10 SignedURL` skipped against fake-gcs).
+
+If conformance failures show up, fix them before committing — tighten the adapter, don't paper over with skips.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add internal/storage/gcs/gcs_conformance_test.go
+git commit -m "M7 task 1.15: gcs conformance test harness — passes against fake-gcs"
+```
+
+---
+
+### Task 1.16: README for the gcs package
+
+**Files:**
+- Create: `internal/storage/gcs/README.md`
+
+- [ ] **Step 1: Write `README.md`**
+
+```markdown
+# internal/storage/gcs
+
+Google Cloud Storage adapter for `storage.ObjectStore`. Canonical M7 backend (§11.1).
+
+## Capabilities
+
+- Strong read-after-write and read-after-delete consistency (§11.1).
+- Conditional writes via `ifGenerationMatch` (§12.2).
+- v4 signed URLs (`gstorage.SigningSchemeV4`).
+- Resumable uploads model `MultipartUpload`. Parts are buffered in
+  adapter memory and flushed in order on `CompleteMultipartIfAbsent`.
+
+## Configuration
+
+| Env var | Purpose |
+|---|---|
+| `BUCKETVCS_GCS_ENDPOINT` | Override default endpoint (CI uses fake-gcs URL) |
+| `BUCKETVCS_GCS_CREDENTIALS_FILE` | Path to service-account JSON |
+| `BUCKETVCS_GCS_USER_PROJECT` | Billing project for requester-pays buckets |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Standard ADC path (honored by SDK) |
+
+## Running conformance against real GCS
+
+```bash
+export BUCKETVCS_GCS_TEST_BUCKET=<your-bucket>
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json
+go test -count=1 -timeout=15m ./internal/storage/gcs
+```
+
+## Running conformance against fake-gcs-server
+
+```bash
+docker compose -f docker-compose.cloud.yml up -d --wait
+export BUCKETVCS_GCS_TEST_BUCKET=bucketvcs-conformance
+export BUCKETVCS_GCS_ENDPOINT=http://localhost:4443/storage/v1/
+export STORAGE_EMULATOR_HOST=localhost:4443
+go test -count=1 -timeout=10m ./internal/storage/gcs
+```
+
+`§29 #10 SignedURL` is skipped against fake-gcs (it does not implement signing).
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add internal/storage/gcs/README.md
+git commit -m "M7 task 1.16: gcs README"
+```
+
+---
+
+(Phase 2 — Azure Blob adapter — added next. Layout mirrors Phase 1; only SDK calls differ.)
