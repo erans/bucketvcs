@@ -2,7 +2,6 @@ package receivepack
 
 import (
 	"context"
-	"errors"
 	"io"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
@@ -30,12 +29,6 @@ type EngineRequest struct {
 	Store  storage.ObjectStore
 	Mirror *mirror.Manager
 }
-
-// ErrNotImplemented is returned by stubs until later tasks port the M3 logic.
-var ErrNotImplemented = errors.New("receivepack: not implemented")
-
-// Service runs the command-list + pack ingest + report-status loop.
-func Service(req *EngineRequest) error { return ErrNotImplemented }
 
 // Serve runs Advertise followed by Service on the same request.
 func Serve(req *EngineRequest) error {

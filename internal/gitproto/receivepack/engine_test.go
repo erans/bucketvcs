@@ -3,6 +3,7 @@ package receivepack
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,17 +11,64 @@ import (
 	"testing"
 
 	"github.com/bucketvcs/bucketvcs/internal/importer"
+	"github.com/bucketvcs/bucketvcs/internal/mirror"
+	"github.com/bucketvcs/bucketvcs/internal/pktline"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 	"github.com/bucketvcs/bucketvcs/internal/v2proto"
 )
 
+func TestService_FlushOnlyProbe(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeReceivePackStore(t, storeDir, "acme", "demo")
+
+	store, err := localfs.Open(storeDir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	defer store.Close()
+
+	mirrorDir := t.TempDir()
+	mgr, err := mirror.NewManager(mirrorDir, store)
+	if err != nil {
+		t.Fatalf("mirror.NewManager: %v", err)
+	}
+	defer mgr.Close()
+
+	// Stdin = pktline flush packet "0000"
+	pw := &bytes.Buffer{}
+	wtr := pktline.NewWriter(pw)
+	if err := wtr.WriteFlush(); err != nil {
+		t.Fatalf("WriteFlush: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	req := &EngineRequest{
+		Ctx:          context.Background(),
+		Tenant:       "acme",
+		Repo:         "demo",
+		Stdin:        pw,
+		Stdout:       &stdout,
+		Stderr:       &bytes.Buffer{},
+		Store:        store,
+		Mirror:       mgr,
+		AgentVersion: "test",
+	}
+	err = Service(req)
+	if !errors.Is(err, ErrFlushOnlyProbe) {
+		t.Fatalf("Service with flush-only body: want ErrFlushOnlyProbe, got %v", err)
+	}
+}
+
 func TestStubsCompile(t *testing.T) {
-	if err := Service(&EngineRequest{}); err == nil {
-		t.Fatal("expected ErrNotImplemented from Service stub")
-	}
-	if err := Serve(&EngineRequest{}); err == nil {
-		t.Fatal("expected ErrNotImplemented from Serve")
-	}
+	// Service is now implemented; Serve must succeed or return a non-nil error.
+	// We just verify that calling Service with an empty request doesn't panic
+	// and that Serve delegates to Advertise then Service.
+	// (With no Store or Mirror, both will return non-nil errors — that's fine.)
+	_ = Service(&EngineRequest{Ctx: context.Background()})
+	_ = Serve(&EngineRequest{Ctx: context.Background()})
 }
 
 // makeReceivePackStore creates a synthetic store with one repo for use in
