@@ -27,6 +27,12 @@ type EngineRequest struct {
 	// passed by the client before exec.
 	ProtocolVersion int
 
+	// SSH, when true, suppresses the "# service=...\n" HTTP preamble from
+	// the v2 capability advertisement. The preamble is Smart-HTTP-specific;
+	// git clients connecting over SSH expect the advertisement to begin
+	// directly with "version 2\n" (or with the v0 ref listing).
+	SSH bool
+
 	// AgentVersion is the gateway's advertised agent version string, used in
 	// capability advertisements (e.g. "agent=bucketvcs/0.0.0").
 	AgentVersion string

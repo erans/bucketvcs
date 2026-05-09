@@ -22,6 +22,11 @@ var ErrV2Required = errors.New("uploadpack: protocol v2 required")
 // unsupported command). The HTTP adapter maps this to 400.
 var ErrBadRequest = errors.New("uploadpack: bad request")
 
+// ErrEOF is returned by Service when the client closed the stream without
+// sending a command (clean EOF between commands). The SSH session handler
+// uses this to exit its command loop gracefully.
+var ErrEOF = errors.New("uploadpack: end of stream")
+
 // maxWants is the upper bound on want OIDs accepted in a single fetch.
 // Each want incurs a `git cat-file -t` subprocess for type validation
 // plus an entry in the rev-list argv; the cap is sized to bound the
@@ -51,6 +56,10 @@ const maxPktLineTokens = 32 * 1024
 // The body byte cap is the responsibility of the caller — pass an
 // io.LimitedReader as req.Stdin if you need a hard cap (the HTTP adapter
 // uses http.MaxBytesReader).
+//
+// For SSH transport, Service may be called in a loop: it returns ErrEOF when
+// the stream is cleanly exhausted between commands (i.e., the client closed
+// the channel without sending another command), which signals the loop to stop.
 func serviceImpl(req *EngineRequest) error {
 	if req.ProtocolVersion != 2 {
 		return ErrV2Required
@@ -60,7 +69,17 @@ func serviceImpl(req *EngineRequest) error {
 	if err != nil {
 		return errBadRequestf("bad request body: %v", err)
 	}
-	if len(tokens) == 0 || tokens[0].Type != pktline.Data {
+	// Clean end-of-stream: either no tokens (EOF) or a bare Flush with no
+	// leading command (which git sends when closing the SSH channel after
+	// ls-refs/fetch — see drainPktLine comments on Flush-termination).
+	if len(tokens) == 0 {
+		return ErrEOF
+	}
+	if tokens[0].Type == pktline.Flush {
+		// A leading Flush with no command means end-of-stream on SSH.
+		return ErrEOF
+	}
+	if tokens[0].Type != pktline.Data {
 		return errBadRequestf("empty command")
 	}
 	cmdLine := strings.TrimRight(string(tokens[0].Payload), "\n")
@@ -352,10 +371,18 @@ func dedupOIDs(oids []string) []string {
 	return out
 }
 
-// drainPktLine reads all tokens from r until EOF. Each Data token's Payload
-// is COPIED because pktline.Reader reuses its internal buffer across reads.
-// If r yields more than maxPktLineTokens frames, drainPktLine aborts with
-// an error — this bounds slice growth even if the body limit is generous.
+// drainPktLine reads all tokens from r until EOF or a Flush token. Each Data
+// token's Payload is COPIED because pktline.Reader reuses its internal buffer
+// across reads. If r yields more than maxPktLineTokens frames, drainPktLine
+// aborts with an error — this bounds slice growth even if the body limit is
+// generous.
+//
+// Stopping at Flush (rather than EOF) is required for SSH transport where the
+// channel stays open after the client sends its command: the client writes the
+// command pkt-lines followed by a flush-pkt and then blocks waiting for the
+// server response. Waiting for EOF would deadlock. For HTTP, this is also
+// correct because the request body ends with a flush-pkt followed by EOF, so
+// drainPktLine terminates at the flush and the next Read returns EOF anyway.
 func drainPktLine(r io.Reader) ([]pktline.Token, error) {
 	pr := pktline.NewReader(r)
 	var out []pktline.Token
@@ -375,6 +402,12 @@ func drainPktLine(r io.Reader) ([]pktline.Token, error) {
 			out = append(out, pktline.Token{Type: tok.Type, Payload: cp})
 		} else {
 			out = append(out, tok)
+		}
+		// A Flush token signals end-of-message. Stop reading so the server
+		// can process the command and write its response — necessary for SSH
+		// where the channel remains open after the flush.
+		if tok.Type == pktline.Flush {
+			return out, nil
 		}
 	}
 }

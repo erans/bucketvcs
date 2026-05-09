@@ -39,6 +39,12 @@ func Advertise(req *EngineRequest) error {
 	}
 
 	if req.ProtocolVersion == 2 {
+		if req.SSH {
+			// SSH protocol: skip the "# service=...\n" HTTP preamble.
+			// git over SSH expects the capability advertisement to begin
+			// directly with "version 2\n" (no Smart-HTTP service header).
+			return v2proto.WriteV2AdvertisementSSH(req.Stdout, req.AgentVersion)
+		}
 		return v2proto.WriteV2Advertisement(req.Stdout, "git-upload-pack", req.AgentVersion)
 	}
 

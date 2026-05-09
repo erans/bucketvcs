@@ -166,11 +166,28 @@ run:
 			Stdout:          ch,
 			Stderr:          ch.Stderr(),
 			ProtocolVersion: pv,
+			SSH:             true,
 			Store:           s.opts.BVStore,
 			Mirror:          s.opts.Mirror,
 			AgentVersion:    s.opts.AgentVersion,
 		}
-		serveErr = uploadpack.Serve(req)
+		// Advertise once, then handle multiple commands until EOF.
+		// Over SSH the channel stays open; git sends multiple commands
+		// (e.g. ls-refs then fetch) sequentially before closing.
+		if err := uploadpack.Advertise(req); err != nil {
+			serveErr = err
+			break
+		}
+		for {
+			err := uploadpack.Service(req)
+			if err == uploadpack.ErrEOF {
+				break
+			}
+			if err != nil {
+				serveErr = err
+				break
+			}
+		}
 	case OpReceive:
 		req := &receivepack.EngineRequest{
 			Ctx:             ctx,
