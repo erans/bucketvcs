@@ -6,13 +6,11 @@ import (
 	"net/http"
 	"net/url"
 	"path"
-	"regexp"
 	"strings"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
+	"github.com/bucketvcs/bucketvcs/internal/gateway/routenames"
 )
-
-var nameRE = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 // Op is the protocol operation a request maps to.
 type Op int
@@ -56,7 +54,7 @@ func ParseRoute(method, urlPath, rawQuery string) (*RoutedRequest, error) {
 		return nil, ErrRouteNoMatch
 	}
 	repoID := strings.TrimSuffix(repoSeg, ".git")
-	if !nameRE.MatchString(tenant) || !nameRE.MatchString(repoID) {
+	if !routenames.ValidateName(tenant) || !routenames.ValidateName(repoID) {
 		return nil, ErrRouteNoMatch
 	}
 
