@@ -14,7 +14,7 @@ func TestValidateKey(t *testing.T) {
 			t.Errorf("validateKey(%q) unexpected err: %v", k, err)
 		}
 	}
-	bad := []string{"", "/leading", "trailing/", "double//slash"}
+	bad := []string{"", "/leading", "trailing/", "double//slash", "contains/../segment", "with\x00null", "with\\backslash"}
 	for _, k := range bad {
 		err := validateKey(k)
 		if err == nil {

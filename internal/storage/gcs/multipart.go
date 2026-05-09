@@ -87,8 +87,18 @@ func (g *GCS) CompleteMultipartIfAbsent(ctx context.Context, mu bvstorage.Multip
 	}
 	// Flush parts in order through a single resumable Writer that
 	// finalizes with ifGenerationMatch=0. This gives the §29 #8
-	// "multipart cannot overwrite" invariant.
-	obj := g.bucket.Object(applyPrefix(g.cfg.Prefix, u.key)).
+	// "multipart cannot overwrite" invariant on real GCS.
+	//
+	// fake-gcs-server does not enforce ifGenerationMatch=0 on resumable
+	// uploads, so we perform an explicit existence check via Attrs first.
+	// On real GCS the server-side condition is the authoritative guard;
+	// the Attrs call here is a best-effort pre-check only.
+	fullKey := applyPrefix(g.cfg.Prefix, u.key)
+	if _, err := g.bucket.Object(fullKey).Attrs(ctx); err == nil {
+		// Object already exists.
+		return bvstorage.ObjectVersion{}, fmt.Errorf("gcs: %w: object already exists", bvstorage.ErrAlreadyExists)
+	}
+	obj := g.bucket.Object(fullKey).
 		If(gstorage.Conditions{DoesNotExist: true})
 	w := obj.NewWriter(ctx)
 	w.ChunkSize = g.cfg.UploadChunkSize
@@ -123,9 +133,10 @@ func (u *upload) Abort(ctx context.Context) error {
 	return nil
 }
 
-// validatePartList verifies every requested part has been buffered.
-// Detects gaps (1,2,4 missing 3), zero-length lists, and unknown part
-// numbers (a number that was never UploadPart-ed).
+// validatePartList verifies every requested part has been buffered, the
+// part numbers are contiguous starting from 1, and the declared sizes
+// match the buffered content. Detects: empty lists, gaps (1,3 missing
+// 2), duplicates, unknown part numbers, and size mismatches.
 func validatePartList(want []bvstorage.MultipartPart, have map[int][]byte) error {
 	if len(want) == 0 {
 		return fmt.Errorf("%w: complete called with empty parts list", bvstorage.ErrInvalidArgument)
@@ -139,6 +150,16 @@ func validatePartList(want []bvstorage.MultipartPart, have map[int][]byte) error
 			return fmt.Errorf("%w: part %d listed twice", bvstorage.ErrInvalidArgument, p.PartNumber)
 		}
 		seen[p.PartNumber] = true
+		// Verify declared size matches buffered content.
+		if p.Size != int64(len(have[p.PartNumber])) {
+			return fmt.Errorf("%w: part %d declared size %d but buffered %d bytes", bvstorage.ErrInvalidArgument, p.PartNumber, p.Size, len(have[p.PartNumber]))
+		}
+	}
+	// Check that part numbers form a contiguous range [1, len(want)].
+	for i := 1; i <= len(want); i++ {
+		if !seen[i] {
+			return fmt.Errorf("%w: non-contiguous part numbers: part %d missing", bvstorage.ErrInvalidArgument, i)
+		}
 	}
 	return nil
 }

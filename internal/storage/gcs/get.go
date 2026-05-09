@@ -91,7 +91,10 @@ func parseGen(v bvstorage.ObjectVersion) (int64, error) {
 	var gen int64
 	_, err := fmt.Sscanf(v.Token, "%d", &gen)
 	if err != nil {
-		return 0, fmt.Errorf("%w: ObjectVersion.Token must be a decimal generation: %v", bvstorage.ErrInvalidArgument, err)
+		// A token from the gcs provider that is not a valid decimal generation
+		// number can never match the object's current generation — treat as a
+		// version mismatch rather than an argument error.
+		return 0, fmt.Errorf("%w: ObjectVersion.Token must be a decimal generation: %v", bvstorage.ErrVersionMismatch, err)
 	}
 	return gen, nil
 }

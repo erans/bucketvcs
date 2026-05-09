@@ -12,8 +12,7 @@ type GCS struct {
 	bucket *storage.BucketHandle
 }
 
-// TODO(M7 task 1.16): re-enable interface assertion once all methods exist
-// var _ bvstorage.ObjectStore = (*GCS)(nil)
+var _ bvstorage.ObjectStore = (*GCS)(nil)
 
 // Capabilities reports the GCS adapter capabilities. MultipartMinPartSize
 // is GCS's 256 KiB resumable-chunk minimum. MultipartMaxParts is 0
