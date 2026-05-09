@@ -860,24 +860,126 @@ func (s *Store) AddSSHKey(ctx context.Context, k auth.SSHKey) error {
 	return nil
 }
 
-// ListSSHKeysForUser returns all keys belonging to userID. Implemented in Task 15.
+// ListSSHKeysForUser returns all keys belonging to userID, ordered by created_at ASC.
 func (s *Store) ListSSHKeysForUser(ctx context.Context, userID string) ([]auth.SSHKey, error) {
-	panic("not implemented; comes in M6 task 15")
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, fingerprint, public_key, key_type, label,
+		       created_at, last_used_at, revoked_at,
+		       user_id, scope_tenant, scope_repo, scope_perm
+		FROM ssh_keys
+		WHERE user_id = ?
+		ORDER BY created_at ASC
+	`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanSSHKeys(rows)
 }
 
-// ListSSHKeysForRepo returns all deploy keys bound to (tenant, repo). Implemented in Task 15.
+// ListSSHKeysForRepo returns all deploy keys bound to (tenant, repo), ordered by created_at ASC.
 func (s *Store) ListSSHKeysForRepo(ctx context.Context, tenant, repo string) ([]auth.SSHKey, error) {
-	panic("not implemented; comes in M6 task 15")
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, fingerprint, public_key, key_type, label,
+		       created_at, last_used_at, revoked_at,
+		       user_id, scope_tenant, scope_repo, scope_perm
+		FROM ssh_keys
+		WHERE scope_tenant = ? AND scope_repo = ?
+		ORDER BY created_at ASC
+	`, tenant, repo)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanSSHKeys(rows)
 }
 
-// RevokeSSHKey sets revoked_at to now. Implemented in Task 15.
+// scanSSHKeys scans a *sql.Rows result set into a slice of auth.SSHKey values.
+func scanSSHKeys(rows *sql.Rows) ([]auth.SSHKey, error) {
+	var out []auth.SSHKey
+	for rows.Next() {
+		var k auth.SSHKey
+		var label, userID, scopeTenant, scopeRepo, scopePerm sql.NullString
+		var lastUsedAt, revokedAt sql.NullInt64
+		if err := rows.Scan(
+			&k.ID, &k.Fingerprint, &k.PublicKey, &k.KeyType, &label,
+			&k.CreatedAt, &lastUsedAt, &revokedAt,
+			&userID, &scopeTenant, &scopeRepo, &scopePerm,
+		); err != nil {
+			return nil, err
+		}
+		k.Label = label.String
+		if lastUsedAt.Valid {
+			k.LastUsedAt = lastUsedAt.Int64
+		}
+		if revokedAt.Valid {
+			k.RevokedAt = revokedAt.Int64
+		}
+		if userID.Valid {
+			k.UserID = userID.String
+		}
+		if scopeTenant.Valid {
+			k.ScopeTenant = scopeTenant.String
+		}
+		if scopeRepo.Valid {
+			k.ScopeRepo = scopeRepo.String
+		}
+		if scopePerm.Valid {
+			p, err := permFromText(scopePerm.String)
+			if err != nil {
+				return nil, err
+			}
+			k.ScopePerm = p
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+// RevokeSSHKey sets revoked_at to now for the key identified by full ID or
+// unique prefix. Returns auth.ErrNoSuchKey if no key matches, or a wrapped
+// auth.ErrConflict if the prefix is ambiguous (matches more than one key).
 func (s *Store) RevokeSSHKey(ctx context.Context, keyIDOrPrefix string) error {
-	panic("not implemented; comes in M6 task 15")
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM ssh_keys WHERE id LIKE ? || '%'`, keyIDOrPrefix)
+	if err != nil {
+		return err
+	}
+	var matches []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		matches = append(matches, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	if len(matches) == 0 {
+		return auth.ErrNoSuchKey
+	}
+	if len(matches) > 1 {
+		return fmt.Errorf("%w: prefix %q matches %d keys", auth.ErrConflict, keyIDOrPrefix, len(matches))
+	}
+
+	_, err = s.db.ExecContext(ctx,
+		`UPDATE ssh_keys SET revoked_at = strftime('%s','now') WHERE id = ?`,
+		matches[0],
+	)
+	return err
 }
 
-// TouchSSHKeyUsage updates last_used_at. Best-effort. Implemented in Task 15.
+// TouchSSHKeyUsage updates last_used_at to now for the given key ID.
+// A missing keyID is not an error — UPDATE with no rows affected returns nil.
 func (s *Store) TouchSSHKeyUsage(ctx context.Context, keyID string) error {
-	return nil
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE ssh_keys SET last_used_at = strftime('%s','now') WHERE id = ?`,
+		keyID,
+	)
+	return err
 }
 
 // Compile-time check that *Store satisfies auth.Store.
