@@ -4068,4 +4068,551 @@ git commit -m "M7 task 2.16: azureblob README"
 
 ---
 
-(Phase 3 — CLI integration — added next.)
+## Phase 3 — CLI integration
+
+The `--store=` flag picks up two new schemes. Each task lands a small focused diff to `cmd/bucketvcs/store.go` and its test.
+
+### Task 3.1: Wire `gcs://` through cmd/bucketvcs/store.go
+
+**Files:**
+- Modify: `cmd/bucketvcs/store.go`
+- Modify: `cmd/bucketvcs/store_test.go`
+
+- [ ] **Step 1: Update `parseStoreURL` and add `gcs` case**
+
+In `cmd/bucketvcs/store.go`, drop `gcs` from the M7-reserved error path and add it to the recognized schemes (similar to how `s3`, `r2` are handled). The relevant edit:
+
+```go
+// In parseStoreURL switch:
+case "gcs":
+    if !strings.HasPrefix(rest, "//") {
+        return "", "", fmt.Errorf(`--store: gcs URL must use the form gcs://<bucket>[/<prefix>] (got %q)`, s)
+    }
+    bucketPath := strings.TrimPrefix(rest, "//")
+    bucket, _, _ := strings.Cut(bucketPath, "/")
+    if bucket == "" {
+        return "", "", fmt.Errorf(`--store: gcs:// requires a bucket name (got %q)`, s)
+    }
+    return scheme, bucketPath, nil
+case "azureblob":
+    // (added in Task 3.2; leave reserved-error for now if Task 3.2 hasn't landed)
+    return "", "", fmt.Errorf(`--store: scheme %q is reserved; cloud adapter for this provider lands at M7`, scheme)
+```
+
+- [ ] **Step 2: Add `openStore` case**
+
+```go
+case "gcs":
+    cfg, err := gcs.ParseURL(url)
+    if err != nil {
+        return nil, err
+    }
+    applyEnvToGCSConfig(&cfg)
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+    s, err := gcs.Open(ctx, cfg)
+    if err != nil {
+        return nil, fmt.Errorf("gcs: %w", err)
+    }
+    return s, nil
+```
+
+- [ ] **Step 3: Add `applyEnvToGCSConfig`**
+
+```go
+func applyEnvToGCSConfig(cfg *gcs.Config) {
+    if v := os.Getenv("BUCKETVCS_GCS_ENDPOINT"); v != "" {
+        cfg.Endpoint = v
+    }
+    if v := os.Getenv("BUCKETVCS_GCS_CREDENTIALS_FILE"); v != "" {
+        cfg.CredentialsFile = v
+    }
+    if v := os.Getenv("BUCKETVCS_GCS_USER_PROJECT"); v != "" {
+        cfg.UserProject = v
+    }
+    // GOOGLE_APPLICATION_CREDENTIALS is honored by the GCS SDK directly.
+}
+```
+
+Add `"github.com/bucketvcs/bucketvcs/internal/storage/gcs"` to the imports.
+
+- [ ] **Step 4: Update the parser-error message strings**
+
+Change the `parseStoreURL` initial error and the `unknown scheme` fallback to mention `gcs://`:
+
+```go
+return "", "", fmt.Errorf(`--store: missing scheme; want "localfs:<path>", "s3://<bucket>[/<prefix>]", "r2://<bucket>[/<prefix>]", or "gcs://<bucket>[/<prefix>]"`)
+```
+
+- [ ] **Step 5: Write parser tests**
+
+In `cmd/bucketvcs/store_test.go`, add cases:
+
+```go
+{name: "gcs ok", in: "gcs://my-bucket", wantScheme: "gcs", wantPath: "my-bucket"},
+{name: "gcs with prefix", in: "gcs://my-bucket/repos/staging", wantScheme: "gcs", wantPath: "my-bucket/repos/staging"},
+{name: "gcs missing bucket", in: "gcs://", wantErr: "requires a bucket"},
+{name: "gcs no slashes", in: "gcs:my-bucket", wantErr: "must use the form"},
+```
+
+- [ ] **Step 6: Run, then commit**
+
+```bash
+go test ./cmd/bucketvcs -run TestParseStoreURL -v
+go build ./...
+git add cmd/bucketvcs/store.go cmd/bucketvcs/store_test.go
+git commit -m "M7 task 3.1: cmd/bucketvcs wires gcs:// through internal/storage/gcs"
+```
+
+---
+
+### Task 3.2: Wire `azureblob://` through cmd/bucketvcs/store.go
+
+**Files:**
+- Modify: `cmd/bucketvcs/store.go`
+- Modify: `cmd/bucketvcs/store_test.go`
+
+- [ ] **Step 1: Replace the reserved-error case with the live one**
+
+```go
+case "azureblob":
+    if !strings.HasPrefix(rest, "//") {
+        return "", "", fmt.Errorf(`--store: azureblob URL must use the form azureblob://<container>[/<prefix>] (got %q)`, s)
+    }
+    contPath := strings.TrimPrefix(rest, "//")
+    cont, _, _ := strings.Cut(contPath, "/")
+    if cont == "" {
+        return "", "", fmt.Errorf(`--store: azureblob:// requires a container name (got %q)`, s)
+    }
+    return scheme, contPath, nil
+```
+
+- [ ] **Step 2: Add `openStore` case**
+
+```go
+case "azureblob":
+    cfg, err := azureblob.ParseURL(url)
+    if err != nil {
+        return nil, err
+    }
+    applyEnvToAzureConfig(&cfg)
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+    s, err := azureblob.Open(ctx, cfg)
+    if err != nil {
+        return nil, fmt.Errorf("azureblob: %w", err)
+    }
+    return s, nil
+```
+
+- [ ] **Step 3: Add `applyEnvToAzureConfig`**
+
+```go
+func applyEnvToAzureConfig(cfg *azureblob.Config) {
+    if v := os.Getenv("BUCKETVCS_AZURE_ACCOUNT"); v != "" {
+        cfg.Account = v
+    }
+    if v := os.Getenv("BUCKETVCS_AZURE_SERVICE_URL"); v != "" {
+        cfg.ServiceURL = v
+    }
+    if v := os.Getenv("BUCKETVCS_AZURE_ACCOUNT_KEY"); v != "" {
+        cfg.AccountKey = v
+    }
+    if v := os.Getenv("BUCKETVCS_AZURE_CONNECTION_STRING"); v != "" {
+        cfg.ConnectionString = v
+    }
+}
+```
+
+Add `"github.com/bucketvcs/bucketvcs/internal/storage/azureblob"` to imports.
+
+- [ ] **Step 4: Update parser tests**
+
+```go
+{name: "azureblob ok", in: "azureblob://my-container", wantScheme: "azureblob", wantPath: "my-container"},
+{name: "azureblob with prefix", in: "azureblob://my-container/a/b", wantScheme: "azureblob", wantPath: "my-container/a/b"},
+{name: "azureblob missing container", in: "azureblob://", wantErr: "requires a container"},
+```
+
+Update the missing-scheme error message to also mention `azureblob://`:
+
+```go
+return "", "", fmt.Errorf(`--store: missing scheme; want "localfs:<path>", "s3://<bucket>[/<prefix>]", "r2://<bucket>[/<prefix>]", "gcs://<bucket>[/<prefix>]", or "azureblob://<container>[/<prefix>]"`)
+```
+
+- [ ] **Step 5: Run, then commit**
+
+```bash
+go test ./cmd/bucketvcs -run TestParseStoreURL -v
+go build ./...
+git add cmd/bucketvcs/store.go cmd/bucketvcs/store_test.go
+git commit -m "M7 task 3.2: cmd/bucketvcs wires azureblob:// through internal/storage/azureblob"
+```
+
+---
+
+### Task 3.3: End-to-end smoke against the emulator stack
+
+**Files:**
+- Modify: `internal/diffharness/roundtrip_helpers_test.go`
+
+This task piggybacks on the existing diffharness pattern from M5: the harness env-var override that lets the round-trip integration test run against `gcs://` or `azureblob://`.
+
+- [ ] **Step 1: Locate the existing override**
+
+```bash
+grep -n "BUCKETVCS_DIFFHARNESS_STORE" internal/diffharness/roundtrip_helpers_test.go
+```
+
+The env var should already select between `localfs`, `s3`, `r2`. Extend its `switch` to recognize `gcs` and `azureblob` and dispatch through `cmd/bucketvcs/openStore` (or a small re-implementation if the helper is package-private).
+
+- [ ] **Step 2: Add fixture buckets/containers**
+
+The helper should pre-seed a uuid-prefix under the configured bucket exactly like the M5 helper does for s3.
+
+- [ ] **Step 3: Run end-to-end against fake-gcs and Azurite**
+
+```bash
+docker compose -f docker-compose.cloud.yml up -d --wait
+
+export BUCKETVCS_GCS_TEST_BUCKET=bucketvcs-conformance
+export BUCKETVCS_GCS_ENDPOINT=http://localhost:4443/storage/v1/
+export STORAGE_EMULATOR_HOST=localhost:4443
+export BUCKETVCS_DIFFHARNESS_STORE=gcs://bucketvcs-conformance/diffharness/
+go test -count=1 -timeout=10m ./internal/diffharness
+
+export BUCKETVCS_DIFFHARNESS_STORE=azureblob://bucketvcs-conformance/diffharness/
+export BUCKETVCS_AZURE_CONNECTION_STRING="DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
+go test -count=1 -timeout=10m ./internal/diffharness
+```
+
+Both runs should pass; the round-trip exercises `bucketvcs init` → `import` → `serve` → native `git clone` → byte-identical comparison.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add internal/diffharness/roundtrip_helpers_test.go
+git commit -m "M7 task 3.3: diffharness env-driven override for gcs:// and azureblob://"
+```
+
+---
+
+## Phase 4 — AWS S3 promotion to canonical
+
+No code in `s3compat`. Operational + documentation only.
+
+### Task 4.1: Add real-AWS leg + required MinIO check
+
+**Files:**
+- Modify: `.github/workflows/conformance.yml` (no actual edit needed — the workflow from Task 0.3 already includes the AWS step; verify it triggers when secrets are present.)
+- Modify: `scripts/conformance-emulators.sh` (already includes MinIO; verify the s3compat conformance test binds to `BUCKETVCS_S3_*` correctly when MinIO is the target.)
+
+- [ ] **Step 1: Verify the MinIO-targeted s3compat conformance test currently passes locally**
+
+```bash
+./scripts/conformance-emulators.sh
+```
+
+Expected: PASS for `internal/storage/s3compat` against MinIO, in addition to gcs against fake-gcs and azureblob against Azurite.
+
+If the s3compat test was previously skipped on missing real-cloud creds (it should opt into MinIO via the env), audit `s3compat_conformance_test.go` and confirm `BUCKETVCS_S3_TEST_BUCKET` plus the MinIO env vars are honored. No code change should be required — M5 already wired this for the optional MinIO smoke.
+
+- [ ] **Step 2: Document in repo settings**
+
+In the M7 PR description, list the GitHub repo secrets that must be configured for the nightly real-cloud job:
+
+```
+AWS_S3_TEST_BUCKET, AWS_S3_TEST_REGION,
+AWS_S3_TEST_ACCESS_KEY_ID, AWS_S3_TEST_SECRET_ACCESS_KEY
+R2_TEST_BUCKET, R2_TEST_ENDPOINT,
+R2_TEST_ACCESS_KEY_ID, R2_TEST_SECRET_ACCESS_KEY
+GCS_TEST_BUCKET, GCS_TEST_CREDENTIALS_JSON
+AZURE_TEST_CONTAINER, AZURE_TEST_ACCOUNT, AZURE_TEST_ACCOUNT_KEY
+```
+
+The workflow's `if: ${{ secrets.X != '' }}` guards mean unconfigured legs no-op cleanly.
+
+- [ ] **Step 3: No commit needed unless the MinIO env wiring was previously broken — fix and commit then**
+
+If you needed to fix the s3compat MinIO env wiring:
+```bash
+git add internal/storage/s3compat/s3compat_conformance_test.go
+git commit -m "M7 task 4.1: s3compat conformance honors MinIO env vars (PR-blocking)"
+```
+
+---
+
+### Task 4.2: Documentation updates marking S3 canonical
+
+**Files:**
+- Modify: `docs/superpowers/specs/2026-05-03-bucketvcs-oss-decomposition-design.md`
+- Modify: `docs/m5-cloud-quickstart.md`
+- Modify: `README.md`
+- Modify: `internal/storage/s3compat/README.md`
+
+- [ ] **Step 1: Update decomposition design**
+
+Edit the §11.1 backend matrix row for AWS S3 (or the equivalent passage that describes S3's M5/M7 status). Replace any "AWS S3 promotion in progress (M7)" qualifier with "AWS S3 — canonical (since M7)".
+
+- [ ] **Step 2: Update m5-cloud-quickstart.md**
+
+Move the S3 examples into a dedicated `## AWS S3` section if they're currently grouped with R2 under an "M7 promotion in progress" qualifier. Drop the qualifier.
+
+- [ ] **Step 3: Update README.md**
+
+Locate the storage backends section (or add one if none exists). List the four canonical schemes:
+
+```markdown
+### Canonical storage backends
+
+- `localfs:<path>` — local filesystem
+- `s3://<bucket>[/<prefix>]` — AWS S3
+- `r2://<bucket>[/<prefix>]` — Cloudflare R2
+- `gcs://<bucket>[/<prefix>]` — Google Cloud Storage
+- `azureblob://<container>[/<prefix>]` — Azure Blob Storage
+
+All canonical backends pass the storage conformance suite in CI:
+emulators on every PR, real cloud nightly.
+```
+
+- [ ] **Step 4: Update internal/storage/s3compat/README.md**
+
+Drop any "promoted to canonical at M7" wording. Replace with "Canonical bucketvcs storage backend for AWS S3 and Cloudflare R2 (§11.1)."
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add docs/superpowers/specs/2026-05-03-bucketvcs-oss-decomposition-design.md docs/m5-cloud-quickstart.md README.md internal/storage/s3compat/README.md
+git commit -m "M7 task 4.2: mark AWS S3 canonical in decomposition, README, m5 quickstart, s3compat README"
+```
+
+---
+
+## Phase 5 — Quickstart docs and acceptance
+
+### Task 5.1: docs/m7-cloud-quickstart.md
+
+**Files:**
+- Create: `docs/m7-cloud-quickstart.md`
+
+- [ ] **Step 1: Write the quickstart**
+
+```markdown
+# M7 cloud backends — quickstart
+
+This document covers the two new canonical storage backends added in M7:
+Google Cloud Storage and Azure Blob Storage. For AWS S3 and Cloudflare R2,
+see `docs/m5-cloud-quickstart.md`.
+
+## Google Cloud Storage
+
+### Prerequisites
+
+- A GCS bucket in a region you can write to.
+- A service account with `Storage Object Admin` on the bucket (Object User
+  is sufficient if you do not need to set bucket-level lifecycle).
+- Either `GOOGLE_APPLICATION_CREDENTIALS` pointing at the service-account
+  JSON, or `BUCKETVCS_GCS_CREDENTIALS_FILE`.
+
+### URL form
+
+```
+gcs://<bucket>[/<prefix>]
+```
+
+### Example
+
+```bash
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json
+
+bucketvcs init --store=gcs://my-bucket/my-org/my-repo.bv
+bucketvcs serve --store=gcs://my-bucket/my-org/my-repo.bv --listen=:8080
+
+git clone http://user:$(bucketvcs token issue --user=user)@localhost:8080/my-org/my-repo.git
+```
+
+### Smoke test against fake-gcs-server
+
+```bash
+docker run -d --name fake-gcs -p 4443:4443 fsouza/fake-gcs-server -scheme http -public-host localhost:4443
+curl -X POST -H "Content-Type: application/json" -d '{"name":"smoke"}' http://localhost:4443/storage/v1/b?project=bucketvcs
+
+export BUCKETVCS_GCS_ENDPOINT=http://localhost:4443/storage/v1/
+export STORAGE_EMULATOR_HOST=localhost:4443
+bucketvcs init --store=gcs://smoke/repo.bv
+```
+
+## Azure Blob Storage
+
+### Prerequisites
+
+- A storage account in a region you can write to.
+- A container under that account.
+- Either Shared Key (account key), DefaultAzureCredential (workload identity,
+  managed identity, or `az login`), or a connection string.
+
+### URL form
+
+```
+azureblob://<container>[/<prefix>]
+```
+
+### Example
+
+```bash
+export BUCKETVCS_AZURE_ACCOUNT=mystorageacct
+export BUCKETVCS_AZURE_ACCOUNT_KEY=<key>
+
+bucketvcs init --store=azureblob://my-container/my-org/my-repo.bv
+bucketvcs serve --store=azureblob://my-container/my-org/my-repo.bv --listen=:8080
+```
+
+### Smoke test against Azurite
+
+```bash
+docker run -d --name azurite -p 10000:10000 mcr.microsoft.com/azure-storage/azurite azurite-blob --blobHost 0.0.0.0
+docker exec azurite az storage container create --name smoke \
+  --connection-string "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
+
+export BUCKETVCS_AZURE_CONNECTION_STRING="DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
+bucketvcs init --store=azureblob://smoke/repo.bv
+```
+
+## Rotating CI secrets
+
+The nightly conformance job in `.github/workflows/conformance.yml` reads
+credentials from repo secrets. To rotate:
+
+1. Generate a new key in the cloud console.
+2. Update the GitHub repo secret (`Settings -> Secrets and variables -> Actions`).
+3. Trigger the workflow manually via `workflow_dispatch` to confirm the new key works.
+4. Revoke the old key in the cloud console.
+
+Do not rotate via local CLI commands that print the key — keys can leak through
+shell history. Generate, copy directly into the GitHub UI, then close the tab.
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add docs/m7-cloud-quickstart.md
+git commit -m "M7 task 5.1: m7-cloud-quickstart.md (gcs + azureblob)"
+```
+
+---
+
+### Task 5.2: §12 acceptance criteria check + m7_progress.md
+
+**Files:**
+- Create: `docs/superpowers/specs/m7_progress.md`
+
+This is the M5/M6-style "acceptance gate" task. Run the full conformance suite locally against emulators, run any deferred end-to-end smoke, then write the progress note.
+
+- [ ] **Step 1: Run the full local stack**
+
+```bash
+./scripts/conformance-emulators.sh
+```
+
+Expected: PASS for `localfs`, `s3compat` (against MinIO), `gcs` (against fake-gcs, with §29 #10 SignedURL skipped), `azureblob` (against Azurite, with §29 #10 SignedURL skipped if no key).
+
+- [ ] **Step 2: Run the diffharness end-to-end against gcs and azureblob**
+
+(See Task 3.3 step 3.) Both runs should be green.
+
+- [ ] **Step 3: Write `docs/superpowers/specs/m7_progress.md`**
+
+```markdown
+# M7 — Remaining Canonical Cloud Backends — progress
+
+Date merged: 2026-MM-DD
+Tag: m7-complete
+
+## Acceptance criteria — all green
+
+1. ✅ `internal/storage/gcs` passes conformance against real GCS and fake-gcs-server.
+2. ✅ `internal/storage/azureblob` passes conformance against real Azure Blob and Azurite.
+3. ✅ `internal/storage/s3compat` passes conformance against real AWS S3 (in addition to R2 and MinIO).
+4. ✅ `bucketvcs init --store=gcs://…`, `--store=azureblob://…`, and `--store=s3://…` work end-to-end with import/serve/native git clone+push.
+5. ✅ The `emulators` CI job is required; the `real-cloud` nightly is green for the seven days preceding the tag.
+6. ✅ No file outside `internal/storage/{gcs,azureblob,s3compat}/` imports a provider SDK.
+
+## Notes
+
+- AWS S3 is now formally canonical alongside R2.
+- Documented skips: §29 #10 SignedURL skipped against fake-gcs (no SignedURL implementation) and against Azurite when no account key is configured. Real-cloud runs exercise it fully.
+- Repo secrets required for the nightly run are listed in `docs/m7-cloud-quickstart.md`.
+
+## Out of scope (deferred)
+
+- Tigris, MinIO AIStor (deployment-tested candidates) — §11.2.
+- Wasabi, B2, Ceph, etc. — §11.3 compatibility tier.
+- Cross-backend migration tooling (M16 if needed).
+- `bucketvcs store check` smoke-test subcommand.
+```
+
+- [ ] **Step 4: Update memory note in `m5_progress.md`**
+
+The line "AWS S3 (M7 promotion in progress)" in the user's memory file should now read "AWS S3 (canonical since M7)". This is documented in the design but the actual edit happens in the user's `~/.claude/projects/.../memory/m5_progress.md` after the merge — leave a TODO note in `m7_progress.md` to remind whoever merges:
+
+```markdown
+## Post-merge bookkeeping
+
+After tagging m7-complete, update `m5_progress.md` (in user memory):
+replace "AWS S3 (M7 promotion in progress)" with "AWS S3 (canonical since M7)".
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add docs/superpowers/specs/m7_progress.md
+git commit -m "M7 task 5.2: acceptance criteria green; m7_progress.md"
+```
+
+- [ ] **Step 6: Tag `m7-complete` (do this in the merge PR, not on the worktree branch)**
+
+After the worktree branch merges to main:
+
+```bash
+git tag m7-complete
+git push origin m7-complete
+```
+
+---
+
+## Self-review checklist (run before requesting review)
+
+Walk through the spec sections one by one and confirm a task implements each:
+
+| Spec section | Task(s) |
+|---|---|
+| What this milestone delivers (gcs, azureblob, s3 promotion) | All phases |
+| Architecture / package layout | 1.1, 2.1 |
+| Boundary (no SDK leaks) | Verified by Task 5.2 acceptance criterion 6 |
+| Code-sharing decision (no shared base) | Implicit — each adapter self-contained |
+| GCS provider mapping (§12.2) | 1.7–1.13 |
+| Azure provider mapping (§12.4) | 2.7–2.13 |
+| URL parsing | 1.3, 2.3, 3.1, 3.2 |
+| Secrets policy | 1.3, 2.3 (URL parsers reject creds) |
+| Conformance test wiring | 1.15, 2.15 |
+| Local-emulator profile (PR-blocking) | 0.1, 0.2 |
+| CI matrix (emulators + nightly) | 0.3, 4.1 |
+| Documented conformance gaps (skips) | 1.13 (signed.go) returns ErrNotSupported; suite probes |
+| AWS S3 promotion CI + docs | 4.1, 4.2 |
+| Documentation deliverables | 1.16, 2.16, 4.2, 5.1, 5.2 |
+| Branching and merge | Worktree `worktree-m7-cloud`, single merge — operational, not a task |
+| Acceptance criteria | 5.2 |
+| Risk register (block-ID collision, GCS staleness) | 2.12 covers block-ID; GCS staleness out of scope |
+
+If a row has no task, add one. If a task is unclear, fix it inline now.
+
+---
+
+## Execution
+
+After self-review passes, hand off to either:
+
+- **subagent-driven-development** (recommended) — fresh subagent per task with reviews between
+- **executing-plans** — inline execution with checkpoints
+
+Either way: each task ends green, commits, then the next begins. Do not batch commits across tasks.
