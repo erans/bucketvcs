@@ -2371,4 +2371,503 @@ git commit -m "M7 task 1.16: gcs README"
 
 ---
 
-(Phase 2 — Azure Blob adapter — added next. Layout mirrors Phase 1; only SDK calls differ.)
+## Phase 2 — Azure Blob adapter
+
+Layout mirrors `internal/storage/gcs` file-for-file. Tasks below show the Azure-specific code; for boilerplate (prefix.go, keys.go, doc.go) the GCS versions translate trivially — copy and rename.
+
+### Task 2.1: Skeleton — package, type, Capabilities, SDK deps
+
+**Files:**
+- Create: `internal/storage/azureblob/doc.go`
+- Create: `internal/storage/azureblob/azureblob.go`
+- Modify: `go.mod`, `go.sum`
+
+- [ ] **Step 1: Add Azure SDK dependencies**
+
+```bash
+cd /home/eran/work/bucketvcs/.claude/worktrees/m7-cloud
+go get github.com/Azure/azure-sdk-for-go/sdk/storage/azblob@latest
+go get github.com/Azure/azure-sdk-for-go/sdk/azidentity@latest
+go mod tidy
+```
+
+- [ ] **Step 2: Write `doc.go`**
+
+```go
+// Package azureblob implements storage.ObjectStore against Azure Blob
+// Storage via github.com/Azure/azure-sdk-for-go/sdk/storage/azblob.
+// M7 ships this adapter as a canonical bucketvcs storage backend
+// (§11.1).
+//
+// The CLI exposes one scheme that routes to this package:
+//
+//	azureblob://<container>[/<prefix>]
+//
+// Credentials come from azidentity.NewDefaultAzureCredential by default
+// (env vars, workload identity, managed identity, az CLI). Static keys
+// can be supplied via Config.AccountKey or Config.ConnectionString
+// (the latter primarily for Azurite). Credentials are never URL-embedded.
+//
+// Block blobs are used exclusively. Multipart uploads map to the
+// StageBlock + CommitBlockList flow with If-None-Match: "*" on the
+// commit (the §29 #8 invariant).
+//
+// See docs/superpowers/specs/2026-05-09-m7-remaining-cloud-backends-design.md.
+package azureblob
+```
+
+- [ ] **Step 3: Write `azureblob.go`**
+
+```go
+package azureblob
+
+import (
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
+
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+// AzureBlob is the Azure Blob Storage storage.ObjectStore implementation.
+type AzureBlob struct {
+	cfg       Config
+	service   *azblob.Client
+	container *container.Client
+}
+
+var _ bvstorage.ObjectStore = (*AzureBlob)(nil)
+
+// Capabilities reports the Azure adapter capabilities. MultipartMinPartSize
+// reflects Azure's ~100 KiB practical block-blob minimum; MultipartMaxParts
+// is Azure's documented 50000-block ceiling per blob; MaxObjectSize is the
+// modern Azure 190.7 TiB block-blob max (4000 MiB block * 50000 blocks).
+func (a *AzureBlob) Capabilities() bvstorage.Capabilities {
+	return bvstorage.Capabilities{
+		SignedURLs:           true,
+		StrongList:           true,
+		MultipartMinPartSize: 100 << 10,
+		MultipartMaxParts:    50000,
+		MaxObjectSize:        190 << 40, // 190 TiB
+	}
+}
+```
+
+- [ ] **Step 4: Build, then commit**
+
+```bash
+go build ./internal/storage/azureblob
+git add go.mod go.sum internal/storage/azureblob/doc.go internal/storage/azureblob/azureblob.go
+git commit -m "M7 task 2.1: azureblob package skeleton + Capabilities"
+```
+
+---
+
+### Task 2.2: Config, Validate, defaults
+
+**Files:**
+- Create: `internal/storage/azureblob/config.go`
+- Create: `internal/storage/azureblob/config_test.go`
+
+- [ ] **Step 1: Write `config_test.go`**
+
+```go
+package azureblob
+
+import "testing"
+
+func TestConfigValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     Config
+		wantErr string
+	}{
+		{"ok with account+container", Config{Account: "acct", Container: "c"}, ""},
+		{"ok with conn string", Config{ConnectionString: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=k;BlobEndpoint=http://x;", Container: "c"}, ""},
+		{"missing container", Config{Account: "acct"}, "container is required"},
+		{"missing account and conn string", Config{Container: "c"}, "account or connection string"},
+		{"bad prefix", Config{Account: "a", Container: "c", Prefix: "//bad"}, "invalid prefix"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.Validate()
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("Validate: want nil, got %v", err)
+			case tc.wantErr != "" && err == nil:
+				t.Fatalf("Validate: want %q, got nil", tc.wantErr)
+			case tc.wantErr != "":
+				if !contains(err.Error(), tc.wantErr) {
+					t.Fatalf("Validate: want %q, got %v", tc.wantErr, err)
+				}
+			}
+		})
+	}
+}
+
+func contains(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
+```
+
+- [ ] **Step 2: Write `config.go`**
+
+```go
+package azureblob
+
+import (
+	"fmt"
+	"time"
+)
+
+type Config struct {
+	Account          string // required if no ConnectionString
+	Container        string // required
+	Prefix           string
+
+	ServiceURL       string // optional override (Azurite uses this)
+	AccountKey       string // optional Shared Key (enables SAS)
+	ConnectionString string // optional; precedence over Account/ServiceURL/AccountKey
+
+	UploadBlockSize    int64
+	MaxRetries         int
+	RequestTimeout     time.Duration
+	PresignDefaultTTL  time.Duration
+}
+
+const (
+	defaultUploadBlockSize   = 8 << 20
+	defaultMaxRetries        = 5
+	defaultRequestTimeout    = 60 * time.Second
+	defaultPresignDefaultTTL = 15 * time.Minute
+)
+
+func (c *Config) Validate() error {
+	if c.Container == "" {
+		return fmt.Errorf("azureblob: container is required")
+	}
+	if c.Account == "" && c.ConnectionString == "" {
+		return fmt.Errorf("azureblob: account or connection string is required")
+	}
+	if _, err := normalizePrefix(c.Prefix); err != nil {
+		return fmt.Errorf("azureblob: invalid prefix: %w", err)
+	}
+	return nil
+}
+
+func (c *Config) applyDefaults() {
+	if p, err := normalizePrefix(c.Prefix); err == nil {
+		c.Prefix = p
+	}
+	if c.UploadBlockSize == 0 {
+		c.UploadBlockSize = defaultUploadBlockSize
+	}
+	if c.MaxRetries == 0 {
+		c.MaxRetries = defaultMaxRetries
+	}
+	if c.RequestTimeout == 0 {
+		c.RequestTimeout = defaultRequestTimeout
+	}
+	if c.PresignDefaultTTL == 0 {
+		c.PresignDefaultTTL = defaultPresignDefaultTTL
+	}
+}
+```
+
+- [ ] **Step 3: Commit (build will fail until prefix.go in Task 2.4)**
+
+```bash
+git add internal/storage/azureblob/config.go internal/storage/azureblob/config_test.go
+git commit -m "M7 task 2.2: azureblob Config + Validate (depends on prefix.go)"
+```
+
+---
+
+### Task 2.3: ParseURL
+
+**Files:**
+- Create: `internal/storage/azureblob/url.go`
+- Create: `internal/storage/azureblob/url_test.go`
+
+Azure URL parsing diverges slightly: `azureblob://<container>[/<prefix>]`. Account and credentials come from env, never the URL.
+
+- [ ] **Step 1: Write `url_test.go`**
+
+```go
+package azureblob
+
+import "testing"
+
+func TestParseURL(t *testing.T) {
+	tests := []struct {
+		raw, wantContainer, wantPrefix, wantErr string
+	}{
+		{"azureblob://my-container", "my-container", "", ""},
+		{"azureblob://my-container/repos", "my-container", "repos/", ""},
+		{"azureblob://my-container/a/b/", "my-container", "a/b/", ""},
+		{"azureblob://", "", "", "container required"},
+		{"s3://x", "", "", "unsupported scheme"},
+		{"azureblob://user:pw@c", "", "", "must not contain credentials"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.raw, func(t *testing.T) {
+			cfg, err := ParseURL(tc.raw)
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("ParseURL(%q): want nil, got %v", tc.raw, err)
+			case tc.wantErr != "" && err == nil:
+				t.Fatalf("ParseURL(%q): want %q, got nil", tc.raw, tc.wantErr)
+			case tc.wantErr != "":
+				if !contains(err.Error(), tc.wantErr) {
+					t.Fatalf("ParseURL(%q): want %q, got %v", tc.raw, tc.wantErr, err)
+				}
+				return
+			}
+			if cfg.Container != tc.wantContainer {
+				t.Errorf("Container = %q, want %q", cfg.Container, tc.wantContainer)
+			}
+			if cfg.Prefix != tc.wantPrefix {
+				t.Errorf("Prefix = %q, want %q", cfg.Prefix, tc.wantPrefix)
+			}
+		})
+	}
+}
+```
+
+- [ ] **Step 2: Write `url.go`**
+
+```go
+package azureblob
+
+import (
+	"fmt"
+	"strings"
+)
+
+// ParseURL parses a "--store" URL of the form:
+//
+//	azureblob://<container>[/<prefix>]
+//
+// Account and credentials are NEVER taken from the URL — they come
+// from env vars or DefaultAzureCredential.
+func ParseURL(raw string) (Config, error) {
+	colon := strings.Index(raw, "://")
+	if colon <= 0 {
+		return Config{}, fmt.Errorf("azureblob: unsupported scheme in %q (want azureblob://)", raw)
+	}
+	scheme := raw[:colon]
+	if scheme != "azureblob" {
+		return Config{}, fmt.Errorf("azureblob: unsupported scheme %q (want azureblob://)", scheme)
+	}
+	rest := raw[colon+3:]
+	if rest == "" {
+		return Config{}, fmt.Errorf("azureblob: azureblob://: container required")
+	}
+	cont, prefix, _ := strings.Cut(rest, "/")
+	if cont == "" {
+		return Config{}, fmt.Errorf("azureblob: azureblob://: container required")
+	}
+	if strings.ContainsRune(cont, '@') {
+		return Config{}, fmt.Errorf("azureblob: azureblob:// URL must not contain credentials; use BUCKETVCS_AZURE_ACCOUNT_KEY, BUCKETVCS_AZURE_CONNECTION_STRING, or DefaultAzureCredential")
+	}
+	cfg := Config{Container: cont}
+	if prefix != "" {
+		norm, err := normalizePrefix(prefix)
+		if err != nil {
+			return Config{}, fmt.Errorf("azureblob: azureblob:// prefix: %w", err)
+		}
+		cfg.Prefix = norm
+	}
+	return cfg, nil
+}
+```
+
+- [ ] **Step 3: Commit (still needs prefix.go)**
+
+```bash
+git add internal/storage/azureblob/url.go internal/storage/azureblob/url_test.go
+git commit -m "M7 task 2.3: azureblob ParseURL"
+```
+
+---
+
+### Task 2.4: prefix.go + keys.go
+
+**Files:**
+- Create: `internal/storage/azureblob/prefix.go`
+- Create: `internal/storage/azureblob/prefix_test.go`
+- Create: `internal/storage/azureblob/keys.go`
+- Create: `internal/storage/azureblob/keys_test.go`
+
+These are textually identical to the GCS versions from Task 1.4 with the package name swapped. Reproduce them in `package azureblob`. Run all azureblob tests to confirm:
+
+```bash
+go test ./internal/storage/azureblob -run "TestConfig|TestParseURL|TestNormalizePrefix|TestApplyPrefix|TestStripPrefix|TestValidateKey" -v
+```
+Expected: PASS for all.
+
+- [ ] **Step 1: Copy + adapt** the four files from `internal/storage/gcs/` (Task 1.4), changing only `package gcs` → `package azureblob`. The error message prefixes remain `"prefix"` / `"key"` — they are package-neutral.
+
+- [ ] **Step 2: Run, then commit**
+
+```bash
+go test ./internal/storage/azureblob -v
+git add internal/storage/azureblob/prefix.go internal/storage/azureblob/prefix_test.go internal/storage/azureblob/keys.go internal/storage/azureblob/keys_test.go
+git commit -m "M7 task 2.4: azureblob prefix + key validation; package now builds"
+```
+
+---
+
+### Task 2.5: errs.go — Azure error classification
+
+**Files:**
+- Create: `internal/storage/azureblob/errs.go`
+- Create: `internal/storage/azureblob/errs_test.go`
+
+Azure errors are surfaced as `*azcore.ResponseError` with HTTP status codes and a string `ErrorCode`.
+
+- [ ] **Step 1: Write `errs_test.go`**
+
+```go
+package azureblob
+
+import (
+	"errors"
+	"net/http"
+	"testing"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+func TestClassify(t *testing.T) {
+	makeErr := func(status int, code string) error {
+		return &azcore.ResponseError{
+			StatusCode: status,
+			ErrorCode:  code,
+		}
+	}
+	tests := []struct {
+		name string
+		op   azureOp
+		err  error
+		want error
+	}{
+		{"nil", opGet, nil, nil},
+		{"404", opGet, makeErr(http.StatusNotFound, "BlobNotFound"), bvstorage.ErrNotFound},
+		{"412 putIfAbsent -> AlreadyExists", opPutIfAbsent, makeErr(http.StatusPreconditionFailed, "BlobAlreadyExists"), bvstorage.ErrAlreadyExists},
+		{"412 putIfMatch -> VersionMismatch", opPutIfMatch, makeErr(http.StatusPreconditionFailed, "ConditionNotMet"), bvstorage.ErrVersionMismatch},
+		{"409 BlobAlreadyExists -> AlreadyExists", opPutIfAbsent, makeErr(http.StatusConflict, "BlobAlreadyExists"), bvstorage.ErrAlreadyExists},
+		{"429 throttled", opGet, makeErr(http.StatusTooManyRequests, "TooManyRequests"), bvstorage.ErrThrottled},
+		{"403 access denied", opGet, makeErr(http.StatusForbidden, "AuthenticationFailed"), bvstorage.ErrAccessDenied},
+		{"503 transient", opGet, makeErr(http.StatusServiceUnavailable, "ServerBusy"), bvstorage.ErrTransient},
+		{"400 invalid", opPutIfAbsent, makeErr(http.StatusBadRequest, "InvalidBlobOrBlock"), bvstorage.ErrInvalidArgument},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classify(tc.op, tc.err)
+			if tc.want == nil {
+				if got != nil {
+					t.Fatalf("got %v, want nil", got)
+				}
+				return
+			}
+			if !errors.Is(got, tc.want) {
+				t.Fatalf("got %v, want errors.Is(%v)", got, tc.want)
+			}
+		})
+	}
+}
+```
+
+- [ ] **Step 2: Write `errs.go`**
+
+```go
+package azureblob
+
+import (
+	"errors"
+	"fmt"
+	"net/http"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+type azureOp int
+
+const (
+	opGet azureOp = iota
+	opHead
+	opGetRange
+	opList
+	opPutIfAbsent
+	opPutIfMatch
+	opDeleteIfMatch
+	opStageBlock
+	opCommitIfAbsent
+	opSignedURL
+)
+
+func classify(op azureOp, err error) error {
+	if err == nil {
+		return nil
+	}
+	var re *azcore.ResponseError
+	if errors.As(err, &re) {
+		switch re.StatusCode {
+		case http.StatusNotFound:
+			return wrap(bvstorage.ErrNotFound, err)
+		case http.StatusPreconditionFailed:
+			switch op {
+			case opPutIfAbsent, opCommitIfAbsent:
+				return wrap(bvstorage.ErrAlreadyExists, err)
+			case opPutIfMatch, opDeleteIfMatch, opGet:
+				return wrap(bvstorage.ErrVersionMismatch, err)
+			default:
+				return wrap(bvstorage.ErrTransient, err)
+			}
+		case http.StatusConflict:
+			// BlobAlreadyExists also returns 409 in some create paths
+			// (Put Block List on a blob with a snapshot etc.).
+			switch op {
+			case opPutIfAbsent, opCommitIfAbsent:
+				return wrap(bvstorage.ErrAlreadyExists, err)
+			default:
+				return wrap(bvstorage.ErrTransient, err)
+			}
+		case http.StatusTooManyRequests:
+			return wrap(bvstorage.ErrThrottled, err)
+		case http.StatusUnauthorized, http.StatusForbidden:
+			return wrap(bvstorage.ErrAccessDenied, err)
+		case http.StatusBadRequest:
+			return wrap(bvstorage.ErrInvalidArgument, err)
+		case http.StatusServiceUnavailable, http.StatusGatewayTimeout, http.StatusBadGateway, http.StatusInternalServerError:
+			return wrap(bvstorage.ErrTransient, err)
+		}
+	}
+	return fmt.Errorf("azureblob: %w", err)
+}
+
+func wrap(sentinel, cause error) error {
+	return fmt.Errorf("azureblob: %w: %v", sentinel, cause)
+}
+```
+
+- [ ] **Step 3: Run, then commit**
+
+```bash
+go test ./internal/storage/azureblob -run TestClassify -v
+git add internal/storage/azureblob/errs.go internal/storage/azureblob/errs_test.go
+git commit -m "M7 task 2.5: azureblob error classification"
+```
+
+---
+
+(Tasks 2.6–2.16 — retry, Open, get/put/delete/list, multipart, signed, cleanup, conformance, README — added next.)
