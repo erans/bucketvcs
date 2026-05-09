@@ -14,9 +14,6 @@ type AzureBlob struct {
 	container *container.Client
 }
 
-// placeholder until Task 2.2 lands config.go
-type Config struct{}
-
 // var _ bvstorage.ObjectStore = (*AzureBlob)(nil)
 
 // Capabilities reports the Azure adapter capabilities. MultipartMinPartSize
