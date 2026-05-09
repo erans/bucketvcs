@@ -615,31 +615,31 @@ func (s *Store) ListRepos(ctx context.Context, tenant string) ([]*Repo, error) {
 }
 
 // VerifyCredential implements auth.Store.
-func (s *Store) VerifyCredential(ctx context.Context, c auth.Credential) (*auth.Actor, string, error) {
+func (s *Store) VerifyCredential(ctx context.Context, c auth.Credential) (*auth.Actor, string, *auth.Scope, error) {
 	bp, ok := c.(auth.BasicPassword)
 	if !ok {
 		// M6 will add SSHKeyFingerprint handling.
-		return nil, "", auth.ErrInvalidCredential
+		return nil, "", nil, auth.ErrInvalidCredential
 	}
 	tokenID, secret, err := auth.ParseToken(bp.Password)
 	if err != nil {
-		return nil, "", auth.ErrInvalidCredential
+		return nil, "", nil, auth.ErrInvalidCredential
 	}
 	tok, err := s.GetTokenByID(ctx, tokenID)
 	if errors.Is(err, auth.ErrNoSuchToken) {
-		return nil, "", auth.ErrInvalidCredential
+		return nil, "", nil, auth.ErrInvalidCredential
 	}
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	if err := auth.VerifyHash(secret, tok.SecretHash); err != nil {
-		return nil, "", auth.ErrInvalidCredential
+		return nil, "", nil, auth.ErrInvalidCredential
 	}
 	if tok.RevokedAt != nil {
-		return nil, "", auth.ErrTokenRevoked
+		return nil, "", nil, auth.ErrTokenRevoked
 	}
 	if tok.ExpiresAt != nil && *tok.ExpiresAt <= time.Now().Unix() {
-		return nil, "", auth.ErrTokenExpired
+		return nil, "", nil, auth.ErrTokenExpired
 	}
 	// Lookup the user; check name match and disabled state.
 	row := s.db.QueryRowContext(ctx,
@@ -649,19 +649,19 @@ func (s *Store) VerifyCredential(ctx context.Context, c auth.Credential) (*auth.
 	var adminInt int
 	var disabled sql.NullInt64
 	if err := row.Scan(&name, &adminInt, &disabled); err != nil {
-		return nil, "", auth.ErrInvalidCredential
+		return nil, "", nil, auth.ErrInvalidCredential
 	}
 	if disabled.Valid {
-		return nil, "", auth.ErrUserDisabled
+		return nil, "", nil, auth.ErrUserDisabled
 	}
 	if bp.Username != name {
-		return nil, "", auth.ErrInvalidCredential
+		return nil, "", nil, auth.ErrInvalidCredential
 	}
 	return &auth.Actor{
 		UserID:  tok.UserID,
 		Name:    name,
 		IsAdmin: adminInt != 0,
-	}, tokenID, nil
+	}, tokenID, nil, nil
 }
 
 // TouchTokenUsage implements auth.Store. A missing tokenID is not an error.

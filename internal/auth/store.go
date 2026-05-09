@@ -9,16 +9,19 @@ import "context"
 // All methods take ctx so timeouts and cancellation propagate from the
 // HTTP handler. Implementations must honor ctx promptly.
 type Store interface {
-	// VerifyCredential validates a credential and returns the associated
-	// actor plus the originating token id (empty for credential types
-	// that don't carry an id).
+	// VerifyCredential validates a credential and returns:
+	//   - actor: the principal (synthetic for deploy keys)
+	//   - credentialID: tokens.id for BasicPassword, ssh_keys.id for SSHKeyFingerprint
+	//   - scope: nil for HTTP token credentials and user SSH keys; populated
+	//            with (Tenant, Repo, Perm) for deploy-key SSH credentials so
+	//            the gateway can short-circuit per-repo permission lookup
 	//
 	// Errors:
-	//   ErrInvalidCredential   — credential did not match any record
-	//   ErrTokenExpired        — record matched but expires_at < now
-	//   ErrTokenRevoked        — record matched but revoked_at != null
-	//   ErrUserDisabled        — record matched but user disabled_at != null
-	VerifyCredential(ctx context.Context, c Credential) (actor *Actor, tokenID string, err error)
+	//   ErrInvalidCredential — credential did not match any record
+	//   ErrTokenExpired      — record matched but expires_at < now
+	//   ErrTokenRevoked      — record matched but revoked_at != null
+	//   ErrUserDisabled      — record matched but user disabled_at != null
+	VerifyCredential(ctx context.Context, c Credential) (actor *Actor, credentialID string, scope *Scope, err error)
 
 	// LookupRepoPerm returns the actor's permission level on (tenant, repo).
 	// Anonymous actors (nil) return PermNone without consulting storage.

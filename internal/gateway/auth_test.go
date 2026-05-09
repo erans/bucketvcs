@@ -21,8 +21,8 @@ type fakeStore struct {
 	flagsErr  error
 }
 
-func (f *fakeStore) VerifyCredential(ctx context.Context, c auth.Credential) (*auth.Actor, string, error) {
-	return f.credActor, f.credToken, f.credErr
+func (f *fakeStore) VerifyCredential(ctx context.Context, c auth.Credential) (*auth.Actor, string, *auth.Scope, error) {
+	return f.credActor, f.credToken, nil, f.credErr
 }
 func (f *fakeStore) LookupRepoPerm(ctx context.Context, a *auth.Actor, t, r string) (auth.Perm, error) {
 	if a == nil {

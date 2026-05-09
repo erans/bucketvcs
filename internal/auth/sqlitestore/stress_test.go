@@ -39,7 +39,7 @@ func TestStress_VerifyMany(t *testing.T) {
 	start := time.Now()
 	for i := 0; i < 1_000; i++ {
 		tok := tokens[i%N]
-		if _, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok}); err != nil {
+		if _, _, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok}); err != nil {
 			t.Fatalf("Verify[%d]: %v", i, err)
 		}
 	}
@@ -79,7 +79,7 @@ func TestStress_ConcurrentVerify(t *testing.T) {
 		wg.Add(1)
 		go func(tok string) {
 			defer wg.Done()
-			if _, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok}); err != nil {
+			if _, _, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok}); err != nil {
 				errs <- err
 			}
 		}(tokens[i])

@@ -33,7 +33,7 @@ func Run(t *testing.T, factory Factory) {
 		s, _ := factory(t)
 		defer s.Close()
 		tok, _, _, _ := auth.GenerateToken()
-		_, _, err := s.VerifyCredential(context.Background(),
+		_, _, _, err := s.VerifyCredential(context.Background(),
 			auth.BasicPassword{Username: "alice", Password: tok})
 		mustErrIs(t, err, auth.ErrInvalidCredential)
 	})
@@ -47,7 +47,7 @@ func Run(t *testing.T, factory Factory) {
 		_, id, _, _ := auth.GenerateToken()
 		sd.CreateToken(ctx, uid, id, hash, nil)
 		bad := "bvts_" + id + "_" + strings.Repeat("A", 52)
-		_, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: bad})
+		_, _, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: bad})
 		mustErrIs(t, err, auth.ErrInvalidCredential)
 	})
 
@@ -60,7 +60,7 @@ func Run(t *testing.T, factory Factory) {
 		hash, _ := auth.HashSecret(secret)
 		past := time.Now().Add(-time.Hour).Unix()
 		sd.CreateToken(ctx, uid, id, hash, &past)
-		_, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
+		_, _, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
 		mustErrIs(t, err, auth.ErrTokenExpired)
 	})
 
@@ -73,7 +73,7 @@ func Run(t *testing.T, factory Factory) {
 		hash, _ := auth.HashSecret(secret)
 		sd.CreateToken(ctx, uid, id, hash, nil)
 		sd.RevokeToken(ctx, id)
-		_, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
+		_, _, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
 		mustErrIs(t, err, auth.ErrTokenRevoked)
 	})
 
@@ -86,8 +86,25 @@ func Run(t *testing.T, factory Factory) {
 		hash, _ := auth.HashSecret(secret)
 		sd.CreateToken(ctx, uid, id, hash, nil)
 		sd.SetUserDisabled(ctx, "alice", true)
-		_, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
+		_, _, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
 		mustErrIs(t, err, auth.ErrUserDisabled)
+	})
+
+	t.Run("VerifyCredential_BasicPasswordReturnsNilScope", func(t *testing.T) {
+		s, sd := factory(t)
+		defer s.Close()
+		ctx := context.Background()
+		uid := sd.CreateUser(ctx, "alice", false)
+		tok, id, secret, _ := auth.GenerateToken()
+		hash, _ := auth.HashSecret(secret)
+		sd.CreateToken(ctx, uid, id, hash, nil)
+		_, _, scope, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
+		if err != nil {
+			t.Fatalf("VerifyCredential: %v", err)
+		}
+		if scope != nil {
+			t.Errorf("expected nil scope for BasicPassword, got %+v", scope)
+		}
 	})
 
 	t.Run("LookupRepoPerm_NoneForNoGrant", func(t *testing.T) {

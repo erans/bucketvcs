@@ -461,7 +461,7 @@ func TestVerifyCredential_HappyPath(t *testing.T) {
 	hash, _ := auth.HashSecret(secret)
 	_ = s.CreateToken(ctx, id, uid, hash, "laptop", nil)
 
-	got, gotID, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
+	got, gotID, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
 	if err != nil {
 		t.Fatalf("VerifyCredential: %v", err)
 	}
@@ -482,7 +482,7 @@ func TestVerifyCredential_BadPassword(t *testing.T) {
 	hash, _ := auth.HashSecret("real-secret-string")
 	_ = s.CreateToken(ctx, id, uid, hash, "", nil)
 
-	_, _, err := s.VerifyCredential(ctx, auth.BasicPassword{
+	_, _, _, err := s.VerifyCredential(ctx, auth.BasicPassword{
 		Username: "alice",
 		Password: "bvts_" + id + "_" + strings.Repeat("A", 52),
 	})
@@ -496,7 +496,7 @@ func TestVerifyCredential_UnknownTokenID(t *testing.T) {
 	defer s.Close()
 	ctx := context.Background()
 	tok, _, _, _ := auth.GenerateToken()
-	_, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
+	_, _, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
 	if !errors.Is(err, auth.ErrInvalidCredential) {
 		t.Fatalf("want ErrInvalidCredential, got %v", err)
 	}
@@ -511,7 +511,7 @@ func TestVerifyCredential_Expired(t *testing.T) {
 	hash, _ := auth.HashSecret(secret)
 	past := time.Now().Add(-time.Hour).Unix()
 	_ = s.CreateToken(ctx, id, uid, hash, "", &past)
-	_, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
+	_, _, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
 	if !errors.Is(err, auth.ErrTokenExpired) {
 		t.Fatalf("want ErrTokenExpired, got %v", err)
 	}
@@ -526,7 +526,7 @@ func TestVerifyCredential_Revoked(t *testing.T) {
 	hash, _ := auth.HashSecret(secret)
 	_ = s.CreateToken(ctx, id, uid, hash, "", nil)
 	_ = s.RevokeToken(ctx, id)
-	_, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
+	_, _, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
 	if !errors.Is(err, auth.ErrTokenRevoked) {
 		t.Fatalf("want ErrTokenRevoked, got %v", err)
 	}
@@ -541,7 +541,7 @@ func TestVerifyCredential_Disabled(t *testing.T) {
 	hash, _ := auth.HashSecret(secret)
 	_ = s.CreateToken(ctx, id, uid, hash, "", nil)
 	_ = s.SetUserDisabled(ctx, "alice", true)
-	_, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
+	_, _, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
 	if !errors.Is(err, auth.ErrUserDisabled) {
 		t.Fatalf("want ErrUserDisabled, got %v", err)
 	}
@@ -557,7 +557,7 @@ func TestVerifyCredential_UsernameMustMatch(t *testing.T) {
 	hash, _ := auth.HashSecret(secret)
 	_ = s.CreateToken(ctx, id, uid, hash, "", nil)
 	// Wrong username, valid token: reject. (Spec §30.1: username + token-as-password.)
-	_, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "bob", Password: tok})
+	_, _, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "bob", Password: tok})
 	if !errors.Is(err, auth.ErrInvalidCredential) {
 		t.Fatalf("want ErrInvalidCredential, got %v", err)
 	}

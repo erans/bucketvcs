@@ -52,8 +52,8 @@ func newPermissiveAuthStore(_ *testing.T, tenant, repo string) auth.Store {
 	return &permissiveAuthStore{tenant: tenant, repo: repo}
 }
 
-func (p *permissiveAuthStore) VerifyCredential(ctx context.Context, c auth.Credential) (*auth.Actor, string, error) {
-	return &auth.Actor{UserID: "perm-admin", Name: "perm-admin", IsAdmin: true}, "perm-token", nil
+func (p *permissiveAuthStore) VerifyCredential(ctx context.Context, c auth.Credential) (*auth.Actor, string, *auth.Scope, error) {
+	return &auth.Actor{UserID: "perm-admin", Name: "perm-admin", IsAdmin: true}, "perm-token", nil, nil
 }
 func (p *permissiveAuthStore) LookupRepoPerm(ctx context.Context, _ *auth.Actor, _, _ string) (auth.Perm, error) {
 	return auth.PermWrite, nil

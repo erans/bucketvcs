@@ -48,7 +48,8 @@ func RunAuth(w http.ResponseWriter, r *http.Request, store auth.Store, rr *Route
 	var actor *auth.Actor
 	var tokenID string
 	if user, pass, hasBasic := r.BasicAuth(); hasBasic {
-		actor, tokenID, err = store.VerifyCredential(ctx, auth.BasicPassword{Username: user, Password: pass})
+		var scope *auth.Scope
+		actor, tokenID, scope, err = store.VerifyCredential(ctx, auth.BasicPassword{Username: user, Password: pass})
 		if err != nil {
 			// Only credential-state errors map to 401. Backend / internal
 			// errors (DB unreachable, etc.) must surface as 500 so they
@@ -60,6 +61,7 @@ func RunAuth(w http.ResponseWriter, r *http.Request, store auth.Store, rr *Route
 			}
 			return nil, false
 		}
+		_ = scope // scope is always nil for BasicPassword; used by deploy-key branch (Task 14)
 		// Best-effort last-used update off the hot path.
 		go func(id string) {
 			tctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
