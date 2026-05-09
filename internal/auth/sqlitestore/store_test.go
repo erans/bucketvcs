@@ -40,8 +40,8 @@ func TestOpen_CreatesFileAndAppliesMigrations(t *testing.T) {
 	if err := s.db.QueryRow("SELECT MAX(version) FROM schema_version").Scan(&v); err != nil {
 		t.Fatalf("schema_version: %v", err)
 	}
-	if v != 1 {
-		t.Errorf("schema_version = %d, want 1", v)
+	if v != 2 {
+		t.Errorf("schema_version = %d, want 2", v)
 	}
 }
 
