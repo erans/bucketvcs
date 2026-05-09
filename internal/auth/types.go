@@ -49,3 +49,39 @@ const (
 type RepoFlags struct {
 	PublicRead bool
 }
+
+// Scope narrows a credential to a single repo at a specific permission
+// level. Returned by Store.VerifyCredential for deploy-key SSH credentials;
+// nil for HTTP token credentials and user SSH keys.
+//
+// When Scope is non-nil, the gateway middleware short-circuits the
+// per-repo permission lookup and uses Scope.Perm directly, after asserting
+// that Scope.Tenant and Scope.Repo match the requested resource.
+type Scope struct {
+	Tenant string
+	Repo   string
+	Perm   Perm // PermRead or PermWrite. PermAdmin is not allowed for deploy keys.
+}
+
+// SSHKey is the persisted shape of an entry in the ssh_keys table.
+// Exactly one of (UserID) or (ScopeTenant + ScopeRepo + ScopePerm) is set.
+// The schema enforces this XOR via a CHECK constraint.
+type SSHKey struct {
+	ID          string // bvsk_<24 base32>
+	Fingerprint string // "SHA256:..." OpenSSH form
+	PublicKey   []byte // raw wire-format public key bytes
+	KeyType     string // "ssh-ed25519" | "ssh-rsa" | "ecdsa-sha2-..."
+	Label       string
+
+	// Set for user keys; empty for deploy keys.
+	UserID string
+
+	// Set for deploy keys; empty for user keys.
+	ScopeTenant string
+	ScopeRepo   string
+	ScopePerm   Perm
+
+	CreatedAt  int64
+	LastUsedAt int64
+	RevokedAt  int64
+}
