@@ -5,9 +5,6 @@ import (
 	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
 )
 
-// Config holds GCS adapter configuration. Fully defined in Task 1.2 (config.go).
-type Config struct{}
-
 // GCS is the Google Cloud Storage storage.ObjectStore implementation.
 type GCS struct {
 	cfg    Config
