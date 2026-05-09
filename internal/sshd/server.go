@@ -136,6 +136,81 @@ func encodeScope(scope *auth.Scope) string {
 	return scope.Tenant + "/" + scope.Repo + ":" + auth.PermToText(scope.Perm)
 }
 
+// Listen opens the TCP listener on opts.Addr. Call before Serve.
+func (s *Server) Listen() error {
+	l, err := net.Listen("tcp", s.opts.Addr)
+	if err != nil {
+		return fmt.Errorf("ssh listen %s: %w", s.opts.Addr, err)
+	}
+	s.listener = l
+	s.opts.Logger.Info("ssh listening", "addr", l.Addr().String())
+	return nil
+}
+
+// Addr returns the actual listen address (useful when Addr was ":0" for tests).
+func (s *Server) Addr() net.Addr {
+	if s.listener == nil {
+		return nil
+	}
+	return s.listener.Addr()
+}
+
+// Serve accepts connections until ctx is canceled or Close() is called.
+// Blocks. Returns nil on graceful shutdown, or the accept error.
+func (s *Server) Serve(ctx context.Context) error {
+	if s.listener == nil {
+		return errors.New("sshd: Listen() not called")
+	}
+	go func() {
+		<-ctx.Done()
+		s.listener.Close()
+	}()
+	for {
+		conn, err := s.listener.Accept()
+		if err != nil {
+			s.mu.Lock()
+			closed := s.closed
+			s.mu.Unlock()
+			if closed || ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+		s.sessions.Add(1)
+		go func() {
+			defer s.sessions.Done()
+			s.handleConn(ctx, conn)
+		}()
+	}
+}
+
+// Close stops accepting new connections and waits up to opts.Grace for
+// in-flight sessions to drain. After Grace, in-flight ssh.Channels are
+// closed by killing the listener (sshConn.Close in handleConn).
+func (s *Server) Close() error {
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+	if s.listener != nil {
+		s.listener.Close()
+	}
+	done := make(chan struct{})
+	go func() {
+		s.sessions.Wait()
+		close(done)
+	}()
+	grace := s.opts.Grace
+	if grace == 0 {
+		return nil
+	}
+	select {
+	case <-done:
+	case <-time.After(grace):
+		s.opts.Logger.Warn("ssh grace exceeded; in-flight sessions left to terminate")
+	}
+	return nil
+}
+
 // decodeScope is the inverse. Empty string -> nil.
 func decodeScope(s string) (*auth.Scope, error) {
 	if s == "" {
