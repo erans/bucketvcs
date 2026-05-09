@@ -47,8 +47,9 @@ func RunAuth(w http.ResponseWriter, r *http.Request, store auth.Store, rr *Route
 
 	var actor *auth.Actor
 	var tokenID string
+	var scope *auth.Scope
 	if user, pass, hasBasic := r.BasicAuth(); hasBasic {
-		actor, tokenID, err = store.VerifyCredential(ctx, auth.BasicPassword{Username: user, Password: pass})
+		actor, tokenID, scope, err = store.VerifyCredential(ctx, auth.BasicPassword{Username: user, Password: pass})
 		if err != nil {
 			// Only credential-state errors map to 401. Backend / internal
 			// errors (DB unreachable, etc.) must surface as 500 so they
@@ -66,12 +67,24 @@ func RunAuth(w http.ResponseWriter, r *http.Request, store auth.Store, rr *Route
 			defer cancel()
 			_ = store.TouchTokenUsage(tctx, id)
 		}(tokenID)
+		if scope != nil && (scope.Tenant != rr.Tenant || scope.Repo != rr.Repo) {
+			http.Error(w, "scope mismatch", http.StatusForbidden)
+			return nil, false
+		}
 	}
 
-	perm, err := store.LookupRepoPerm(ctx, actor, rr.Tenant, rr.Repo)
-	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return nil, false
+	var perm auth.Perm
+	if scope != nil {
+		// Scoped credential (currently only deploy-key SSH; M4 BasicPassword
+		// never sets this). The credential is only valid for one specific
+		// (tenant, repo). Use the pre-authorized permission from the scope.
+		perm = scope.Perm
+	} else {
+		perm, err = store.LookupRepoPerm(ctx, actor, rr.Tenant, rr.Repo)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return nil, false
+		}
 	}
 
 	ok, _ := auth.Decide(actor, perm, rr.RequiredAction, flags)

@@ -132,5 +132,22 @@ func TestServe_RejectsLegacyAuthScopeFlag(t *testing.T) {
 	}
 }
 
+func TestServe_RequiresAtLeastOneListener(t *testing.T) {
+	_ = userCmdEnv(t)
+	storeDir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	// Pass --store so we reach the at-least-one-listener check; pass neither
+	// --addr nor --ssh-addr.
+	code := runServe(context.Background(),
+		[]string{"--store", "localfs:" + storeDir, "--mirror-dir", t.TempDir()},
+		&stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("expected exit code 2 when neither --addr nor --ssh-addr given, got %d (stderr=%q)", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "at least one") {
+		t.Fatalf("stderr should mention 'at least one': %q", stderr.String())
+	}
+}
+
 // keep io import alive (used in earlier test files in this pkg)
 var _ = io.Discard

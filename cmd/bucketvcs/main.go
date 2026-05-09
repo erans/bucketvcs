@@ -46,6 +46,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return runToken(ctx, rest, stdout, stderr)
 	case "repo":
 		return runRepo(ctx, rest, stdout, stderr)
+	case "ssh":
+		return runSSH(ctx, rest, stdout, stderr)
 	case "-h", "--help", "help":
 		usage(stdout)
 		return 0
@@ -66,6 +68,7 @@ Subcommands:
   export             Materialize a bare git repo from bucketvcs storage
   cat-object         Read a Git object from a bucketvcs repo
   serve              Run the HTTP smart-Git gateway
+  ssh                SSH subcommands (fingerprint)
   user               Manage users (add/list/disable/enable/delete)
   token              Manage tokens (create/list/revoke)
   repo               Manage repository registry and permissions

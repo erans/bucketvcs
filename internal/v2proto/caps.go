@@ -63,8 +63,31 @@ func WriteV2Advertisement(w io.Writer, service, version string) error {
 	return pw.WriteFlush()
 }
 
-// V2Capabilities returns the M3 capability lines (without trailing LFs) in
-// the exact order they should be advertised. Exposed for testing and reuse.
+// WriteV2AdvertisementSSH writes the SSH-transport capability advertisement
+// for protocol v2. Unlike WriteV2Advertisement, it does NOT emit the
+// "# service=...\n" Smart-HTTP preamble — git SSH clients expect the
+// advertisement to begin directly with "version 2\n".
+//
+// Layout:
+//
+//	pkt-line: "version 2\n"
+//	pkt-line: "agent=bucketvcs/<version>\n"
+//	pkt-line: "ls-refs=unborn\n"
+//	pkt-line: "fetch\n"
+//	pkt-line: "object-format=sha1\n"
+//	flush
+func WriteV2AdvertisementSSH(w io.Writer, version string) error {
+	if strings.ContainsAny(version, "\r\n\x00") {
+		return fmt.Errorf("v2proto: agent version contains forbidden control characters")
+	}
+	pw := pktline.NewWriter(w)
+	for _, line := range V2Capabilities(version) {
+		if err := pw.WriteString(line + "\n"); err != nil {
+			return err
+		}
+	}
+	return pw.WriteFlush()
+}
 func V2Capabilities(version string) []string {
 	return []string{
 		"version 2",

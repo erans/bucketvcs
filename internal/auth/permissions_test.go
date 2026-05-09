@@ -78,3 +78,39 @@ func TestDecide_NilActorIgnoresPerm(t *testing.T) {
 		})
 	}
 }
+
+// TestDecide_DeployKeyScopeSymmetry asserts that a synthetic deploy-key
+// actor + scope-derived perm produces identical Decide outcomes to a real
+// user with the equivalent grant. This is the contract that lets the SSH
+// session handler (M6 Task 21) rely on Decide without a separate code path
+// for scoped credentials.
+func TestDecide_DeployKeyScopeSymmetry(t *testing.T) {
+	flags := RepoFlags{}
+	cases := []struct {
+		name   string
+		perm   Perm
+		action Action
+		want   bool
+	}{
+		{"read_perm read_action", PermRead, ActionRead, true},
+		{"read_perm write_action", PermRead, ActionWrite, false},
+		{"write_perm read_action", PermWrite, ActionRead, true},
+		{"write_perm write_action", PermWrite, ActionWrite, true},
+	}
+	deployActor := &Actor{UserID: "deploy:bvsk_xyz", Name: "deploy-key:ci"}
+	userActor := &Actor{UserID: "u_abc", Name: "alice"}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotDeploy, _ := Decide(deployActor, tc.perm, tc.action, flags)
+			gotUser, _ := Decide(userActor, tc.perm, tc.action, flags)
+			if gotDeploy != gotUser {
+				t.Fatalf("symmetry violation: deploy=%v user=%v perm=%v action=%v",
+					gotDeploy, gotUser, tc.perm, tc.action)
+			}
+			if gotDeploy != tc.want {
+				t.Fatalf("got %v, want %v (perm=%v action=%v)",
+					gotDeploy, tc.want, tc.perm, tc.action)
+			}
+		})
+	}
+}

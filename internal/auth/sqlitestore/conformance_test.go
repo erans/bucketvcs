@@ -49,6 +49,50 @@ func (sd *sqliteSeeder) Grant(ctx context.Context, user, tenant, repo, perm stri
 	}
 }
 
+// M6 SSH-key seeder methods.
+
+func (sd *sqliteSeeder) SeedUser(t *testing.T, name string, isAdmin bool) string {
+	t.Helper()
+	id, err := sd.s.CreateUser(context.Background(), name, isAdmin)
+	if err != nil {
+		t.Fatalf("SeedUser %q: %v", name, err)
+	}
+	return id
+}
+
+func (sd *sqliteSeeder) SeedRepo(t *testing.T, tenant, repo string, publicRead bool) {
+	t.Helper()
+	if err := sd.s.RegisterRepo(context.Background(), tenant, repo); err != nil {
+		t.Fatalf("SeedRepo %s/%s: %v", tenant, repo, err)
+	}
+	if publicRead {
+		if err := sd.s.SetRepoPublic(context.Background(), tenant, repo, true); err != nil {
+			t.Fatalf("SeedRepo SetRepoPublic %s/%s: %v", tenant, repo, err)
+		}
+	}
+}
+
+func (sd *sqliteSeeder) DisableUser(t *testing.T, userID string) {
+	t.Helper()
+	if err := sd.s.DisableUserByID(context.Background(), userID); err != nil {
+		t.Fatalf("DisableUser %q: %v", userID, err)
+	}
+}
+
+func (sd *sqliteSeeder) DeleteUser(t *testing.T, userID string) {
+	t.Helper()
+	if err := sd.s.DeleteUserByID(context.Background(), userID); err != nil {
+		t.Fatalf("DeleteUser %q: %v", userID, err)
+	}
+}
+
+func (sd *sqliteSeeder) DeleteRepo(t *testing.T, tenant, repo string) {
+	t.Helper()
+	if err := sd.s.DeleteRepo(context.Background(), tenant, repo); err != nil {
+		t.Fatalf("DeleteRepo %s/%s: %v", tenant, repo, err)
+	}
+}
+
 func TestConformance(t *testing.T) {
 	conformance.Run(t, func(t *testing.T) (auth.Store, conformance.Seeder) {
 		dir := t.TempDir()

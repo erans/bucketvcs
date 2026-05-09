@@ -1,0 +1,413 @@
+package uploadpack
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+
+	"github.com/bucketvcs/bucketvcs/internal/gitcli"
+	"github.com/bucketvcs/bucketvcs/internal/pktline"
+	"github.com/bucketvcs/bucketvcs/internal/repo"
+	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	"github.com/bucketvcs/bucketvcs/internal/repo/repoerrs"
+	"github.com/bucketvcs/bucketvcs/internal/v2proto"
+)
+
+// ErrV2Required is returned when the engine is asked to Service a non-V2 request.
+var ErrV2Required = errors.New("uploadpack: protocol v2 required")
+
+// ErrBadRequest is returned for malformed input (bad pkt-line, empty command,
+// unsupported command). The HTTP adapter maps this to 400.
+var ErrBadRequest = errors.New("uploadpack: bad request")
+
+// ErrEOF is returned by Service when the client closed the stream without
+// sending a command (clean EOF between commands). The SSH session handler
+// uses this to exit its command loop gracefully.
+var ErrEOF = errors.New("uploadpack: end of stream")
+
+// maxWants is the upper bound on want OIDs accepted in a single fetch.
+// Each want incurs a `git cat-file -t` subprocess for type validation
+// plus an entry in the rev-list argv; the cap is sized to bound the
+// total subprocess count rather than the OID count alone. A future task
+// can lift this once a batched cat-file --batch-check helper lands.
+const maxWants = 256
+
+// maxHaves is the upper bound on have OIDs accepted in a single fetch.
+// Same per-OID subprocess cost as wants. Real Git clients negotiate
+// haves in 256-sized rounds (the libgit2/CGit default), so 256 covers
+// the usual round size; a multi-round negotiation re-enters this
+// handler for each subsequent round, so 256 per request is sufficient.
+const maxHaves = 256
+
+// maxPktLineTokens caps the number of pkt-line tokens drainPktLine will
+// accumulate from one request. Even a maximal fetch body has only a few
+// thousand tokens (one per want/have/capability line plus a handful of
+// markers); 32k is above any legitimate request and below the point where
+// the slice itself becomes a memory pressure source.
+const maxPktLineTokens = 32 * 1024
+
+// serviceImpl runs the V2 negotiation/fetch protocol: reads pkt-line tokens
+// from req.Stdin, dispatches on the leading command line, writes response
+// bytes to req.Stdout.
+//
+// Required: req.ProtocolVersion == 2. Anything else returns ErrV2Required.
+// The body byte cap is the responsibility of the caller — pass an
+// io.LimitedReader as req.Stdin if you need a hard cap (the HTTP adapter
+// uses http.MaxBytesReader).
+//
+// For SSH transport, Service may be called in a loop: it returns ErrEOF when
+// the stream is cleanly exhausted between commands (i.e., the client closed
+// the channel without sending another command), which signals the loop to stop.
+func serviceImpl(req *EngineRequest) error {
+	if req.ProtocolVersion != 2 {
+		return ErrV2Required
+	}
+
+	tokens, err := drainPktLine(req.Stdin)
+	if err != nil {
+		return errBadRequestf("bad request body: %v", err)
+	}
+	// Clean end-of-stream: either no tokens (EOF) or a bare Flush with no
+	// leading command (which git sends when closing the SSH channel after
+	// ls-refs/fetch — see drainPktLine comments on Flush-termination).
+	if len(tokens) == 0 {
+		return ErrEOF
+	}
+	if tokens[0].Type == pktline.Flush {
+		// A leading Flush with no command means end-of-stream on SSH.
+		return ErrEOF
+	}
+	if tokens[0].Type != pktline.Data {
+		return errBadRequestf("empty command")
+	}
+	cmdLine := strings.TrimRight(string(tokens[0].Payload), "\n")
+
+	r, err := repo.Open(req.Ctx, req.Store, req.Tenant, req.Repo)
+	if err != nil {
+		if errors.Is(err, repoerrs.ErrRepoNotFound) {
+			return ErrRepoNotFound
+		}
+		if errors.Is(err, repoerrs.ErrInvalidTenantID) || errors.Is(err, repoerrs.ErrInvalidRepoID) {
+			return ErrInvalidName
+		}
+		return err
+	}
+	view, err := r.ReadRoot(req.Ctx)
+	if err != nil {
+		return err
+	}
+	var body manifest.Body
+	if err := json.Unmarshal(view.Body, &body); err != nil {
+		return err
+	}
+
+	switch cmdLine {
+	case "command=ls-refs":
+		if err := v2proto.HandleLsRefs(tokens, &body, req.Stdout); err != nil {
+			return errBadRequestf("ls-refs: %v", err)
+		}
+		return nil
+	case "command=fetch":
+		return serveFetch(req, tokens, &body)
+	default:
+		return errBadRequestf("unsupported command %s", cmdLine)
+	}
+}
+
+// errBadRequestf wraps the message in ErrBadRequest so callers can errors.Is
+// to detect "client error" vs "server error".
+func errBadRequestf(format string, args ...any) error {
+	return fmt.Errorf("%w: "+format, append([]any{ErrBadRequest}, args...)...)
+}
+
+// serveFetch is a verbatim port of handleFetch from internal/gateway/upload_pack.go.
+// HTTP-specific calls (http.Error, http.MaxBytesReader, Header.Set) are
+// REMOVED — the engine returns errors instead.
+func serveFetch(req *EngineRequest, tokens []pktline.Token, body *manifest.Body) error {
+	fetchReq, err := v2proto.ParseFetchArgs(tokens)
+	if err != nil {
+		return errBadRequestf("fetch: %v", err)
+	}
+	// Bound the per-OID work below: each want triggers a cat-file probe
+	// and joins the rev-list argv; each have triggers the same plus a
+	// reachability classification. Without these caps, a malformed
+	// request can blow up CPU, argv (E2BIG), or memory.
+	if len(fetchReq.Wants) > maxWants {
+		return errBadRequestf("fetch: too many wants (%d > %d)", len(fetchReq.Wants), maxWants)
+	}
+	if len(fetchReq.Haves) > maxHaves {
+		return errBadRequestf("fetch: too many haves (%d > %d)", len(fetchReq.Haves), maxHaves)
+	}
+	// Dedupe — clients sometimes send the same OID twice (e.g. when a
+	// have appears in multiple local refs); without dedup we'd run the
+	// same probe twice and pass duplicate args to rev-list.
+	fetchReq.Wants = dedupOIDs(fetchReq.Wants)
+	fetchReq.Haves = dedupOIDs(fetchReq.Haves)
+	m, err := req.Mirror.Open(req.Ctx, req.Tenant, req.Repo)
+	if err != nil {
+		return fmt.Errorf("mirror: %w", err)
+	}
+	m.RLock()
+	defer m.RUnlock()
+
+	// Validate every want is reachable from an advertised ref. We require
+	// commit-or-tag wants (allowAnySHA1InWant is NOT enabled): a tree or
+	// blob OID smuggled as a want would be packed by pack-objects --revs
+	// even though git rev-list rejects it as a starting point — meaning we
+	// must reject those upfront. Then rev-list <wants> --not --all over the
+	// mirror tells us which (if any) reach objects outside the advertised
+	// refset; empty means every want is fully covered.
+	for _, oid := range fetchReq.Wants {
+		kind, err := gitcli.RevParseObjectKind(req.Ctx, m.BareDir(), oid)
+		if err != nil {
+			return errBadRequestf("fetch: not our ref %s", oid)
+		}
+		if kind != "commit" && kind != "tag" {
+			return errBadRequestf("fetch: want must be a commit or tag, got %s for %s", kind, oid)
+		}
+	}
+	unreachable, err := gitcli.RevListNotAll(req.Ctx, m.BareDir(), fetchReq.Wants)
+	if err != nil {
+		return fmt.Errorf("fetch: reachability check failed: %w", err)
+	}
+	if len(unreachable) > 0 {
+		// Don't echo the unreachable list verbatim; the first OID is
+		// enough to diagnose and avoids leaking other hidden OIDs we may
+		// have walked into.
+		return errBadRequestf("fetch: not our ref %s", unreachable[0])
+	}
+
+	// Defensively reject shallow/deepen arguments. The v2 advertisement no
+	// longer exposes the "shallow" feature qualifier on "fetch", so a
+	// compliant client will not send these — but a misbehaving or
+	// downgraded-cache client might, and silently serving a full pack to a
+	// depth-bounded fetch would corrupt the client's history view. A future
+	// task will add shallow-info plumbing and re-advertise the capability.
+	if fetchReq.Depth > 0 || fetchReq.DeepenSince != "" || len(fetchReq.DeepenNot) > 0 || fetchReq.DeepenRelative || len(fetchReq.Shallow) > 0 {
+		return errBadRequestf("fetch: shallow/deepen arguments not yet supported by gateway")
+	}
+
+	pw := pktline.NewWriter(req.Stdout)
+
+	// Acknowledgments section — emitted whenever the client sent haves.
+	// Per protocol-v2 §fetch the section is REQUIRED in that case (with
+	// "NAK" when nothing is common); omitting it makes follow-on framing
+	// ambiguous. We split the haves into commons (we have them AND they
+	// are reachable from advertised refs) and unknowns (everything else),
+	// and feed both into WriteAcknowledgments so it can NAK when commons
+	// is empty.
+	//
+	// Reachability matters for haves the same way it matters for wants:
+	// if we ACK an OID merely because the object exists in the mirror's
+	// pack files (e.g. a deleted-but-not-GC'd commit), we leak the
+	// existence of hidden objects to a probing client. We also must NOT
+	// forward such hidden OIDs to pack-objects as ^<oid> exclusions —
+	// they would either falsely trim history (if reachable from a want
+	// via the hidden subgraph) or invalidly reference unreachable revs.
+	//
+	// We track ackEmitted so the delim before "packfile\n" is only
+	// written when the acknowledgments section actually ran.
+	var (
+		commons    []string
+		unknown    []string
+		ackEmitted bool
+	)
+	if len(fetchReq.Haves) > 0 {
+		// First pass: keep only haves that are commit-or-tag AND present
+		// in the mirror. Trees, blobs, and missing objects are treated as
+		// "unknown" — they never get ACKed and never reach pack-objects.
+		var candidates []string
+		for _, h := range fetchReq.Haves {
+			kind, err := gitcli.RevParseObjectKind(req.Ctx, m.BareDir(), h)
+			if err != nil || (kind != "commit" && kind != "tag") {
+				unknown = append(unknown, h)
+				continue
+			}
+			candidates = append(candidates, h)
+		}
+		// Second pass: confirm reachability from the advertised refset.
+		// rev-list <candidates> --not --all returns the candidates'
+		// objects that are reachable but NOT covered by --all; any
+		// candidate that appears in that output is unreachable from any
+		// advertised ref and must be treated as unknown.
+		if len(candidates) > 0 {
+			leaked, err := gitcli.RevListNotAll(req.Ctx, m.BareDir(), candidates)
+			if err != nil {
+				return fmt.Errorf("fetch: have-reachability check failed: %w", err)
+			}
+			leakedSet := make(map[string]struct{}, len(leaked))
+			for _, oid := range leaked {
+				leakedSet[oid] = struct{}{}
+			}
+			for _, c := range candidates {
+				if _, hidden := leakedSet[c]; hidden {
+					unknown = append(unknown, c)
+					continue
+				}
+				commons = append(commons, c)
+			}
+		}
+		// "ready" tells the client we have enough to proceed to the packfile
+		// section in this response. We can only set it when at least one
+		// have is common AND the client signaled "done"; otherwise the
+		// client would interpret "ready" as our intent to send a packfile
+		// in this round, but it still expects another negotiation round.
+		ready := len(commons) > 0 && fetchReq.Done
+		if err := v2proto.WriteAcknowledgments(req.Stdout, commons, unknown, ready); err != nil {
+			return nil
+		}
+		ackEmitted = true
+		if !fetchReq.Done {
+			// Multi-round negotiation — flush and let the client send
+			// another round.
+			_ = pw.WriteFlush()
+			return nil
+		}
+	}
+
+	// Open the pack stream BEFORE writing the packfile section header.
+	// If pack-objects fails to start (missing binary, bad dir, invalid
+	// args), surfacing that as a clean error is only possible while
+	// the response body is still empty (i.e. before the acknowledgments
+	// section was emitted in the no-haves path, or — when haves were
+	// present and we already wrote the acks section — at least before the
+	// packfile header). Stream-time errors after start are reported via
+	// side-band fatal below.
+	//
+	// Only commons are forwarded to pack-objects as ^<oid> exclusions;
+	// unknown haves would become invalid negative revisions and cause
+	// `git pack-objects --revs` to abort, breaking otherwise valid fetches
+	// from clients that send haves from unrelated local refs.
+	pack, err := gitcli.PackObjectsForFetch(req.Ctx, m.BareDir(), gitcli.PackForFetchOptions{
+		Wants:      fetchReq.Wants,
+		Haves:      commons,
+		ThinPack:   fetchReq.ThinPack,
+		IncludeTag: fetchReq.IncludeTag,
+		OfsDelta:   fetchReq.OfsDelta,
+		NoProgress: fetchReq.NoProgress,
+	})
+	if err != nil {
+		// If we already wrote acknowledgments, we have to surface this on
+		// the side-band — but the side-band lives inside the packfile
+		// section, so we must first emit the protocol-required delim and
+		// "packfile\n" header to keep framing valid. Otherwise the client
+		// sees side-band frames where it expects a section header and
+		// reports a malformed response. Pre-ack failures take the clean
+		// error return path because the body is still empty.
+		if ackEmitted {
+			_ = pw.WriteDelim()
+			_ = pw.WriteString("packfile\n")
+			sb := pktline.NewSidebandWriter(pw)
+			_, _ = sb.WriteFatal([]byte("pack-objects: " + err.Error()))
+			return nil
+		}
+		return fmt.Errorf("pack-objects: %w", err)
+	}
+
+	if ackEmitted {
+		// Per protocol-v2 §fetch, when both an acknowledgments section and
+		// a packfile section are present, they are separated by a delim-pkt.
+		_ = pw.WriteDelim()
+	}
+	if err := pw.WriteString("packfile\n"); err != nil {
+		_ = pack.Close()
+		return nil
+	}
+
+	sb := pktline.NewSidebandWriter(pw)
+	buf := make([]byte, 65000)
+	streamErr := false
+	for {
+		n, rerr := pack.Read(buf)
+		if n > 0 {
+			if _, werr := sb.WriteData(buf[:n]); werr != nil {
+				streamErr = true
+				break
+			}
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			_, _ = sb.WriteFatal([]byte("pack stream: " + rerr.Error()))
+			streamErr = true
+			break
+		}
+	}
+	// Explicitly close the pack reader so a non-zero pack-objects exit code
+	// is observed BEFORE we send the trailing flush. A defer'd Close would
+	// run after we've already promised the client a clean response.
+	if cerr := pack.Close(); cerr != nil && !streamErr {
+		_, _ = sb.WriteFatal([]byte("pack-objects: " + cerr.Error()))
+		return nil
+	}
+	if streamErr {
+		return nil
+	}
+	_ = pw.WriteFlush()
+	return nil
+}
+
+// dedupOIDs returns oids with duplicates removed in first-seen order.
+// Both wants and haves are validated as 40-char hex by ParseFetchArgs,
+// so dedup-by-string is safe. We dedupe before any per-OID work to
+// bound the cost when a misbehaving client sends the same OID many
+// times.
+func dedupOIDs(oids []string) []string {
+	if len(oids) <= 1 {
+		return oids
+	}
+	seen := make(map[string]struct{}, len(oids))
+	out := make([]string, 0, len(oids))
+	for _, o := range oids {
+		if _, ok := seen[o]; ok {
+			continue
+		}
+		seen[o] = struct{}{}
+		out = append(out, o)
+	}
+	return out
+}
+
+// drainPktLine reads all tokens from r until EOF or a Flush token. Each Data
+// token's Payload is COPIED because pktline.Reader reuses its internal buffer
+// across reads. If r yields more than maxPktLineTokens frames, drainPktLine
+// aborts with an error — this bounds slice growth even if the body limit is
+// generous.
+//
+// Stopping at Flush (rather than EOF) is required for SSH transport where the
+// channel stays open after the client sends its command: the client writes the
+// command pkt-lines followed by a flush-pkt and then blocks waiting for the
+// server response. Waiting for EOF would deadlock. For HTTP, this is also
+// correct because the request body ends with a flush-pkt followed by EOF, so
+// drainPktLine terminates at the flush and the next Read returns EOF anyway.
+func drainPktLine(r io.Reader) ([]pktline.Token, error) {
+	pr := pktline.NewReader(r)
+	var out []pktline.Token
+	for {
+		tok, err := pr.Read()
+		if err == io.EOF {
+			return out, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("pktline: %w", err)
+		}
+		if len(out) >= maxPktLineTokens {
+			return nil, fmt.Errorf("pktline: too many frames (>%d)", maxPktLineTokens)
+		}
+		if tok.Type == pktline.Data {
+			cp := append([]byte{}, tok.Payload...)
+			out = append(out, pktline.Token{Type: tok.Type, Payload: cp})
+		} else {
+			out = append(out, tok)
+		}
+		// A Flush token signals end-of-message. Stop reading so the server
+		// can process the command and write its response — necessary for SSH
+		// where the channel remains open after the flush.
+		if tok.Type == pktline.Flush {
+			return out, nil
+		}
+	}
+}

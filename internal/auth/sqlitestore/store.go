@@ -104,12 +104,12 @@ func (s *Store) CreateUser(ctx context.Context, name string, isAdmin bool) (stri
 }
 
 // GetUserByName returns the user row with the given name.
-func (s *Store) GetUserByName(ctx context.Context, name string) (*User, error) {
+func (s *Store) GetUserByName(ctx context.Context, name string) (*auth.User, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id, name, is_admin, created_at, disabled_at FROM users WHERE name = ?`,
 		name,
 	)
-	u := &User{}
+	u := &auth.User{}
 	var adminInt int
 	var disabled sql.NullInt64
 	if err := row.Scan(&u.ID, &u.Name, &adminInt, &u.CreatedAt, &disabled); err != nil {
@@ -551,6 +551,41 @@ func (s *Store) RevokeRepoPermission(ctx context.Context, userName, tenant, repo
 	return err
 }
 
+// DeleteRepo removes a (tenant, name) from repos. SSH deploy keys bound to
+// the repo are removed by CASCADE (schema enforces ON DELETE CASCADE on the
+// FOREIGN KEY). No error if the repo did not exist.
+func (s *Store) DeleteRepo(ctx context.Context, tenant, name string) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM repos WHERE tenant = ? AND name = ?`, tenant, name,
+	)
+	return err
+}
+
+// DeleteUserByID removes the user with the given ID. Unlike DeleteUser (which
+// uses name and guards against last-admin deletion), this method is intended
+// for test teardown and operates on the raw ID without the last-admin check.
+// SSH keys owned by the user are removed by CASCADE.
+func (s *Store) DeleteUserByID(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id)
+	return err
+}
+
+// DisableUserByID sets disabled_at for the user identified by ID. Intended for
+// test-seeding where the caller holds the opaque ID rather than the name.
+func (s *Store) DisableUserByID(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE users SET disabled_at = ? WHERE id = ?`, time.Now().Unix(), id,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return auth.ErrNoSuchUser
+	}
+	return nil
+}
+
 // LookupRepoPerm returns the actor's permission level on (tenant, repo).
 // Implements auth.Store.
 func (s *Store) LookupRepoPerm(ctx context.Context, actor *auth.Actor, tenant, repo string) (auth.Perm, error) {
@@ -615,31 +650,38 @@ func (s *Store) ListRepos(ctx context.Context, tenant string) ([]*Repo, error) {
 }
 
 // VerifyCredential implements auth.Store.
-func (s *Store) VerifyCredential(ctx context.Context, c auth.Credential) (*auth.Actor, string, error) {
-	bp, ok := c.(auth.BasicPassword)
-	if !ok {
-		// M6 will add SSHKeyFingerprint handling.
-		return nil, "", auth.ErrInvalidCredential
+func (s *Store) VerifyCredential(ctx context.Context, c auth.Credential) (*auth.Actor, string, *auth.Scope, error) {
+	switch c := c.(type) {
+	case auth.SSHKeyFingerprint:
+		return s.verifySSHKey(ctx, c.Fingerprint)
+	case auth.BasicPassword:
+		return s.verifyBasicPassword(ctx, c)
+	default:
+		return nil, "", nil, auth.ErrInvalidCredential
 	}
+}
+
+// verifyBasicPassword handles the BasicPassword credential case.
+func (s *Store) verifyBasicPassword(ctx context.Context, bp auth.BasicPassword) (*auth.Actor, string, *auth.Scope, error) {
 	tokenID, secret, err := auth.ParseToken(bp.Password)
 	if err != nil {
-		return nil, "", auth.ErrInvalidCredential
+		return nil, "", nil, auth.ErrInvalidCredential
 	}
 	tok, err := s.GetTokenByID(ctx, tokenID)
 	if errors.Is(err, auth.ErrNoSuchToken) {
-		return nil, "", auth.ErrInvalidCredential
+		return nil, "", nil, auth.ErrInvalidCredential
 	}
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	if err := auth.VerifyHash(secret, tok.SecretHash); err != nil {
-		return nil, "", auth.ErrInvalidCredential
+		return nil, "", nil, auth.ErrInvalidCredential
 	}
 	if tok.RevokedAt != nil {
-		return nil, "", auth.ErrTokenRevoked
+		return nil, "", nil, auth.ErrTokenRevoked
 	}
 	if tok.ExpiresAt != nil && *tok.ExpiresAt <= time.Now().Unix() {
-		return nil, "", auth.ErrTokenExpired
+		return nil, "", nil, auth.ErrTokenExpired
 	}
 	// Lookup the user; check name match and disabled state.
 	row := s.db.QueryRowContext(ctx,
@@ -649,19 +691,92 @@ func (s *Store) VerifyCredential(ctx context.Context, c auth.Credential) (*auth.
 	var adminInt int
 	var disabled sql.NullInt64
 	if err := row.Scan(&name, &adminInt, &disabled); err != nil {
-		return nil, "", auth.ErrInvalidCredential
+		return nil, "", nil, auth.ErrInvalidCredential
 	}
 	if disabled.Valid {
-		return nil, "", auth.ErrUserDisabled
+		return nil, "", nil, auth.ErrUserDisabled
 	}
 	if bp.Username != name {
-		return nil, "", auth.ErrInvalidCredential
+		return nil, "", nil, auth.ErrInvalidCredential
 	}
 	return &auth.Actor{
 		UserID:  tok.UserID,
 		Name:    name,
 		IsAdmin: adminInt != 0,
-	}, tokenID, nil
+	}, tokenID, nil, nil
+}
+
+// verifySSHKey handles the SSHKeyFingerprint credential case.
+// It performs a single join to resolve both user keys and deploy keys.
+// The schema enforces an XOR constraint: either user_id is set (user key) or
+// scope_* fields are set (deploy key) — never both, never neither.
+// We branch on userID.Valid after scanning to distinguish the two cases.
+func (s *Store) verifySSHKey(ctx context.Context, fingerprint string) (*auth.Actor, string, *auth.Scope, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT k.id,
+		       k.user_id, k.scope_tenant, k.scope_repo, k.scope_perm,
+		       k.revoked_at, k.label,
+		       u.id, u.name, u.is_admin, u.disabled_at
+		FROM ssh_keys k
+		LEFT JOIN users u ON u.id = k.user_id
+		WHERE k.fingerprint = ?
+	`, fingerprint)
+
+	var (
+		keyID                                     string
+		userID, scopeTenant, scopeRepo, scopePerm sql.NullString
+		revokedAt                                 sql.NullInt64
+		keyLabel                                  sql.NullString
+		uID, uName                                sql.NullString
+		uIsAdmin                                  sql.NullInt64
+		uDisabledAt                               sql.NullInt64
+	)
+	err := row.Scan(&keyID,
+		&userID, &scopeTenant, &scopeRepo, &scopePerm,
+		&revokedAt, &keyLabel,
+		&uID, &uName, &uIsAdmin, &uDisabledAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, "", nil, auth.ErrInvalidCredential
+	}
+	if err != nil {
+		return nil, "", nil, err
+	}
+	if revokedAt.Valid {
+		return nil, "", nil, auth.ErrTokenRevoked
+	}
+
+	if userID.Valid {
+		// User key. The user row must exist (JOIN guarantees it if user_id is
+		// set and the FK is intact) and not be disabled.
+		if uDisabledAt.Valid {
+			return nil, "", nil, auth.ErrUserDisabled
+		}
+		actor := &auth.Actor{
+			UserID:  uID.String,
+			Name:    uName.String,
+			IsAdmin: uIsAdmin.Valid && uIsAdmin.Int64 != 0,
+		}
+		return actor, keyID, nil, nil
+	}
+
+	// Deploy key. Build a synthetic actor; scope drives permission.
+	label := keyLabel.String
+	if label == "" {
+		label = "(unlabeled)"
+	}
+	actor := &auth.Actor{
+		UserID: "deploy:" + keyID,
+		Name:   "deploy-key:" + label,
+	}
+	perm, err := permFromText(scopePerm.String)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	return actor, keyID, &auth.Scope{
+		Tenant: scopeTenant.String,
+		Repo:   scopeRepo.String,
+		Perm:   perm,
+	}, nil
 }
 
 // TouchTokenUsage implements auth.Store. A missing tokenID is not an error.
@@ -671,6 +786,212 @@ func (s *Store) TouchTokenUsage(ctx context.Context, tokenID string) error {
 	}
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE tokens SET last_used_at = ? WHERE id = ?`, time.Now().Unix(), tokenID,
+	)
+	return err
+}
+
+// nullableString returns a sql.NullString; Valid is true iff s is non-empty.
+func nullableString(s string) sql.NullString {
+	return sql.NullString{String: s, Valid: s != ""}
+}
+
+// permToText and permFromText delegate to the exported auth package helpers.
+// They are retained as package-level aliases so existing callers within this
+// file continue to compile without changes; a future cleanup can inline them.
+//
+// TODO(cleanup): replace call sites with auth.PermToText / auth.PermFromText
+// directly and remove these wrappers.
+func permToText(p auth.Perm) string            { return auth.PermToText(p) }
+func permFromText(s string) (auth.Perm, error) { return auth.PermFromText(s) }
+
+// isCheckViolation reports whether err looks like a SQLite CHECK constraint
+// failure. modernc.org/sqlite uses the message "CHECK constraint failed".
+func isCheckViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "CHECK constraint failed")
+}
+
+// isFingerprintUniqueViolation reports whether err is a UNIQUE constraint
+// failure specifically on the ssh_keys fingerprint column/index.
+func isFingerprintUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	// modernc.org/sqlite formats UNIQUE errors as:
+	//   "UNIQUE constraint failed: ssh_keys.fingerprint" OR
+	//   "constraint failed: UNIQUE: ssh_keys.fingerprint"
+	// The index name ssh_keys_fingerprint_idx may also appear, but checking
+	// for the column reference is more specific.
+	return (strings.Contains(msg, "UNIQUE constraint failed") ||
+		strings.Contains(msg, "constraint failed: UNIQUE")) &&
+		(strings.Contains(msg, "ssh_keys.fingerprint") ||
+			strings.Contains(msg, "fingerprint"))
+}
+
+// AddSSHKey persists an ssh_keys row. Implements auth.Store.
+func (s *Store) AddSSHKey(ctx context.Context, k auth.SSHKey) error {
+	hasUser := k.UserID != ""
+	hasScope := k.ScopeTenant != "" || k.ScopeRepo != "" || k.ScopePerm != auth.PermNone
+	if hasUser == hasScope {
+		return fmt.Errorf("invalid ssh key shape: must set exactly one of user_id or scope_*")
+	}
+
+	var (
+		userID      sql.NullString
+		scopeTenant sql.NullString
+		scopeRepo   sql.NullString
+		scopePerm   sql.NullString
+	)
+	if hasUser {
+		userID = sql.NullString{String: k.UserID, Valid: true}
+	} else {
+		scopeTenant = sql.NullString{String: k.ScopeTenant, Valid: true}
+		scopeRepo = sql.NullString{String: k.ScopeRepo, Valid: true}
+		scopePerm = sql.NullString{String: permToText(k.ScopePerm), Valid: true}
+	}
+
+	now := time.Now().Unix()
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO ssh_keys (id, fingerprint, public_key, key_type, label,
+		                      created_at, user_id, scope_tenant, scope_repo, scope_perm)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, k.ID, k.Fingerprint, k.PublicKey, k.KeyType,
+		nullableString(k.Label), now,
+		userID, scopeTenant, scopeRepo, scopePerm)
+
+	if err != nil {
+		if isFingerprintUniqueViolation(err) {
+			return auth.ErrDuplicateFingerprint
+		}
+		if isCheckViolation(err) {
+			return fmt.Errorf("invalid ssh key: %w", err)
+		}
+		return err
+	}
+	return nil
+}
+
+// ListSSHKeysForUser returns all keys belonging to userID, ordered by created_at ASC.
+func (s *Store) ListSSHKeysForUser(ctx context.Context, userID string) ([]auth.SSHKey, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, fingerprint, public_key, key_type, label,
+		       created_at, last_used_at, revoked_at,
+		       user_id, scope_tenant, scope_repo, scope_perm
+		FROM ssh_keys
+		WHERE user_id = ?
+		ORDER BY created_at ASC
+	`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanSSHKeys(rows)
+}
+
+// ListSSHKeysForRepo returns all deploy keys bound to (tenant, repo), ordered by created_at ASC.
+func (s *Store) ListSSHKeysForRepo(ctx context.Context, tenant, repo string) ([]auth.SSHKey, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, fingerprint, public_key, key_type, label,
+		       created_at, last_used_at, revoked_at,
+		       user_id, scope_tenant, scope_repo, scope_perm
+		FROM ssh_keys
+		WHERE scope_tenant = ? AND scope_repo = ?
+		ORDER BY created_at ASC
+	`, tenant, repo)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanSSHKeys(rows)
+}
+
+// scanSSHKeys scans a *sql.Rows result set into a slice of auth.SSHKey values.
+func scanSSHKeys(rows *sql.Rows) ([]auth.SSHKey, error) {
+	var out []auth.SSHKey
+	for rows.Next() {
+		var k auth.SSHKey
+		var label, userID, scopeTenant, scopeRepo, scopePerm sql.NullString
+		var lastUsedAt, revokedAt sql.NullInt64
+		if err := rows.Scan(
+			&k.ID, &k.Fingerprint, &k.PublicKey, &k.KeyType, &label,
+			&k.CreatedAt, &lastUsedAt, &revokedAt,
+			&userID, &scopeTenant, &scopeRepo, &scopePerm,
+		); err != nil {
+			return nil, err
+		}
+		k.Label = label.String
+		if lastUsedAt.Valid {
+			k.LastUsedAt = lastUsedAt.Int64
+		}
+		if revokedAt.Valid {
+			k.RevokedAt = revokedAt.Int64
+		}
+		if userID.Valid {
+			k.UserID = userID.String
+		}
+		if scopeTenant.Valid {
+			k.ScopeTenant = scopeTenant.String
+		}
+		if scopeRepo.Valid {
+			k.ScopeRepo = scopeRepo.String
+		}
+		if scopePerm.Valid {
+			p, err := permFromText(scopePerm.String)
+			if err != nil {
+				return nil, err
+			}
+			k.ScopePerm = p
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+// RevokeSSHKey sets revoked_at to now for the key identified by full ID or
+// unique prefix. Returns auth.ErrNoSuchKey if no key matches, or a wrapped
+// auth.ErrConflict if the prefix is ambiguous (matches more than one key).
+func (s *Store) RevokeSSHKey(ctx context.Context, keyIDOrPrefix string) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM ssh_keys WHERE id LIKE ? || '%'`, keyIDOrPrefix)
+	if err != nil {
+		return err
+	}
+	var matches []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		matches = append(matches, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	if len(matches) == 0 {
+		return auth.ErrNoSuchKey
+	}
+	if len(matches) > 1 {
+		return fmt.Errorf("%w: prefix %q matches %d keys", auth.ErrConflict, keyIDOrPrefix, len(matches))
+	}
+
+	_, err = s.db.ExecContext(ctx,
+		`UPDATE ssh_keys SET revoked_at = strftime('%s','now') WHERE id = ?`,
+		matches[0],
+	)
+	return err
+}
+
+// TouchSSHKeyUsage updates last_used_at to now for the given key ID.
+// A missing keyID is not an error — UPDATE with no rows affected returns nil.
+func (s *Store) TouchSSHKeyUsage(ctx context.Context, keyID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE ssh_keys SET last_used_at = strftime('%s','now') WHERE id = ?`,
+		keyID,
 	)
 	return err
 }

@@ -15,6 +15,7 @@ import (
 // returns a fresh Store and a Seeder bound to it; the Seeder applies the
 // minimum operations the conformance tests need.
 type Seeder interface {
+	// M4 (BasicPassword) helpers — accept ctx, used by existing tests.
 	CreateUser(ctx context.Context, name string, isAdmin bool) (userID string)
 	CreateToken(ctx context.Context, userID, tokenID, secretHash string, expiresAt *int64)
 	RevokeToken(ctx context.Context, tokenID string)
@@ -22,6 +23,18 @@ type Seeder interface {
 	RegisterRepo(ctx context.Context, tenant, repo string)
 	SetRepoPublic(ctx context.Context, tenant, repo string, public bool)
 	Grant(ctx context.Context, userName, tenant, repo, perm string)
+
+	// M6 (SSH key) helpers — accept *testing.T, call t.Fatal on error.
+	// SeedUser creates a user and returns its opaque userID.
+	SeedUser(t *testing.T, name string, isAdmin bool) string
+	// SeedRepo registers a (tenant, repo) pair.
+	SeedRepo(t *testing.T, tenant, repo string, publicRead bool)
+	// DisableUser disables the user identified by userID.
+	DisableUser(t *testing.T, userID string)
+	// DeleteUser removes the user identified by userID.
+	DeleteUser(t *testing.T, userID string)
+	// DeleteRepo removes the (tenant, repo) registration.
+	DeleteRepo(t *testing.T, tenant, repo string)
 }
 
 // Factory builds a fresh (Store, Seeder) pair for each test.
@@ -33,7 +46,7 @@ func Run(t *testing.T, factory Factory) {
 		s, _ := factory(t)
 		defer s.Close()
 		tok, _, _, _ := auth.GenerateToken()
-		_, _, err := s.VerifyCredential(context.Background(),
+		_, _, _, err := s.VerifyCredential(context.Background(),
 			auth.BasicPassword{Username: "alice", Password: tok})
 		mustErrIs(t, err, auth.ErrInvalidCredential)
 	})
@@ -47,7 +60,7 @@ func Run(t *testing.T, factory Factory) {
 		_, id, _, _ := auth.GenerateToken()
 		sd.CreateToken(ctx, uid, id, hash, nil)
 		bad := "bvts_" + id + "_" + strings.Repeat("A", 52)
-		_, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: bad})
+		_, _, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: bad})
 		mustErrIs(t, err, auth.ErrInvalidCredential)
 	})
 
@@ -60,7 +73,7 @@ func Run(t *testing.T, factory Factory) {
 		hash, _ := auth.HashSecret(secret)
 		past := time.Now().Add(-time.Hour).Unix()
 		sd.CreateToken(ctx, uid, id, hash, &past)
-		_, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
+		_, _, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
 		mustErrIs(t, err, auth.ErrTokenExpired)
 	})
 
@@ -73,7 +86,7 @@ func Run(t *testing.T, factory Factory) {
 		hash, _ := auth.HashSecret(secret)
 		sd.CreateToken(ctx, uid, id, hash, nil)
 		sd.RevokeToken(ctx, id)
-		_, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
+		_, _, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
 		mustErrIs(t, err, auth.ErrTokenRevoked)
 	})
 
@@ -86,8 +99,25 @@ func Run(t *testing.T, factory Factory) {
 		hash, _ := auth.HashSecret(secret)
 		sd.CreateToken(ctx, uid, id, hash, nil)
 		sd.SetUserDisabled(ctx, "alice", true)
-		_, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
+		_, _, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
 		mustErrIs(t, err, auth.ErrUserDisabled)
+	})
+
+	t.Run("VerifyCredential_BasicPasswordReturnsNilScope", func(t *testing.T) {
+		s, sd := factory(t)
+		defer s.Close()
+		ctx := context.Background()
+		uid := sd.CreateUser(ctx, "alice", false)
+		tok, id, secret, _ := auth.GenerateToken()
+		hash, _ := auth.HashSecret(secret)
+		sd.CreateToken(ctx, uid, id, hash, nil)
+		_, _, scope, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
+		if err != nil {
+			t.Fatalf("VerifyCredential: %v", err)
+		}
+		if scope != nil {
+			t.Errorf("expected nil scope for BasicPassword, got %+v", scope)
+		}
 	})
 
 	t.Run("LookupRepoPerm_NoneForNoGrant", func(t *testing.T) {
@@ -171,6 +201,8 @@ func Run(t *testing.T, factory Factory) {
 			t.Fatalf("missing id: %v", err)
 		}
 	})
+
+	RunSSHKeyTests(t, factory)
 }
 
 func mustErrIs(t *testing.T, got, want error) {

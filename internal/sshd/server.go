@@ -1,0 +1,251 @@
+package sshd
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"strconv"
+	"sync"
+	"time"
+
+	"golang.org/x/crypto/ssh"
+
+	"github.com/bucketvcs/bucketvcs/internal/auth"
+	"github.com/bucketvcs/bucketvcs/internal/mirror"
+	"github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+// Options configures the SSH listener and the underlying engine seam.
+type Options struct {
+	// Addr is the TCP listen address, e.g. "127.0.0.1:2222" or ":2222".
+	Addr string
+	// HostKeyPath is the location of the OpenSSH-format private key file.
+	// If the file is absent, NewServer generates an ed25519 key and
+	// persists it (mode 0600).
+	HostKeyPath string
+	// Grace bounds Close()'s wait for in-flight sessions before forcing
+	// closure. Zero means force-close immediately.
+	Grace time.Duration
+
+	// AgentVersion is the gateway's advertised agent version, plumbed into
+	// gitproto EngineRequest.
+	AgentVersion string
+
+	// Auth + storage seams.
+	Store   auth.Store
+	BVStore storage.ObjectStore
+	Mirror  *mirror.Manager
+	Logger  *slog.Logger
+}
+
+// Server is the bucketvcs SSH listener. Construct via NewServer.
+type Server struct {
+	opts     Options
+	config   *ssh.ServerConfig
+	listener net.Listener
+
+	mu       sync.Mutex
+	closed   bool
+	sessions sync.WaitGroup
+}
+
+// NewServer loads or generates the host key, builds the ssh.ServerConfig,
+// and returns a ready-to-Listen Server. The actual TCP listen happens
+// in Listen() (Task 21).
+func NewServer(opts Options) (*Server, error) {
+	if opts.Logger == nil {
+		return nil, errors.New("sshd: Options.Logger is required")
+	}
+	if opts.Store == nil {
+		return nil, errors.New("sshd: Options.Store is required")
+	}
+	if opts.HostKeyPath == "" {
+		return nil, errors.New("sshd: Options.HostKeyPath is required")
+	}
+	if opts.Addr == "" {
+		return nil, errors.New("sshd: Options.Addr is required")
+	}
+
+	signer, err := LoadOrGenerateHostKey(opts.HostKeyPath, opts.Logger)
+	if err != nil {
+		return nil, err
+	}
+
+	s := &Server{opts: opts}
+	s.config = &ssh.ServerConfig{
+		MaxAuthTries:      6,
+		PublicKeyCallback: s.publicKeyCallback,
+		AuthLogCallback:   s.logAuthAttempt,
+	}
+	s.config.AddHostKey(signer)
+	return s, nil
+}
+
+// publicKeyCallback authenticates a presented public key against the auth
+// Store. On success, the actor + scope + key id are stashed in
+// ssh.Permissions.Extensions for the session handler.
+func (s *Server) publicKeyCallback(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+	if meta.User() != "git" {
+		return nil, errors.New("only the 'git' user is supported")
+	}
+	fp := SHA256Fingerprint(key)
+
+	// x/crypto/ssh has no per-callback context; pass background. The Store
+	// implementations honor ctx for cancellation but we have none here.
+	actor, keyID, scope, err := s.opts.Store.VerifyCredential(
+		context.Background(),
+		auth.SSHKeyFingerprint{Fingerprint: fp},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &ssh.Permissions{Extensions: map[string]string{
+		"actor_id":   actor.UserID,
+		"actor_name": actor.Name,
+		"is_admin":   strconv.FormatBool(actor.IsAdmin),
+		"scope":      encodeScope(scope),
+		"key_id":     keyID,
+	}}, nil
+}
+
+// logAuthAttempt records every SSH auth attempt (success or failure).
+func (s *Server) logAuthAttempt(meta ssh.ConnMetadata, method string, err error) {
+	fields := []any{
+		"remote", meta.RemoteAddr().String(),
+		"user", meta.User(),
+		"method", method,
+	}
+	if err != nil {
+		fields = append(fields, "result", "fail", "err", err.Error())
+	} else {
+		fields = append(fields, "result", "ok")
+	}
+	s.opts.Logger.Info("ssh auth attempt", fields...)
+}
+
+// encodeScope serializes a *Scope for ssh.Permissions.Extensions, which
+// only carries strings. Empty for nil; "<tenant>/<repo>:<read|write>"
+// otherwise.
+func encodeScope(scope *auth.Scope) string {
+	if scope == nil {
+		return ""
+	}
+	return scope.Tenant + "/" + scope.Repo + ":" + auth.PermToText(scope.Perm)
+}
+
+// Listen opens the TCP listener on opts.Addr. Call before Serve.
+func (s *Server) Listen() error {
+	l, err := net.Listen("tcp", s.opts.Addr)
+	if err != nil {
+		return fmt.Errorf("ssh listen %s: %w", s.opts.Addr, err)
+	}
+	s.listener = l
+	s.opts.Logger.Info("ssh listening", "addr", l.Addr().String())
+	return nil
+}
+
+// Addr returns the actual listen address (useful when Addr was ":0" for tests).
+func (s *Server) Addr() net.Addr {
+	if s.listener == nil {
+		return nil
+	}
+	return s.listener.Addr()
+}
+
+// Serve accepts connections until ctx is canceled or Close() is called.
+// Blocks. Returns nil on graceful shutdown, or the accept error.
+func (s *Server) Serve(ctx context.Context) error {
+	if s.listener == nil {
+		return errors.New("sshd: Listen() not called")
+	}
+	go func() {
+		<-ctx.Done()
+		s.listener.Close()
+	}()
+	for {
+		conn, err := s.listener.Accept()
+		if err != nil {
+			s.mu.Lock()
+			closed := s.closed
+			s.mu.Unlock()
+			if closed || ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+		s.sessions.Add(1)
+		go func() {
+			defer s.sessions.Done()
+			s.handleConn(ctx, conn)
+		}()
+	}
+}
+
+// Close stops accepting new connections and waits up to opts.Grace for
+// in-flight sessions to drain. After Grace, in-flight ssh.Channels are
+// closed by killing the listener (sshConn.Close in handleConn).
+func (s *Server) Close() error {
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+	if s.listener != nil {
+		s.listener.Close()
+	}
+	done := make(chan struct{})
+	go func() {
+		s.sessions.Wait()
+		close(done)
+	}()
+	grace := s.opts.Grace
+	if grace == 0 {
+		return nil
+	}
+	select {
+	case <-done:
+	case <-time.After(grace):
+		s.opts.Logger.Warn("ssh grace exceeded; in-flight sessions left to terminate")
+	}
+	return nil
+}
+
+// decodeScope is the inverse. Empty string -> nil.
+func decodeScope(s string) (*auth.Scope, error) {
+	if s == "" {
+		return nil, nil
+	}
+	// <tenant>/<repo>:<read|write>
+	colon := -1
+	for i := 0; i < len(s); i++ {
+		if s[i] == ':' {
+			colon = i
+			break
+		}
+	}
+	if colon < 0 {
+		return nil, fmt.Errorf("decodeScope: missing ':' in %q", s)
+	}
+	repoPart := s[:colon]
+	permPart := s[colon+1:]
+	slash := -1
+	for i := 0; i < len(repoPart); i++ {
+		if repoPart[i] == '/' {
+			slash = i
+			break
+		}
+	}
+	if slash < 0 {
+		return nil, fmt.Errorf("decodeScope: missing '/' in %q", s)
+	}
+	perm, err := auth.PermFromText(permPart)
+	if err != nil {
+		return nil, err
+	}
+	return &auth.Scope{
+		Tenant: repoPart[:slash],
+		Repo:   repoPart[slash+1:],
+		Perm:   perm,
+	}, nil
+}
