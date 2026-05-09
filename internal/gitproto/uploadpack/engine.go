@@ -2,7 +2,6 @@ package uploadpack
 
 import (
 	"context"
-	"errors"
 	"io"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
@@ -36,12 +35,9 @@ type EngineRequest struct {
 	Mirror *mirror.Manager
 }
 
-// ErrNotImplemented is returned by stubs until later tasks port the M3 logic.
-var ErrNotImplemented = errors.New("uploadpack: not implemented")
-
 // Service runs the negotiation/pack-streaming loop reading req.Stdin
 // and writing to req.Stdout.
-func Service(req *EngineRequest) error { return ErrNotImplemented }
+func Service(req *EngineRequest) error { return serviceImpl(req) }
 
 // Serve runs Advertise followed by Service on the same request.
 func Serve(req *EngineRequest) error {

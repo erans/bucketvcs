@@ -3,19 +3,83 @@ package uploadpack
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bucketvcs/bucketvcs/internal/importer"
+	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 	"github.com/bucketvcs/bucketvcs/internal/v2proto"
 )
 
-func TestStubsCompile(t *testing.T) {
-	if err := Service(&EngineRequest{}); err == nil {
-		t.Fatal("expected ErrNotImplemented from Service stub")
+func TestService_RejectsNonV2(t *testing.T) {
+	req := &EngineRequest{ProtocolVersion: 0, Stdin: strings.NewReader("")}
+	err := Service(req)
+	if !errors.Is(err, ErrV2Required) {
+		t.Fatalf("got %v, want ErrV2Required", err)
+	}
+}
+
+func TestService_LsRefs_DelegatesToV2Proto(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeUploadPackStore(t, storeDir, "acme", "demo")
+
+	store, err := localfs.Open(storeDir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	defer store.Close()
+
+	// Build a pkt-line input: command=ls-refs DELIM symrefs ref-prefix refs/heads/ FLUSH
+	// Using the same encoding helpers as gateway tests (reimplemented locally).
+	var body bytes.Buffer
+	writePktLine := func(s string) {
+		n := len(s) + 4
+		body.WriteByte(hexNibbleUP(byte(n >> 12)))
+		body.WriteByte(hexNibbleUP(byte(n >> 8 & 0xf)))
+		body.WriteByte(hexNibbleUP(byte(n >> 4 & 0xf)))
+		body.WriteByte(hexNibbleUP(byte(n & 0xf)))
+		body.WriteString(s)
+	}
+	writePktLine("command=ls-refs\n")
+	body.WriteString("0001") // delim
+	writePktLine("symrefs\n")
+	writePktLine("ref-prefix refs/heads/\n")
+	body.WriteString("0000") // flush
+
+	mirrorDir := t.TempDir()
+	mgr, err := mirror.NewManager(mirrorDir, store)
+	if err != nil {
+		t.Fatalf("mirror.NewManager: %v", err)
+	}
+	defer mgr.Close()
+
+	var out bytes.Buffer
+	req := &EngineRequest{
+		Ctx:             context.Background(),
+		Tenant:          "acme",
+		Repo:            "demo",
+		Stdin:           &body,
+		Stdout:          &out,
+		Stderr:          &bytes.Buffer{},
+		ProtocolVersion: 2,
+		Store:           store,
+		Mirror:          mgr,
+		AgentVersion:    "test",
+	}
+	if err := Service(req); err != nil {
+		t.Fatalf("Service: %v", err)
+	}
+	// The ls-refs response must contain the main branch ref.
+	if !bytes.Contains(out.Bytes(), []byte("refs/heads/main")) {
+		t.Fatalf("ls-refs response missing refs/heads/main: %q", out.Bytes())
 	}
 }
 
@@ -56,6 +120,13 @@ func mustExecUP(t *testing.T, dir string, args ...string) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("%v: %v\n%s", args, err, out)
 	}
+}
+
+func hexNibbleUP(n byte) byte {
+	if n < 10 {
+		return '0' + n
+	}
+	return 'a' + (n - 10)
 }
 
 func TestAdvertise_V0_RefAdvertisementShape(t *testing.T) {
