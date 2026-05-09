@@ -795,35 +795,14 @@ func nullableString(s string) sql.NullString {
 	return sql.NullString{String: s, Valid: s != ""}
 }
 
-// permToText converts an auth.Perm to the text stored in scope_perm.
-// Only PermRead and PermWrite are valid for deploy keys.
-func permToText(p auth.Perm) string {
-	switch p {
-	case auth.PermRead:
-		return "read"
-	case auth.PermWrite:
-		return "write"
-	default:
-		return ""
-	}
-}
-
-// permFromText is the inverse of permToText. It also handles "admin" because
-// the repo_permissions table (used by LookupRepoPerm) can carry that value.
-// The ssh_keys.scope_perm CHECK constraint prevents admin from appearing
-// there, so callers of verifySSHKey are safe against admin deploy keys.
-func permFromText(s string) (auth.Perm, error) {
-	switch s {
-	case "read":
-		return auth.PermRead, nil
-	case "write":
-		return auth.PermWrite, nil
-	case "admin":
-		return auth.PermAdmin, nil
-	default:
-		return auth.PermNone, fmt.Errorf("unknown perm %q", s)
-	}
-}
+// permToText and permFromText delegate to the exported auth package helpers.
+// They are retained as package-level aliases so existing callers within this
+// file continue to compile without changes; a future cleanup can inline them.
+//
+// TODO(cleanup): replace call sites with auth.PermToText / auth.PermFromText
+// directly and remove these wrappers.
+func permToText(p auth.Perm) string            { return auth.PermToText(p) }
+func permFromText(s string) (auth.Perm, error) { return auth.PermFromText(s) }
 
 // isCheckViolation reports whether err looks like a SQLite CHECK constraint
 // failure. modernc.org/sqlite uses the message "CHECK constraint failed".
