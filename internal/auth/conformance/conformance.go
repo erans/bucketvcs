@@ -15,6 +15,7 @@ import (
 // returns a fresh Store and a Seeder bound to it; the Seeder applies the
 // minimum operations the conformance tests need.
 type Seeder interface {
+	// M4 (BasicPassword) helpers — accept ctx, used by existing tests.
 	CreateUser(ctx context.Context, name string, isAdmin bool) (userID string)
 	CreateToken(ctx context.Context, userID, tokenID, secretHash string, expiresAt *int64)
 	RevokeToken(ctx context.Context, tokenID string)
@@ -22,6 +23,18 @@ type Seeder interface {
 	RegisterRepo(ctx context.Context, tenant, repo string)
 	SetRepoPublic(ctx context.Context, tenant, repo string, public bool)
 	Grant(ctx context.Context, userName, tenant, repo, perm string)
+
+	// M6 (SSH key) helpers — accept *testing.T, call t.Fatal on error.
+	// SeedUser creates a user and returns its opaque userID.
+	SeedUser(t *testing.T, name string, isAdmin bool) string
+	// SeedRepo registers a (tenant, repo) pair.
+	SeedRepo(t *testing.T, tenant, repo string, publicRead bool)
+	// DisableUser disables the user identified by userID.
+	DisableUser(t *testing.T, userID string)
+	// DeleteUser removes the user identified by userID.
+	DeleteUser(t *testing.T, userID string)
+	// DeleteRepo removes the (tenant, repo) registration.
+	DeleteRepo(t *testing.T, tenant, repo string)
 }
 
 // Factory builds a fresh (Store, Seeder) pair for each test.
@@ -188,6 +201,8 @@ func Run(t *testing.T, factory Factory) {
 			t.Fatalf("missing id: %v", err)
 		}
 	})
+
+	RunSSHKeyTests(t, factory)
 }
 
 func mustErrIs(t *testing.T, got, want error) {

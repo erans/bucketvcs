@@ -551,6 +551,41 @@ func (s *Store) RevokeRepoPermission(ctx context.Context, userName, tenant, repo
 	return err
 }
 
+// DeleteRepo removes a (tenant, name) from repos. SSH deploy keys bound to
+// the repo are removed by CASCADE (schema enforces ON DELETE CASCADE on the
+// FOREIGN KEY). No error if the repo did not exist.
+func (s *Store) DeleteRepo(ctx context.Context, tenant, name string) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM repos WHERE tenant = ? AND name = ?`, tenant, name,
+	)
+	return err
+}
+
+// DeleteUserByID removes the user with the given ID. Unlike DeleteUser (which
+// uses name and guards against last-admin deletion), this method is intended
+// for test teardown and operates on the raw ID without the last-admin check.
+// SSH keys owned by the user are removed by CASCADE.
+func (s *Store) DeleteUserByID(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id)
+	return err
+}
+
+// DisableUserByID sets disabled_at for the user identified by ID. Intended for
+// test-seeding where the caller holds the opaque ID rather than the name.
+func (s *Store) DisableUserByID(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE users SET disabled_at = ? WHERE id = ?`, time.Now().Unix(), id,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return auth.ErrNoSuchUser
+	}
+	return nil
+}
+
 // LookupRepoPerm returns the actor's permission level on (tenant, repo).
 // Implements auth.Store.
 func (s *Store) LookupRepoPerm(ctx context.Context, actor *auth.Actor, tenant, repo string) (auth.Perm, error) {
