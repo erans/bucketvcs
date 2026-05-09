@@ -675,5 +675,113 @@ func (s *Store) TouchTokenUsage(ctx context.Context, tokenID string) error {
 	return err
 }
 
+// nullableString returns a sql.NullString; Valid is true iff s is non-empty.
+func nullableString(s string) sql.NullString {
+	return sql.NullString{String: s, Valid: s != ""}
+}
+
+// permToText converts an auth.Perm to the text stored in scope_perm.
+// Only PermRead and PermWrite are valid for deploy keys.
+func permToText(p auth.Perm) string {
+	switch p {
+	case auth.PermRead:
+		return "read"
+	case auth.PermWrite:
+		return "write"
+	default:
+		return ""
+	}
+}
+
+// isCheckViolation reports whether err looks like a SQLite CHECK constraint
+// failure. modernc.org/sqlite uses the message "CHECK constraint failed".
+func isCheckViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "CHECK constraint failed")
+}
+
+// isFingerprintUniqueViolation reports whether err is a UNIQUE constraint
+// failure specifically on the ssh_keys fingerprint column/index.
+func isFingerprintUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	// modernc.org/sqlite formats UNIQUE errors as:
+	//   "UNIQUE constraint failed: ssh_keys.fingerprint" OR
+	//   "constraint failed: UNIQUE: ssh_keys.fingerprint"
+	// The index name ssh_keys_fingerprint_idx may also appear, but checking
+	// for the column reference is more specific.
+	return (strings.Contains(msg, "UNIQUE constraint failed") ||
+		strings.Contains(msg, "constraint failed: UNIQUE")) &&
+		(strings.Contains(msg, "ssh_keys.fingerprint") ||
+			strings.Contains(msg, "fingerprint"))
+}
+
+// AddSSHKey persists an ssh_keys row. Implements auth.Store.
+func (s *Store) AddSSHKey(ctx context.Context, k auth.SSHKey) error {
+	hasUser := k.UserID != ""
+	hasScope := k.ScopeTenant != "" || k.ScopeRepo != "" || k.ScopePerm != auth.PermNone
+	if hasUser == hasScope {
+		return fmt.Errorf("invalid ssh key shape: must set exactly one of user_id or scope_*")
+	}
+
+	var (
+		userID      sql.NullString
+		scopeTenant sql.NullString
+		scopeRepo   sql.NullString
+		scopePerm   sql.NullString
+	)
+	if hasUser {
+		userID = sql.NullString{String: k.UserID, Valid: true}
+	} else {
+		scopeTenant = sql.NullString{String: k.ScopeTenant, Valid: true}
+		scopeRepo = sql.NullString{String: k.ScopeRepo, Valid: true}
+		scopePerm = sql.NullString{String: permToText(k.ScopePerm), Valid: true}
+	}
+
+	now := time.Now().Unix()
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO ssh_keys (id, fingerprint, public_key, key_type, label,
+		                      created_at, user_id, scope_tenant, scope_repo, scope_perm)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, k.ID, k.Fingerprint, k.PublicKey, k.KeyType,
+		nullableString(k.Label), now,
+		userID, scopeTenant, scopeRepo, scopePerm)
+
+	if err != nil {
+		if isFingerprintUniqueViolation(err) {
+			return auth.ErrDuplicateFingerprint
+		}
+		if isCheckViolation(err) {
+			return fmt.Errorf("invalid ssh key: %w", err)
+		}
+		return err
+	}
+	return nil
+}
+
+// ListSSHKeysForUser returns all keys belonging to userID. Implemented in Task 15.
+func (s *Store) ListSSHKeysForUser(ctx context.Context, userID string) ([]auth.SSHKey, error) {
+	panic("not implemented; comes in M6 task 15")
+}
+
+// ListSSHKeysForRepo returns all deploy keys bound to (tenant, repo). Implemented in Task 15.
+func (s *Store) ListSSHKeysForRepo(ctx context.Context, tenant, repo string) ([]auth.SSHKey, error) {
+	panic("not implemented; comes in M6 task 15")
+}
+
+// RevokeSSHKey sets revoked_at to now. Implemented in Task 15.
+func (s *Store) RevokeSSHKey(ctx context.Context, keyIDOrPrefix string) error {
+	panic("not implemented; comes in M6 task 15")
+}
+
+// TouchSSHKeyUsage updates last_used_at. Best-effort. Implemented in Task 15.
+func (s *Store) TouchSSHKeyUsage(ctx context.Context, keyID string) error {
+	return nil
+}
+
 // Compile-time check that *Store satisfies auth.Store.
 var _ auth.Store = (*Store)(nil)

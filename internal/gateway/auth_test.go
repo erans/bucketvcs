@@ -41,6 +41,17 @@ func (f *fakeStore) GetRepoFlags(ctx context.Context, t, r string) (auth.RepoFla
 func (f *fakeStore) TouchTokenUsage(ctx context.Context, id string) error { return nil }
 func (f *fakeStore) Close() error                                         { return nil }
 
+// SSH key stubs — not exercised by auth middleware tests.
+func (f *fakeStore) AddSSHKey(ctx context.Context, k auth.SSHKey) error { return nil }
+func (f *fakeStore) ListSSHKeysForUser(ctx context.Context, userID string) ([]auth.SSHKey, error) {
+	return nil, nil
+}
+func (f *fakeStore) ListSSHKeysForRepo(ctx context.Context, tenant, repo string) ([]auth.SSHKey, error) {
+	return nil, nil
+}
+func (f *fakeStore) RevokeSSHKey(ctx context.Context, keyIDOrPrefix string) error { return nil }
+func (f *fakeStore) TouchSSHKeyUsage(ctx context.Context, keyID string) error     { return nil }
+
 func req(t *testing.T, method, path, query, basicUser, basicPass string) *http.Request {
 	t.Helper()
 	r := httptest.NewRequest(method, "http://x"+path+"?"+query, nil)

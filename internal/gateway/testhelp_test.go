@@ -66,3 +66,16 @@ func (p *permissiveAuthStore) GetRepoFlags(ctx context.Context, tenant, repo str
 }
 func (p *permissiveAuthStore) TouchTokenUsage(ctx context.Context, _ string) error { return nil }
 func (p *permissiveAuthStore) Close() error                                        { return nil }
+
+// SSH key stubs — permissiveAuthStore is used for protocol tests, not key mgmt.
+func (p *permissiveAuthStore) AddSSHKey(ctx context.Context, k auth.SSHKey) error { return nil }
+func (p *permissiveAuthStore) ListSSHKeysForUser(ctx context.Context, userID string) ([]auth.SSHKey, error) {
+	return nil, nil
+}
+func (p *permissiveAuthStore) ListSSHKeysForRepo(ctx context.Context, tenant, repo string) ([]auth.SSHKey, error) {
+	return nil, nil
+}
+func (p *permissiveAuthStore) RevokeSSHKey(ctx context.Context, keyIDOrPrefix string) error {
+	return nil
+}
+func (p *permissiveAuthStore) TouchSSHKeyUsage(ctx context.Context, keyID string) error { return nil }

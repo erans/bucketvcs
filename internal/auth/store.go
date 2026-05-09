@@ -38,6 +38,29 @@ type Store interface {
 	// error; implementations may no-op silently.
 	TouchTokenUsage(ctx context.Context, tokenID string) error
 
+	// AddSSHKey persists an ssh_keys row. The caller computes ID, Fingerprint,
+	// PublicKey, KeyType, Label, and either UserID (user key) or
+	// ScopeTenant+ScopeRepo+ScopePerm (deploy key). Returns
+	// ErrDuplicateFingerprint if Fingerprint already exists.
+	AddSSHKey(ctx context.Context, k SSHKey) error
+
+	// ListSSHKeysForUser returns all keys belonging to userID, including
+	// revoked. Returns nil slice (not error) if user has no keys.
+	ListSSHKeysForUser(ctx context.Context, userID string) ([]SSHKey, error)
+
+	// ListSSHKeysForRepo returns all deploy keys bound to (tenant, repo),
+	// including revoked. Returns nil slice if repo has none.
+	ListSSHKeysForRepo(ctx context.Context, tenant, repo string) ([]SSHKey, error)
+
+	// RevokeSSHKey sets revoked_at to now. keyIDOrPrefix may be the full ID
+	// or any unique prefix. Returns ErrNoSuchKey if no match, or ErrConflict
+	// if the prefix matches multiple rows.
+	RevokeSSHKey(ctx context.Context, keyIDOrPrefix string) error
+
+	// TouchSSHKeyUsage updates last_used_at. Best-effort: missing keyID is
+	// not an error.
+	TouchSSHKeyUsage(ctx context.Context, keyID string) error
+
 	// Close releases backing resources (DB connections etc).
 	Close() error
 }
