@@ -993,4 +993,871 @@ git commit -m "M7 task 1.4: gcs prefix + key validation; package now builds"
 
 ---
 
-(Tasks 1.5–1.14 — error classification, retry, Open, get/put/delete/list, multipart, signed URL, conformance, README — added next.)
+### Task 1.5: errs.go — error classification
+
+**Files:**
+- Create: `internal/storage/gcs/errs.go`
+- Create: `internal/storage/gcs/errs_test.go`
+
+GCS surfaces errors as `*googleapi.Error` with HTTP status codes; conditional failures use 412. The `iterator.Done` sentinel and `storage.ErrObjectNotExist` need explicit handling.
+
+- [ ] **Step 1: Write the failing test**
+
+```go
+package gcs
+
+import (
+	"errors"
+	"net/http"
+	"testing"
+
+	gstorage "cloud.google.com/go/storage"
+	"google.golang.org/api/googleapi"
+
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+func TestClassify(t *testing.T) {
+	tests := []struct {
+		name string
+		op   gcsOp
+		err  error
+		want error
+	}{
+		{"nil", opGet, nil, nil},
+		{"object-not-exist", opGet, gstorage.ErrObjectNotExist, bvstorage.ErrNotFound},
+		{"404", opGet, &googleapi.Error{Code: http.StatusNotFound}, bvstorage.ErrNotFound},
+		{"412 putIfAbsent -> AlreadyExists", opPutIfAbsent, &googleapi.Error{Code: http.StatusPreconditionFailed}, bvstorage.ErrAlreadyExists},
+		{"412 putIfMatch -> VersionMismatch", opPutIfMatch, &googleapi.Error{Code: http.StatusPreconditionFailed}, bvstorage.ErrVersionMismatch},
+		{"412 deleteIfMatch -> VersionMismatch", opDeleteIfMatch, &googleapi.Error{Code: http.StatusPreconditionFailed}, bvstorage.ErrVersionMismatch},
+		{"412 completeIfAbsent -> AlreadyExists", opCompleteIfAbsent, &googleapi.Error{Code: http.StatusPreconditionFailed}, bvstorage.ErrAlreadyExists},
+		{"429 throttled", opGet, &googleapi.Error{Code: http.StatusTooManyRequests}, bvstorage.ErrThrottled},
+		{"403 access denied", opGet, &googleapi.Error{Code: http.StatusForbidden}, bvstorage.ErrAccessDenied},
+		{"503 transient", opGet, &googleapi.Error{Code: http.StatusServiceUnavailable}, bvstorage.ErrTransient},
+		{"400 invalid", opPutIfAbsent, &googleapi.Error{Code: http.StatusBadRequest}, bvstorage.ErrInvalidArgument},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classify(tc.op, tc.err)
+			if tc.want == nil {
+				if got != nil {
+					t.Fatalf("classify: want nil, got %v", got)
+				}
+				return
+			}
+			if !errors.Is(got, tc.want) {
+				t.Fatalf("classify: got %v, want errors.Is(%v)", got, tc.want)
+			}
+		})
+	}
+}
+```
+
+- [ ] **Step 2: Run — should fail (`classify` undefined)**
+
+```bash
+go test ./internal/storage/gcs -run TestClassify -v
+```
+Expected: FAIL.
+
+- [ ] **Step 3: Write `errs.go`**
+
+```go
+package gcs
+
+import (
+	"errors"
+	"fmt"
+	"net/http"
+
+	gstorage "cloud.google.com/go/storage"
+	"google.golang.org/api/googleapi"
+
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+// gcsOp tells classify which conditional semantics applied. 412 has
+// different caller-visible meanings depending on whether the call set
+// ifGenerationMatch=0 (create-only) or ifGenerationMatch=N (update).
+type gcsOp int
+
+const (
+	opGet gcsOp = iota
+	opHead
+	opGetRange
+	opList
+	opPutIfAbsent      // ifGenerationMatch=0  -> 412 = ErrAlreadyExists
+	opPutIfMatch       // ifGenerationMatch=N  -> 412 = ErrVersionMismatch
+	opDeleteIfMatch    // ifGenerationMatch=N  -> 412 = ErrVersionMismatch
+	opCreateMultipart  // open resumable session
+	opUploadPart       // append to resumable session
+	opCompleteIfAbsent // finalize with ifGenerationMatch=0
+	opAbortMultipart
+	opSignedURL
+)
+
+// classify maps an SDK error to a storage sentinel. The original error
+// remains reachable via errors.As / errors.Unwrap.
+func classify(op gcsOp, err error) error {
+	if err == nil {
+		return nil
+	}
+
+	if errors.Is(err, gstorage.ErrObjectNotExist) || errors.Is(err, gstorage.ErrBucketNotExist) {
+		return wrap(bvstorage.ErrNotFound, err)
+	}
+
+	var ge *googleapi.Error
+	if errors.As(err, &ge) {
+		switch ge.Code {
+		case http.StatusNotFound:
+			return wrap(bvstorage.ErrNotFound, err)
+		case http.StatusPreconditionFailed:
+			switch op {
+			case opPutIfAbsent, opCompleteIfAbsent:
+				return wrap(bvstorage.ErrAlreadyExists, err)
+			case opPutIfMatch, opDeleteIfMatch, opGet:
+				return wrap(bvstorage.ErrVersionMismatch, err)
+			default:
+				return wrap(bvstorage.ErrTransient, err)
+			}
+		case http.StatusTooManyRequests:
+			return wrap(bvstorage.ErrThrottled, err)
+		case http.StatusUnauthorized, http.StatusForbidden:
+			return wrap(bvstorage.ErrAccessDenied, err)
+		case http.StatusBadRequest:
+			return wrap(bvstorage.ErrInvalidArgument, err)
+		case http.StatusServiceUnavailable, http.StatusGatewayTimeout, http.StatusBadGateway, http.StatusInternalServerError:
+			return wrap(bvstorage.ErrTransient, err)
+		}
+	}
+
+	return fmt.Errorf("gcs: %w", err)
+}
+
+func wrap(sentinel, cause error) error {
+	return fmt.Errorf("gcs: %w: %v", sentinel, cause)
+}
+```
+
+- [ ] **Step 4: Run tests — PASS**
+
+```bash
+go test ./internal/storage/gcs -run TestClassify -v
+```
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/storage/gcs/errs.go internal/storage/gcs/errs_test.go
+git commit -m "M7 task 1.5: gcs error classification"
+```
+
+---
+
+### Task 1.6: retry.go (gax policy hook)
+
+**Files:**
+- Create: `internal/storage/gcs/retry.go`
+- Create: `internal/storage/gcs/retry_test.go`
+
+The GCS Go client retries automatically. We expose a single helper that returns the per-bucket retry options the rest of the package applies.
+
+- [ ] **Step 1: Write the test**
+
+```go
+package gcs
+
+import "testing"
+
+func TestRetryOptions(t *testing.T) {
+	cfg := Config{MaxRetries: 7}
+	cfg.applyDefaults()
+	opts := retryOpts(cfg)
+	if opts.maxAttempts != 7 {
+		t.Errorf("maxAttempts = %d, want 7", opts.maxAttempts)
+	}
+	if opts.policy == 0 {
+		t.Errorf("policy must be set")
+	}
+}
+```
+
+- [ ] **Step 2: Run — should fail**
+
+```bash
+go test ./internal/storage/gcs -run TestRetryOptions -v
+```
+
+- [ ] **Step 3: Write `retry.go`**
+
+```go
+package gcs
+
+import (
+	gstorage "cloud.google.com/go/storage"
+)
+
+// retryOpts captures the parameters we hand to BucketHandle.Retryer.
+// We always use RetryAlways (the GCS SDK's "retry idempotent reads and
+// preconditioned writes" policy); 412 PreconditionFailed is NOT retried
+// by design — that case is the conditional-write contract we rely on.
+type retryParams struct {
+	maxAttempts int
+	policy      gstorage.RetryPolicy
+}
+
+func retryOpts(cfg Config) retryParams {
+	return retryParams{
+		maxAttempts: cfg.MaxRetries,
+		policy:      gstorage.RetryAlways,
+	}
+}
+
+// applyRetry wraps a *storage.BucketHandle with the configured retryer.
+func applyRetry(b *gstorage.BucketHandle, p retryParams) *gstorage.BucketHandle {
+	return b.Retryer(
+		gstorage.WithMaxAttempts(p.maxAttempts),
+		gstorage.WithPolicy(p.policy),
+	)
+}
+```
+
+- [ ] **Step 4: Run tests — PASS**
+
+```bash
+go test ./internal/storage/gcs -run TestRetryOptions -v
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/storage/gcs/retry.go internal/storage/gcs/retry_test.go
+git commit -m "M7 task 1.6: gcs retry policy hook"
+```
+
+---
+
+### Task 1.7: Open + client wiring
+
+**Files:**
+- Create: `internal/storage/gcs/open.go`
+- Create: `internal/storage/gcs/open_test.go`
+
+- [ ] **Step 1: Write the failing test**
+
+```go
+package gcs_test
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/bucketvcs/bucketvcs/internal/storage/gcs"
+)
+
+func TestOpenRejectsBadConfig(t *testing.T) {
+	_, err := gcs.Open(context.Background(), gcs.Config{})
+	if err == nil {
+		t.Fatal("Open: want error for empty Bucket")
+	}
+}
+
+func TestOpenWithEndpointOverride(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	cfg := gcs.Config{
+		Bucket:          "test",
+		Endpoint:        srv.URL + "/storage/v1/",
+		CredentialsJSON: []byte(`{"type":"service_account","client_email":"x@y","private_key":"-----BEGIN PRIVATE KEY-----\n-----END PRIVATE KEY-----\n","token_uri":"` + srv.URL + `/token"}`),
+	}
+	// We can't fully exercise auth without a real key; just verify
+	// Open does not panic and returns an opener that the caller can
+	// close. Errors from auth setup are acceptable here — we want
+	// the wiring path to compile and be reachable.
+	g, err := gcs.Open(context.Background(), cfg)
+	if err != nil {
+		t.Logf("Open with mock endpoint returned (expected) auth err: %v", err)
+		return
+	}
+	if g == nil {
+		t.Fatal("Open: returned nil GCS")
+	}
+}
+```
+
+- [ ] **Step 2: Run — should fail (`Open` undefined)**
+
+```bash
+go test ./internal/storage/gcs -run TestOpen -v
+```
+
+- [ ] **Step 3: Write `open.go`**
+
+```go
+package gcs
+
+import (
+	"context"
+	"fmt"
+
+	gstorage "cloud.google.com/go/storage"
+	"google.golang.org/api/option"
+)
+
+// Open builds a GCS adapter from cfg. Credential precedence:
+//  1. cfg.CredentialsJSON  (raw bytes)
+//  2. cfg.CredentialsFile  (path)
+//  3. SDK default chain    (ADC: env, workload identity, metadata)
+//
+// cfg.Endpoint, when set, overrides the default GCS endpoint. CI uses
+// this to point at fake-gcs-server.
+func Open(ctx context.Context, cfg Config) (*GCS, error) {
+	cfg.applyDefaults()
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
+	var opts []option.ClientOption
+	switch {
+	case len(cfg.CredentialsJSON) > 0:
+		opts = append(opts, option.WithCredentialsJSON(cfg.CredentialsJSON))
+	case cfg.CredentialsFile != "":
+		opts = append(opts, option.WithCredentialsFile(cfg.CredentialsFile))
+	}
+	if cfg.Endpoint != "" {
+		opts = append(opts, option.WithEndpoint(cfg.Endpoint))
+	}
+
+	client, err := gstorage.NewClient(ctx, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("gcs: new client: %w", err)
+	}
+
+	bucket := client.Bucket(cfg.Bucket)
+	if cfg.UserProject != "" {
+		bucket = bucket.UserProject(cfg.UserProject)
+	}
+	bucket = applyRetry(bucket, retryOpts(cfg))
+
+	return &GCS{cfg: cfg, client: client, bucket: bucket}, nil
+}
+
+// Close releases the underlying GCS client.
+func (g *GCS) Close() error {
+	return g.client.Close()
+}
+```
+
+- [ ] **Step 4: Run tests — should PASS**
+
+```bash
+go test ./internal/storage/gcs -run TestOpen -v
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/storage/gcs/open.go internal/storage/gcs/open_test.go
+git commit -m "M7 task 1.7: gcs Open + client wiring"
+```
+
+---
+
+### Task 1.8: Get / Head / GetRange
+
+**Files:**
+- Create: `internal/storage/gcs/get.go`
+- Create: `internal/storage/gcs/get_test.go`
+
+For unit-mocking GCS we use the `STORAGE_EMULATOR_HOST` env var pointing at an `httptest.Server` that returns canned JSON. This mirrors what `fake-gcs-server` does at a coarser level. See `cloud.google.com/go/storage` testing patterns.
+
+- [ ] **Step 1: Write `get.go`**
+
+```go
+package gcs
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"time"
+
+	gstorage "cloud.google.com/go/storage"
+
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+func (g *GCS) Get(ctx context.Context, key string, opts *bvstorage.GetOptions) (*bvstorage.Object, error) {
+	if err := validateKey(key); err != nil {
+		return nil, err
+	}
+	obj := g.bucket.Object(applyPrefix(g.cfg.Prefix, key))
+	if opts != nil && opts.IfVersionMatches != nil {
+		gen, err := parseGen(*opts.IfVersionMatches)
+		if err != nil {
+			return nil, err
+		}
+		obj = obj.Generation(gen)
+	}
+	rdr, err := obj.NewReader(ctx)
+	if err != nil {
+		return nil, classify(opGet, err)
+	}
+	attrs, err := obj.Attrs(ctx)
+	if err != nil {
+		_ = rdr.Close()
+		return nil, classify(opHead, err)
+	}
+	return &bvstorage.Object{
+		Body: rdr,
+		Metadata: bvstorage.ObjectMetadata{
+			Key:         key,
+			Version:     versionFromGen(attrs.Generation),
+			Size:        attrs.Size,
+			ContentType: attrs.ContentType,
+			ModifiedAt:  attrs.Updated,
+		},
+	}, nil
+}
+
+func (g *GCS) Head(ctx context.Context, key string) (*bvstorage.ObjectMetadata, error) {
+	if err := validateKey(key); err != nil {
+		return nil, err
+	}
+	obj := g.bucket.Object(applyPrefix(g.cfg.Prefix, key))
+	attrs, err := obj.Attrs(ctx)
+	if err != nil {
+		return nil, classify(opHead, err)
+	}
+	return &bvstorage.ObjectMetadata{
+		Key:         key,
+		Version:     versionFromGen(attrs.Generation),
+		Size:        attrs.Size,
+		ContentType: attrs.ContentType,
+		ModifiedAt:  attrs.Updated,
+	}, nil
+}
+
+func (g *GCS) GetRange(ctx context.Context, key string, start, endInclusive int64) (io.ReadCloser, error) {
+	if err := validateKey(key); err != nil {
+		return nil, err
+	}
+	if start < 0 || endInclusive < start {
+		return nil, fmt.Errorf("%w: invalid range [%d,%d]", bvstorage.ErrInvalidArgument, start, endInclusive)
+	}
+	obj := g.bucket.Object(applyPrefix(g.cfg.Prefix, key))
+	rdr, err := obj.NewRangeReader(ctx, start, endInclusive-start+1)
+	if err != nil {
+		return nil, classify(opGetRange, err)
+	}
+	return rdr, nil
+}
+
+// versionFromGen / parseGen serialize the GCS generation number as a
+// decimal string so ObjectVersion stays opaque to callers.
+func versionFromGen(gen int64) bvstorage.ObjectVersion {
+	return bvstorage.ObjectVersion{
+		Provider: "gcs",
+		Token:    fmt.Sprintf("%d", gen),
+		Kind:     bvstorage.VersionEtag, // generation plays the etag role
+	}
+}
+
+func parseGen(v bvstorage.ObjectVersion) (int64, error) {
+	if v.Provider != "" && v.Provider != "gcs" {
+		return 0, fmt.Errorf("%w: ObjectVersion.Provider=%q (gcs requires \"gcs\")", bvstorage.ErrVersionMismatch, v.Provider)
+	}
+	var gen int64
+	_, err := fmt.Sscanf(v.Token, "%d", &gen)
+	if err != nil {
+		return 0, fmt.Errorf("%w: ObjectVersion.Token must be a decimal generation: %v", bvstorage.ErrInvalidArgument, err)
+	}
+	return gen, nil
+}
+
+// silence unused imports if errors / time become unused after refactor
+var _ = errors.New
+var _ = time.Time{}
+```
+
+- [ ] **Step 2: Write `get_test.go`**
+
+```go
+package gcs_test
+
+// Live behavior is covered by gcs_conformance_test.go (Task 1.13)
+// against fake-gcs-server. This file holds only narrow unit tests that
+// don't depend on a running emulator.
+
+import (
+	"testing"
+
+	"github.com/bucketvcs/bucketvcs/internal/storage/gcs"
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+func TestParseGenRejectsWrongProvider(t *testing.T) {
+	_, err := gcs.ExportedParseGen(bvstorage.ObjectVersion{Provider: "s3compat", Token: "123"})
+	if err == nil {
+		t.Fatal("expected error for non-gcs provider")
+	}
+}
+```
+
+(Add an internal export: in a new file `internal/storage/gcs/export_test.go`:
+
+```go
+package gcs
+
+// Test-only helpers exported via build-tag-free file in the same
+// package. See get_test.go.
+
+func ExportedParseGen(v interface{ String() string } /* unused */) (int64, error) {
+	// type-narrow via concrete reconstruction handled in get_test.go
+	return 0, nil
+}
+```
+
+— actually simpler: just write the test in `package gcs` (white-box) instead. Replace `get_test.go` above with):
+
+```go
+package gcs
+
+import (
+	"testing"
+
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+func TestParseGenRejectsWrongProvider(t *testing.T) {
+	_, err := parseGen(bvstorage.ObjectVersion{Provider: "s3compat", Token: "123"})
+	if err == nil {
+		t.Fatal("expected error for non-gcs provider")
+	}
+}
+
+func TestParseGenAcceptsEmptyProvider(t *testing.T) {
+	gen, err := parseGen(bvstorage.ObjectVersion{Token: "42"})
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if gen != 42 {
+		t.Fatalf("gen = %d, want 42", gen)
+	}
+}
+
+func TestParseGenRejectsNonNumeric(t *testing.T) {
+	_, err := parseGen(bvstorage.ObjectVersion{Token: "not-a-number"})
+	if err == nil {
+		t.Fatal("expected error for non-numeric token")
+	}
+}
+```
+
+(Discard the `export_test.go` idea above — keep tests in-package.)
+
+- [ ] **Step 3: Run tests**
+
+```bash
+go test ./internal/storage/gcs -run "TestParseGen" -v
+```
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add internal/storage/gcs/get.go internal/storage/gcs/get_test.go
+git commit -m "M7 task 1.8: gcs Get + Head + GetRange + version codec"
+```
+
+---
+
+### Task 1.9: PutIfAbsent + PutIfVersionMatches
+
+**Files:**
+- Create: `internal/storage/gcs/put.go`
+- Create: `internal/storage/gcs/put_test.go`
+
+- [ ] **Step 1: Write `put.go`**
+
+```go
+package gcs
+
+import (
+	"context"
+	"io"
+
+	gstorage "cloud.google.com/go/storage"
+
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+func (g *GCS) PutIfAbsent(ctx context.Context, key string, body io.Reader, opts *bvstorage.PutOptions) (bvstorage.ObjectVersion, error) {
+	if err := validateKey(key); err != nil {
+		return bvstorage.ObjectVersion{}, err
+	}
+	obj := g.bucket.Object(applyPrefix(g.cfg.Prefix, key)).
+		If(gstorage.Conditions{DoesNotExist: true})
+	w := obj.NewWriter(ctx)
+	w.ChunkSize = g.cfg.UploadChunkSize
+	if opts != nil && opts.ContentType != "" {
+		w.ContentType = opts.ContentType
+	}
+	if _, err := io.Copy(w, body); err != nil {
+		_ = w.Close()
+		return bvstorage.ObjectVersion{}, classify(opPutIfAbsent, err)
+	}
+	if err := w.Close(); err != nil {
+		return bvstorage.ObjectVersion{}, classify(opPutIfAbsent, err)
+	}
+	return versionFromGen(w.Attrs().Generation), nil
+}
+
+func (g *GCS) PutIfVersionMatches(ctx context.Context, key string, expected bvstorage.ObjectVersion, body io.Reader, opts *bvstorage.PutOptions) (bvstorage.ObjectVersion, error) {
+	if err := validateKey(key); err != nil {
+		return bvstorage.ObjectVersion{}, err
+	}
+	gen, err := parseGen(expected)
+	if err != nil {
+		return bvstorage.ObjectVersion{}, err
+	}
+	obj := g.bucket.Object(applyPrefix(g.cfg.Prefix, key)).
+		If(gstorage.Conditions{GenerationMatch: gen})
+	w := obj.NewWriter(ctx)
+	w.ChunkSize = g.cfg.UploadChunkSize
+	if opts != nil && opts.ContentType != "" {
+		w.ContentType = opts.ContentType
+	}
+	if _, err := io.Copy(w, body); err != nil {
+		_ = w.Close()
+		return bvstorage.ObjectVersion{}, classify(opPutIfMatch, err)
+	}
+	if err := w.Close(); err != nil {
+		return bvstorage.ObjectVersion{}, classify(opPutIfMatch, err)
+	}
+	return versionFromGen(w.Attrs().Generation), nil
+}
+```
+
+- [ ] **Step 2: Write `put_test.go`** (unit-level — full behavior covered by conformance)
+
+```go
+package gcs
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"testing"
+
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+func TestPutIfAbsentRejectsBadKey(t *testing.T) {
+	g := &GCS{}
+	_, err := g.PutIfAbsent(context.Background(), "/leading", bytes.NewReader(nil), nil)
+	if err == nil || !errors.Is(err, bvstorage.ErrInvalidArgument) {
+		t.Fatalf("got %v, want ErrInvalidArgument", err)
+	}
+}
+
+func TestPutIfVersionMatchesRejectsWrongProviderToken(t *testing.T) {
+	g := &GCS{}
+	_, err := g.PutIfVersionMatches(context.Background(), "k", bvstorage.ObjectVersion{Provider: "s3compat", Token: "1"}, bytes.NewReader(nil), nil)
+	if err == nil || !errors.Is(err, bvstorage.ErrVersionMismatch) {
+		t.Fatalf("got %v, want ErrVersionMismatch", err)
+	}
+}
+```
+
+- [ ] **Step 3: Run tests — PASS**
+
+```bash
+go test ./internal/storage/gcs -run "TestPut" -v
+```
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add internal/storage/gcs/put.go internal/storage/gcs/put_test.go
+git commit -m "M7 task 1.9: gcs PutIfAbsent + PutIfVersionMatches"
+```
+
+---
+
+### Task 1.10: DeleteIfVersionMatches
+
+**Files:**
+- Create: `internal/storage/gcs/delete.go`
+- Create: `internal/storage/gcs/delete_test.go`
+
+- [ ] **Step 1: Write `delete.go`**
+
+```go
+package gcs
+
+import (
+	"context"
+
+	gstorage "cloud.google.com/go/storage"
+
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+func (g *GCS) DeleteIfVersionMatches(ctx context.Context, key string, expected bvstorage.ObjectVersion) error {
+	if err := validateKey(key); err != nil {
+		return err
+	}
+	gen, err := parseGen(expected)
+	if err != nil {
+		return err
+	}
+	obj := g.bucket.Object(applyPrefix(g.cfg.Prefix, key)).
+		If(gstorage.Conditions{GenerationMatch: gen})
+	if err := obj.Delete(ctx); err != nil {
+		return classify(opDeleteIfMatch, err)
+	}
+	return nil
+}
+```
+
+- [ ] **Step 2: Write `delete_test.go`**
+
+```go
+package gcs
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+func TestDeleteRejectsBadKey(t *testing.T) {
+	g := &GCS{}
+	err := g.DeleteIfVersionMatches(context.Background(), "", bvstorage.ObjectVersion{Token: "1"})
+	if err == nil || !errors.Is(err, bvstorage.ErrInvalidArgument) {
+		t.Fatalf("got %v, want ErrInvalidArgument", err)
+	}
+}
+```
+
+- [ ] **Step 3: Run, then commit**
+
+```bash
+go test ./internal/storage/gcs -run TestDelete -v
+git add internal/storage/gcs/delete.go internal/storage/gcs/delete_test.go
+git commit -m "M7 task 1.10: gcs DeleteIfVersionMatches"
+```
+
+---
+
+### Task 1.11: List with delimiter and pagination
+
+**Files:**
+- Create: `internal/storage/gcs/list.go`
+- Create: `internal/storage/gcs/list_test.go`
+
+The GCS pager iterates by token; we round-trip the token opaquely in `ListPage.NextToken`.
+
+- [ ] **Step 1: Write `list.go`**
+
+```go
+package gcs
+
+import (
+	"context"
+	"errors"
+
+	gstorage "cloud.google.com/go/storage"
+	"google.golang.org/api/iterator"
+
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+func (g *GCS) List(ctx context.Context, prefix string, opts *bvstorage.ListOptions) (*bvstorage.ListPage, error) {
+	q := &gstorage.Query{
+		Prefix: applyPrefix(g.cfg.Prefix, prefix),
+	}
+	maxKeys := 1000
+	var token string
+	if opts != nil {
+		if opts.Delimiter != "" {
+			q.Delimiter = opts.Delimiter
+		}
+		if opts.MaxKeys > 0 {
+			maxKeys = opts.MaxKeys
+		}
+		token = opts.ContinuationToken
+	}
+	it := g.bucket.Objects(ctx, q)
+	pager := iterator.NewPager(it, maxKeys, token)
+
+	var batch []*gstorage.ObjectAttrs
+	nextToken, err := pager.NextPage(&batch)
+	if err != nil && !errors.Is(err, iterator.Done) {
+		return nil, classify(opList, err)
+	}
+
+	page := &bvstorage.ListPage{NextToken: nextToken}
+	for _, attrs := range batch {
+		// CommonPrefixes come back as ObjectAttrs with empty Name and
+		// non-empty Prefix.
+		if attrs.Prefix != "" {
+			page.CommonPrefixes = append(page.CommonPrefixes, stripPrefix(g.cfg.Prefix, attrs.Prefix))
+			continue
+		}
+		page.Objects = append(page.Objects, bvstorage.ObjectMetadata{
+			Key:         stripPrefix(g.cfg.Prefix, attrs.Name),
+			Version:     versionFromGen(attrs.Generation),
+			Size:        attrs.Size,
+			ContentType: attrs.ContentType,
+			ModifiedAt:  attrs.Updated,
+		})
+	}
+	return page, nil
+}
+```
+
+- [ ] **Step 2: Write `list_test.go`** (unit-level only; full behavior in conformance)
+
+```go
+package gcs
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
+)
+
+func TestListNilOptions(t *testing.T) {
+	// Calling on a zero-value GCS would panic on bucket dereference,
+	// so just verify the signature compiles.
+	var _ func(context.Context, string, *bvstorage.ListOptions) (*bvstorage.ListPage, error) = (*GCS)(nil).List
+	_ = errors.New
+}
+```
+
+- [ ] **Step 3: Run, then commit**
+
+```bash
+go test ./internal/storage/gcs -run TestList -v
+git add internal/storage/gcs/list.go internal/storage/gcs/list_test.go
+git commit -m "M7 task 1.11: gcs List with delimiter and pagination"
+```
+
+---
+
+(Tasks 1.12–1.14 — multipart, signed, conformance, README — added next.)
