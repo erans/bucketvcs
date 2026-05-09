@@ -147,7 +147,7 @@ Raw ETag string with quotes stripped (e.g. `"0x8DBF1234ABCD"`). Round-tripped op
 
 ### Block-blob choice
 
-We use block blobs (not append/page blobs); they are the only blob type that supports `If-None-Match: *` on commit and the staged-block / commit-list pattern that maps onto our `MultipartUpload` shape. Block ID layout is `base64(guid + ":" + zeroPad(partNumber))` — Azure requires fixed-length block IDs within a single commit, and the per-upload GUID prevents collisions across concurrent uploads to the same target key.
+We use block blobs (not append blobs or page blobs). Block blobs are the blob type whose staged-block / commit-list flow maps onto our `MultipartUpload` shape: `StageBlock` per part, `CommitBlockList` as the all-or-nothing finalize, with `If-None-Match: *` on the commit giving us the §29 #8 invariant. Append blobs are append-only with no commit step; page blobs target random-access workloads (VHDs) and assume per-page updates — neither fits a content-addressed pack-file workload. Block ID layout is `base64(guid + ":" + zeroPad(partNumber))` — Azure requires fixed-length block IDs within a single commit, and the per-upload GUID prevents collisions across concurrent uploads to the same target key.
 
 ### Credentials
 
@@ -265,9 +265,9 @@ The `emulators` job is a **required** check on PRs. The `real-cloud` job runs on
 
 ### Documented conformance gaps (skips, not bypasses)
 
-- `fake-gcs-server` does not implement signed URLs — `§29 #10 SignedURL` is skipped against the emulator and tested against real GCS only. The skip is gated by a runtime capability probe, not by package name.
-- Azurite supports SAS only with the well-known dev account key — same skip mechanism if the live config has no key.
-- Both skips emit a `t.Logf` line so they are visible in the run output.
+- `fake-gcs-server` does not implement signed URLs. The conformance suite probes `SignedGetURL` once during setup; if the call returns `ErrNotSupported` (or `Capabilities().SignedURLs == false`), `§29 #10 SignedURL` is skipped with a `t.Logf`. The skip is therefore data-driven — real GCS exercises the full case, fake-gcs is automatically skipped.
+- Azurite supports SAS, but only when initialized with an account key (the default Azurite container ships with a well-known dev key). If the live config has no `AccountKey` and no `ConnectionString` carrying one, the same skip path triggers.
+- Both skips emit a single `t.Logf` line so they are visible in CI output and cannot be silently lost.
 
 ## AWS S3 promotion to canonical
 
