@@ -1492,44 +1492,6 @@ var _ = time.Time{}
 - [ ] **Step 2: Write `get_test.go`**
 
 ```go
-package gcs_test
-
-// Live behavior is covered by gcs_conformance_test.go (Task 1.13)
-// against fake-gcs-server. This file holds only narrow unit tests that
-// don't depend on a running emulator.
-
-import (
-	"testing"
-
-	"github.com/bucketvcs/bucketvcs/internal/storage/gcs"
-	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
-)
-
-func TestParseGenRejectsWrongProvider(t *testing.T) {
-	_, err := gcs.ExportedParseGen(bvstorage.ObjectVersion{Provider: "s3compat", Token: "123"})
-	if err == nil {
-		t.Fatal("expected error for non-gcs provider")
-	}
-}
-```
-
-(Add an internal export: in a new file `internal/storage/gcs/export_test.go`:
-
-```go
-package gcs
-
-// Test-only helpers exported via build-tag-free file in the same
-// package. See get_test.go.
-
-func ExportedParseGen(v interface{ String() string } /* unused */) (int64, error) {
-	// type-narrow via concrete reconstruction handled in get_test.go
-	return 0, nil
-}
-```
-
-— actually simpler: just write the test in `package gcs` (white-box) instead. Replace `get_test.go` above with):
-
-```go
 package gcs
 
 import (
@@ -1562,8 +1524,6 @@ func TestParseGenRejectsNonNumeric(t *testing.T) {
 	}
 }
 ```
-
-(Discard the `export_test.go` idea above — keep tests in-package.)
 
 - [ ] **Step 3: Run tests**
 
@@ -3227,6 +3187,7 @@ git commit -m "M7 task 2.8: azureblob Get + Head + GetRange + ETag codec"
 package azureblob
 
 import (
+	"bytes"
 	"context"
 	"io"
 
@@ -3249,7 +3210,6 @@ func (a *AzureBlob) PutIfAbsent(ctx context.Context, key string, body io.Reader,
 		return bvstorage.ObjectVersion{}, err
 	}
 	bb := a.container.NewBlockBlobClient(applyPrefix(a.cfg.Prefix, key))
-
 	upOpts := &blockblob.UploadOptions{
 		AccessConditions: &blob.AccessConditions{
 			ModifiedAccessConditions: &blob.ModifiedAccessConditions{IfNoneMatch: to.Ptr(eTagAny)},
@@ -3258,8 +3218,7 @@ func (a *AzureBlob) PutIfAbsent(ctx context.Context, key string, body io.Reader,
 	if opts != nil && opts.ContentType != "" {
 		upOpts.HTTPHeaders = &blob.HTTPHeaders{BlobContentType: to.Ptr(opts.ContentType)}
 	}
-
-	resp, err := bb.Upload(ctx, streamSeeker(buf), upOpts)
+	resp, err := bb.Upload(ctx, &readSeekCloser{Reader: bytes.NewReader(buf)}, upOpts)
 	if err != nil {
 		return bvstorage.ObjectVersion{}, classify(opPutIfAbsent, err)
 	}
@@ -3278,7 +3237,6 @@ func (a *AzureBlob) PutIfVersionMatches(ctx context.Context, key string, expecte
 		return bvstorage.ObjectVersion{}, err
 	}
 	bb := a.container.NewBlockBlobClient(applyPrefix(a.cfg.Prefix, key))
-
 	etag := parseETag(expected)
 	upOpts := &blockblob.UploadOptions{
 		AccessConditions: &blob.AccessConditions{
@@ -3288,47 +3246,17 @@ func (a *AzureBlob) PutIfVersionMatches(ctx context.Context, key string, expecte
 	if opts != nil && opts.ContentType != "" {
 		upOpts.HTTPHeaders = &blob.HTTPHeaders{BlobContentType: to.Ptr(opts.ContentType)}
 	}
-
-	resp, err := bb.Upload(ctx, streamSeeker(buf), upOpts)
+	resp, err := bb.Upload(ctx, &readSeekCloser{Reader: bytes.NewReader(buf)}, upOpts)
 	if err != nil {
 		return bvstorage.ObjectVersion{}, classify(opPutIfMatch, err)
 	}
 	return versionFromETag(resp.ETag), nil
 }
 
-// streamSeeker wraps a byte slice in a ReadSeekCloser as Upload requires.
-func streamSeeker(b []byte) io.ReadSeekCloser {
-	return &nopCloser{r: bytesReadSeeker(b)}
-}
-
-type nopCloser struct{ r interface{ ReadSeeker } }
-
-func (n *nopCloser) Read(p []byte) (int, error)                   { return n.r.Read(p) }
-func (n *nopCloser) Seek(o int64, w int) (int64, error)           { return n.r.Seek(o, w) }
-func (n *nopCloser) Close() error                                 { return nil }
-
-// bytesReadSeeker is a minimal *bytes.Reader alias to avoid the import
-// cycle when keeping helpers local.
-func bytesReadSeeker(b []byte) interface{ ReadSeeker } {
-	return readSeeker{ReadSeeker: bytesNewReader(b)}
-}
-
-type readSeeker struct{ io.ReadSeeker }
-
-// — implementation note: replace the above stubs with the standard
-// `bytes.NewReader(buf)` returning a `*bytes.Reader` (which already
-// implements both `io.ReadSeeker` and `io.Closer` via a wrapper).
-// The helper above is only there to keep the file self-contained for
-// the plan reader; in the actual file just write:
-//
-//   func streamSeeker(b []byte) io.ReadSeekCloser {
-//       return &readSeekCloser{Reader: bytes.NewReader(b)}
-//   }
-//   type readSeekCloser struct{ *bytes.Reader }
-//   func (*readSeekCloser) Close() error { return nil }
+// readSeekCloser is also defined in multipart.go. Pick one location.
 ```
 
-Use the simpler form in the actual implementation (the comment block at the end shows it). Drop the `bytesReadSeeker` / `bytesNewReader` placeholders.
+(`readSeekCloser` is the small wrapper around `*bytes.Reader` that adds a no-op `Close`. It's defined in `multipart.go` — leave it there and reference it here. Both files compile in the same package.)
 
 - [ ] **Step 2: Write `put_test.go`**
 
@@ -3484,7 +3412,7 @@ func (a *AzureBlob) List(ctx context.Context, prefix string, opts *bvstorage.Lis
 		pager := a.container.NewListBlobsFlatPager(&container.ListBlobsFlatOptions{
 			Prefix:     to.Ptr(full),
 			MaxResults: &maxResults,
-			Marker:     marker(),
+			Marker:     markerPtr(marker),
 		})
 		if !pager.More() {
 			return page, nil
@@ -3509,7 +3437,7 @@ func (a *AzureBlob) List(ctx context.Context, prefix string, opts *bvstorage.Lis
 	pager := a.container.NewListBlobsHierarchyPager(delimiter, &container.ListBlobsHierarchyOptions{
 		Prefix:     to.Ptr(full),
 		MaxResults: &maxResults,
-		Marker:     marker(),
+		Marker:     markerPtr(marker),
 	})
 	if !pager.More() {
 		return page, nil
@@ -3534,8 +3462,7 @@ func (a *AzureBlob) List(ctx context.Context, prefix string, opts *bvstorage.Lis
 	return page, nil
 }
 
-// marker is a tiny helper because the Azure SDK takes *string for an
-// empty marker, not "" — they treat nil and "" differently.
+// markerPtr returns nil for empty input. Azure treats nil and "" differently.
 func markerPtr(s string) *string {
 	if s == "" {
 		return nil
@@ -3543,8 +3470,6 @@ func markerPtr(s string) *string {
 	return &s
 }
 ```
-
-(In the actual implementation, replace `marker()` calls with `markerPtr(marker)` — the placeholder above is to keep the snippet under the eye; the helper definition is at the bottom of the file.)
 
 - [ ] **Step 2: Write `list_test.go`** (unit-level only)
 
