@@ -23,6 +23,10 @@ type EngineRequest struct {
 
 	ProtocolVersion int
 
+	// AgentVersion is the gateway's advertised agent version string, used in
+	// capability advertisements (e.g. "agent=bucketvcs/0.0.0").
+	AgentVersion string
+
 	Store  storage.ObjectStore
 	Mirror *mirror.Manager
 }

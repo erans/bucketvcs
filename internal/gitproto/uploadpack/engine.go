@@ -28,15 +28,16 @@ type EngineRequest struct {
 	// passed by the client before exec.
 	ProtocolVersion int
 
+	// AgentVersion is the gateway's advertised agent version string, used in
+	// capability advertisements (e.g. "agent=bucketvcs/0.0.0").
+	AgentVersion string
+
 	Store  storage.ObjectStore
 	Mirror *mirror.Manager
 }
 
 // ErrNotImplemented is returned by stubs until later tasks port the M3 logic.
 var ErrNotImplemented = errors.New("uploadpack: not implemented")
-
-// Advertise writes the upload-pack ref/capability advertisement to req.Stdout.
-func Advertise(req *EngineRequest) error { return ErrNotImplemented }
 
 // Service runs the negotiation/pack-streaming loop reading req.Stdin
 // and writing to req.Stdout.
@@ -49,3 +50,4 @@ func Serve(req *EngineRequest) error {
 	}
 	return Service(req)
 }
+

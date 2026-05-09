@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/bucketvcs/bucketvcs/internal/gitproto/uploadpack"
 	"github.com/bucketvcs/bucketvcs/internal/pktline"
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
@@ -23,6 +24,41 @@ func (s *Server) handleInfoRefs(w http.ResponseWriter, r *http.Request, tenant, 
 		return
 	}
 
+	if service == "git-upload-pack" {
+		proto := 0
+		if wantsV2(r.Header.Get("Git-Protocol")) {
+			proto = 2
+		}
+		req := &uploadpack.EngineRequest{
+			Ctx:             r.Context(),
+			Tenant:          tenant,
+			Repo:            repoID,
+			Stdout:          w,
+			ProtocolVersion: proto,
+			Store:           s.store,
+			AgentVersion:    s.opts.Version,
+		}
+		// Set response headers before writing any body bytes. If Advertise
+		// returns an error we can still write an HTTP error response because
+		// Advertise only writes to req.Stdout (== w) on success.
+		//
+		// We must set the headers here, before Advertise, so that when
+		// Advertise writes its first byte the correct Content-Type is in
+		// place. ResponseWriter buffers headers until the first Write.
+		w.Header().Set("Content-Type", "application/x-git-upload-pack-advertisement")
+		w.Header().Set("Cache-Control", "no-cache")
+		if err := uploadpack.Advertise(req); err != nil {
+			if errors.Is(err, uploadpack.ErrRepoNotFound) {
+				http.Error(w, "repository not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, "internal storage error", http.StatusInternalServerError)
+			return
+		}
+		return
+	}
+
+	// git-receive-pack: open repo, read manifest, write v0 advertisement.
 	r2, err := repo.Open(r.Context(), s.store, tenant, repoID)
 	if err != nil {
 		if errors.Is(err, repoerrs.ErrRepoNotFound) {
@@ -47,79 +83,9 @@ func (s *Server) handleInfoRefs(w http.ResponseWriter, r *http.Request, tenant, 
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/x-"+service+"-advertisement")
+	w.Header().Set("Content-Type", "application/x-git-receive-pack-advertisement")
 	w.Header().Set("Cache-Control", "no-cache")
-
-	if service == "git-upload-pack" && wantsV2(r.Header.Get("Git-Protocol")) {
-		_ = v2proto.WriteV2Advertisement(w, service, s.opts.Version)
-		return
-	}
-
-	if service == "git-upload-pack" {
-		writeV0UploadPackAdvertisement(w, &body, s.opts.Version)
-		return
-	}
 	writeV0ReceivePackAdvertisement(w, &body, s.opts.Version)
-}
-
-// writeV0UploadPackAdvertisement writes the v0 "smart" upload-pack advertisement.
-// When body.DefaultBranch resolves to a known ref, HEAD is advertised first with
-// capabilities and a symref=HEAD:<target> attribute so v0 clients can determine
-// the remote default branch.
-func writeV0UploadPackAdvertisement(w http.ResponseWriter, body *manifest.Body, version string) {
-	pw := pktline.NewWriter(w)
-	_ = pw.WriteString("# service=git-upload-pack\n")
-	_ = pw.WriteFlush()
-
-	names := make([]string, 0, len(body.Refs))
-	for n := range body.Refs {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-
-	headOID, hasHead := "", false
-	if body.DefaultBranch != "" {
-		if oid, ok := body.Refs[body.DefaultBranch]; ok {
-			headOID, hasHead = oid, true
-		}
-	}
-
-	baseCaps := uploadPackV0Caps(version)
-	// symref=HEAD:<default> is informational; advertise it whenever the
-	// repo has a configured default branch, even if that branch is unborn
-	// (target ref absent). v0 clients use it to learn the remote default
-	// branch on clone/fetch.
-	capsWithSymref := baseCaps
-	if body.DefaultBranch != "" {
-		capsWithSymref = baseCaps + " symref=HEAD:" + body.DefaultBranch
-	}
-
-	if hasHead {
-		_ = pw.WriteString(headOID + " HEAD\x00" + capsWithSymref + "\n")
-		for _, n := range names {
-			_ = pw.WriteString(body.Refs[n] + " " + n + "\n")
-		}
-		_ = pw.WriteFlush()
-		return
-	}
-
-	if len(names) == 0 {
-		_ = pw.WriteString("0000000000000000000000000000000000000000 capabilities^{}\x00" + capsWithSymref + "\n")
-		_ = pw.WriteFlush()
-		return
-	}
-
-	first := true
-	for _, n := range names {
-		oid := body.Refs[n]
-		if first {
-			_ = pw.WriteString(oid + " " + n + "\x00" + capsWithSymref + "\n")
-			first = false
-			continue
-		}
-		_ = pw.WriteString(oid + " " + n + "\n")
-	}
-	_ = pw.WriteFlush()
 }
 
 // writeV0ReceivePackAdvertisement writes the v0 receive-pack advertisement.
@@ -154,18 +120,6 @@ func writeV0ReceivePackAdvertisement(w http.ResponseWriter, body *manifest.Body,
 		_ = pw.WriteString(oid + " " + n + "\n")
 	}
 	_ = pw.WriteFlush()
-}
-
-func uploadPackV0Caps(version string) string {
-	return strings.Join([]string{
-		"multi_ack_detailed",
-		"no-done",
-		"side-band-64k",
-		"thin-pack",
-		"ofs-delta",
-		"agent=" + v2proto.AgentName + "/" + version,
-		"object-format=sha1",
-	}, " ")
 }
 
 func receivePackV0Caps(version string) string {
