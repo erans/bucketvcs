@@ -14,7 +14,7 @@ type AzureBlob struct {
 	container *container.Client
 }
 
-// var _ bvstorage.ObjectStore = (*AzureBlob)(nil)
+var _ bvstorage.ObjectStore = (*AzureBlob)(nil)
 
 // Capabilities reports the Azure adapter capabilities. MultipartMinPartSize
 // reflects Azure's ~100 KiB practical block-blob minimum; MultipartMaxParts

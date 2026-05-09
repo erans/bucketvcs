@@ -18,6 +18,12 @@ import (
 	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
 )
 
+// stagedPart holds the metadata for a staged Azure block.
+type stagedPart struct {
+	blockID string
+	size    int64
+}
+
 // upload models a block-blob multipart upload. Each StageBlock gets a
 // fixed-length block ID that combines a per-upload GUID with a
 // zero-padded part number; the GUID prevents cross-upload collisions
@@ -29,7 +35,7 @@ type upload struct {
 	key    string
 
 	mu         sync.Mutex
-	parts      map[int]string // partNumber -> staged block ID
+	parts      map[int]stagedPart // partNumber -> staged part info
 	terminated bool
 }
 
@@ -50,7 +56,7 @@ func (a *AzureBlob) CreateMultipart(ctx context.Context, key string, _ *bvstorag
 		parent: a,
 		id:     id,
 		key:    key,
-		parts:  make(map[int]string),
+		parts:  make(map[int]stagedPart),
 	}, nil
 }
 
@@ -81,11 +87,12 @@ func (u *upload) UploadPart(ctx context.Context, partNumber int, body io.Reader)
 	if u.terminated {
 		return bvstorage.MultipartPart{}, fmt.Errorf("%w: upload %s terminated during stage", bvstorage.ErrInvalidArgument, u.id)
 	}
-	u.parts[partNumber] = blockID
+	partSize := int64(len(buf))
+	u.parts[partNumber] = stagedPart{blockID: blockID, size: partSize}
 	return bvstorage.MultipartPart{
 		PartNumber: partNumber,
 		Token:      blockID,
-		Size:       int64(len(buf)),
+		Size:       partSize,
 	}, nil
 }
 
@@ -105,6 +112,13 @@ func (a *AzureBlob) CompleteMultipartIfAbsent(ctx context.Context, mu bvstorage.
 	sorted := append([]bvstorage.MultipartPart(nil), parts...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].PartNumber < sorted[j].PartNumber })
 
+	// Validate: parts must be contiguous starting from 1.
+	for i, p := range sorted {
+		if p.PartNumber != i+1 {
+			return bvstorage.ObjectVersion{}, fmt.Errorf("%w: parts must be contiguous starting at 1 (got part %d at position %d)", bvstorage.ErrInvalidArgument, p.PartNumber, i+1)
+		}
+	}
+
 	blockIDs := make([]string, 0, len(sorted))
 	seen := make(map[int]bool)
 	for _, p := range sorted {
@@ -112,11 +126,15 @@ func (a *AzureBlob) CompleteMultipartIfAbsent(ctx context.Context, mu bvstorage.
 			return bvstorage.ObjectVersion{}, fmt.Errorf("%w: part %d listed twice", bvstorage.ErrInvalidArgument, p.PartNumber)
 		}
 		seen[p.PartNumber] = true
-		blockID, ok := u.parts[p.PartNumber]
+		staged, ok := u.parts[p.PartNumber]
 		if !ok {
 			return bvstorage.ObjectVersion{}, fmt.Errorf("%w: part %d was never staged", bvstorage.ErrInvalidArgument, p.PartNumber)
 		}
-		blockIDs = append(blockIDs, blockID)
+		// Validate that the caller's reported size matches what was staged.
+		if p.Size != staged.size {
+			return bvstorage.ObjectVersion{}, fmt.Errorf("%w: part %d size mismatch: staged %d bytes, caller reports %d bytes", bvstorage.ErrInvalidArgument, p.PartNumber, staged.size, p.Size)
+		}
+		blockIDs = append(blockIDs, staged.blockID)
 	}
 
 	bb := u.parent.container.NewBlockBlobClient(applyPrefix(u.parent.cfg.Prefix, u.key))
