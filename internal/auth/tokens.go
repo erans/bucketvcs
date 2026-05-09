@@ -58,8 +58,8 @@ func ParseToken(token string) (id, secret string, err error) {
 	return parts[1], parts[2], nil
 }
 
-// randomCrockford returns n Crockford-base32 characters drawn from a CSPRNG.
-func randomCrockford(n int) (string, error) {
+// RandomCrockford returns n Crockford-base32 characters drawn from a CSPRNG.
+func RandomCrockford(n int) (string, error) {
 	buf := make([]byte, n)
 	if _, err := rand.Read(buf); err != nil {
 		return "", err
@@ -69,6 +69,20 @@ func randomCrockford(n int) (string, error) {
 		out[i] = crockfordAlphabet[int(b)%32]
 	}
 	return string(out), nil
+}
+
+// randomCrockford is a thin wrapper kept for internal backward compatibility.
+func randomCrockford(n int) (string, error) { return RandomCrockford(n) }
+
+// GenerateSSHKeyID returns a fresh ssh_keys.id of the form
+// "bvsk_<24 base32 chars>" — same shape as token IDs but with a distinct
+// prefix so operators can tell user keys and tokens apart at a glance.
+func GenerateSSHKeyID() (string, error) {
+	s, err := RandomCrockford(24)
+	if err != nil {
+		return "", err
+	}
+	return "bvsk_" + s, nil
 }
 
 func isCrockford(s string) bool {

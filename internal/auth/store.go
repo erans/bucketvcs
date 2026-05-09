@@ -61,6 +61,9 @@ type Store interface {
 	// not an error.
 	TouchSSHKeyUsage(ctx context.Context, keyID string) error
 
+	// GetUserByName returns the user with the given name, or ErrNoSuchUser.
+	GetUserByName(ctx context.Context, name string) (*User, error)
+
 	// Close releases backing resources (DB connections etc).
 	Close() error
 }

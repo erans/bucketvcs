@@ -85,3 +85,12 @@ type SSHKey struct {
 	LastUsedAt int64
 	RevokedAt  int64
 }
+
+// User is the actor's persisted profile. Returned by Store.GetUserByName.
+type User struct {
+	ID         string
+	Name       string
+	IsAdmin    bool
+	DisabledAt *int64 // nil = not disabled
+	CreatedAt  int64
+}

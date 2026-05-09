@@ -51,6 +51,9 @@ func (f *fakeStore) ListSSHKeysForRepo(ctx context.Context, tenant, repo string)
 }
 func (f *fakeStore) RevokeSSHKey(ctx context.Context, keyIDOrPrefix string) error { return nil }
 func (f *fakeStore) TouchSSHKeyUsage(ctx context.Context, keyID string) error     { return nil }
+func (f *fakeStore) GetUserByName(ctx context.Context, name string) (*auth.User, error) {
+	return nil, auth.ErrNoSuchUser
+}
 
 func req(t *testing.T, method, path, query, basicUser, basicPass string) *http.Request {
 	t.Helper()

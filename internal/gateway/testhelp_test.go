@@ -79,3 +79,6 @@ func (p *permissiveAuthStore) RevokeSSHKey(ctx context.Context, keyIDOrPrefix st
 	return nil
 }
 func (p *permissiveAuthStore) TouchSSHKeyUsage(ctx context.Context, keyID string) error { return nil }
+func (p *permissiveAuthStore) GetUserByName(ctx context.Context, name string) (*auth.User, error) {
+	return nil, auth.ErrNoSuchUser
+}

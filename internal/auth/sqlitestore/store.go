@@ -104,12 +104,12 @@ func (s *Store) CreateUser(ctx context.Context, name string, isAdmin bool) (stri
 }
 
 // GetUserByName returns the user row with the given name.
-func (s *Store) GetUserByName(ctx context.Context, name string) (*User, error) {
+func (s *Store) GetUserByName(ctx context.Context, name string) (*auth.User, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id, name, is_admin, created_at, disabled_at FROM users WHERE name = ?`,
 		name,
 	)
-	u := &User{}
+	u := &auth.User{}
 	var adminInt int
 	var disabled sql.NullInt64
 	if err := row.Scan(&u.ID, &u.Name, &adminInt, &u.CreatedAt, &disabled); err != nil {
