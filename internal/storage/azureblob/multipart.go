@@ -64,12 +64,6 @@ func (u *upload) UploadPart(ctx context.Context, partNumber int, body io.Reader)
 	if partNumber < 1 || partNumber > 50000 {
 		return bvstorage.MultipartPart{}, fmt.Errorf("%w: partNumber must be in [1,50000] (got %d)", bvstorage.ErrInvalidArgument, partNumber)
 	}
-	u.mu.Lock()
-	if u.terminated {
-		u.mu.Unlock()
-		return bvstorage.MultipartPart{}, fmt.Errorf("%w: upload %s already terminated", bvstorage.ErrInvalidArgument, u.id)
-	}
-	u.mu.Unlock()
 
 	buf, err := io.ReadAll(body)
 	if err != nil {
@@ -77,14 +71,27 @@ func (u *upload) UploadPart(ctx context.Context, partNumber int, body io.Reader)
 	}
 	blockID := makeBlockID(u.id, partNumber)
 	bb := u.parent.container.NewBlockBlobClient(applyPrefix(u.parent.cfg.Prefix, u.key))
+
+	// Hold the mutex across the StageBlock network call. This serialises
+	// concurrent UploadPart calls but prevents the Abort race: if Abort runs
+	// while StageBlock is in flight the block lands on Azure with no local
+	// record, leaking until Azure's 7-day GC. Holding the lock means Abort
+	// blocks until StageBlock completes (or fails) before flipping terminated.
+	// This matches the gcs/multipart.go pattern; conformance stress tests for
+	// concurrent Complete still pass because Complete holds its own lock and
+	// operates only on the already-staged parts map.
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.terminated {
+		return bvstorage.MultipartPart{}, fmt.Errorf("%w: upload %s already terminated", bvstorage.ErrInvalidArgument, u.id)
+	}
 	_, err = bb.StageBlock(ctx, blockID, &readSeekCloser{Reader: bytes.NewReader(buf)}, nil)
 	if err != nil {
 		return bvstorage.MultipartPart{}, classify(opStageBlock, err)
 	}
-
-	u.mu.Lock()
-	defer u.mu.Unlock()
 	if u.terminated {
+		// Abort arrived during StageBlock; block is staged but we have no
+		// record — Azure will GC it after 7 days. Do not record the part.
 		return bvstorage.MultipartPart{}, fmt.Errorf("%w: upload %s terminated during stage", bvstorage.ErrInvalidArgument, u.id)
 	}
 	partSize := int64(len(buf))
