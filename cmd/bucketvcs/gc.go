@@ -60,6 +60,10 @@ func runGC(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc: --format must be text or json (got %q)\n", *format)
 		return 2
 	}
+	if *retention < 0 {
+		fmt.Fprintf(stderr, "gc: --retention=%s is negative; use --retention=1s as the floor or omit the flag for the 7d default.\n", *retention)
+		return 2
+	}
 	if *retention > 0 && *retention < time.Second {
 		fmt.Fprintf(stderr, "gc: --retention=%s is below the 1s minimum; sub-second values are silently rounded to 0 and the default 7d window applies. Use --retention=1s as the floor.\n", *retention)
 		return 2

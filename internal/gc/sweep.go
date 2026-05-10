@@ -54,7 +54,10 @@ func RunSweep(ctx context.Context, s storage.ObjectStore, r *repo.Repo, mark mar
 	if err != nil {
 		return sweeps.Record{}, fmt.Errorf("gc: read root: %w", err)
 	}
-	freshLive := BuildLiveSet(k, view.Header, view.Body)
+	freshLive, err := BuildLiveSet(k, view.Header, view.Body)
+	if err != nil {
+		return sweeps.Record{}, fmt.Errorf("gc: build live set: %w", err)
+	}
 	retention := time.Duration(mark.RetentionSeconds) * time.Second
 
 	out := sweeps.Record{

@@ -15,9 +15,11 @@ import (
 const DefaultMarkRecordRetention = 10
 
 // PruneMarks deletes mark records past the most recent keep records.
-// Errors on individual deletes are tolerated (logged via the sweep
-// report by the caller); PruneMarks returns the first hard listing
-// error if any.
+// Storage transients (ErrNotFound, ErrVersionMismatch) on individual
+// deletes are tolerated and the loop continues. Other errors abort
+// the prune and return wrapped — the caller (gc.Run) treats these as
+// non-fatal sweep housekeeping issues and demotes them to warnings
+// (see gc.Run's PruneMarks call site for the policy).
 func PruneMarks(ctx context.Context, s storage.ObjectStore, k *keys.Repo, keep int) error {
 	if keep < 1 {
 		keep = DefaultMarkRecordRetention

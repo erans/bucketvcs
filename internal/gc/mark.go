@@ -41,7 +41,10 @@ func RunMark(ctx context.Context, s storage.ObjectStore, r *repo.Repo, opts Mark
 	if err != nil {
 		return marks.Record{}, fmt.Errorf("gc: read root: %w", err)
 	}
-	live := BuildLiveSet(k, view.Header, view.Body)
+	live, err := BuildLiveSet(k, view.Header, view.Body)
+	if err != nil {
+		return marks.Record{}, fmt.Errorf("gc: build live set: %w", err)
+	}
 
 	startedAt := opts.Now().UTC()
 	markID := newMarkID(startedAt)
@@ -75,7 +78,6 @@ func RunMark(ctx context.Context, s storage.ObjectStore, r *repo.Repo, opts Mark
 		SchemaVersion:                marks.SchemaVersion,
 		MarkID:                       markID,
 		StartedAt:                    startedAt,
-		CompletedAt:                  opts.Now().UTC(),
 		CurrentManifestVersion:       view.Header.ManifestVersion,
 		CurrentManifestObjectVersion: view.Version.Token,
 		RetentionSeconds:             opts.RetentionSeconds,

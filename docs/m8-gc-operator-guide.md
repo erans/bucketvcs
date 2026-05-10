@@ -663,6 +663,16 @@ prefix. Sweep records are stored at `gc/sweeps/sw_<ulid>.json`. Both use
 ULID keys that sort lexicographically by time (most recent last in ascending
 order).
 
+> **Sweep record error field sensitivity:** The `errors[].error` field in a
+> sweep record carries the raw `err.Error()` string returned by the underlying
+> storage adapter. Depending on the backend this may include filesystem paths
+> (localfs), cloud request IDs, or other context-specific tokens. Sweep records
+> are stored in the same bucket as the repository and are readable by anyone
+> with bucket read access. Operators in secret-sensitive deployments should
+> review sweep records before sharing or exporting them. A future milestone may
+> replace raw error strings with structured error-kind tokens; until then, treat
+> the `errors[].error` field as potentially-sensitive provider output.
+
 ### 7.1 Dry-run preview with JSON output
 
 Before running a live GC sweep, you can see the full candidate list without

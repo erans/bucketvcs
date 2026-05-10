@@ -38,7 +38,16 @@ type SkippedEntry struct {
 	Reason   string `json:"reason"` // revived | retention_not_met | version_mismatch | not_found | tx_sweep_disarmed
 }
 
-// ErrorEntry records one candidate the sweep tried to delete and failed on.
+// ErrorEntry records one candidate the sweep tried to delete and
+// failed on. The Error field carries the raw err.Error() string from
+// the underlying storage adapter. This may include filesystem paths
+// (localfs), request IDs (cloud), or other context-specific tokens.
+// The sweep record is stored in the same bucket as the repo and is
+// readable by anyone with bucket read access — operators handling
+// secret-sensitive deployments should review records before sharing
+// or exporting. A future milestone may introduce error-kind tokens
+// + truncated messages; until then, treat the Error field as
+// potentially-sensitive provider output.
 type ErrorEntry struct {
 	Key      string `json:"key"`
 	Category string `json:"category"`

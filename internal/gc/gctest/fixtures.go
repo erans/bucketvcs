@@ -3,6 +3,7 @@
 package gctest
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -23,7 +24,7 @@ func PutEmpty(t *testing.T, s storage.ObjectStore, key string) {
 // PutBytes writes the given content via PutIfAbsent and fatals on error.
 func PutBytes(t *testing.T, s storage.ObjectStore, key string, content []byte) {
 	t.Helper()
-	if _, err := s.PutIfAbsent(context.Background(), key, strings.NewReader(string(content)), nil); err != nil {
+	if _, err := s.PutIfAbsent(context.Background(), key, bytes.NewReader(content), nil); err != nil {
 		t.Fatalf("PutBytes %s: %v", key, err)
 	}
 }

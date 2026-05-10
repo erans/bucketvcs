@@ -2,6 +2,7 @@ package gc
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
@@ -17,7 +18,12 @@ type LiveSet map[string]struct{}
 // The body is parsed as manifest.Body. Unknown fields in the body are
 // ignored. Future-fields recognized but currently emitted as empty
 // (Bundles for M11; ref-shards for M12) are tolerated.
-func BuildLiveSet(k *keys.Repo, header manifest.RootHeader, bodyJSON []byte) LiveSet {
+//
+// On a JSON parse failure the header-derived keys are returned together
+// with a non-nil error. The caller must treat this error as fatal and
+// abort GC for the affected repo — continuing without body-derived keys
+// risks sweeping live packs.
+func BuildLiveSet(k *keys.Repo, header manifest.RootHeader, bodyJSON []byte) (LiveSet, error) {
 	live := LiveSet{}
 	live[k.RootManifestKey()] = struct{}{}
 	if header.LatestTx != "" {
@@ -27,9 +33,12 @@ func BuildLiveSet(k *keys.Repo, header manifest.RootHeader, bodyJSON []byte) Liv
 
 	var body manifest.Body
 	if len(bodyJSON) > 0 {
-		// Best-effort parse; an unparseable body still leaves the
-		// header-derived keys in the live-set, which is the safe behavior.
-		_ = json.Unmarshal(bodyJSON, &body)
+		if err := json.Unmarshal(bodyJSON, &body); err != nil {
+			// Return the header-derived keys plus the error. The caller
+			// must abort GC — continuing without body-derived pack/index
+			// keys risks sweeping live data.
+			return live, fmt.Errorf("gc: parse manifest body: %w", err)
+		}
 	}
 
 	for _, p := range body.Packs {
@@ -47,5 +56,5 @@ func BuildLiveSet(k *keys.Repo, header manifest.RootHeader, bodyJSON []byte) Liv
 		live[body.Indexes.CommitGraph.Key] = struct{}{}
 	}
 	// body.Bundles is M11 placeholder — currently empty struct, no keys to add.
-	return live
+	return live, nil
 }

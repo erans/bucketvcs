@@ -28,7 +28,10 @@ func TestBuildLiveSet_IncludesRootTxAndPackTriples(t *testing.T) {
 	bodyJSON, _ := json.Marshal(body)
 	header := manifest.RootHeader{LatestTx: "tx_01HZ"}
 
-	live := gc.BuildLiveSet(k, header, bodyJSON)
+	live, err := gc.BuildLiveSet(k, header, bodyJSON)
+	if err != nil {
+		t.Fatalf("BuildLiveSet: %v", err)
+	}
 
 	want := []string{
 		k.RootManifestKey(),
@@ -49,7 +52,10 @@ func TestBuildLiveSet_IncludesRootTxAndPackTriples(t *testing.T) {
 func TestBuildLiveSet_EmptyBodyJustHasHeaderKeys(t *testing.T) {
 	k, _ := keys.NewRepo("acme", "site")
 	header := manifest.RootHeader{LatestTx: "tx_01HZ"}
-	live := gc.BuildLiveSet(k, header, []byte(`{}`))
+	live, err := gc.BuildLiveSet(k, header, []byte(`{}`))
+	if err != nil {
+		t.Fatalf("BuildLiveSet: %v", err)
+	}
 	if _, ok := live[k.RootManifestKey()]; !ok {
 		t.Error("live-set must contain root manifest key")
 	}

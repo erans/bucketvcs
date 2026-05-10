@@ -122,7 +122,21 @@ func Run(ctx context.Context, s storage.ObjectStore, r *repo.Repo, opts RunOptio
 		}
 		markRecord = latest
 		rep.MarkID = latest.MarkID
+		rep.MarkRecord = latest
 		rep.ManifestVersion = latest.CurrentManifestVersion
+
+		if opts.Retention > 0 {
+			pinnedRetention := time.Duration(latest.RetentionSeconds) * time.Second
+			if opts.Retention != pinnedRetention {
+				opts.Logger.Warn("gc.sweep_only.retention_overridden_by_mark",
+					"subsystem", "gc",
+					"repo_id", repoIDStr,
+					"flag_retention", opts.Retention.String(),
+					"mark_retention", pinnedRetention.String(),
+					"mark_id", latest.MarkID,
+				)
+			}
+		}
 	}
 
 	sweepStart := opts.Now()
@@ -158,7 +172,14 @@ func Run(ctx context.Context, s storage.ObjectStore, r *repo.Repo, opts RunOptio
 		}
 		rep.SweepID = sweep.SweepID
 		if err := PruneMarks(ctx, s, k, DefaultMarkRecordRetention); err != nil {
-			return rep, fmt.Errorf("gc: prune marks: %w", err)
+			// Prune is housekeeping; failures here do not invalidate the
+			// sweep that just succeeded. Log as a warning and continue. A
+			// future run will retry the prune.
+			opts.Logger.Warn("gc.prune.failed",
+				"subsystem", "gc",
+				"repo_id", repoIDStr,
+				"error", err.Error(),
+			)
 		}
 	}
 
