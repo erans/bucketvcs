@@ -1,5 +1,3 @@
-// Package gc implements the M8 garbage collector for bucketvcs repos.
-// See docs/superpowers/specs/2026-05-09-m8-basic-gc-design.md.
 package gc
 
 import (
