@@ -29,7 +29,7 @@ func runGC(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	repoFlag := fs.String("repo", "", "<tenant>/<repo> (mutually exclusive with --all-repos)")
 	allRepos := fs.Bool("all-repos", false, "Process every repo discovered under tenants/*/repos/*")
 	retention := fs.Duration("retention", gc.DefaultRetention, "Sweep candidate retention window")
-	maxConcurrency := fs.Int("max-concurrency", 1, "Per-repo sweep concurrency")
+	maxConcurrency := fs.Int("max-concurrency", 1, "RESERVED for future parallel sweep; currently no-op (sequential)")
 	markOnly := fs.Bool("mark-only", false, "Run mark phase only; skip sweep")
 	sweepOnly := fs.Bool("sweep-only", false, "Skip mark phase; sweep most recent mark")
 	dryRun := fs.Bool("dry-run", false, "Compute candidates, write nothing, delete nothing")
@@ -167,7 +167,7 @@ func emitReport(w io.Writer, format string, r gc.RunReport) error {
 		})
 	default:
 		fmt.Fprintf(w, "repo %s @ manifest v%d\n", r.RepoID, r.ManifestVersion)
-		if r.MarkID != "" {
+		if r.MarkRecord.MarkID != "" {
 			fmt.Fprintf(w, "  mark    %s   candidates: tx=%d packs=%d indexes=%d  (%s)\n",
 				r.MarkID,
 				len(r.MarkRecord.Candidates.TxRecords),
@@ -203,7 +203,7 @@ Flags:
   --repo=<tenant>/<repo>    Single repo (mutually exclusive with --all-repos)
   --all-repos               Process every repo discovered under tenants/*/repos/*
   --retention=<duration>    Sweep candidate retention window (default 168h; warns if < 24h)
-  --max-concurrency=<n>     Per-repo sweep concurrency (default 1)
+  --max-concurrency=<n>     RESERVED — currently no-op; sequential sweep (default 1)
   --mark-only               Run mark phase only; skip sweep
   --sweep-only              Skip mark phase; sweep most recent existing mark
   --dry-run                 Compute candidates, write nothing, delete nothing

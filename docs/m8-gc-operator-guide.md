@@ -562,98 +562,17 @@ rule above applies.
 
 ### 5.4 Azure Blob Storage
 
-Azure Blob Storage calls uncommitted blocks from an incomplete `Put Block` +
-`Put Block List` sequence "uncommitted blobs." A management policy can delete
-them after a specified number of days.
+**No lifecycle policy is required.** Azure Blob Storage automatically deletes
+uncommitted blocks 7 days after the last `Put Block` call for that upload
+session, regardless of any lifecycle management configuration. This is
+built-in Block Blob commit semantics: when a `Put Block` is not followed by a
+`Put Block List` within the 7-day window, the uncommitted blocks are
+garbage-collected automatically by the platform.
 
-Create `policy.json`:
-
-```json
-{
-  "rules": [
-    {
-      "name": "abort-uncommitted-blobs",
-      "enabled": true,
-      "type": "Lifecycle",
-      "definition": {
-        "filters": {
-          "blobTypes": ["blockBlob"]
-        },
-        "actions": {
-          "baseBlob": {
-            "delete": {
-              "daysAfterModificationGreaterThan": 7
-            }
-          },
-          "snapshot": {},
-          "version": {}
-        }
-      }
-    }
-  ]
-}
-```
-
-Wait — the above targets committed blobs. For uncommitted blocks specifically,
-use the `enableAutoTierToHotFromCool` or the `delete_uncommitted_blob_after`
-sub-property. The correct structure for the Azure management-policy API
-(2023-08-03 and later) is:
-
-```json
-{
-  "rules": [
-    {
-      "name": "abort-uncommitted-blobs",
-      "enabled": true,
-      "type": "Lifecycle",
-      "definition": {
-        "filters": {
-          "blobTypes": ["blockBlob"]
-        },
-        "actions": {
-          "baseBlob": {},
-          "snapshot": {},
-          "version": {},
-          "uncommittedBlock": {
-            "delete": {
-              "daysAfterLastModificationGreaterThan": 7
-            }
-          }
-        }
-      }
-    }
-  ]
-}
-```
-
-Apply it to your storage account:
-
-```bash
-az storage account management-policy create \
-  --account-name mystorageacct \
-  --resource-group my-resource-group \
-  --policy @policy.json
-```
-
-Verify:
-
-```bash
-az storage account management-policy show \
-  --account-name mystorageacct \
-  --resource-group my-resource-group
-```
-
-Notes:
-
-- Azure evaluates lifecycle policies once per day.
-- The `uncommittedBlock` action requires that the storage account has the
-  lifecycle management feature enabled (enabled by default on General Purpose
-  v2 accounts).
-- Ensure the storage account `--kind` is `StorageV2`; the `uncommittedBlock`
-  lifecycle action is not available on legacy V1 accounts.
-- The `daysAfterLastModificationGreaterThan` condition measures days since the
-  block was last written to. An upload that stalls for 7 days will have its
-  blocks cleaned up.
+No action required — the platform handles this. Confirm by reviewing Azure's
+Block Blob documentation: when a `Put Block` is not followed by `Put Block
+List` within the 7-day window, the uncommitted blocks are garbage-collected
+automatically.
 
 ---
 
@@ -863,12 +782,17 @@ which force-push or branch deletion dropped the pack from the live set.
 
 **`last_seen_reachable_at`**
 
-For canonical packs only. The approximate timestamp of the last GC run that
-saw this pack as reachable (present in the live set). This is set on the run
-that observes the transition from reachable to unreachable; it approximates the
-time of a force-push or branch deletion. Null if GC never observed the pack in
-a reachable state (for example, an orphan pack from a crashed import that was
-never committed to a manifest).
+For canonical packs only. Set to the `completed_at` timestamp of the previous
+GC mark run when one exists, or null when this is the first GC run for the
+repo.
+
+This field does **not** distinguish "transitioned to unreachable since the
+previous mark" from "newly uploaded since the previous mark and never
+reachable" — both produce the previous-mark `completed_at`. Use it only as a
+coarse "we know this object existed (unreachable) by at most this point"
+signal, not as a forensic transition timestamp. If you need to determine when a
+pack became unreachable, cross-reference `mark_manifest_version` against your
+push log instead.
 
 **`current_manifest_object_version`** (mark record)
 

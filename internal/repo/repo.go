@@ -135,11 +135,11 @@ func Create(ctx context.Context, store storage.ObjectStore, tenantID, repoID str
 	}
 
 	// Best-effort commit marker (M8 GC uses these to distinguish winning
-	// tx records from CAS-loss orphans). Failure is logged via the
-	// caller's logger if any; we never fail Create on marker-write failure.
+	// tx records from CAS-loss orphans). The CAS that the marker witnesses
+	// has already committed; we never fail Create on marker-write failure.
+	// No structured logger plumbed into Create today; the failure is
+	// silent. M16 doctor tooling can repair missing markers.
 	if err := tx.WriteCommitMarker(ctx, store, k.CommitMarkerKey(txID)); err != nil {
-		// No structured logger plumbed into Create today; the failure is
-		// silent for now. M16 doctor tooling can repair missing markers.
 		_ = err
 	}
 
@@ -320,9 +320,9 @@ func (r *Repo) Commit(
 			}
 			return "", err
 		}
-		// Best-effort commit marker; see Create for rationale. A marker-write failure
-		// does not roll back a successful CAS — the marker is an audit aid, not a
-		// correctness guarantee. M16 doctor tooling can repair missing markers.
+		// Best-effort commit marker; the CAS already committed, so a
+		// marker-write failure is not propagated. M16 doctor tooling can
+		// repair missing markers. See Create for full rationale.
 		if err := tx.WriteCommitMarker(ctx, r.store, r.keys.CommitMarkerKey(txID)); err != nil {
 			_ = err
 		}

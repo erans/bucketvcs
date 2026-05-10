@@ -96,6 +96,9 @@ func TestGC_CLI_DryRun_TextOutputShowsSweepBlock(t *testing.T) {
 	if !strings.Contains(out, "sweep") {
 		t.Errorf("dry-run text output missing 'sweep' block; got: %s", out)
 	}
+	if !strings.Contains(out, "mark") {
+		t.Errorf("dry-run text output missing 'mark' block; got: %s", out)
+	}
 }
 
 func TestGC_CLI_AllRepos_TouchesEachRepo(t *testing.T) {

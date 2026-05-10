@@ -17,7 +17,7 @@ import (
 // RunOptions configures one Run invocation against one repo.
 type RunOptions struct {
 	Retention      time.Duration    // sweep candidate retention; defaults to DefaultRetention
-	MaxConcurrency int              // sweep worker pool; defaults to 1
+	MaxConcurrency int              // MaxConcurrency is reserved for future parallel-sweep implementation; the current implementation processes candidates sequentially.
 	MarkOnly       bool             // execute mark phase only
 	SweepOnly      bool             // execute sweep phase only against most recent mark
 	DryRun         bool             // compute candidates, write nothing, delete nothing

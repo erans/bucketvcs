@@ -19,7 +19,8 @@ import (
 type SweepOptions struct {
 	// Now is a clock injection point for tests; defaults to time.Now.
 	Now func() time.Time
-	// MaxConcurrency caps in-flight DeleteIfVersionMatches calls.
+	// MaxConcurrency is reserved for future parallel-sweep implementation;
+	// the current implementation processes candidates sequentially.
 	// Zero or negative is normalized to 1.
 	MaxConcurrency int
 	// DryRun, when true, classifies candidates normally but skips all
@@ -74,15 +75,15 @@ func RunSweep(ctx context.Context, s storage.ObjectStore, r *repo.Repo, mark mar
 	// worker pool — revisit when sweep throughput becomes a bottleneck.
 	for _, t := range mark.Candidates.TxRecords {
 		decision := classify(t.Key, "tx_records", t.FirstSeenUnreachableAt, retention, now, freshLive, mark.TxOrphanSweepArmed)
-		applyDecision(ctx, s, k, t.Key, "tx_records", decision, opts.DryRun, &out)
+		applyDecision(ctx, s, t.Key, "tx_records", decision, opts.DryRun, &out)
 	}
 	for _, p := range mark.Candidates.CanonicalPacks {
 		decision := classify(p.Key, "canonical_packs", p.FirstSeenUnreachableAt, retention, now, freshLive, true /* armed N/A */)
-		applyDecision(ctx, s, k, p.Key, "canonical_packs", decision, opts.DryRun, &out)
+		applyDecision(ctx, s, p.Key, "canonical_packs", decision, opts.DryRun, &out)
 	}
 	for _, i := range mark.Candidates.Indexes {
 		decision := classify(i.Key, "indexes", i.FirstSeenUnreachableAt, retention, now, freshLive, true /* armed N/A */)
-		applyDecision(ctx, s, k, i.Key, "indexes", decision, opts.DryRun, &out)
+		applyDecision(ctx, s, i.Key, "indexes", decision, opts.DryRun, &out)
 	}
 
 	out.CompletedAt = opts.Now().UTC()
@@ -112,7 +113,7 @@ func classify(key, category string, firstSeen time.Time, retention time.Duration
 	return decideDelete
 }
 
-func applyDecision(ctx context.Context, s storage.ObjectStore, k *keys.Repo, key, category string, d decision, dryRun bool, out *sweeps.Record) {
+func applyDecision(ctx context.Context, s storage.ObjectStore, key, category string, d decision, dryRun bool, out *sweeps.Record) {
 	switch d {
 	case decideRevived:
 		out.Skipped = append(out.Skipped, sweeps.SkippedEntry{Key: key, Category: category, Reason: "revived"})
