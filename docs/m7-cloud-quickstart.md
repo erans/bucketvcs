@@ -96,3 +96,12 @@ credentials from repo secrets. To rotate:
 
 Do not rotate via local CLI commands that print the key — keys can leak through
 shell history. Generate, copy directly into the GitHub UI, then close the tab.
+
+## Bucket lifecycle: incomplete multipart uploads
+
+bucketvcs M8 GC does **not** clean up incomplete multipart uploads in-binary.
+Per spec §33.5 this is delegated to the bucket-lifecycle branch — configure
+your bucket to abort incomplete multipart uploads automatically.
+
+For Google Cloud Storage and Azure Blob lifecycle recipes, see
+[docs/m8-gc-operator-guide.md §5](m8-gc-operator-guide.md#5-bucket-lifecycle-for-incomplete-multipart-uploads-335).

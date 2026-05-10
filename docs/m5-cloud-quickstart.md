@@ -48,3 +48,12 @@ aws s3 sync /var/lib/bucketvcs/ s3://bucketvcs-prod/ \
 
 After migration, point `--store` at `r2://bucketvcs-prod` and verify
 with `bucketvcs inspect-manifest`.
+
+## Bucket lifecycle: incomplete multipart uploads
+
+bucketvcs M8 GC does **not** clean up incomplete multipart uploads in-binary.
+Per spec §33.5 this is delegated to the bucket-lifecycle branch — configure
+your bucket to abort incomplete multipart uploads automatically.
+
+For AWS S3 and Cloudflare R2 lifecycle recipes, see
+[docs/m8-gc-operator-guide.md §5](m8-gc-operator-guide.md#5-bucket-lifecycle-for-incomplete-multipart-uploads-335).
