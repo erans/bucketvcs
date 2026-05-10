@@ -1078,3 +1078,90 @@ In the interim, if you operate a repository at this scale:
   concern and may not be appropriate.
 - You can run `bucketvcs gc --mark-only` to test whether a mark phase
   completes within your memory budget before scheduling sweep.
+
+---
+
+## 10. Acceptance Verification (M8 CI / Conformance Workflow)
+
+This section documents how to confirm that the M8 GC safety tests are
+exercised by the conformance workflow on every PR.
+
+### 10.1 What landed in M8
+
+- `internal/gc/conformance/safety_localfs_test.go` — property-based GCSafety
+  test against the localfs backend (`TestGC_PropertyGCSafety_Localfs`).
+- `internal/storage/s3compat/s3compat_conformance_test.go` — GCSafety hooks for
+  MinIO/R2/S3 (`TestS3Compat_GCSafety_R2`, `TestS3Compat_GCSafety_S3`).
+- `internal/storage/gcs/gcs_conformance_test.go` — GCSafety hook for fake-gcs
+  (`TestGcs_GCSafety`).
+- `internal/storage/azureblob/azureblob_conformance_test.go` — GCSafety hook for
+  Azurite (`TestAzureBlob_GCSafety`).
+- `scripts/conformance-emulators.sh` — extended with
+  `go test ... ./internal/gc/conformance/...` so the CI emulator job picks up
+  the localfs GCSafety test in the same run as the cloud-adapter tests.
+- `.github/workflows/conformance.yml` — unchanged from M7; the `emulators` job
+  delegates entirely to `scripts/conformance-emulators.sh`, so no workflow-file
+  edit was required.
+
+### 10.2 Running locally before pushing
+
+Boot the full emulator stack and run all conformance tests (storage + GC):
+
+```bash
+./scripts/conformance-emulators.sh
+```
+
+This starts MinIO, fake-gcs-server, and Azurite via `docker-compose.cloud.yml`,
+pre-creates the required buckets/containers, and runs:
+
+```
+go test -count=1 -timeout=10m ./internal/storage/...
+go test -count=1 -timeout=5m  ./internal/gc/conformance/...
+```
+
+The script tears down the stack on exit. Set `BUCKETVCS_KEEP_EMULATORS=1` to
+leave the stack running for interactive debugging after the test run.
+
+### 10.3 Triggering the CI conformance workflow (manual step)
+
+The `conformance / emulators` GitHub Actions job runs on every pull request.
+To confirm the M8 GCSafety tests are picked up:
+
+1. Push the branch:
+
+   ```bash
+   git push -u origin feature/m8-gc
+   ```
+
+2. Open a draft PR against `main`.
+
+3. Watch the `conformance / emulators` job in the Actions tab. When it
+   completes, search the job log for these five test names:
+
+   - `TestS3Compat_GCSafety_R2`
+   - `TestS3Compat_GCSafety_S3`
+   - `TestGcs_GCSafety`
+   - `TestAzureBlob_GCSafety`
+   - `TestGC_PropertyGCSafety_Localfs`
+
+   All five must appear as `PASS` (or `ok` in the `go test` summary line).
+
+4. Confirm the `real-cloud` job (nightly / workflow_dispatch only, gated on
+   repo secrets) also runs `./internal/storage/s3compat`, `./internal/storage/gcs`,
+   and `./internal/storage/azureblob` — these packages contain the per-adapter
+   GCSafety hooks. The `real-cloud` job does not yet invoke
+   `./internal/gc/conformance/...` directly (that suite is localfs-only), so
+   no additional secret configuration is required for the GC conformance path.
+
+### 10.4 Verification checklist summary
+
+| Check | Command | Expected result |
+|-------|---------|----------------|
+| Workflow YAML syntax | `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/conformance.yml'))"` | No error |
+| Emulator script syntax | `bash -n scripts/conformance-emulators.sh` | No error |
+| GCSafety test: R2 | `grep -r TestS3Compat_GCSafety_R2 --include='*.go'` | Found in `internal/storage/s3compat/` |
+| GCSafety test: S3 | `grep -r TestS3Compat_GCSafety_S3 --include='*.go'` | Found in `internal/storage/s3compat/` |
+| GCSafety test: GCS | `grep -r TestGcs_GCSafety --include='*.go'` | Found in `internal/storage/gcs/` |
+| GCSafety test: Azure | `grep -r TestAzureBlob_GCSafety --include='*.go'` | Found in `internal/storage/azureblob/` |
+| GCSafety test: localfs | `grep -r TestGC_PropertyGCSafety_Localfs --include='*.go'` | Found in `internal/gc/conformance/` |
+| Local emulator run | `./scripts/conformance-emulators.sh` | All tests pass |
