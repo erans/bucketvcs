@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	gcconformance "github.com/bucketvcs/bucketvcs/internal/gc/conformance"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/storage/conformance"
 	"github.com/bucketvcs/bucketvcs/internal/storage/s3compat"
@@ -127,4 +128,40 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func TestS3Compat_GCSafety_R2(t *testing.T) {
+	bucket := os.Getenv("BUCKETVCS_R2_BUCKET")
+	endpoint := os.Getenv("BUCKETVCS_R2_ENDPOINT")
+	if bucket == "" || endpoint == "" {
+		t.Skip("R2 GC safety: set BUCKETVCS_R2_BUCKET, BUCKETVCS_R2_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY")
+	}
+	cfg := s3compat.Config{
+		Bucket:          bucket,
+		Region:          envOr("BUCKETVCS_R2_REGION", "auto"),
+		Endpoint:        endpoint,
+		ForcePathStyle:  true,
+		AccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
+		SecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
+		SessionToken:    os.Getenv("AWS_SESSION_TOKEN"),
+	}
+	gcconformance.RunPropertyGCSafety(t, gcconformance.Factory(makeFactory(t, cfg)))
+}
+
+func TestS3Compat_GCSafety_S3(t *testing.T) {
+	bucket := os.Getenv("BUCKETVCS_S3_BUCKET")
+	region := os.Getenv("BUCKETVCS_S3_REGION")
+	if bucket == "" || region == "" {
+		t.Skip("S3 GC safety: set BUCKETVCS_S3_BUCKET, BUCKETVCS_S3_REGION, AWS credentials")
+	}
+	cfg := s3compat.Config{
+		Bucket:          bucket,
+		Region:          region,
+		Endpoint:        os.Getenv("BUCKETVCS_S3_ENDPOINT"),
+		ForcePathStyle:  os.Getenv("BUCKETVCS_S3_FORCE_PATH_STYLE") == "true",
+		AccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
+		SecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
+		SessionToken:    os.Getenv("AWS_SESSION_TOKEN"),
+	}
+	gcconformance.RunPropertyGCSafety(t, gcconformance.Factory(makeFactory(t, cfg)))
 }

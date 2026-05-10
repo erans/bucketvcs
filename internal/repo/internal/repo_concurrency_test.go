@@ -311,8 +311,8 @@ func TestCommit_Scenario_CallbackErrorAborts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Objects) != 1 {
-		t.Errorf("want 1 tx record (only the create), got %d", len(page.Objects))
+	if len(page.Objects) != 2 {
+		t.Errorf("want 2 objects (create tx + create marker) — callback error leaves no orphan; got %d", len(page.Objects))
 	}
 }
 

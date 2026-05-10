@@ -48,6 +48,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return runRepo(ctx, rest, stdout, stderr)
 	case "ssh":
 		return runSSH(ctx, rest, stdout, stderr)
+	case "gc":
+		return runGC(ctx, rest, stdout, stderr)
 	case "-h", "--help", "help":
 		usage(stdout)
 		return 0
@@ -72,6 +74,7 @@ Subcommands:
   user               Manage users (add/list/disable/enable/delete)
   token              Manage tokens (create/list/revoke)
   repo               Manage repository registry and permissions
+  gc                 Garbage-collect orphan and unreachable storage
 
 Run "bucketvcs <subcommand> --help" for subcommand flags.
 `)

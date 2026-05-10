@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	gcconformance "github.com/bucketvcs/bucketvcs/internal/gc/conformance"
 	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/storage/conformance"
 	"github.com/bucketvcs/bucketvcs/internal/storage/gcs"
@@ -75,4 +76,17 @@ func cleanupGCSPrefix(tb testing.TB, s bvstorage.ObjectStore, ctx context.Contex
 			return
 		}
 	}
+}
+
+func TestGcs_GCSafety(t *testing.T) {
+	bucket := os.Getenv("BUCKETVCS_GCS_BUCKET")
+	if bucket == "" {
+		t.Skip("BUCKETVCS_GCS_BUCKET unset — skipping live GCS GC safety")
+	}
+	base := gcs.Config{
+		Bucket:          bucket,
+		Endpoint:        os.Getenv("BUCKETVCS_GCS_ENDPOINT"),
+		CredentialsFile: os.Getenv("BUCKETVCS_GCS_CREDENTIALS_FILE"),
+	}
+	gcconformance.RunPropertyGCSafety(t, gcconformance.Factory(makeGCSFactory(t, base)))
 }

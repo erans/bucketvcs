@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/repo"
+	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
 	txpkg "github.com/bucketvcs/bucketvcs/internal/repo/tx"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
@@ -181,8 +183,8 @@ func TestCreate_AlreadyExists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Objects) != 2 {
-		t.Errorf("want 2 tx records (original create + orphan from duplicate attempt), got %d", len(page.Objects))
+	if len(page.Objects) != 3 {
+		t.Errorf("want 3 objects (create tx + create marker + orphan tx from duplicate attempt), got %d", len(page.Objects))
 	}
 }
 
@@ -314,8 +316,8 @@ func TestCommit_CallbackError(t *testing.T) {
 	}
 	// No new tx record (callback runs BEFORE PutIfAbsent).
 	page, _ := s.List(ctx, "tenants/acme/repos/x/tx/", nil)
-	if len(page.Objects) != 1 {
-		t.Errorf("want 1 tx record (the create), got %d", len(page.Objects))
+	if len(page.Objects) != 2 {
+		t.Errorf("want 2 objects (create tx + create marker) — callback error leaves no orphan; got %d", len(page.Objects))
 	}
 	v, _ := r.ReadRoot(ctx)
 	if v.Header.ManifestVersion != 1 {
@@ -355,11 +357,11 @@ func TestCommit_PerAttemptFreshTxID(t *testing.T) {
 	if v.Header.ManifestVersion != 3 {
 		t.Errorf("want manifest_version=3, got %d", v.Header.ManifestVersion)
 	}
-	// Tx records on disk: 1 create + 1 orphan (from the first attempt
-	// that lost CAS) + 2 winners (side-channel + outer) = 4.
+	// Objects in tx/ prefix: create(tx+marker=2) + orphan(tx only=1) +
+	// side-channel winner(tx+marker=2) + outer winner(tx+marker=2) = 7.
 	page, _ := s.List(ctx, "tenants/acme/repos/x/tx/", nil)
-	if len(page.Objects) != 4 {
-		t.Errorf("want 4 tx records (1 create + 1 orphan + 2 committed); got %d", len(page.Objects))
+	if len(page.Objects) != 7 {
+		t.Errorf("want 7 objects (2 create + 1 orphan + 2 side-channel + 2 outer winner); got %d", len(page.Objects))
 	}
 }
 
@@ -484,8 +486,8 @@ func TestCommit_CtxCancelInCallbackNoOrphan(t *testing.T) {
 		t.Errorf("want context.Canceled, got %v", err)
 	}
 	page, _ := s.List(context.Background(), "tenants/acme/repos/x/tx/", nil)
-	if len(page.Objects) != 1 {
-		t.Errorf("want 1 tx record (only the create) — callback cancel should leave no orphan; got %d", len(page.Objects))
+	if len(page.Objects) != 2 {
+		t.Errorf("want 2 objects (create tx + create marker) — callback cancel should leave no orphan; got %d", len(page.Objects))
 	}
 }
 
@@ -534,5 +536,89 @@ func TestCommit_PolicyZeroMaxRetriesNormalized(t *testing.T) {
 	}
 	if txID == "" {
 		t.Errorf("expected a winning tx_id, got empty")
+	}
+}
+
+// mustCreate creates a repo or fatals the test.
+func mustCreate(ctx context.Context, t *testing.T, s storage.ObjectStore, tenant, repoID string, opts repo.CreateOptions) *repo.Repo {
+	t.Helper()
+	r, err := repo.Create(ctx, s, tenant, repoID, opts)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	return r
+}
+
+// markerFailingStore wraps an ObjectStore and forces PutIfAbsent on any
+// key ending in ".commit" to return a synthetic error. All other ops
+// pass through.
+type markerFailingStore struct {
+	storage.ObjectStore
+}
+
+func newMarkerFailingStore(s storage.ObjectStore) storage.ObjectStore {
+	return &markerFailingStore{ObjectStore: s}
+}
+
+func (m *markerFailingStore) PutIfAbsent(ctx context.Context, key string, body io.Reader, opts *storage.PutOptions) (storage.ObjectVersion, error) {
+	if strings.HasSuffix(key, ".commit") {
+		return storage.ObjectVersion{}, fmt.Errorf("synthetic marker-write failure")
+	}
+	return m.ObjectStore.PutIfAbsent(ctx, key, body, opts)
+}
+
+func TestCommit_WritesCommitMarkerOnSuccess(t *testing.T) {
+	store := newLocalFS(t)
+	ctx := context.Background()
+	r := mustCreate(ctx, t, store, "acme", "site", repo.CreateOptions{Actor: "u_test"})
+
+	txID, err := r.Commit(ctx, txpkg.Body{Type: "push", Actor: "u_test"},
+		func(prev *repo.RootView) ([]byte, error) {
+			return prev.Body, nil
+		})
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	k, _ := keys.NewRepo("acme", "site")
+	markerKey := k.CommitMarkerKey(txID)
+	if _, err := store.Head(ctx, markerKey); err != nil {
+		t.Fatalf("expected commit marker at %s, got: %v", markerKey, err)
+	}
+}
+
+func TestCreate_WritesCommitMarkerOnSuccess(t *testing.T) {
+	store := newLocalFS(t)
+	ctx := context.Background()
+	r, err := repo.Create(ctx, store, "acme", "site", repo.CreateOptions{Actor: "u_test"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	view, err := r.ReadRoot(ctx)
+	if err != nil {
+		t.Fatalf("ReadRoot: %v", err)
+	}
+	k, _ := keys.NewRepo("acme", "site")
+	markerKey := k.CommitMarkerKey(view.Header.LatestTx)
+	if _, err := store.Head(ctx, markerKey); err != nil {
+		t.Fatalf("expected commit marker at %s, got: %v", markerKey, err)
+	}
+}
+
+func TestCommit_MarkerWriteFailureDoesNotFailCommit(t *testing.T) {
+	// Use the failing-store fixture to inject a marker-write failure.
+	// The Commit MUST still return success because the CAS already won.
+	base := newLocalFS(t)
+	store := newMarkerFailingStore(base) // PutIfAbsent on .commit keys -> error
+	ctx := context.Background()
+	r := mustCreate(ctx, t, store, "acme", "site", repo.CreateOptions{Actor: "u_test"})
+
+	txID, err := r.Commit(ctx, txpkg.Body{Type: "push", Actor: "u_test"},
+		func(prev *repo.RootView) ([]byte, error) { return prev.Body, nil })
+	if err != nil {
+		t.Fatalf("Commit must succeed despite marker-write failure: %v", err)
+	}
+	if txID == "" {
+		t.Fatal("Commit returned empty txID despite claiming success")
 	}
 }

@@ -63,6 +63,16 @@ func (r *Repo) TxPrefix() string {
 	return r.prefix + "tx/"
 }
 
+// CommitMarkerKey returns the durable key for the §M8 commit marker
+// associated with txID. The marker is a zero-byte sibling of the tx
+// record at <TxRecordKey(txID)>.commit; its existence signals that the
+// matching tx record was the winner of the CAS that produced the next
+// manifest version. Used by M8 GC to distinguish winning tx records
+// from CAS-loss orphans.
+func (r *Repo) CommitMarkerKey(txID string) string {
+	return r.TxRecordKey(txID) + ".commit"
+}
+
 func validID(s string) bool {
 	if !idPattern.MatchString(s) {
 		return false

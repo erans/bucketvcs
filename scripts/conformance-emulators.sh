@@ -74,3 +74,6 @@ export BUCKETVCS_AZURE_CONNECTION_STRING="DefaultEndpointsProtocol=http;AccountN
 echo "==> Running storage conformance suite"
 cd "$REPO_ROOT"
 go test -count=1 -timeout=10m ./internal/storage/...
+
+echo "==> Running GC conformance suite (localfs binding)"
+go test -count=1 -timeout=5m ./internal/gc/conformance/...
