@@ -46,7 +46,7 @@ func Run(ctx context.Context, s storage.ObjectStore, r *repo.Repo, opts RunOptio
 	if opts.Retention <= 0 {
 		opts.Retention = DefaultRetention
 	}
-	if opts.Retention > 0 && opts.Retention < time.Second {
+	if opts.Retention < time.Second {
 		return RunReport{}, fmt.Errorf("gc: Retention=%s is below the 1s minimum; use Retention >= 1*time.Second", opts.Retention)
 	}
 	if opts.MaxConcurrency < 1 {

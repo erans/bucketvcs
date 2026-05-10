@@ -218,6 +218,34 @@ func TestGC_CLI_DryRun_NoDelete(t *testing.T) {
 	}
 }
 
+func TestGC_CLI_DryRun_TextHasDryRunMarkers(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := localfs.Open(dir)
+	ctx := context.Background()
+	if _, err := repo.Create(ctx, store, "acme", "site", repo.CreateOptions{Actor: "u_test"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	store.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := runGC(ctx, []string{
+		"--store", "localfs:" + dir,
+		"--repo", "acme/site",
+		"--retention", "1s",
+		"--dry-run",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("dry-run exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "DRY RUN") {
+		t.Errorf("expected 'DRY RUN' marker in text output; got: %s", out)
+	}
+	if !strings.Contains(out, "would-delete") {
+		t.Errorf("expected 'would-delete' label in dry-run text output; got: %s", out)
+	}
+}
+
 func TestGC_CLI_JSON_DeletedSlicesAreEmptyArrays(t *testing.T) {
 	dir := t.TempDir()
 	store, _ := localfs.Open(dir)

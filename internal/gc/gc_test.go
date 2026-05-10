@@ -3,14 +3,18 @@ package gc_test
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/gc"
 	"github.com/bucketvcs/bucketvcs/internal/gc/gctest"
+	"github.com/bucketvcs/bucketvcs/internal/gc/marks"
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
+	"github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 )
 
@@ -146,6 +150,68 @@ func TestRun_SweepOnly_WithExistingMark_RunsSweep(t *testing.T) {
 	if srep.MarkID != mrep.MarkID {
 		t.Errorf("SweepOnly MarkID = %q, want %q", srep.MarkID, mrep.MarkID)
 	}
+}
+
+func TestRun_CorruptManifestBody_AbortsCleanly(t *testing.T) {
+	base, _ := localfs.Open(t.TempDir())
+	ctx := context.Background()
+	if _, err := repo.Create(ctx, base, "acme", "site", repo.CreateOptions{Actor: "u_test"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Wrap base to corrupt the root manifest body on Get, so that the schema
+	// gate (which only checks header fields) passes but BuildLiveSet's
+	// json.Unmarshal into manifest.Body fails on the body fields.
+	manifestKey := "tenants/acme/repos/site/manifest/root.json"
+	wrapped := &corruptManifestStore{ObjectStore: base, manifestKey: manifestKey}
+
+	// repo.Open uses the wrapped store; schema gate passes (header is valid),
+	// so Open succeeds. r.ReadRoot inside RunMark will return the corrupt body.
+	r, err := repo.Open(ctx, wrapped, "acme", "site")
+	if err != nil {
+		t.Fatalf("Open with corrupt wrapper: %v", err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(testWriter{t}, nil))
+	_, err = gc.Run(ctx, wrapped, r, gc.RunOptions{
+		Retention: time.Hour,
+		Logger:    logger,
+		Now:       time.Now,
+	})
+	if err == nil {
+		t.Fatal("expected gc.Run to return an error when manifest body is corrupt")
+	}
+	if !strings.Contains(err.Error(), "build live set") && !strings.Contains(err.Error(), "parse") {
+		t.Errorf("error should mention build live set or parse failure; got: %v", err)
+	}
+
+	// Verify NO mark record was written (gc.Run must have aborted before marks.Write).
+	k, _ := keys.NewRepo("acme", "site")
+	if _, merr := marks.ReadLatest(ctx, base, k); !errors.Is(merr, marks.ErrNotFound) {
+		t.Errorf("expected no mark record after abort; got err=%v", merr)
+	}
+}
+
+// corruptManifestStore wraps an ObjectStore and replaces the root manifest
+// body with a corrupt "packs" field type on Get. The header fields remain
+// valid so the §43.7 schema gate passes, but BuildLiveSet's body unmarshal
+// into manifest.Body (which expects []PackEntry) will fail.
+type corruptManifestStore struct {
+	storage.ObjectStore
+	manifestKey string
+}
+
+func (c *corruptManifestStore) Get(ctx context.Context, key string, opts *storage.GetOptions) (*storage.Object, error) {
+	if key != c.manifestKey {
+		return c.ObjectStore.Get(ctx, key, opts)
+	}
+	// Valid header fields; "packs" is a string instead of an array so that
+	// json.Unmarshal into manifest.Body.Packs []PackEntry fails.
+	corrupt := `{"schema_version":1,"min_reader_version":"0.1.0","repo_id":"site","repo_format":{"object_format":"sha1","compatibility":["sha1"]},"manifest_version":1,"latest_tx":"","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","packs":"not-an-array"}`
+	return &storage.Object{
+		Body:     io.NopCloser(strings.NewReader(corrupt)),
+		Metadata: storage.ObjectMetadata{Key: key, Version: storage.ObjectVersion{Token: "v1"}},
+	}, nil
 }
 
 type testWriter struct{ t *testing.T }

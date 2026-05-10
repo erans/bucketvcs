@@ -49,6 +49,14 @@ func DiscoverIndexes(ctx context.Context, s storage.ObjectStore, k *keys.Repo, l
 //
 // Caller is responsible for OR-ing armed with any prior mark record's
 // armed value (sticky once true).
+//
+// Note: markers without a sibling tx record (an unlikely state, but
+// possible if a future repair tool injects one) are tracked here
+// purely for the armed-sweep gate logic; they are NOT enumerated as
+// candidates and will accumulate forever until cleaned by repair
+// tooling. Sweeping orphan markers is intentionally out of M8 scope
+// because the marker is itself a forensic signal — destroying it
+// without a corresponding tx record would lose information.
 func DiscoverTxRecords(ctx context.Context, s storage.ObjectStore, k *keys.Repo, live LiveSet) (candidates []string, armed bool, err error) {
 	prefix := k.Prefix() + "tx/"
 	records := map[string]struct{}{}

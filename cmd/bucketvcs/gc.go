@@ -130,8 +130,12 @@ func runGC(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			continue
 		}
 		if err := emitReport(stdout, *format, report); err != nil {
-			fmt.Fprintf(stderr, "gc: emit report: %v\n", err)
-			return 1
+			fmt.Fprintf(stderr, "gc: emit report for %s/%s: %v\n", ref.TenantID, ref.RepoID, err)
+			if !*allRepos {
+				return 1
+			}
+			anyError = true
+			// Continue: a stdout glitch on one repo shouldn't abort the run.
 		}
 		if len(report.SweepRecord.Errors) > 0 {
 			anyError = true
@@ -184,7 +188,11 @@ func emitReport(w io.Writer, format string, r gc.RunReport) error {
 			"dry_run":                r.DryRun,
 		})
 	default:
-		fmt.Fprintf(w, "repo %s @ manifest v%d\n", r.RepoID, r.ManifestVersion)
+		if r.DryRun {
+			fmt.Fprintf(w, "DRY RUN — repo %s @ manifest v%d\n", r.RepoID, r.ManifestVersion)
+		} else {
+			fmt.Fprintf(w, "repo %s @ manifest v%d\n", r.RepoID, r.ManifestVersion)
+		}
 		if r.MarkRecord.MarkID != "" {
 			fmt.Fprintf(w, "  mark    %s   candidates: tx=%d packs=%d indexes=%d  (%s)\n",
 				r.MarkRecord.MarkID,
@@ -200,8 +208,12 @@ func emitReport(w io.Writer, format string, r gc.RunReport) error {
 			for _, sk := range s.Skipped {
 				byReason[sk.Reason]++
 			}
-			fmt.Fprintf(w, "  sweep   %s   deleted: tx=%d packs=%d indexes=%d\n",
-				s.SweepID,
+			deletedLabel := "deleted"
+			if r.DryRun {
+				deletedLabel = "would-delete"
+			}
+			fmt.Fprintf(w, "  sweep   %s   %s: tx=%d packs=%d indexes=%d\n",
+				s.SweepID, deletedLabel,
 				len(s.Deleted.TxRecords), len(s.Deleted.CanonicalPacks), len(s.Deleted.Indexes))
 			fmt.Fprintf(w, "                       skipped: revived=%d retention=%d vmismatch=%d notfound=%d disarmed=%d\n",
 				byReason["revived"], byReason["retention_not_met"], byReason["version_mismatch"], byReason["not_found"], byReason["tx_sweep_disarmed"])
@@ -220,7 +232,7 @@ Flags:
   --store=<URL>             Storage URL (required, e.g. localfs:/path, s3://bucket, gcs://bucket, azureblob://container)
   --repo=<tenant>/<repo>    Single repo (mutually exclusive with --all-repos)
   --all-repos               Process every repo discovered under tenants/*/repos/*
-  --retention=<duration>    Sweep candidate retention window (default 168h; warns if < 24h)
+  --retention=<duration>    Sweep candidate retention window (default 168h; minimum 1s; warns if < 24h)
   --max-concurrency=<n>     RESERVED — currently no-op; sequential sweep (default 1)
   --mark-only               Run mark phase only; skip sweep
   --sweep-only              Skip mark phase; sweep most recent existing mark
