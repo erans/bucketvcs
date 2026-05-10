@@ -26,6 +26,10 @@ type SweepOptions struct {
 
 // RunSweep executes the sweep phase against the given mark record.
 // Returns the (unwritten) sweep Record. Caller writes via sweeps.Write.
+//
+// Individual delete failures are accumulated in Record.Errors, not
+// returned as an error; the returned error covers only fatal setup
+// failures (key derivation, root-read).
 func RunSweep(ctx context.Context, s storage.ObjectStore, r *repo.Repo, mark marks.Record, opts SweepOptions) (sweeps.Record, error) {
 	if opts.Now == nil {
 		opts.Now = time.Now
@@ -56,11 +60,13 @@ func RunSweep(ctx context.Context, s storage.ObjectStore, r *repo.Repo, mark mar
 		CurrentManifestObjectVersion: view.Version.Token,
 	}
 
-	now := opts.Now()
+	now := startedAt
 
-	// Iterate categories sequentially (max-concurrency applies within
-	// each category). Sequential category processing keeps the report
-	// shape predictable and the implementation simple; revisit if hot.
+	// Categories are processed sequentially; within each category,
+	// candidates are also processed sequentially. MaxConcurrency is
+	// normalized for forward-compat (an opts.MaxConcurrency=0 still
+	// produces a valid SweepOptions) but is not yet plumbed into a
+	// worker pool — revisit when sweep throughput becomes a bottleneck.
 	for _, t := range mark.Candidates.TxRecords {
 		decision := classify(t.Key, "tx_records", t.FirstSeenUnreachableAt, retention, now, freshLive, mark.TxOrphanSweepArmed)
 		applyDecision(ctx, s, k, t.Key, "tx_records", decision, &out)
