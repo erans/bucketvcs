@@ -72,3 +72,28 @@ func TestGC_CLI_RetentionWarningBelow24h(t *testing.T) {
 		t.Errorf("expected retention warning on stderr; got: %s", stderr.String())
 	}
 }
+
+func TestGC_CLI_DryRun_TextOutputShowsSweepBlock(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := localfs.Open(dir)
+	ctx := context.Background()
+	if _, err := repo.Create(ctx, store, "acme", "site", repo.CreateOptions{Actor: "u_test"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	store.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := runGC(ctx, []string{
+		"--store", "localfs:" + dir,
+		"--repo", "acme/site",
+		"--retention", "1ms",
+		"--dry-run",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("dry-run exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "sweep") {
+		t.Errorf("dry-run text output missing 'sweep' block; got: %s", out)
+	}
+}

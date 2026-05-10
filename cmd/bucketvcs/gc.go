@@ -16,8 +16,8 @@ import (
 // runGC is the gc subcommand entry point. Returns process exit code:
 //
 //	0 — clean run (no errors, no version_mismatch)
-//	1 — operational error (store unreachable, invalid flags, etc.)
-//	2 — usage error / left-work-behind (any version_mismatch or per-key errors in --all-repos summary)
+//	1 — operational error (store unreachable, GC failure)
+//	2 — usage error or left work behind (bad flags, version_mismatch, or per-key errors)
 func runGC(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("gc", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -69,6 +69,7 @@ func runGC(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc: open store: %v\n", err)
 		return 1
 	}
+	defer closeStore(store)
 
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
 	opts := gc.RunOptions{
@@ -134,6 +135,10 @@ func runGC(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
+	// In --all-repos summary, anyError takes priority over anyMismatch:
+	// operational failures are louder than left-work-behind. If both occur
+	// in the same run, exit 1 wins; the per-repo logs above still show the
+	// version_mismatch counts for operator triage.
 	switch {
 	case anyError:
 		return 1
@@ -171,7 +176,7 @@ func emitReport(w io.Writer, format string, r gc.RunReport) error {
 				r.MarkDuration.Round(time.Millisecond),
 			)
 		}
-		if r.SweepID != "" || (r.MarkID == "" && r.SweepRecord.SweepID == "") {
+		if r.SweepRecord.SweepID != "" {
 			s := r.SweepRecord
 			byReason := map[string]int{}
 			for _, sk := range s.Skipped {
@@ -207,8 +212,8 @@ Flags:
 
 Exit codes:
   0  clean (no errors, no version_mismatch)
-  1  operational error (store unreachable, invalid flags, etc.)
-  2  ran successfully but left work behind (any version_mismatch or per-key errors)
+  1  operational error (store unreachable, GC failure, etc.)
+  2  usage error or left work behind (bad flags, version_mismatch, or per-key errors)
 
 See docs/m8-gc-operator-guide.md for retention guidance and the §43.6
 race window.
