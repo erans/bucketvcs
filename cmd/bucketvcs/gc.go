@@ -16,8 +16,8 @@ import (
 // runGC is the gc subcommand entry point. Returns process exit code:
 //
 //	0 — clean run (no errors, no version_mismatch)
-//	1 — operational error (store unreachable, GC failure)
-//	2 — usage error or left work behind (bad flags, version_mismatch, or per-key errors)
+//	1 — operational error (store unreachable, GC failure, per-key sweep errors)
+//	2 — usage error or version_mismatch (bad flags, version_mismatch skips left work behind)
 func runGC(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("gc", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -212,8 +212,8 @@ Flags:
 
 Exit codes:
   0  clean (no errors, no version_mismatch)
-  1  operational error (store unreachable, GC failure, etc.)
-  2  usage error or left work behind (bad flags, version_mismatch, or per-key errors)
+  1  operational error (store unreachable, GC failure, per-key sweep errors)
+  2  usage error or version_mismatch (bad flags, version_mismatch skips left work behind)
 
 See docs/m8-gc-operator-guide.md for retention guidance and the §43.6
 race window.
