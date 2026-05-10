@@ -46,6 +46,9 @@ func Run(ctx context.Context, s storage.ObjectStore, r *repo.Repo, opts RunOptio
 	if opts.Retention <= 0 {
 		opts.Retention = DefaultRetention
 	}
+	if opts.Retention > 0 && opts.Retention < time.Second {
+		return RunReport{}, fmt.Errorf("gc: Retention=%s is below the 1s minimum; use Retention >= 1*time.Second", opts.Retention)
+	}
 	if opts.MaxConcurrency < 1 {
 		opts.MaxConcurrency = 1
 	}
@@ -136,7 +139,22 @@ func Run(ctx context.Context, s storage.ObjectStore, r *repo.Repo, opts RunOptio
 
 	if !opts.DryRun {
 		if err := sweeps.Write(ctx, s, k, sweep); err != nil {
-			return rep, fmt.Errorf("gc: write sweep: %w", err)
+			// The sweep deletes already happened on disk but the audit
+			// record is now lost. Emit an audit-tagged log line so the
+			// forensic trail isn't completely silent. Operators reading
+			// §7.4 of the operator guide should cross-reference this log.
+			opts.Logger.Error("gc.sweep.audit_write_failed",
+				"audit", true,
+				"subsystem", "gc",
+				"repo_id", repoIDStr,
+				"sweep_id", sweep.SweepID,
+				"mark_id", sweep.MarkID,
+				"deleted_tx_records", len(sweep.Deleted.TxRecords),
+				"deleted_canonical_packs", len(sweep.Deleted.CanonicalPacks),
+				"deleted_indexes", len(sweep.Deleted.Indexes),
+				"error", err.Error(),
+			)
+			return rep, fmt.Errorf("gc: write sweep (deletes already executed): %w", err)
 		}
 		rep.SweepID = sweep.SweepID
 		if err := PruneMarks(ctx, s, k, DefaultMarkRecordRetention); err != nil {

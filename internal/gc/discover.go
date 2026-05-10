@@ -3,6 +3,7 @@ package gc
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
@@ -76,6 +77,7 @@ func DiscoverTxRecords(ctx context.Context, s storage.ObjectStore, k *keys.Repo,
 		}
 		candidates = append(candidates, recKey)
 	}
+	sort.Strings(candidates)
 	return candidates, armed, nil
 }
 

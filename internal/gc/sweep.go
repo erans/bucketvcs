@@ -165,15 +165,9 @@ func applyDecision(ctx context.Context, s storage.ObjectStore, key, category str
 	switch category {
 	case "tx_records":
 		out.Deleted.TxRecords = append(out.Deleted.TxRecords, key)
-		// Defensive marker delete (see spec §8.1 step 6). In normal
-		// operation no marker exists for an orphan tx record (a candidate
-		// must not have had a marker at mark time, and losing CAS
-		// attempts never get a later marker via repo.Commit). The delete
-		// is idempotent and silent on NotFound; it exists to clean up any
-		// stray marker introduced out-of-band (e.g., a future repair tool).
-		if mmeta, herr := s.Head(ctx, key+".commit"); herr == nil {
-			_ = s.DeleteIfVersionMatches(ctx, key+".commit", mmeta.Version)
-		}
+		// Note: by classification, an orphan tx record has no .commit
+		// sibling. If a future repair tool injects markers, it must
+		// clean its own markers — this code path does not.
 	case "canonical_packs":
 		out.Deleted.CanonicalPacks = append(out.Deleted.CanonicalPacks, key)
 	case "indexes":

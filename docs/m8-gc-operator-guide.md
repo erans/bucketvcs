@@ -253,6 +253,8 @@ unreachable (as first observed by GC), not from the time GC runs.
 The flag accepts any `time.Duration` string that Go's `time.ParseDuration`
 accepts:
 
+The minimum allowed retention is **1 second**. Values below 1s are rejected by the CLI with exit code 2, because sub-second retention values silently truncate to zero in the on-disk record and previously caused the default 7-day window to silently apply. Use `--retention=1s` as the floor when scripting fast test loops.
+
 ```bash
 # One week (the default — explicit for clarity in scripts)
 bucketvcs gc --all-repos --store=s3://my-bucket --retention=168h
@@ -837,6 +839,8 @@ mark and sweep.
 5. If the deletion was a race, re-import the missing content and open a bug
    against the operation. Increase the retention window to reduce future
    exposure.
+
+> **Sweep audit record write failure:** If the sweep audit record fails to write after deletes have already executed (e.g., transient store error during sweep), `bucketvcs gc` exits 1 and emits an audit-tagged `gc.sweep.audit_write_failed` log line carrying the sweep_id, mark_id, and per-category deletion counts. Cross-reference this log line and the still-present mark record (`gc/marks/mk_<...>.json`) to reconstruct what was deleted.
 
 ---
 

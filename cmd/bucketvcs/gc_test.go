@@ -5,6 +5,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
@@ -82,11 +83,14 @@ func TestGC_CLI_DryRun_TextOutputShowsSweepBlock(t *testing.T) {
 	}
 	store.Close()
 
+	// Sleep so any candidates age past the 1s retention floor.
+	time.Sleep(1100 * time.Millisecond)
+
 	var stdout, stderr bytes.Buffer
 	code := runGC(ctx, []string{
 		"--store", "localfs:" + dir,
 		"--repo", "acme/site",
-		"--retention", "1ms",
+		"--retention", "1s",
 		"--dry-run",
 	}, &stdout, &stderr)
 	if code != 0 {
@@ -137,11 +141,14 @@ func TestGC_CLI_DryRun_MarkBlockShowsMarkID(t *testing.T) {
 	}
 	store.Close()
 
+	// Sleep so any candidates age past the 1s retention floor.
+	time.Sleep(1100 * time.Millisecond)
+
 	var stdout, stderr bytes.Buffer
 	code := runGC(ctx, []string{
 		"--store", "localfs:" + dir,
 		"--repo", "acme/site",
-		"--retention", "1ms",
+		"--retention", "1s",
 		"--dry-run",
 	}, &stdout, &stderr)
 	if code != 0 {
@@ -166,15 +173,38 @@ func TestGC_CLI_DryRun_NoDelete(t *testing.T) {
 	}
 	store.Close()
 
+	// Phase 1: mark-only run writes firstSeenUnreachableAt = now to disk.
+	var stdout1, stderr1 bytes.Buffer
+	if code := runGC(ctx, []string{
+		"--store", "localfs:" + dir,
+		"--repo", "acme/site",
+		"--retention", "1s",
+		"--mark-only",
+	}, &stdout1, &stderr1); code != 0 {
+		t.Fatalf("mark-only exit = %d; stderr=%s", code, stderr1.String())
+	}
+
+	// Sleep so the orphan pack ages past the 1s retention floor.
+	// The sweep will see now - firstSeenUnreachableAt ≈ 1.1s > 1s → would-delete.
+	time.Sleep(1100 * time.Millisecond)
+
+	// Phase 2: sweep-only dry-run against the mark written in phase 1.
 	var stdout, stderr bytes.Buffer
 	code := runGC(ctx, []string{
 		"--store", "localfs:" + dir,
 		"--repo", "acme/site",
-		"--retention", "1ms",
+		"--retention", "1s",
+		"--sweep-only",
 		"--dry-run",
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("dry-run exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	// Verify the would-delete branch fired: packs=1 in the sweep block, not packs=0.
+	out := stdout.String()
+	if !strings.Contains(out, "packs=1") {
+		t.Errorf("dry-run did not exercise would-delete path; expected packs=1 in sweep block, got: %s", out)
 	}
 
 	// Re-open the store to verify the orphan still exists.

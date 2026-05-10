@@ -21,30 +21,47 @@ func TestRun_DryRun_NoEffect(t *testing.T) {
 	k, _ := keys.NewRepo("acme", "site")
 	gctest.PutEmpty(t, store, k.CanonicalPackKey("orphan"))
 
-	rep, err := gc.Run(ctx, store, r, gc.RunOptions{
-		DryRun:    true,
+	logger := slog.New(slog.NewTextHandler(testWriter{t}, nil))
+
+	// Phase 1: mark-only run writes the mark record with firstSeenUnreachableAt = now.
+	// DryRun is false so the mark is persisted to disk for phase 2.
+	_, err := gc.Run(ctx, store, r, gc.RunOptions{
+		MarkOnly:  true,
 		Retention: time.Second,
-		Logger:    slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Logger:    logger,
 		Now:       time.Now,
 	})
 	if err != nil {
-		t.Fatalf("Run: %v", err)
+		t.Fatalf("MarkOnly Run: %v", err)
 	}
-	if rep.MarkID != "" {
-		t.Errorf("dry-run wrote mark_id=%q, want empty", rep.MarkID)
+
+	// Sleep so the orphan pack ages past the 1s retention floor before sweep.
+	time.Sleep(1100 * time.Millisecond)
+
+	// Phase 2: sweep-only dry-run against the mark written in phase 1.
+	// now - firstSeenUnreachableAt ≈ 1.1s > 1s → would-delete branch fires.
+	rep, err := gc.Run(ctx, store, r, gc.RunOptions{
+		SweepOnly: true,
+		DryRun:    true,
+		Retention: time.Second,
+		Logger:    logger,
+		Now:       time.Now,
+	})
+	if err != nil {
+		t.Fatalf("SweepOnly DryRun Run: %v", err)
 	}
 	if rep.SweepID != "" {
 		t.Errorf("dry-run wrote sweep_id=%q, want empty", rep.SweepID)
 	}
-	// Pack should still exist.
+	// Pack should still exist (dry-run must not delete anything).
 	if _, err := store.Head(ctx, k.CanonicalPackKey("orphan")); err != nil {
 		t.Errorf("dry-run deleted pack: %v", err)
 	}
-	// "Would delete" candidates should appear in the sweep record.
-	// Retention is 1s and we don't sleep, so the orphan pack has not yet
-	// aged past retention — it will appear in Skipped, not Deleted.
-	// That's correct dry-run behavior: compute candidates, write nothing,
-	// delete nothing. The key assertion is MarkID=="" and pack still exists.
+	// "Would delete" branch must have fired: the orphan pack aged past retention
+	// and should appear in Deleted, not Skipped.
+	if len(rep.SweepRecord.Deleted.CanonicalPacks) != 1 {
+		t.Errorf("dry-run would-delete canonical_packs = %d, want 1", len(rep.SweepRecord.Deleted.CanonicalPacks))
+	}
 }
 
 func TestRun_MarkOnly_WritesMarkButNoSweep(t *testing.T) {
