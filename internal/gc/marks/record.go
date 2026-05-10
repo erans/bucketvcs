@@ -51,54 +51,72 @@ type IndexCandidate struct {
 	FirstSeenUnreachableAt time.Time `json:"first_seen_unreachable_at"`
 }
 
+// marshaledRecord is the on-disk JSON shape — fields appear in this
+// order on disk. previous_mark_id uses *string so that a nil pointer
+// emits JSON null and a non-nil pointer emits a quoted string.
+type marshaledRecord struct {
+	SchemaVersion                int        `json:"schema_version"`
+	MarkID                       string     `json:"mark_id"`
+	PreviousMarkID               *string    `json:"previous_mark_id"`
+	StartedAt                    time.Time  `json:"started_at"`
+	CompletedAt                  time.Time  `json:"completed_at"`
+	CurrentManifestVersion       uint64     `json:"current_manifest_version"`
+	CurrentManifestObjectVersion string     `json:"current_manifest_object_version"`
+	RetentionSeconds             int        `json:"retention_seconds"`
+	TxOrphanSweepArmed           bool       `json:"tx_orphan_sweep_armed"`
+	Candidates                   Candidates `json:"candidates"`
+}
+
 // MarshalJSON emits canonical Record JSON, normalizing nil candidate
 // slices to empty arrays and PreviousMarkID to JSON null when empty.
+// Field order on disk matches the marshaledRecord declaration.
 func (r Record) MarshalJSON() ([]byte, error) {
-	type alias Record
-	a := alias(r)
-	if a.Candidates.TxRecords == nil {
-		a.Candidates.TxRecords = []TxCandidate{}
+	m := marshaledRecord{
+		SchemaVersion:                r.SchemaVersion,
+		MarkID:                       r.MarkID,
+		StartedAt:                    r.StartedAt,
+		CompletedAt:                  r.CompletedAt,
+		CurrentManifestVersion:       r.CurrentManifestVersion,
+		CurrentManifestObjectVersion: r.CurrentManifestObjectVersion,
+		RetentionSeconds:             r.RetentionSeconds,
+		TxOrphanSweepArmed:           r.TxOrphanSweepArmed,
+		Candidates:                   r.Candidates,
 	}
-	if a.Candidates.CanonicalPacks == nil {
-		a.Candidates.CanonicalPacks = []PackCandidate{}
-	}
-	if a.Candidates.Indexes == nil {
-		a.Candidates.Indexes = []IndexCandidate{}
-	}
-	prev := json.RawMessage("null")
 	if r.PreviousMarkID != "" {
-		b, err := json.Marshal(r.PreviousMarkID)
-		if err != nil {
-			return nil, err
-		}
-		prev = b
+		s := r.PreviousMarkID
+		m.PreviousMarkID = &s
 	}
-	out, err := json.Marshal(a)
-	if err != nil {
-		return nil, err
+	if m.Candidates.TxRecords == nil {
+		m.Candidates.TxRecords = []TxCandidate{}
 	}
-	// Splice previous_mark_id into the output object.
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(out, &top); err != nil {
-		return nil, err
+	if m.Candidates.CanonicalPacks == nil {
+		m.Candidates.CanonicalPacks = []PackCandidate{}
 	}
-	top["previous_mark_id"] = prev
-	return json.MarshalIndent(top, "", "  ")
+	if m.Candidates.Indexes == nil {
+		m.Candidates.Indexes = []IndexCandidate{}
+	}
+	return json.MarshalIndent(m, "", "  ")
 }
 
 // UnmarshalJSON parses the canonical Record JSON.
 func (r *Record) UnmarshalJSON(b []byte) error {
-	type alias Record
-	var a struct {
-		alias
-		PreviousMarkID *string `json:"previous_mark_id"`
-	}
-	if err := json.Unmarshal(b, &a); err != nil {
+	var m marshaledRecord
+	if err := json.Unmarshal(b, &m); err != nil {
 		return err
 	}
-	*r = Record(a.alias)
-	if a.PreviousMarkID != nil {
-		r.PreviousMarkID = *a.PreviousMarkID
+	*r = Record{
+		SchemaVersion:                m.SchemaVersion,
+		MarkID:                       m.MarkID,
+		StartedAt:                    m.StartedAt,
+		CompletedAt:                  m.CompletedAt,
+		CurrentManifestVersion:       m.CurrentManifestVersion,
+		CurrentManifestObjectVersion: m.CurrentManifestObjectVersion,
+		RetentionSeconds:             m.RetentionSeconds,
+		TxOrphanSweepArmed:           m.TxOrphanSweepArmed,
+		Candidates:                   m.Candidates,
+	}
+	if m.PreviousMarkID != nil {
+		r.PreviousMarkID = *m.PreviousMarkID
 	}
 	return nil
 }
