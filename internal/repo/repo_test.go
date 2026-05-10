@@ -613,9 +613,12 @@ func TestCommit_MarkerWriteFailureDoesNotFailCommit(t *testing.T) {
 	ctx := context.Background()
 	r := mustCreate(ctx, t, store, "acme", "site", repo.CreateOptions{Actor: "u_test"})
 
-	_, err := r.Commit(ctx, txpkg.Body{Type: "push", Actor: "u_test"},
+	txID, err := r.Commit(ctx, txpkg.Body{Type: "push", Actor: "u_test"},
 		func(prev *repo.RootView) ([]byte, error) { return prev.Body, nil })
 	if err != nil {
 		t.Fatalf("Commit must succeed despite marker-write failure: %v", err)
+	}
+	if txID == "" {
+		t.Fatal("Commit returned empty txID despite claiming success")
 	}
 }

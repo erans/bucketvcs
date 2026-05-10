@@ -320,7 +320,9 @@ func (r *Repo) Commit(
 			}
 			return "", err
 		}
-		// Best-effort commit marker; see Create for rationale.
+		// Best-effort commit marker; see Create for rationale. A marker-write failure
+		// does not roll back a successful CAS — the marker is an audit aid, not a
+		// correctness guarantee. M16 doctor tooling can repair missing markers.
 		if err := tx.WriteCommitMarker(ctx, r.store, r.keys.CommitMarkerKey(txID)); err != nil {
 			_ = err
 		}
