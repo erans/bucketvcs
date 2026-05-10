@@ -22,8 +22,8 @@ Cross-milestone changes: none expected as contract changes. Implementation may g
 
 | ID | Deliverable | Spec |
 |----|-------------|------|
-| A | Reachability walk from current ref tips, reusing M2's importer pack-reader path (no dependency on indexes being current) | §14, §21 |
-| B | Single full-repack output: one new `packs/canonical/<hash>.pack` + `.idx` per successful run | §15.1, §21 |
+| A | Reachability handled by `git rev-list --all --objects` inside `gitcli.PackObjectsAll` against a locally-materialized bare repo (importer's pattern); no Go-side walker needed | §14, §21 |
+| B | Single full-repack output: one new `packs/canonical/<hash>.pack` + `.idx` per successful run, produced via `gitcli.PackObjectsAll` against a temp bare repo materialized from the current canonical packs | §15.1, §21 |
 | C | Fresh commit-graph (`.bvcg`) built from the same ref tips | §15.3, §21 |
 | D | Fresh object-map (`.bvom`) covering the new pack | §15.3, §21 |
 | E | CAS-merge protocol that preserves concurrent-push packs (§43.6 / §17) | §43.6, §17 |
@@ -87,15 +87,16 @@ internal/maintenance/
   options.go                  RunOptions, threshold config, defaults
   run.go                      Run(ctx, store, k, opts) entry point — single repo
   thresholds.go               §15.3 trigger evaluation against current manifest
-  pipeline.go                 orchestrates the 6 phases
-  walker.go                   ref-tip reachability walk over current packs
-  packwrite.go                streams object closure into a new packs/canonical/ pack + .idx
-  indexes.go                  rebuilds .bvcg + .bvom against the new pack
+  pipeline.go                 orchestrates the 7 phases (Phase 0–6)
+  materialize.go              download P0 packs into a temp bare repo; write packed-refs + HEAD
+  repack.go                   gitcli.PackObjectsAll wrapper; tmpdir lifecycle
+  indexes.go                  rebuilds .bvcg + .bvom against the new local pack
+  upload.go                   PutIfAbsent the four artifacts to canonical keys
   casmerge.go                 the CAS-merge attempt loop; produces M_new from (M0, M_now, our-output)
   audit.go                    structured log emission, mirrors internal/gc/audit.go
   metrics.go                  §32 metric names + helpers
   conformance/                MaintenanceSafety property test against any ObjectStore factory
-  mtest/                      shared test fixtures (ref-tip builders, pack synthesizers)
+  mtest/                      shared test fixtures (manifest+pack synthesizers, ObjectStore recorder)
 
 cmd/bucketvcs/maintenance.go  CLI subcommand (cobra), mirrors gc.go shape
 ```
@@ -111,7 +112,8 @@ cmd/bucketvcs/maintenance.go  CLI subcommand (cobra), mirrors gc.go shape
 
 - **Stateless entry point.** `maintenance.Run(ctx, store, k, opts) (Report, error)` takes an `ObjectStore` and a `keys.Repo` — the same surface as `gc.Run`. No package globals, no config files. The CLI builds `opts` from flags and calls it.
 - **One repo per call.** `--all-repos` loops in the CLI, exactly like `bucketvcs gc --all-repos`. Per-repo failures are isolated.
-- **Reuse, do not fork.** The reachability walk is a thin wrapper over the importer's existing `pack.Reader` traversal helpers. The index builders are M2's `objindex.Build` and `commitgraph.Build` unchanged. The novel code in M9 is `pipeline.go`, `casmerge.go`, and `thresholds.go`.
+- **Reuse, do not fork.** Pack production reuses `gitcli.PackObjectsAll` (the importer's pattern from M2 — git CLI does the rev-list + pack-objects work; reachability is implicit in `--all`). Index building stays pure Go via `objindex.Build` and `commitgraph.Build`, opened against the new local pack via the importer's `newLocalFilePackStore` adapter (or an equivalent thin helper if it stays unexported). The novel code in M9 is `materialize.go`, `pipeline.go`, `casmerge.go`, and `thresholds.go`.
+- **Pure-Go pack writer is out of scope.** The §40.3 promotion rule reserves pure-Go pack writing for its own milestone after differential-harness shadow time. M9 follows the existing convention: git CLI for pack writes, pure Go for everything else.
 - **No new manifest fields.** All output lands in existing slots: `Packs`, `Indexes.ObjectMap`, `Indexes.CommitGraph`. Zero schema-version changes.
 - **No required cross-milestone changes.** If profiling during implementation surfaces a needed primitive (e.g. a streaming object-source enumerator on `internal/pack`), it lands as an additive method (no contract change). Anything larger surfaces as a Phase-0 patch step in the plan, reviewed independently — same posture M8 took for `tx.WriteCommitMarker`.
 
@@ -127,7 +129,7 @@ The two CLIs are independent and idempotent. Operator runbook orders them as `gc
 
 ## 4. Maintenance pipeline
 
-A single `maintenance.Run` call executes six phases. Phases 1, 5, 6 are the only ones that touch durable state.
+A single `maintenance.Run` call executes seven phases. Phases 4 and 6 are the only ones that touch durable manifest state; phases 1–3 work in a per-run temp directory.
 
 ### 4.1 Phase 0 — Load & gate
 
@@ -136,73 +138,91 @@ A single `maintenance.Run` call executes six phases. Phases 1, 5, 6 are the only
 2. Evaluate thresholds against M0 (see §5)
 3. If !opts.Force && !triggered: emit "no-op" report, exit 0
 4. Snapshot ref tips T0 := M0.Body.Refs (map[ref]commit_oid)
-   Snapshot pack set P0 := set(M0.Body.Packs.PackKey)
+   Snapshot default branch D0 := M0.Body.DefaultBranch
+   Snapshot pack set P0 := list of M0.Body.Packs entries (Key + IdxKey)
 ```
 
-If `T0` is empty (newly-initialized repo with no refs), the run is a no-op regardless of triggers — there is nothing to repack.
+If `T0` is empty (newly-initialized repo with no refs) or `P0` is empty, the run is a no-op regardless of triggers — there is nothing to repack.
 
-### 4.2 Phase 1 — Reachability walk
-
-```
-5. Open every pack in P0 via internal/pack readers (lazy index load)
-6. Walk closure from T0 over commits / trees / blobs / tags using the
-   same traversal helpers internal/importer uses
-7. Produce: ordered iterator of (oid, type, content) — streamed, not
-   materialized into a single in-memory list
-```
-
-The walk uses `internal/pack/cache.go`'s reader cache. Memory bound: one pack window + delta-base cache + the visited-OID hashset (fixed size per object). If a referenced commit's parents are not present in P0 (corrupt input), the walk fails fast with a wrapped error and the run aborts before any writes — same posture as `internal/gc/liveset.go` on missing references.
-
-### 4.3 Phase 2 — Pack write
+### 4.2 Phase 1 — Materialize bare repo
 
 ```
- 8. Stream the object iterator into a new pack:
-    - Compute pack content hash incrementally (SHA-1 over the wire format)
-    - Pack key:   packs/canonical/<repo>/<contenthash>.pack
-    - Pack-index: packs/canonical/<repo>/<contenthash>.idx
- 9. Upload .pack (PutIfAbsent — content-addressed, idempotent on retry)
-10. Build .idx from the pack offsets, upload .idx (PutIfAbsent)
+ 5. Create temp dir <tmp> with os.MkdirTemp("", "bucketvcs-maint-")
+ 6. mkdir <tmp>/bare.git/objects/pack
+ 7. For each (PackKey, IdxKey) in P0:
+      Get(ctx, PackKey) → stream to <tmp>/bare.git/objects/pack/pack-<oid>.pack
+      Get(ctx, IdxKey)  → stream to <tmp>/bare.git/objects/pack/pack-<oid>.idx
+    where <oid> is the pack's content hash (already part of the canonical key).
+ 8. Write <tmp>/bare.git/HEAD with "ref: refs/heads/<D0>\n"
+ 9. Write <tmp>/bare.git/packed-refs from T0 (one "<oid> <ref>\n" line per entry,
+    sorted by ref name for determinism)
+10. Write <tmp>/bare.git/config (minimal: [core] repositoryformatversion=0)
+11. Run gitcli.Fsck(ctx, <tmp>/bare.git, true) — fail-fast on corruption
 ```
 
-Delta selection for M9 is a clean re-encode: every object is emitted as either a base object or a delta against an immediate parent (tree → tree base, commit → its tree, blob → no delta). No window-based delta search; that is a post-M9 optimization. M2's existing pack writer already does this and is used unchanged.
+Memory bound: streaming downloads, no in-memory accumulation. Disk bound: total of `P0` pack sizes plus the soon-to-be-produced consolidated pack (≈ same order of magnitude pre-compression).
 
-### 4.4 Phase 3 — Index rebuild
+If any pack download fails, the run aborts with a wrapped error before any writes; the temp dir is deleted in a deferred cleanup.
 
-```
-11. Build .bvom (object-map): one entry per oid in the new pack with
-    pack-id + offset. internal/objindex.Build, unchanged.
-12. Build .bvcg (commit-graph) from T0 walking commits in topological
-    order. internal/commitgraph.Build, unchanged.
-13. Compute content hashes; upload to:
-      indexes/object-map/<bvom-hash>.bvom
-      indexes/commit-graph/<bvcg-hash>.bvcg
-```
-
-The .bvom intentionally covers only the new pack. See §4.6 for why this is correct.
-
-### 4.5 Phase 4 — Tx record (audit trail)
+### 4.3 Phase 2 — Repack (git CLI)
 
 ```
-14. Construct tx_id = "maint-" + <ulid>, body:
-      { kind: "maintenance",
-        run_started_at, run_completed_at,
-        m0_version, ref_tip_snapshot: T0,
-        repacked_pack_keys: sorted(P0),
-        new_pack: { key, hash, size_bytes, object_count },
-        new_object_map: { key, hash },
-        new_commit_graph: { key, hash } }
-15. Upload tx/<tx_id>.json (PutIfAbsent)
-16. Upload tx/<tx_id>.commit (post-CAS marker — written after Phase 5
-    succeeds, mirroring M1's WriteCommitMarker pattern)
+12. prefix := <tmp>/out/pack
+    mkdir <tmp>/out
+13. packID, err := gitcli.PackObjectsAll(ctx, <tmp>/bare.git, prefix)
+    Produces: <tmp>/out/pack-<packID>.pack and <tmp>/out/pack-<packID>.idx
+14. Stat the pack file → packSizeBytes
 ```
 
-Tx kind `"maintenance"` is new; M1's tx record schema accepts it without a schema bump (the body is opaque to M1; M8 GC's tx-orphan sweep classifies on `<txKey>.commit` presence, not body shape).
+`packID` is git's trailing SHA-1 over the pack bytes. As the importer's comments document, repeated repacks of the same reachable set typically yield different `packID`s because delta search is non-deterministic across threads — so PutIfAbsent in Phase 4 normally succeeds.
 
-### 4.6 Phase 5 — CAS-merge
+### 4.4 Phase 3 — Index rebuild (pure Go)
 
 ```
-17. Re-read manifest → M_now, version v_now
-18. If v_now == v0:
+15. Open the new local pack: copy `internal/importer/buildcommit.go`'s
+    small unexported `newLocalFilePackStore` adapter into
+    `internal/maintenance/localpack.go` (≈30 lines, two methods on a
+    type that satisfies `storage.ObjectStore` against a single local
+    file pair). Then `pack.Open(ctx, store, "p.pack", "p.idx")`.
+16. bvomBytes, err := objindex.Build(reader, packID)
+    bvomHash := sha256(bvomBytes) → hex
+17. tips := buildTipsFromRefs(ctx, reader, T0)
+    bvcgBytes, err := commitgraph.Build(ctx, reader, tips)
+    bvcgHash := sha256(bvcgBytes) → hex
+18. Compute object count: reader.Idx().Count()
+```
+
+The `.bvom` covers exactly the new pack. The `.bvcg` is built from `T0`'s commit tips (annotated tags dereferenced via the same loop importer uses, capped at depth 16).
+
+### 4.5 Phase 4 — Upload artifacts
+
+```
+19. PutIfAbsent <tmp>/out/pack-<packID>.pack → k.CanonicalPackKey(packID)
+20. PutIfAbsent <tmp>/out/pack-<packID>.idx  → k.PackIdxKey(packID, "canonical")
+21. PutIfAbsent bvomBytes                    → k.ObjectMapKey(bvomHash)
+22. PutIfAbsent bvcgBytes                    → k.CommitGraphKey(bvcgHash)
+```
+
+ErrAlreadyExists on .bvom / .bvcg is benign (content-addressed → same bytes already there). ErrAlreadyExists on the pack key indicates a content collision against pre-existing bytes; per importer's analysis, this is either an orphan from a crashed prior run, a replay, or a deterministic-repack collision. The run aborts with a wrapped error rather than risk an offset-mismatch between our local .bvom (built against our specific bytes) and what the canonical key now resolves to.
+
+### 4.6 Phase 5 — Tx record
+
+```
+23. txID := "maint-" + ulid.Make()
+24. body := tx.Body{Type: "maintenance", Actor: opts.Actor, Extra: { ... see §4.7 }}
+25. tx.Write(ctx, store, k.TxRecordKey(txID), tx.Header{...}, body)
+    via PutIfAbsent. Tx kind "maintenance" is new; M1's tx record schema
+    accepts free-form body fields and M8 GC's tx-orphan classifier reads
+    the .commit sibling, not the body.
+```
+
+The Extra block carries: `m0_version`, `ref_tip_snapshot` (T0), `repacked_pack_keys` (sorted P0.Key list), `new_pack` (key, hash, size_bytes, object_count), `new_object_map` (key, hash), `new_commit_graph` (key, hash).
+
+### 4.7 Phase 6 — CAS-merge
+
+```
+26. Re-read manifest → M_now, version v_now
+27. If v_now == v0:
       Build M_new with:
         Packs         = [new_pack_entry]
         Indexes       = { ObjectMap: new_bvom_ref,
@@ -211,7 +231,7 @@ Tx kind `"maintenance"` is new; M1's tx record schema accepts it without a schem
         DefaultBranch = M_now.DefaultBranch
         Bundles       = M_now.Bundles      (preserved unchanged)
     Else (v_now > v0): a push or another maintenance ran:
-      Late_packs := M_now.Packs filtered by PackKey ∉ P0
+      Late_packs := M_now.Packs filtered by PackKey ∉ {p.Key for p in P0}
       Build M_new with:
         Packs         = [new_pack_entry] ++ Late_packs
         Indexes       = { ObjectMap: new_bvom_ref,
@@ -219,10 +239,10 @@ Tx kind `"maintenance"` is new; M1's tx record schema accepts it without a schem
         Refs          = M_now.Refs
         DefaultBranch = M_now.DefaultBranch
         Bundles       = M_now.Bundles
-19. CAS write manifest (If-Match v_now). On success: phase 6.
+28. CAS write manifest (If-Match v_now). On success: phase 7.
     On CAS conflict: re-read, retry merge (bounded retries, default 5).
     Bounded retry exhaustion → fail run with non-zero exit; the upload
-    artifacts in phases 2–4 remain in the bucket and become tx-orphan +
+    artifacts in phases 4–5 remain in the bucket and become tx-orphan +
     canonical-pack-orphan candidates for the next M8 GC run.
 ```
 
@@ -231,18 +251,21 @@ Two correctness notes on the merge:
 1. The new indexes (`new_bvom_ref`, `new_bvcg_ref`) are *correct as accelerators*: they cover exactly the objects in the new pack. They are *incomplete* with respect to `Late_packs` if any. This is fine: §14 indexes are accelerators, not authority — the fetch path falls back to scanning packs when an oid misses the index. This is the same posture as a fresh push that does not touch the indexes (current state today).
 2. Refs at CAS time (`M_now.Refs`) are preserved verbatim. We never write ref state in M9; we only write pack and index state. A ref that advanced during the run points at a commit that is either (a) reachable from T0 — already in our new pack — or (b) added by a concurrent push — already in a `Late_packs` member. Either way, `M_new` is reachability-complete.
 
-### 4.7 Phase 6 — Commit marker + audit
+### 4.8 Phase 7 — Commit marker + audit
 
 ```
-20. Write tx/<tx_id>.commit (best-effort, like M1).
-21. Emit audit log entry: kind=maintenance.completed, with the same
+29. tx.WriteCommitMarker(ctx, store, k.CommitMarkerKey(txID))  (best-effort)
+30. Cleanup <tmp>: deferred os.RemoveAll
+31. Emit audit log entry: kind=maintenance.completed, with the same
     fields as the tx body plus before/after pack count and manifest
     pack-metadata size.
-22. Emit §32 metrics (durations, byte counts, retry counts, outcome).
-23. Return Report{...} to the caller.
+32. Emit §32 metrics (durations, byte counts, retry counts, outcome).
+33. Return Report{...} to the caller.
 ```
 
-If Phase 6's commit-marker write fails, the run still reports success — the manifest CAS is the durable commit point. M8's tx-orphan sweep handles missing commit markers identically to push tx records.
+If Phase 7's commit-marker write fails, the run still reports success — the manifest CAS in Phase 6 is the durable commit point. M8's tx-orphan sweep handles missing commit markers identically to push tx records.
+
+The temp directory is deleted via a deferred `os.RemoveAll` at the start of `Run`, so failure at any phase still cleans up.
 
 ## 5. §15.3 thresholds
 
@@ -366,7 +389,7 @@ maintenance.completed { repo_id, run_id, outcome,
 
 | Tier | Location | What it covers |
 |------|----------|----------------|
-| Unit | `internal/maintenance/*_test.go` | thresholds.go decision table; casmerge.go body construction (table-driven over before/after body shapes); pipeline.go phase ordering with a fake ObjectStore; walker.go fan-out and traversal-order invariants |
+| Unit | `internal/maintenance/*_test.go` | thresholds.go decision table; casmerge.go body construction (table-driven over before/after body shapes); pipeline.go phase ordering with a fake ObjectStore; materialize.go bare-repo layout invariants (packed-refs format, HEAD content, file presence) |
 | Integration | `internal/maintenance/integration_test.go` against localfs | full pipeline on a synthesized small repo (10 commits, 5 refs, 3 packs); roundtrip into a `git fsck`-clean export; differential test that import → maintenance → export is reachability-equivalent to import → export |
 | Conformance | `internal/maintenance/conformance/safety.go` exposing `RunPropertyMaintenanceSafety(t, factory)` | the §43.6-style invariant property (below), wired into the cross-adapter aggregator |
 
@@ -431,5 +454,5 @@ This is the protection against pack-writer regressions (delta selection, oid ord
 - **Trigger model: CLI / in-serve / daemon?** CLI-only, mirroring M8.
 - **Repack shape: full / geometric / tiered?** Full repack (one pack out per successful run). Geometric and tiered are explicit followups.
 - **Push-during-repack correctness?** CAS-merge keeps concurrent push packs; old packs become unreachable and M8 GC reclaims after retention. No new safety primitives.
-- **Reachability source: walk packs / use existing index / shell out to git?** Walk packs from ref tips, reusing M2 importer helpers.
-- **Cross-milestone changes?** None expected as contract changes; an additive `internal/pack` helper may surface during implementation.
+- **Pack production: pure-Go writer or git CLI?** Git CLI via `gitcli.PackObjectsAll` against a locally-materialized bare repo. Same pattern as M2's importer. Pure-Go pack writing is its own future milestone (§40.3 promotion rule). Reachability decision is delegated to git's `rev-list --all --objects` inside `PackObjectsAll`.
+- **Cross-milestone changes?** None expected as contract changes. `internal/maintenance/localpack.go` is a duplicate-and-shrink of importer's unexported `newLocalFilePackStore` (≈30 lines); if it becomes shared it can be promoted to a small sibling package later, but M9 doesn't need that.
