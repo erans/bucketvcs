@@ -29,14 +29,41 @@ func (a *AzureBlob) Get(ctx context.Context, key string, opts *bvstorage.GetOpti
 	if err != nil {
 		return nil, classify(opGet, err)
 	}
+
+	// Azure may omit ContentLength for chunked transfer responses. Fall back
+	// to a GetProperties call to obtain the real size rather than silently
+	// returning 0 in ObjectMetadata.Size.
+	size := deref(resp.ContentLength)
+	etag := resp.ETag
+	contentType := resp.ContentType
+	modifiedAt := resp.LastModified
+	if resp.ContentLength == nil {
+		props, propErr := bb.GetProperties(ctx, nil)
+		if propErr == nil {
+			size = deref(props.ContentLength)
+			if etag == nil {
+				etag = props.ETag
+			}
+			if contentType == nil {
+				contentType = props.ContentType
+			}
+			if modifiedAt == nil {
+				modifiedAt = props.LastModified
+			}
+		}
+		// If GetProperties also fails we proceed with size=0 rather than
+		// discarding a successfully opened body; the caller can detect this
+		// via a 0-size metadata field.
+	}
+
 	return &bvstorage.Object{
 		Body: resp.Body,
 		Metadata: bvstorage.ObjectMetadata{
 			Key:         key,
-			Version:     versionFromETag(resp.ETag),
-			Size:        deref(resp.ContentLength),
-			ContentType: derefStr(resp.ContentType),
-			ModifiedAt:  derefTime(resp.LastModified),
+			Version:     versionFromETag(etag),
+			Size:        size,
+			ContentType: derefStr(contentType),
+			ModifiedAt:  derefTime(modifiedAt),
 		},
 	}, nil
 }
@@ -50,10 +77,17 @@ func (a *AzureBlob) Head(ctx context.Context, key string) (*bvstorage.ObjectMeta
 	if err != nil {
 		return nil, classify(opHead, err)
 	}
+	// GetProperties returning a nil ContentLength is an Azure protocol error
+	// (the field is always present in a well-formed 200 response). Treat it
+	// as a transient failure so callers can retry rather than receiving a
+	// silently corrupt 0-size result.
+	if resp.ContentLength == nil {
+		return nil, fmt.Errorf("azureblob: %w: HEAD %s returned nil ContentLength", bvstorage.ErrTransient, key)
+	}
 	return &bvstorage.ObjectMetadata{
 		Key:         key,
 		Version:     versionFromETag(resp.ETag),
-		Size:        deref(resp.ContentLength),
+		Size:        *resp.ContentLength,
 		ContentType: derefStr(resp.ContentType),
 		ModifiedAt:  derefTime(resp.LastModified),
 	}, nil
