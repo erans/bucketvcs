@@ -120,6 +120,18 @@ func TestIndexAndBundleKeys(t *testing.T) {
 	}
 }
 
+func TestCommitMarkerKey(t *testing.T) {
+	r, err := keys.NewRepo("acme", "site")
+	if err != nil {
+		t.Fatalf("NewRepo: %v", err)
+	}
+	got := r.CommitMarkerKey("tx_01HZSAMPLE")
+	want := "tenants/acme/repos/site/tx/tx_01HZSAMPLE.json.commit"
+	if got != want {
+		t.Fatalf("CommitMarkerKey = %q, want %q", got, want)
+	}
+}
+
 func TestPackIdxKey_RejectsBadArea(t *testing.T) {
 	r, _ := keys.NewRepo("acme", "my-repo")
 	defer func() {
