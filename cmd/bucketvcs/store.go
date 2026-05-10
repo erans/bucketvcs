@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/storage"
+	"github.com/bucketvcs/bucketvcs/internal/storage/azureblob"
 	"github.com/bucketvcs/bucketvcs/internal/storage/gcs"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 	"github.com/bucketvcs/bucketvcs/internal/storage/s3compat"
@@ -51,7 +52,16 @@ func parseStoreURL(s string) (scheme, path string, err error) {
 		}
 		return scheme, bucketPath, nil
 	case "azureblob":
-		return "", "", fmt.Errorf(`--store: scheme %q is reserved; cloud adapter for this provider lands at M7`, scheme)
+		// rest should be "//container[/prefix]"
+		if !strings.HasPrefix(rest, "//") {
+			return "", "", fmt.Errorf(`--store: %s URL must use the form %s://<container>[/<prefix>] (got %q)`, scheme, scheme, s)
+		}
+		containerPath := strings.TrimPrefix(rest, "//")
+		container, _, _ := strings.Cut(containerPath, "/")
+		if container == "" {
+			return "", "", fmt.Errorf(`--store: %s:// requires a container name (got %q)`, scheme, s)
+		}
+		return scheme, containerPath, nil
 	default:
 		return "", "", fmt.Errorf(`--store: unknown scheme %q; want "localfs:<path>", "s3://<bucket>[/<prefix>]", "r2://<bucket>[/<prefix>]", "gcs://<bucket>[/<prefix>]", or "azureblob://<container>[/<prefix>]"`, scheme)
 	}
@@ -98,6 +108,19 @@ func openStore(url string) (storage.ObjectStore, error) {
 			return nil, fmt.Errorf("gcs: %w", err)
 		}
 		return s, nil
+	case "azureblob":
+		cfg, err := azureblob.ParseURL(url)
+		if err != nil {
+			return nil, err
+		}
+		applyEnvToAzureConfig(&cfg)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		s, err := azureblob.Open(ctx, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("azureblob: %w", err)
+		}
+		return s, nil
 	default:
 		return nil, fmt.Errorf("unreachable: scheme %q passed parseStoreURL but openStore has no constructor", scheme)
 	}
@@ -141,5 +164,22 @@ func applyEnvToGCSConfig(cfg *gcs.Config) {
 	}
 	if v := os.Getenv("BUCKETVCS_GCS_USER_PROJECT"); v != "" {
 		cfg.UserProject = v
+	}
+}
+
+// applyEnvToAzureConfig layers Azure-specific env vars onto a Config seed
+// produced by azureblob.ParseURL.
+func applyEnvToAzureConfig(cfg *azureblob.Config) {
+	if v := os.Getenv("BUCKETVCS_AZURE_ACCOUNT"); v != "" {
+		cfg.Account = v
+	}
+	if v := os.Getenv("BUCKETVCS_AZURE_SERVICE_URL"); v != "" {
+		cfg.ServiceURL = v
+	}
+	if v := os.Getenv("BUCKETVCS_AZURE_ACCOUNT_KEY"); v != "" {
+		cfg.AccountKey = v
+	}
+	if v := os.Getenv("BUCKETVCS_AZURE_CONNECTION_STRING"); v != "" {
+		cfg.ConnectionString = v
 	}
 }
