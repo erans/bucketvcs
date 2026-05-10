@@ -97,3 +97,64 @@ func TestGC_CLI_DryRun_TextOutputShowsSweepBlock(t *testing.T) {
 		t.Errorf("dry-run text output missing 'sweep' block; got: %s", out)
 	}
 }
+
+func TestGC_CLI_AllRepos_TouchesEachRepo(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := localfs.Open(dir)
+	ctx := context.Background()
+	if _, err := repo.Create(ctx, store, "acme", "site", repo.CreateOptions{Actor: "u_test"}); err != nil {
+		t.Fatalf("Create site: %v", err)
+	}
+	if _, err := repo.Create(ctx, store, "acme", "blog", repo.CreateOptions{Actor: "u_test"}); err != nil {
+		t.Fatalf("Create blog: %v", err)
+	}
+	store.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := runGC(ctx, []string{
+		"--store", "localfs:" + dir,
+		"--all-repos",
+		"--retention", "1s",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "acme/site") || !strings.Contains(out, "acme/blog") {
+		t.Errorf("output missing one of the repos: %s", out)
+	}
+}
+
+func TestGC_CLI_DryRun_NoDelete(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := localfs.Open(dir)
+	ctx := context.Background()
+	_, _ = repo.Create(ctx, store, "acme", "site", repo.CreateOptions{Actor: "u_test"})
+
+	// Drop an orphan pack to be a sweep candidate.
+	if _, err := store.PutIfAbsent(ctx, "tenants/acme/repos/site/packs/canonical/orphan.pack", strings.NewReader(""), nil); err != nil {
+		t.Fatalf("seed orphan: %v", err)
+	}
+	store.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := runGC(ctx, []string{
+		"--store", "localfs:" + dir,
+		"--repo", "acme/site",
+		"--retention", "1ms",
+		"--dry-run",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("dry-run exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	// Re-open the store to verify the orphan still exists.
+	store2, err := localfs.Open(dir)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer store2.Close()
+	if _, err := store2.Head(ctx, "tenants/acme/repos/site/packs/canonical/orphan.pack"); err != nil {
+		t.Errorf("dry-run deleted orphan: %v", err)
+	}
+}
