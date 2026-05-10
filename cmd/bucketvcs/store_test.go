@@ -61,13 +61,48 @@ func TestParseStoreURL_R2(t *testing.T) {
 }
 
 func TestParseStoreURL_RejectsCloudReservations(t *testing.T) {
-	for _, scheme := range []string{"gcs", "azureblob"} {
+	for _, scheme := range []string{"azureblob"} {
 		_, _, err := parseStoreURL(scheme + "://x")
 		if err == nil {
 			t.Fatalf("%s:// must still be reserved", scheme)
 		}
 		if !strings.Contains(err.Error(), "M7") {
 			t.Fatalf("%s:// error %q does not mention M7", scheme, err.Error())
+		}
+	}
+}
+
+func TestParseStoreURL_GCS(t *testing.T) {
+	cases := []struct {
+		url        string
+		wantScheme string
+		wantPath   string
+	}{
+		{"gcs://my-bucket", "gcs", "my-bucket"},
+		{"gcs://my-bucket/data", "gcs", "my-bucket/data"},
+		{"gcs://my-bucket/data/sub", "gcs", "my-bucket/data/sub"},
+		{"gcs://bucket-with-dashes", "gcs", "bucket-with-dashes"},
+	}
+	for _, c := range cases {
+		scheme, path, err := parseStoreURL(c.url)
+		if err != nil {
+			t.Errorf("%q: unexpected error: %v", c.url, err)
+			continue
+		}
+		if scheme != c.wantScheme {
+			t.Errorf("%q: scheme = %q, want %q", c.url, scheme, c.wantScheme)
+		}
+		if path != c.wantPath {
+			t.Errorf("%q: path = %q, want %q", c.url, path, c.wantPath)
+		}
+	}
+}
+
+func TestParseStoreURL_GCS_Errors(t *testing.T) {
+	for _, url := range []string{"gcs:///prefix", "gcs://", "gcs://"} {
+		_, _, err := parseStoreURL(url)
+		if err == nil {
+			t.Fatalf("parseStoreURL(%q) must reject empty bucket", url)
 		}
 	}
 }
