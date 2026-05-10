@@ -1,0 +1,71 @@
+name: conformance
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * *"  # nightly real-cloud run
+  workflow_dispatch:
+
+jobs:
+  emulators:
+    name: emulators (MinIO + fake-gcs + Azurite)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+      - name: Run conformance against emulators
+        run: ./scripts/conformance-emulators.sh
+
+  real-cloud:
+    name: real-cloud (nightly)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: AWS S3 conformance
+        if: ${{ secrets.AWS_S3_BUCKET != '' }}
+        env:
+          BUCKETVCS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+          BUCKETVCS_S3_REGION: ${{ secrets.AWS_S3_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_S3_SECRET_ACCESS_KEY }}
+        run: go test -count=1 -timeout=15m ./internal/storage/s3compat
+
+      - name: Cloudflare R2 conformance
+        if: ${{ secrets.R2_BUCKET != '' }}
+        env:
+          BUCKETVCS_R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          BUCKETVCS_R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          BUCKETVCS_R2_REGION: auto
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: go test -count=1 -timeout=15m ./internal/storage/s3compat
+
+      - name: GCS conformance
+        if: ${{ secrets.GCS_BUCKET != '' }}
+        env:
+          BUCKETVCS_GCS_BUCKET: ${{ secrets.GCS_BUCKET }}
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/gcs-creds.json
+        run: |
+          echo '${{ secrets.GCS_CREDENTIALS_JSON }}' > "$GOOGLE_APPLICATION_CREDENTIALS"
+          go test -count=1 -timeout=15m ./internal/storage/gcs
+
+      - name: Azure Blob conformance
+        if: ${{ secrets.AZURE_CONTAINER != '' }}
+        env:
+          BUCKETVCS_AZURE_CONTAINER: ${{ secrets.AZURE_CONTAINER }}
+          BUCKETVCS_AZURE_ACCOUNT: ${{ secrets.AZURE_ACCOUNT }}
+          BUCKETVCS_AZURE_ACCOUNT_KEY: ${{ secrets.AZURE_ACCOUNT_KEY }}
+        run: go test -count=1 -timeout=15m ./internal/storage/azureblob

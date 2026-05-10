@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/bucketvcs/bucketvcs/internal/diffharness/fixtures"
 	"github.com/bucketvcs/bucketvcs/internal/exporter"
 	"github.com/bucketvcs/bucketvcs/internal/gitcli"
@@ -19,7 +21,18 @@ import (
 func newTestStore(t *testing.T) storage.ObjectStore {
 	t.Helper()
 	if url := os.Getenv("BUCKETVCS_DIFFHARNESS_STORE"); url != "" {
-		s, err := openStoreFromURL(t, url)
+		// For cloud schemes, append a unique UUID sub-prefix so that each
+		// test gets an isolated namespace and re-runs don't collide on the
+		// same fixed repo names (tenant="diff", repo=<fixture>).
+		storeURL := url
+		if !strings.HasPrefix(url, "localfs:") {
+			// Ensure trailing slash before appending the UUID segment.
+			if !strings.HasSuffix(storeURL, "/") {
+				storeURL += "/"
+			}
+			storeURL += uuid.New().String() + "/"
+		}
+		s, err := openStoreFromURL(t, storeURL)
 		if err != nil {
 			t.Fatalf("BUCKETVCS_DIFFHARNESS_STORE=%q: %v", url, err)
 		}

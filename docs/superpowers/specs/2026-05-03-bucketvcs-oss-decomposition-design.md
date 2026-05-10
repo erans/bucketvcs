@@ -67,7 +67,7 @@ After **M3** there is a working OSS Git server backed by local filesystem. After
 | M4 | HTTPS token authentication: HTTP Basic with token-as-password, hashed at rest per §30.5 | §30.1, §30.3, §30.5 | Authenticated clone/fetch/push from real Git clients via `git credential` helpers |
 | M5 | First cloud backend: Cloudflare R2 (recommended per §27 default) or AWS S3 | §11.1, §12.1 or §12.3 | End-to-end clone/fetch/push against a real cloud bucket; chosen backend passes full conformance suite |
 | M6 | SSH gateway + SSH public-key authentication, sharing the M4 authorization engine | §30.2, §30.3, §40.2 | `git@host:org/repo.git` works; SSH and HTTPS map to the same actor and permission decisions |
-| M7 | Remaining canonical cloud backends (the other three of S3, GCS, R2, Azure) | §11.1, §12.x | Each remaining backend passes conformance; can parallelize across contributors |
+| M7 | Remaining canonical cloud backends: AWS S3 (promoted from M5 conformance), GCS, Azure Blob | §11.1, §12.x | Each backend passes conformance; all four §11.1 schemes (s3://, r2://, gcs://, azureblob://) are canonical |
 | M8 | Basic GC: mark/sweep with retention window and §43.6 push-vs-sweep correctness rules; immutable GC mark and sweep records | §25, §33.1, §33.5, §43.6 | `bucketvcs gc` reclaims orphaned packs without ever deleting a still-reachable object; long-running deployments stop leaking storage |
 
 After M8: §35 OSS-scope minimum is complete. First OSS release candidate.

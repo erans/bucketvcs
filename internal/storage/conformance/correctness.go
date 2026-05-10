@@ -437,8 +437,11 @@ func testListDelimiter(t *testing.T, f Factory) {
 
 func testMultipartHappyPath(t *testing.T, f Factory) {
 	s := newStore(t, f)
-	const partSize = 1 << 16 // 64 KiB
-	const numParts = 4
+	// S3 (and MinIO) enforce a 5 MiB minimum per part for all parts except the
+	// last.  Use 5 MiB+1 so all parts satisfy the minimum regardless of
+	// position; keep numParts small to limit test data volume.
+	const partSize = 5<<20 + 1 // 5 MiB + 1 byte
+	const numParts = 2
 	full := DeterministicBytes(partSize*numParts, "multi-happy")
 
 	mp, err := s.CreateMultipart(ctx(), "rk/multi-happy", &storage.MultipartOptions{ContentType: "application/octet-stream"})

@@ -8,17 +8,18 @@ import (
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/storage"
+	"github.com/bucketvcs/bucketvcs/internal/storage/azureblob"
+	"github.com/bucketvcs/bucketvcs/internal/storage/gcs"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 	"github.com/bucketvcs/bucketvcs/internal/storage/s3compat"
 )
 
 // parseStoreURL parses a --store value into (scheme, scheme-specific
-// remainder). M5 supports localfs:, s3:, and r2:; gcs and azureblob
-// are reserved for M7.
+// remainder). Supports localfs:, s3:, r2:, gcs:, and azureblob:.
 func parseStoreURL(s string) (scheme, path string, err error) {
 	colon := strings.IndexByte(s, ':')
 	if colon <= 0 {
-		return "", "", fmt.Errorf(`--store: missing scheme; want "localfs:<path>", "s3://<bucket>[/<prefix>]", or "r2://<bucket>[/<prefix>]"`)
+		return "", "", fmt.Errorf(`--store: missing scheme; want "localfs:<path>", "s3://<bucket>[/<prefix>]", "r2://<bucket>[/<prefix>]", "gcs://<bucket>[/<prefix>]", or "azureblob://<container>[/<prefix>]"`)
 	}
 	scheme = s[:colon]
 	rest := s[colon+1:]
@@ -39,10 +40,30 @@ func parseStoreURL(s string) (scheme, path string, err error) {
 			return "", "", fmt.Errorf(`--store: %s:// requires a bucket name (got %q)`, scheme, s)
 		}
 		return scheme, bucketPath, nil
-	case "gcs", "azureblob":
-		return "", "", fmt.Errorf(`--store: scheme %q is reserved; cloud adapter for this provider lands at M7`, scheme)
+	case "gcs":
+		// rest should be "//bucket[/prefix]"
+		if !strings.HasPrefix(rest, "//") {
+			return "", "", fmt.Errorf(`--store: %s URL must use the form %s://<bucket>[/<prefix>] (got %q)`, scheme, scheme, s)
+		}
+		bucketPath := strings.TrimPrefix(rest, "//")
+		bucket, _, _ := strings.Cut(bucketPath, "/")
+		if bucket == "" {
+			return "", "", fmt.Errorf(`--store: %s:// requires a bucket name (got %q)`, scheme, s)
+		}
+		return scheme, bucketPath, nil
+	case "azureblob":
+		// rest should be "//container[/prefix]"
+		if !strings.HasPrefix(rest, "//") {
+			return "", "", fmt.Errorf(`--store: %s URL must use the form %s://<container>[/<prefix>] (got %q)`, scheme, scheme, s)
+		}
+		containerPath := strings.TrimPrefix(rest, "//")
+		container, _, _ := strings.Cut(containerPath, "/")
+		if container == "" {
+			return "", "", fmt.Errorf(`--store: %s:// requires a container name (got %q)`, scheme, s)
+		}
+		return scheme, containerPath, nil
 	default:
-		return "", "", fmt.Errorf(`--store: unknown scheme %q; want "localfs:<path>", "s3://<bucket>[/<prefix>]", or "r2://<bucket>[/<prefix>]"`, scheme)
+		return "", "", fmt.Errorf(`--store: unknown scheme %q; want "localfs:<path>", "s3://<bucket>[/<prefix>]", "r2://<bucket>[/<prefix>]", "gcs://<bucket>[/<prefix>]", or "azureblob://<container>[/<prefix>]"`, scheme)
 	}
 }
 
@@ -74,6 +95,32 @@ func openStore(url string) (storage.ObjectStore, error) {
 			return nil, fmt.Errorf("s3compat: %w", err)
 		}
 		return s, nil
+	case "gcs":
+		cfg, err := gcs.ParseURL(url)
+		if err != nil {
+			return nil, err
+		}
+		applyEnvToGCSConfig(&cfg)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		s, err := gcs.Open(ctx, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("gcs: %w", err)
+		}
+		return s, nil
+	case "azureblob":
+		cfg, err := azureblob.ParseURL(url)
+		if err != nil {
+			return nil, err
+		}
+		applyEnvToAzureConfig(&cfg)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		s, err := azureblob.Open(ctx, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("azureblob: %w", err)
+		}
+		return s, nil
 	default:
 		return nil, fmt.Errorf("unreachable: scheme %q passed parseStoreURL but openStore has no constructor", scheme)
 	}
@@ -103,5 +150,36 @@ func applyEnvToConfig(cfg *s3compat.Config, scheme string) {
 		cfg.AccessKeyID = v
 		cfg.SecretAccessKey = os.Getenv("AWS_SECRET_ACCESS_KEY")
 		cfg.SessionToken = os.Getenv("AWS_SESSION_TOKEN")
+	}
+}
+
+// applyEnvToGCSConfig layers GCS-specific env vars onto a Config seed
+// produced by gcs.ParseURL.
+func applyEnvToGCSConfig(cfg *gcs.Config) {
+	if v := os.Getenv("BUCKETVCS_GCS_ENDPOINT"); v != "" {
+		cfg.Endpoint = v
+	}
+	if v := os.Getenv("BUCKETVCS_GCS_CREDENTIALS_FILE"); v != "" {
+		cfg.CredentialsFile = v
+	}
+	if v := os.Getenv("BUCKETVCS_GCS_USER_PROJECT"); v != "" {
+		cfg.UserProject = v
+	}
+}
+
+// applyEnvToAzureConfig layers Azure-specific env vars onto a Config seed
+// produced by azureblob.ParseURL.
+func applyEnvToAzureConfig(cfg *azureblob.Config) {
+	if v := os.Getenv("BUCKETVCS_AZURE_ACCOUNT"); v != "" {
+		cfg.Account = v
+	}
+	if v := os.Getenv("BUCKETVCS_AZURE_SERVICE_URL"); v != "" {
+		cfg.ServiceURL = v
+	}
+	if v := os.Getenv("BUCKETVCS_AZURE_ACCOUNT_KEY"); v != "" {
+		cfg.AccountKey = v
+	}
+	if v := os.Getenv("BUCKETVCS_AZURE_CONNECTION_STRING"); v != "" {
+		cfg.ConnectionString = v
 	}
 }

@@ -1,0 +1,52 @@
+# Local emulator stack for storage adapter conformance.
+# Used by scripts/conformance-emulators.sh and the GitHub Actions
+# `emulators` job.
+services:
+  minio:
+    image: minio/minio:RELEASE.2025-01-20T14-49-07Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/live"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  fake-gcs:
+    image: fsouza/fake-gcs-server:1.49.3
+    command:
+      - "-scheme"
+      - "http"
+      - "-public-host"
+      - "localhost:4443"
+      - "-port"
+      - "4443"
+    ports:
+      - "4443:4443"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4443/storage/v1/b"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:3.33.0
+    command:
+      - "azurite-blob"
+      - "--blobHost"
+      - "0.0.0.0"
+      - "--blobPort"
+      - "10000"
+      - "--skipApiVersionCheck"
+    ports:
+      - "10000:10000"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "10000"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
