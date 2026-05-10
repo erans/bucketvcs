@@ -1,0 +1,163 @@
+package gc
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"math/rand"
+	"time"
+
+	"github.com/bucketvcs/bucketvcs/internal/gc/marks"
+	"github.com/bucketvcs/bucketvcs/internal/gc/sweeps"
+	"github.com/bucketvcs/bucketvcs/internal/repo"
+	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
+	"github.com/bucketvcs/bucketvcs/internal/storage"
+	"github.com/oklog/ulid/v2"
+)
+
+// SweepOptions configures one RunSweep invocation.
+type SweepOptions struct {
+	// Now is a clock injection point for tests; defaults to time.Now.
+	Now func() time.Time
+	// MaxConcurrency caps in-flight DeleteIfVersionMatches calls.
+	// Zero or negative is normalized to 1.
+	MaxConcurrency int
+}
+
+// RunSweep executes the sweep phase against the given mark record.
+// Returns the (unwritten) sweep Record. Caller writes via sweeps.Write.
+func RunSweep(ctx context.Context, s storage.ObjectStore, r *repo.Repo, mark marks.Record, opts SweepOptions) (sweeps.Record, error) {
+	if opts.Now == nil {
+		opts.Now = time.Now
+	}
+	if opts.MaxConcurrency < 1 {
+		opts.MaxConcurrency = 1
+	}
+
+	k, err := keys.NewRepo(r.TenantID(), r.RepoID())
+	if err != nil {
+		return sweeps.Record{}, fmt.Errorf("gc: keys: %w", err)
+	}
+
+	startedAt := opts.Now().UTC()
+	view, err := r.ReadRoot(ctx)
+	if err != nil {
+		return sweeps.Record{}, fmt.Errorf("gc: read root: %w", err)
+	}
+	freshLive := BuildLiveSet(k, view.Header, view.Body)
+	retention := time.Duration(mark.RetentionSeconds) * time.Second
+
+	out := sweeps.Record{
+		SchemaVersion:                sweeps.SchemaVersion,
+		SweepID:                      newSweepID(startedAt),
+		MarkID:                       mark.MarkID,
+		StartedAt:                    startedAt,
+		CurrentManifestVersion:       view.Header.ManifestVersion,
+		CurrentManifestObjectVersion: view.Version.Token,
+	}
+
+	now := opts.Now()
+
+	// Iterate categories sequentially (max-concurrency applies within
+	// each category). Sequential category processing keeps the report
+	// shape predictable and the implementation simple; revisit if hot.
+	for _, t := range mark.Candidates.TxRecords {
+		decision := classify(t.Key, "tx_records", t.FirstSeenUnreachableAt, retention, now, freshLive, mark.TxOrphanSweepArmed)
+		applyDecision(ctx, s, k, t.Key, "tx_records", decision, &out)
+	}
+	for _, p := range mark.Candidates.CanonicalPacks {
+		decision := classify(p.Key, "canonical_packs", p.FirstSeenUnreachableAt, retention, now, freshLive, true /* armed N/A */)
+		applyDecision(ctx, s, k, p.Key, "canonical_packs", decision, &out)
+	}
+	for _, i := range mark.Candidates.Indexes {
+		decision := classify(i.Key, "indexes", i.FirstSeenUnreachableAt, retention, now, freshLive, true /* armed N/A */)
+		applyDecision(ctx, s, k, i.Key, "indexes", decision, &out)
+	}
+
+	out.CompletedAt = opts.Now().UTC()
+	return out, nil
+}
+
+// decision is the outcome of pre-flight classification per candidate.
+type decision int
+
+const (
+	decideDelete decision = iota
+	decideRevived
+	decideRetention
+	decideDisarmed
+)
+
+func classify(key, category string, firstSeen time.Time, retention time.Duration, now time.Time, live LiveSet, armed bool) decision {
+	if _, ok := live[key]; ok {
+		return decideRevived
+	}
+	if now.Sub(firstSeen) < retention {
+		return decideRetention
+	}
+	if category == "tx_records" && !armed {
+		return decideDisarmed
+	}
+	return decideDelete
+}
+
+func applyDecision(ctx context.Context, s storage.ObjectStore, k *keys.Repo, key, category string, d decision, out *sweeps.Record) {
+	switch d {
+	case decideRevived:
+		out.Skipped = append(out.Skipped, sweeps.SkippedEntry{Key: key, Category: category, Reason: "revived"})
+		return
+	case decideRetention:
+		out.Skipped = append(out.Skipped, sweeps.SkippedEntry{Key: key, Category: category, Reason: "retention_not_met"})
+		return
+	case decideDisarmed:
+		out.Skipped = append(out.Skipped, sweeps.SkippedEntry{Key: key, Category: category, Reason: "tx_sweep_disarmed"})
+		return
+	}
+
+	meta, err := s.Head(ctx, key)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			out.Skipped = append(out.Skipped, sweeps.SkippedEntry{Key: key, Category: category, Reason: "not_found"})
+			return
+		}
+		out.Errors = append(out.Errors, sweeps.ErrorEntry{Key: key, Category: category, Error: err.Error()})
+		return
+	}
+	if err := s.DeleteIfVersionMatches(ctx, key, meta.Version); err != nil {
+		switch {
+		case errors.Is(err, storage.ErrVersionMismatch):
+			out.Skipped = append(out.Skipped, sweeps.SkippedEntry{Key: key, Category: category, Reason: "version_mismatch"})
+		case errors.Is(err, storage.ErrNotFound):
+			out.Skipped = append(out.Skipped, sweeps.SkippedEntry{Key: key, Category: category, Reason: "not_found"})
+		default:
+			out.Errors = append(out.Errors, sweeps.ErrorEntry{Key: key, Category: category, Error: err.Error()})
+		}
+		return
+	}
+
+	switch category {
+	case "tx_records":
+		out.Deleted.TxRecords = append(out.Deleted.TxRecords, key)
+		// Defensive marker delete (see spec §8.1 step 6). In normal
+		// operation no marker exists for an orphan tx record (a candidate
+		// must not have had a marker at mark time, and losing CAS
+		// attempts never get a later marker via repo.Commit). The delete
+		// is idempotent and silent on NotFound; it exists to clean up any
+		// stray marker introduced out-of-band (e.g., a future repair tool).
+		if mmeta, herr := s.Head(ctx, key+".commit"); herr == nil {
+			_ = s.DeleteIfVersionMatches(ctx, key+".commit", mmeta.Version)
+		}
+	case "canonical_packs":
+		out.Deleted.CanonicalPacks = append(out.Deleted.CanonicalPacks, key)
+	case "indexes":
+		out.Deleted.Indexes = append(out.Deleted.Indexes, key)
+	}
+}
+
+var sweepEntropy = &ulid.LockedMonotonicReader{
+	MonotonicReader: ulid.Monotonic(rand.New(rand.NewSource(time.Now().UnixNano())), 0),
+}
+
+func newSweepID(at time.Time) string {
+	return "sw_" + ulid.MustNew(ulid.Timestamp(at), sweepEntropy).String()
+}
