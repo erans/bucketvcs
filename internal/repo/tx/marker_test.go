@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/bucketvcs/bucketvcs/internal/repo/tx"
-	"github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 )
 
@@ -60,5 +59,4 @@ func TestWriteCommitMarker_IdempotentOnExisting(t *testing.T) {
 	if obj.Metadata.Size == 0 {
 		t.Fatalf("WriteCommitMarker overwrote existing object")
 	}
-	_ = storage.ObjectMetadata{} // keep the import live if linters complain
 }
