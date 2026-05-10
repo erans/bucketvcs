@@ -89,8 +89,19 @@ func Run(ctx context.Context, s storage.ObjectStore, r *repo.Repo, opts RunOptio
 		if !mark.TxOrphanSweepArmed {
 			LogDisarmed(opts.Logger, repoIDStr)
 		}
-		LogMarkCompleted(opts.Logger, repoIDStr, mark.MarkID, mark.CurrentManifestVersion,
-			len(mark.Candidates.TxRecords), len(mark.Candidates.CanonicalPacks), len(mark.Candidates.Indexes))
+		if !opts.DryRun {
+			LogMarkCompleted(opts.Logger, repoIDStr, mark.MarkID, mark.CurrentManifestVersion,
+				len(mark.Candidates.TxRecords), len(mark.Candidates.CanonicalPacks), len(mark.Candidates.Indexes))
+		} else {
+			opts.Logger.Info("gc.mark.dry_run",
+				"subsystem", "gc",
+				"repo_id", repoIDStr,
+				"manifest_version", mark.CurrentManifestVersion,
+				"candidate_tx_records", len(mark.Candidates.TxRecords),
+				"candidate_canonical_packs", len(mark.Candidates.CanonicalPacks),
+				"candidate_indexes", len(mark.Candidates.Indexes),
+			)
+		}
 	}
 
 	if opts.MarkOnly {
@@ -134,12 +145,28 @@ func Run(ctx context.Context, s storage.ObjectStore, r *repo.Repo, opts RunOptio
 	}
 
 	skipped := countSkipped(sweep.Skipped)
-	LogSweepCompleted(opts.Logger, repoIDStr, sweep.SweepID, sweep.MarkID,
-		len(sweep.Deleted.TxRecords), len(sweep.Deleted.CanonicalPacks), len(sweep.Deleted.Indexes),
-		skipped["revived"], skipped["retention_not_met"], skipped["version_mismatch"],
-		skipped["not_found"], skipped["tx_sweep_disarmed"],
-		len(sweep.Errors),
-	)
+	if !opts.DryRun {
+		LogSweepCompleted(opts.Logger, repoIDStr, sweep.SweepID, sweep.MarkID,
+			len(sweep.Deleted.TxRecords), len(sweep.Deleted.CanonicalPacks), len(sweep.Deleted.Indexes),
+			skipped["revived"], skipped["retention_not_met"], skipped["version_mismatch"],
+			skipped["not_found"], skipped["tx_sweep_disarmed"],
+			len(sweep.Errors),
+		)
+	} else {
+		opts.Logger.Info("gc.sweep.dry_run",
+			"subsystem", "gc",
+			"repo_id", repoIDStr,
+			"would_delete_tx_records", len(sweep.Deleted.TxRecords),
+			"would_delete_canonical_packs", len(sweep.Deleted.CanonicalPacks),
+			"would_delete_indexes", len(sweep.Deleted.Indexes),
+			"skipped_revived", skipped["revived"],
+			"skipped_retention_not_met", skipped["retention_not_met"],
+			"skipped_version_mismatch", skipped["version_mismatch"],
+			"skipped_not_found", skipped["not_found"],
+			"skipped_tx_sweep_disarmed", skipped["tx_sweep_disarmed"],
+			"errors_count", len(sweep.Errors),
+		)
+	}
 	return rep, nil
 }
 

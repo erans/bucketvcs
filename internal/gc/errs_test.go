@@ -13,3 +13,10 @@ func TestErrInvalidPhaseCombo(t *testing.T) {
 		t.Fatal("ErrInvalidPhaseCombo must be a sentinel")
 	}
 }
+
+func TestErrNoMarkForSweep(t *testing.T) {
+	var e error = gc.ErrNoMarkForSweep
+	if !errors.Is(e, gc.ErrNoMarkForSweep) {
+		t.Fatal("ErrNoMarkForSweep must be a sentinel")
+	}
+}

@@ -2,6 +2,7 @@ package gc_test
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"testing"
 	"time"
@@ -73,8 +74,60 @@ func TestRun_InvalidCombo_MarkOnlyAndSweepOnly(t *testing.T) {
 	ctx := context.Background()
 	r, _ := repo.Create(ctx, store, "acme", "site", repo.CreateOptions{Actor: "u_test"})
 	_, err := gc.Run(ctx, store, r, gc.RunOptions{MarkOnly: true, SweepOnly: true, Retention: time.Hour})
-	if err == nil {
-		t.Fatal("expected error for MarkOnly+SweepOnly combo")
+	if !errors.Is(err, gc.ErrInvalidPhaseCombo) {
+		t.Fatalf("err = %v, want ErrInvalidPhaseCombo", err)
+	}
+}
+
+func TestRun_SweepOnly_NoPriorMark_ReturnsErrNoMarkForSweep(t *testing.T) {
+	store, _ := localfs.Open(t.TempDir())
+	ctx := context.Background()
+	r, _ := repo.Create(ctx, store, "acme", "site", repo.CreateOptions{Actor: "u_test"})
+	_, err := gc.Run(ctx, store, r, gc.RunOptions{
+		SweepOnly: true,
+		Retention: time.Second,
+		Logger:    slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Now:       time.Now,
+	})
+	if !errors.Is(err, gc.ErrNoMarkForSweep) {
+		t.Fatalf("err = %v, want ErrNoMarkForSweep", err)
+	}
+}
+
+func TestRun_SweepOnly_WithExistingMark_RunsSweep(t *testing.T) {
+	store, _ := localfs.Open(t.TempDir())
+	ctx := context.Background()
+	r, _ := repo.Create(ctx, store, "acme", "site", repo.CreateOptions{Actor: "u_test"})
+
+	// Phase 1: produce a mark via mark-only.
+	mrep, err := gc.Run(ctx, store, r, gc.RunOptions{
+		MarkOnly:  true,
+		Retention: time.Second,
+		Logger:    slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Now:       time.Now,
+	})
+	if err != nil {
+		t.Fatalf("MarkOnly Run: %v", err)
+	}
+	if mrep.MarkID == "" {
+		t.Fatal("MarkOnly produced empty MarkID")
+	}
+
+	// Phase 2: sweep-only against that mark.
+	srep, err := gc.Run(ctx, store, r, gc.RunOptions{
+		SweepOnly: true,
+		Retention: time.Second,
+		Logger:    slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Now:       time.Now,
+	})
+	if err != nil {
+		t.Fatalf("SweepOnly Run: %v", err)
+	}
+	if srep.SweepID == "" {
+		t.Error("SweepOnly produced empty SweepID")
+	}
+	if srep.MarkID != mrep.MarkID {
+		t.Errorf("SweepOnly MarkID = %q, want %q", srep.MarkID, mrep.MarkID)
 	}
 }
 
