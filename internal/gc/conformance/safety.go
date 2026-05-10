@@ -22,6 +22,12 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
 
+// Factory returns a fresh storage.ObjectStore for one test invocation,
+// plus a cleanup function the test should defer or t.Cleanup. Mirrors
+// internal/storage/conformance.Factory so cloud adapters can plug in
+// their existing factory closures directly.
+type Factory func(t testing.TB) (storage.ObjectStore, func())
+
 // RunPropertyGCSafety verifies that:
 //
 //  1. An orphan pack younger than the retention window is NOT swept.
@@ -30,7 +36,7 @@ import (
 //     deleted (§43.6).
 //
 // The factory must return a fresh, empty ObjectStore on each call.
-func RunPropertyGCSafety(t *testing.T, factory func(t *testing.T) storage.ObjectStore) {
+func RunPropertyGCSafety(t *testing.T, factory Factory) {
 	t.Helper()
 
 	// Property 1 + 2: retention window respected.
@@ -42,7 +48,8 @@ func RunPropertyGCSafety(t *testing.T, factory func(t *testing.T) storage.Object
 	// RunMark's normalization of RetentionSeconds<=0 → DefaultRetention, and
 	// advance the sweep clock so the candidate's age exceeds 0s.
 	t.Run("orphan_pack_respects_retention", func(t *testing.T) {
-		store := factory(t)
+		store, cleanup := factory(t)
+		t.Cleanup(cleanup)
 		ctx := context.Background()
 		r, err := repo.Create(ctx, store, "acme", "site", repo.CreateOptions{Actor: "u_test"})
 		if err != nil {
@@ -68,6 +75,16 @@ func RunPropertyGCSafety(t *testing.T, factory func(t *testing.T) storage.Object
 		if len(repA.Deleted.CanonicalPacks) != 0 {
 			t.Fatalf("phase A: retention not honored: deleted %v", repA.Deleted.CanonicalPacks)
 		}
+		foundRetentionSkip := false
+		for _, sk := range repA.Skipped {
+			if sk.Reason == "retention_not_met" {
+				foundRetentionSkip = true
+				break
+			}
+		}
+		if !foundRetentionSkip {
+			t.Fatalf("phase A: expected retention_not_met skip, got %+v", repA.Skipped)
+		}
 
 		// Phase B: copy markA candidates, set RetentionSeconds=0, and advance
 		// the sweep clock 2 hours so now.Sub(firstSeen) >> 0s. This tests that
@@ -92,7 +109,8 @@ func RunPropertyGCSafety(t *testing.T, factory func(t *testing.T) storage.Object
 	// of the retention window (making the test non-trivial: without the revival
 	// push the pack would be deleted, confirming the §43.6 guard is what saves it).
 	t.Run("push_during_sweep_does_not_delete_revived_pack", func(t *testing.T) {
-		store := factory(t)
+		store, cleanup := factory(t)
+		t.Cleanup(cleanup)
 		ctx := context.Background()
 		r, err := repo.Create(ctx, store, "acme", "site", repo.CreateOptions{Actor: "u_test"})
 		if err != nil {
