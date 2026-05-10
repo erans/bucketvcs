@@ -1,0 +1,215 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"log/slog"
+	"time"
+
+	"github.com/bucketvcs/bucketvcs/internal/gc"
+	"github.com/bucketvcs/bucketvcs/internal/repo"
+)
+
+// runGC is the gc subcommand entry point. Returns process exit code:
+//
+//	0 — clean run (no errors, no version_mismatch)
+//	1 — operational error (store unreachable, invalid flags, etc.)
+//	2 — usage error / left-work-behind (any version_mismatch or per-key errors in --all-repos summary)
+func runGC(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("gc", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() {
+		fmt.Fprint(stdout, gcUsage)
+	}
+
+	storeURL := fs.String("store", "", "Storage URL (required)")
+	repoFlag := fs.String("repo", "", "<tenant>/<repo> (mutually exclusive with --all-repos)")
+	allRepos := fs.Bool("all-repos", false, "Process every repo discovered under tenants/*/repos/*")
+	retention := fs.Duration("retention", gc.DefaultRetention, "Sweep candidate retention window")
+	maxConcurrency := fs.Int("max-concurrency", 1, "Per-repo sweep concurrency")
+	markOnly := fs.Bool("mark-only", false, "Run mark phase only; skip sweep")
+	sweepOnly := fs.Bool("sweep-only", false, "Skip mark phase; sweep most recent mark")
+	dryRun := fs.Bool("dry-run", false, "Compute candidates, write nothing, delete nothing")
+	format := fs.String("format", "text", "Output format: text|json")
+	help := fs.Bool("help", false, "Show this help")
+
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *help {
+		fmt.Fprint(stdout, gcUsage)
+		return 0
+	}
+
+	if *storeURL == "" {
+		fmt.Fprintln(stderr, "gc: --store is required")
+		return 2
+	}
+	if (*repoFlag == "") == (!*allRepos) {
+		fmt.Fprintln(stderr, "gc: exactly one of --repo or --all-repos is required")
+		return 2
+	}
+	if *markOnly && *sweepOnly {
+		fmt.Fprintln(stderr, "gc: --mark-only and --sweep-only are mutually exclusive")
+		return 2
+	}
+	if *format != "text" && *format != "json" {
+		fmt.Fprintf(stderr, "gc: --format must be text or json (got %q)\n", *format)
+		return 2
+	}
+	if gc.ShouldWarnRetention(*retention) {
+		fmt.Fprintln(stderr, gc.RetentionWarning(*retention))
+	}
+
+	store, err := openStore(*storeURL)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc: open store: %v\n", err)
+		return 1
+	}
+
+	logger := slog.New(slog.NewTextHandler(stderr, nil))
+	opts := gc.RunOptions{
+		Retention:      *retention,
+		MaxConcurrency: *maxConcurrency,
+		MarkOnly:       *markOnly,
+		SweepOnly:      *sweepOnly,
+		DryRun:         *dryRun,
+		Logger:         logger,
+		Now:            time.Now,
+	}
+
+	var refs []gc.RepoRef
+	if *allRepos {
+		refs, err = gc.DiscoverRepos(ctx, store)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc: discover repos: %v\n", err)
+			return 1
+		}
+	} else {
+		tenant, repoID, err := splitTenantRepo(*repoFlag)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc: %v\n", err)
+			return 2
+		}
+		refs = []gc.RepoRef{{TenantID: tenant, RepoID: repoID}}
+	}
+
+	var (
+		anyError    bool
+		anyMismatch bool
+	)
+	for _, ref := range refs {
+		r, err := repo.Open(ctx, store, ref.TenantID, ref.RepoID)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc: open %s/%s: %v\n", ref.TenantID, ref.RepoID, err)
+			if !*allRepos {
+				return 1
+			}
+			anyError = true
+			continue
+		}
+		report, err := gc.Run(ctx, store, r, opts)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc: run %s/%s: %v\n", ref.TenantID, ref.RepoID, err)
+			if !*allRepos {
+				return 1
+			}
+			anyError = true
+			continue
+		}
+		if err := emitReport(stdout, *format, report); err != nil {
+			fmt.Fprintf(stderr, "gc: emit report: %v\n", err)
+			return 1
+		}
+		if len(report.SweepRecord.Errors) > 0 {
+			anyError = true
+		}
+		for _, sk := range report.SweepRecord.Skipped {
+			if sk.Reason == "version_mismatch" {
+				anyMismatch = true
+			}
+		}
+	}
+
+	switch {
+	case anyError:
+		return 1
+	case anyMismatch:
+		return 2
+	default:
+		return 0
+	}
+}
+
+func emitReport(w io.Writer, format string, r gc.RunReport) error {
+	switch format {
+	case "json":
+		enc := json.NewEncoder(w)
+		return enc.Encode(map[string]any{
+			"repo_id":                r.RepoID,
+			"mark_id":                r.MarkID,
+			"sweep_id":               r.SweepID,
+			"manifest_version":       r.ManifestVersion,
+			"deleted":                r.SweepRecord.Deleted,
+			"skipped_count":          len(r.SweepRecord.Skipped),
+			"errors_count":           len(r.SweepRecord.Errors),
+			"mark_duration_seconds":  r.MarkDuration.Seconds(),
+			"sweep_duration_seconds": r.SweepDuration.Seconds(),
+			"dry_run":                r.DryRun,
+		})
+	default:
+		fmt.Fprintf(w, "repo %s @ manifest v%d\n", r.RepoID, r.ManifestVersion)
+		if r.MarkID != "" {
+			fmt.Fprintf(w, "  mark    %s   candidates: tx=%d packs=%d indexes=%d  (%s)\n",
+				r.MarkID,
+				len(r.MarkRecord.Candidates.TxRecords),
+				len(r.MarkRecord.Candidates.CanonicalPacks),
+				len(r.MarkRecord.Candidates.Indexes),
+				r.MarkDuration.Round(time.Millisecond),
+			)
+		}
+		if r.SweepID != "" || (r.MarkID == "" && r.SweepRecord.SweepID == "") {
+			s := r.SweepRecord
+			byReason := map[string]int{}
+			for _, sk := range s.Skipped {
+				byReason[sk.Reason]++
+			}
+			fmt.Fprintf(w, "  sweep   %s   deleted: tx=%d packs=%d indexes=%d\n",
+				s.SweepID,
+				len(s.Deleted.TxRecords), len(s.Deleted.CanonicalPacks), len(s.Deleted.Indexes))
+			fmt.Fprintf(w, "                       skipped: revived=%d retention=%d vmismatch=%d notfound=%d disarmed=%d\n",
+				byReason["revived"], byReason["retention_not_met"], byReason["version_mismatch"], byReason["not_found"], byReason["tx_sweep_disarmed"])
+			fmt.Fprintf(w, "                       errors: %d  (%s)\n", len(s.Errors), r.SweepDuration.Round(time.Millisecond))
+		}
+		return nil
+	}
+}
+
+const gcUsage = `Usage: bucketvcs gc --store=<URL> {--repo=<tenant>/<repo> | --all-repos} [flags]
+
+Garbage-collect orphan and unreachable storage from one or more
+bucketvcs repos.
+
+Flags:
+  --store=<URL>             Storage URL (required, e.g. localfs:/path, s3://bucket, gcs://bucket, azureblob://container)
+  --repo=<tenant>/<repo>    Single repo (mutually exclusive with --all-repos)
+  --all-repos               Process every repo discovered under tenants/*/repos/*
+  --retention=<duration>    Sweep candidate retention window (default 168h; warns if < 24h)
+  --max-concurrency=<n>     Per-repo sweep concurrency (default 1)
+  --mark-only               Run mark phase only; skip sweep
+  --sweep-only              Skip mark phase; sweep most recent existing mark
+  --dry-run                 Compute candidates, write nothing, delete nothing
+  --format=text|json        Output format (default text)
+  --help                    Show this help
+
+Exit codes:
+  0  clean (no errors, no version_mismatch)
+  1  operational error (store unreachable, invalid flags, etc.)
+  2  ran successfully but left work behind (any version_mismatch or per-key errors)
+
+See docs/m8-gc-operator-guide.md for retention guidance and the §43.6
+race window.
+`
