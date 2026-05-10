@@ -134,6 +134,15 @@ func Create(ctx context.Context, store storage.ObjectStore, tenantID, repoID str
 		return nil, fmt.Errorf("repo: create root: %w", err)
 	}
 
+	// Best-effort commit marker (M8 GC uses these to distinguish winning
+	// tx records from CAS-loss orphans). Failure is logged via the
+	// caller's logger if any; we never fail Create on marker-write failure.
+	if err := tx.WriteCommitMarker(ctx, store, k.CommitMarkerKey(txID)); err != nil {
+		// No structured logger plumbed into Create today; the failure is
+		// silent for now. M16 doctor tooling can repair missing markers.
+		_ = err
+	}
+
 	return &Repo{store: store, keys: k}, nil
 }
 
@@ -310,6 +319,10 @@ func (r *Repo) Commit(
 				continue
 			}
 			return "", err
+		}
+		// Best-effort commit marker; see Create for rationale.
+		if err := tx.WriteCommitMarker(ctx, r.store, r.keys.CommitMarkerKey(txID)); err != nil {
+			_ = err
 		}
 		return txID, nil
 	}
