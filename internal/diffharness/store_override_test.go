@@ -9,14 +9,16 @@ import (
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/storage"
+	"github.com/bucketvcs/bucketvcs/internal/storage/azureblob"
+	"github.com/bucketvcs/bucketvcs/internal/storage/gcs"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 	"github.com/bucketvcs/bucketvcs/internal/storage/s3compat"
 )
 
 // openStoreFromURL parses url and returns a storage.ObjectStore. The
 // supported schemes mirror cmd/bucketvcs: localfs:<path>, s3://<bucket>,
-// r2://<bucket>. For cloud schemes, env vars (BUCKETVCS_S3_*, AWS_*)
-// supply the missing config like the CLI does.
+// r2://<bucket>, gcs://<bucket>, azureblob://<container>. For cloud
+// schemes, env vars supply the missing config like the CLI does.
 func openStoreFromURL(t *testing.T, url string) (storage.ObjectStore, error) {
 	t.Helper()
 	switch {
@@ -31,8 +33,26 @@ func openStoreFromURL(t *testing.T, url string) (storage.ObjectStore, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		return s3compat.Open(ctx, cfg)
+	case strings.HasPrefix(url, "gcs://"):
+		cfg, err := gcs.ParseURL(url)
+		if err != nil {
+			return nil, err
+		}
+		envOverlayGCS(&cfg)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return gcs.Open(ctx, cfg)
+	case strings.HasPrefix(url, "azureblob://"):
+		cfg, err := azureblob.ParseURL(url)
+		if err != nil {
+			return nil, err
+		}
+		envOverlayAzure(&cfg)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return azureblob.Open(ctx, cfg)
 	default:
-		return nil, fmt.Errorf("unsupported diffharness store URL %q (want localfs:<path>, s3://<bucket>, or r2://<bucket>)", url)
+		return nil, fmt.Errorf("unsupported diffharness store URL %q (want localfs:<path>, s3://<bucket>, r2://<bucket>, gcs://<bucket>, or azureblob://<container>)", url)
 	}
 }
 
@@ -59,6 +79,37 @@ func envOverlay(cfg *s3compat.Config) {
 		cfg.AccessKeyID = v
 		cfg.SecretAccessKey = os.Getenv("AWS_SECRET_ACCESS_KEY")
 		cfg.SessionToken = os.Getenv("AWS_SESSION_TOKEN")
+	}
+}
+
+// envOverlayGCS mirrors cmd/bucketvcs/applyEnvToGCSConfig. Kept inline here
+// because cmd/bucketvcs is a main package and can't be imported.
+func envOverlayGCS(cfg *gcs.Config) {
+	if v := os.Getenv("BUCKETVCS_GCS_ENDPOINT"); v != "" {
+		cfg.Endpoint = v
+	}
+	if v := os.Getenv("BUCKETVCS_GCS_CREDENTIALS_FILE"); v != "" {
+		cfg.CredentialsFile = v
+	}
+	if v := os.Getenv("BUCKETVCS_GCS_USER_PROJECT"); v != "" {
+		cfg.UserProject = v
+	}
+}
+
+// envOverlayAzure mirrors cmd/bucketvcs/applyEnvToAzureConfig. Kept inline
+// here because cmd/bucketvcs is a main package and can't be imported.
+func envOverlayAzure(cfg *azureblob.Config) {
+	if v := os.Getenv("BUCKETVCS_AZURE_ACCOUNT"); v != "" {
+		cfg.Account = v
+	}
+	if v := os.Getenv("BUCKETVCS_AZURE_SERVICE_URL"); v != "" {
+		cfg.ServiceURL = v
+	}
+	if v := os.Getenv("BUCKETVCS_AZURE_ACCOUNT_KEY"); v != "" {
+		cfg.AccountKey = v
+	}
+	if v := os.Getenv("BUCKETVCS_AZURE_CONNECTION_STRING"); v != "" {
+		cfg.ConnectionString = v
 	}
 }
 
