@@ -2,7 +2,6 @@ package gc_test
 
 import (
 	"context"
-	"sort"
 	"testing"
 
 	"github.com/bucketvcs/bucketvcs/internal/gc"
@@ -26,12 +25,6 @@ func TestDiscoverRepos_FindsAllUnderTenants(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DiscoverRepos: %v", err)
 	}
-	sort.Slice(got, func(i, j int) bool {
-		if got[i].TenantID != got[j].TenantID {
-			return got[i].TenantID < got[j].TenantID
-		}
-		return got[i].RepoID < got[j].RepoID
-	})
 	want := []gc.RepoRef{
 		{TenantID: "acme", RepoID: "blog"},
 		{TenantID: "acme", RepoID: "site"},

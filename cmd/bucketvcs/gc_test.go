@@ -128,6 +128,32 @@ func TestGC_CLI_AllRepos_TouchesEachRepo(t *testing.T) {
 	}
 }
 
+func TestGC_CLI_DryRun_MarkBlockShowsMarkID(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := localfs.Open(dir)
+	ctx := context.Background()
+	if _, err := repo.Create(ctx, store, "acme", "site", repo.CreateOptions{Actor: "u_test"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	store.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := runGC(ctx, []string{
+		"--store", "localfs:" + dir,
+		"--repo", "acme/site",
+		"--retention", "1ms",
+		"--dry-run",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("dry-run exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	// Mark block should print a real mark ID (mk_<ulid>), not an empty placeholder.
+	if !strings.Contains(out, "mk_") {
+		t.Errorf("dry-run mark block missing mk_<id> token; got: %s", out)
+	}
+}
+
 func TestGC_CLI_DryRun_NoDelete(t *testing.T) {
 	dir := t.TempDir()
 	store, _ := localfs.Open(dir)

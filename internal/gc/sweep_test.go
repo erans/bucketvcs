@@ -187,6 +187,42 @@ func TestGC_PushDuringSweep_43_6(t *testing.T) {
 	}
 }
 
+func TestSweep_TxRecordsDisarmed_AllSkippedWithDisarmedReason(t *testing.T) {
+	store, _ := localfs.Open(t.TempDir())
+	ctx := context.Background()
+	r, _ := repo.Create(ctx, store, "acme", "site", repo.CreateOptions{Actor: "u_test"})
+	k, _ := keys.NewRepo("acme", "site")
+
+	// Synthetic mark record with TxOrphanSweepArmed=false, an old
+	// FirstSeenUnreachableAt, and one tx-record candidate. Should be
+	// classified as decideDisarmed (skipped, reason="tx_sweep_disarmed")
+	// regardless of retention.
+	mark := marks.Record{
+		SchemaVersion:      1,
+		MarkID:             "mk_01HZDISARMED",
+		StartedAt:          time.Now().Add(-time.Hour),
+		CompletedAt:        time.Now().Add(-time.Hour),
+		RetentionSeconds:   0,
+		TxOrphanSweepArmed: false,
+		Candidates: marks.Candidates{
+			TxRecords: []marks.TxCandidate{
+				{Key: k.TxRecordKey("tx_pre_m8"), FirstSeenUnreachableAt: time.Now().Add(-time.Hour)},
+			},
+		},
+	}
+
+	rep, err := gc.RunSweep(ctx, store, r, mark, gc.SweepOptions{Now: time.Now})
+	if err != nil {
+		t.Fatalf("RunSweep: %v", err)
+	}
+	if len(rep.Deleted.TxRecords) != 0 {
+		t.Fatalf("disarmed sweep deleted tx records: %v", rep.Deleted.TxRecords)
+	}
+	if len(rep.Skipped) != 1 || rep.Skipped[0].Reason != "tx_sweep_disarmed" {
+		t.Fatalf("expected 1 skipped with reason=tx_sweep_disarmed, got %+v", rep.Skipped)
+	}
+}
+
 func makePushTxBody() tx.Body {
 	return tx.Body{Type: "push", Actor: "u_test"}
 }

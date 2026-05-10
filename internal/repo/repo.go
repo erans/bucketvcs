@@ -139,9 +139,7 @@ func Create(ctx context.Context, store storage.ObjectStore, tenantID, repoID str
 	// has already committed; we never fail Create on marker-write failure.
 	// No structured logger plumbed into Create today; the failure is
 	// silent. M16 doctor tooling can repair missing markers.
-	if err := tx.WriteCommitMarker(ctx, store, k.CommitMarkerKey(txID)); err != nil {
-		_ = err
-	}
+	_ = tx.WriteCommitMarker(ctx, store, k.CommitMarkerKey(txID))
 
 	return &Repo{store: store, keys: k}, nil
 }
@@ -323,9 +321,7 @@ func (r *Repo) Commit(
 		// Best-effort commit marker; the CAS already committed, so a
 		// marker-write failure is not propagated. M16 doctor tooling can
 		// repair missing markers. See Create for full rationale.
-		if err := tx.WriteCommitMarker(ctx, r.store, r.keys.CommitMarkerKey(txID)); err != nil {
-			_ = err
-		}
+		_ = tx.WriteCommitMarker(ctx, r.store, r.keys.CommitMarkerKey(txID))
 		return txID, nil
 	}
 	return "", &repoerrs.CommitGaveUpError{

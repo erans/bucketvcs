@@ -3,6 +3,7 @@ package gc
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/bucketvcs/bucketvcs/internal/storage"
@@ -43,6 +44,12 @@ func DiscoverRepos(ctx context.Context, s storage.ObjectStore) ([]RepoRef, error
 			out = append(out, RepoRef{TenantID: t, RepoID: r})
 		}
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TenantID != out[j].TenantID {
+			return out[i].TenantID < out[j].TenantID
+		}
+		return out[i].RepoID < out[j].RepoID
+	})
 	return out, nil
 }
 

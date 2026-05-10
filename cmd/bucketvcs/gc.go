@@ -169,7 +169,7 @@ func emitReport(w io.Writer, format string, r gc.RunReport) error {
 		fmt.Fprintf(w, "repo %s @ manifest v%d\n", r.RepoID, r.ManifestVersion)
 		if r.MarkRecord.MarkID != "" {
 			fmt.Fprintf(w, "  mark    %s   candidates: tx=%d packs=%d indexes=%d  (%s)\n",
-				r.MarkID,
+				r.MarkRecord.MarkID,
 				len(r.MarkRecord.Candidates.TxRecords),
 				len(r.MarkRecord.Candidates.CanonicalPacks),
 				len(r.MarkRecord.Candidates.Indexes),
