@@ -765,15 +765,20 @@ bucketvcs gc \
   --format=json \
 | jq '{
     repo: .repo_id,
-    candidates: {
-      tx_records: (.candidates.tx_records | length),
-      canonical_packs: (.candidates.canonical_packs | length),
-      indexes: (.candidates.indexes | length)
+    would_delete: {
+      tx_records: (.deleted.tx_records | length),
+      canonical_packs: (.deleted.canonical_packs | length),
+      indexes: (.deleted.indexes | length)
     }
   }'
 ```
 
-To list the actual candidate keys:
+Note: in `--format=json` output the would-be-deleted set appears under `.deleted` (populated
+even in dry-run mode via the "would delete" reporting logic). The `.candidates` structure
+exists only in the on-disk mark record (readable with
+`aws s3 cp s3://... - | jq .candidates`) — it is not present in the CLI's JSON output.
+
+To list the actual candidate pack keys:
 
 ```bash
 bucketvcs gc \
@@ -781,8 +786,11 @@ bucketvcs gc \
   --store=s3://my-bucket \
   --dry-run \
   --format=json \
-| jq -r '.candidates.canonical_packs[].key'
+| jq -r '.deleted.canonical_packs[]'
 ```
+
+`deleted.canonical_packs` is a plain `[]string` of full storage keys — there are no `.key`
+sub-fields.
 
 ### 7.2 Reading stored mark records
 
@@ -915,8 +923,8 @@ mark and sweep.
 | Code | Meaning | Recommended response |
 |------|---------|---------------------|
 | `0` | Clean run. Zero per-key errors, zero `version_mismatch` skips. All candidate processing completed normally. | No action required. |
-| `1` | Operational error. The store was unreachable, the manifest schema is unsupported, `--repo` did not find a repo, or flags were invalid. | **Treat as a page.** Something is wrong with the store or the invocation. Investigate immediately. In `--all-repos` mode, exit 1 means at least one repo's GC failed completely. |
-| `2` | Ran successfully but left work behind. At least one candidate was skipped with `reason=version_mismatch`, or at least one per-key error occurred. GC completed its sweep for all other candidates. | **Treat as a soft alert.** Investigate at normal business hours. Common cause: a concurrent push during the sweep window caused a `version_mismatch`. The affected candidates will be re-evaluated on the next GC run. A persistent exit 2 (same candidates always producing `version_mismatch`) indicates a store-level conflict that needs operator attention. |
+| `1` | Operational error. Examples: store unreachable, manifest schema unsupported, `--repo` did not find a repo, repo open failure, per-key sweep errors. | **Treat as a page.** Something is wrong with the store or the repository. Investigate immediately. In `--all-repos` mode, exit 1 means at least one repo's GC failed completely. Note: invalid flags exit 2, not 1. |
+| `2` | Usage error or left-work-behind. Examples: missing or conflicting flags (`--store`, `--repo`/`--all-repos`, `--mark-only`/`--sweep-only`), bad `--store` URL, bad `--repo` format, bad `--format` value, OR a sweep produced `reason=version_mismatch` skips. | **Treat as a soft alert.** Investigate at normal business hours. Common cause: a concurrent push during the sweep window caused a `version_mismatch`. The affected candidates will be re-evaluated on the next GC run. A persistent exit 2 (same candidates always producing `version_mismatch`) indicates a store-level conflict that needs operator attention. Note: per-key sweep errors exit 1, not 2. |
 
 ### 8.2 Cron alerting patterns
 
