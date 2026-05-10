@@ -217,3 +217,33 @@ func TestGC_CLI_DryRun_NoDelete(t *testing.T) {
 		t.Errorf("dry-run deleted orphan: %v", err)
 	}
 }
+
+func TestGC_CLI_JSON_DeletedSlicesAreEmptyArrays(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := localfs.Open(dir)
+	ctx := context.Background()
+	if _, err := repo.Create(ctx, store, "acme", "site", repo.CreateOptions{Actor: "u_test"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	store.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := runGC(ctx, []string{
+		"--store", "localfs:" + dir,
+		"--repo", "acme/site",
+		"--retention", "1h",
+		"--mark-only",
+		"--format", "json",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("mark-only json exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	// Empty slices must serialize as [] not null — jq pipelines rely on this.
+	if strings.Contains(out, `"tx_records":null`) || strings.Contains(out, `"canonical_packs":null`) || strings.Contains(out, `"indexes":null`) {
+		t.Fatalf("deleted slices serialized as null instead of []; got: %s", out)
+	}
+	if !strings.Contains(out, `"tx_records":[]`) || !strings.Contains(out, `"canonical_packs":[]`) || !strings.Contains(out, `"indexes":[]`) {
+		t.Fatalf("expected empty arrays for all three deleted categories; got: %s", out)
+	}
+}

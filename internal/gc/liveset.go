@@ -48,6 +48,10 @@ func BuildLiveSet(k *keys.Repo, header manifest.RootHeader, bodyJSON []byte) (Li
 		if p.IdxKey != "" {
 			live[p.IdxKey] = struct{}{}
 		}
+		// TODO(M2-bitmap): when manifest.PackEntry adds a BitmapKey field, add
+		// it to the live-set inside this loop. DiscoverCanonicalPacks lists
+		// .bitmap files alongside .pack/.idx, so a bitmap without a live-set
+		// entry will be classified as orphan after retention.
 	}
 	if body.Indexes.ObjectMap != nil && body.Indexes.ObjectMap.Key != "" {
 		live[body.Indexes.ObjectMap.Key] = struct{}{}
@@ -55,6 +59,10 @@ func BuildLiveSet(k *keys.Repo, header manifest.RootHeader, bodyJSON []byte) (Li
 	if body.Indexes.CommitGraph != nil && body.Indexes.CommitGraph.Key != "" {
 		live[body.Indexes.CommitGraph.Key] = struct{}{}
 	}
+	// TODO(M11/M2-update): when manifest.Indexes adds a Reachability field,
+	// add it to the live-set here. DiscoverIndexes already lists the
+	// indexes/reachability/ prefix, so any reachability index without a
+	// live-set entry will be classified as orphan and swept after retention.
 	// body.Bundles is M11 placeholder — currently empty struct, no keys to add.
 	return live, nil
 }

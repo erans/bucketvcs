@@ -12,6 +12,11 @@ import (
 
 // DiscoverCanonicalPacks lists all objects under packs/canonical/ for the
 // repo and returns the keys NOT in live.
+//
+// TODO(M2-bitmap): when manifest.PackEntry adds a BitmapKey field, update
+// BuildLiveSet to add it to the live-set. This function already lists
+// .bitmap files alongside .pack/.idx; any .bitmap key absent from the
+// live-set will be classified as an orphan and swept after retention.
 func DiscoverCanonicalPacks(ctx context.Context, s storage.ObjectStore, k *keys.Repo, live LiveSet) ([]string, error) {
 	prefix := k.Prefix() + "packs/canonical/"
 	return listExcludingLive(ctx, s, prefix, live)
@@ -19,6 +24,11 @@ func DiscoverCanonicalPacks(ctx context.Context, s storage.ObjectStore, k *keys.
 
 // DiscoverIndexes lists all objects under indexes/{object-map,commit-graph,reachability}/
 // and returns keys NOT in live.
+//
+// TODO(M11/M2-update): when manifest.Indexes adds a Reachability field, update
+// BuildLiveSet to add it to the live-set. This function already enumerates the
+// indexes/reachability/ sub-prefix; any reachability index absent from the
+// live-set will be classified as an orphan and swept after retention.
 func DiscoverIndexes(ctx context.Context, s storage.ObjectStore, k *keys.Repo, live LiveSet) ([]string, error) {
 	var out []string
 	for _, sub := range []string{"object-map/", "commit-graph/", "reachability/"} {

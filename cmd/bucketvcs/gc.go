@@ -68,7 +68,7 @@ func runGC(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc: --retention=%s is below the 1s minimum; sub-second values are silently rounded to 0 and the default 7d window applies. Use --retention=1s as the floor.\n", *retention)
 		return 2
 	}
-	if gc.ShouldWarnRetention(*retention) {
+	if *retention > 0 && gc.ShouldWarnRetention(*retention) {
 		fmt.Fprintln(stderr, gc.RetentionWarning(*retention))
 	}
 
@@ -161,12 +161,22 @@ func emitReport(w io.Writer, format string, r gc.RunReport) error {
 	switch format {
 	case "json":
 		enc := json.NewEncoder(w)
+		deleted := r.SweepRecord.Deleted
+		if deleted.TxRecords == nil {
+			deleted.TxRecords = []string{}
+		}
+		if deleted.CanonicalPacks == nil {
+			deleted.CanonicalPacks = []string{}
+		}
+		if deleted.Indexes == nil {
+			deleted.Indexes = []string{}
+		}
 		return enc.Encode(map[string]any{
 			"repo_id":                r.RepoID,
 			"mark_id":                r.MarkID,
 			"sweep_id":               r.SweepID,
 			"manifest_version":       r.ManifestVersion,
-			"deleted":                r.SweepRecord.Deleted,
+			"deleted":                deleted,
 			"skipped_count":          len(r.SweepRecord.Skipped),
 			"errors_count":           len(r.SweepRecord.Errors),
 			"mark_duration_seconds":  r.MarkDuration.Seconds(),
