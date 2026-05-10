@@ -1,8 +1,9 @@
 # M8 — Basic Garbage Collection — progress
 
-Date merged: TBD (write at merge time)
-Tag: `m8-complete` (apply after merge to main)
-Worktree: `.claude/worktrees/m8-gc` on branch `feature/m8-gc`
+Date merged: 2026-05-10
+Merge commit: `a8e5e4e`
+Tag: `m8-complete`
+Worktree: `.claude/worktrees/m8-gc` on branch `feature/m8-gc` (retained per project convention)
 Plan: `docs/superpowers/plans/2026-05-09-m8-basic-gc.md`
 Spec: `docs/superpowers/specs/2026-05-09-m8-basic-gc-design.md`
 
