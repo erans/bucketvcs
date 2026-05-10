@@ -1,9 +1,8 @@
 # s3compat — S3-compatible storage adapter
 
 Implements `internal/storage.ObjectStore` against any S3-compatible
-object store via `aws-sdk-go-v2`. M5 ships this adapter as the
-canonical Cloudflare R2 backend; AWS S3 is exercised in conformance
-testing and is formally promoted to canonical at M7.
+object store via `aws-sdk-go-v2`. Canonical bucketvcs storage backend
+for AWS S3 and Cloudflare R2 (§11.1).
 
 ## CLI usage
 
