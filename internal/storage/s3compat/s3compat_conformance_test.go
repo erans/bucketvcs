@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	gcconformance "github.com/bucketvcs/bucketvcs/internal/gc/conformance"
+	maintconformance "github.com/bucketvcs/bucketvcs/internal/maintenance/conformance"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/storage/conformance"
 	"github.com/bucketvcs/bucketvcs/internal/storage/s3compat"
@@ -146,6 +147,7 @@ func TestS3Compat_GCSafety_R2(t *testing.T) {
 		SessionToken:    os.Getenv("AWS_SESSION_TOKEN"),
 	}
 	gcconformance.RunPropertyGCSafety(t, gcconformance.Factory(makeFactory(t, cfg)))
+	maintconformance.RunPropertyMaintenanceSafety(t, maintconformance.Factory(makeFactory(t, cfg)))
 }
 
 func TestS3Compat_GCSafety_S3(t *testing.T) {
@@ -164,4 +166,5 @@ func TestS3Compat_GCSafety_S3(t *testing.T) {
 		SessionToken:    os.Getenv("AWS_SESSION_TOKEN"),
 	}
 	gcconformance.RunPropertyGCSafety(t, gcconformance.Factory(makeFactory(t, cfg)))
+	maintconformance.RunPropertyMaintenanceSafety(t, maintconformance.Factory(makeFactory(t, cfg)))
 }

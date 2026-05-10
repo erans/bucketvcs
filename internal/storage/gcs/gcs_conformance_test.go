@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	gcconformance "github.com/bucketvcs/bucketvcs/internal/gc/conformance"
+	maintconformance "github.com/bucketvcs/bucketvcs/internal/maintenance/conformance"
 	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/storage/conformance"
 	"github.com/bucketvcs/bucketvcs/internal/storage/gcs"
@@ -89,4 +90,5 @@ func TestGcs_GCSafety(t *testing.T) {
 		CredentialsFile: os.Getenv("BUCKETVCS_GCS_CREDENTIALS_FILE"),
 	}
 	gcconformance.RunPropertyGCSafety(t, gcconformance.Factory(makeGCSFactory(t, base)))
+	maintconformance.RunPropertyMaintenanceSafety(t, maintconformance.Factory(makeGCSFactory(t, base)))
 }

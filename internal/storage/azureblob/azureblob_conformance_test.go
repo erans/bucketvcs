@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	gcconformance "github.com/bucketvcs/bucketvcs/internal/gc/conformance"
+	maintconformance "github.com/bucketvcs/bucketvcs/internal/maintenance/conformance"
 	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/storage/azureblob"
 	"github.com/bucketvcs/bucketvcs/internal/storage/conformance"
@@ -93,4 +94,5 @@ func TestAzureBlob_GCSafety(t *testing.T) {
 		ServiceURL:       os.Getenv("BUCKETVCS_AZURE_SERVICE_URL"),
 	}
 	gcconformance.RunPropertyGCSafety(t, gcconformance.Factory(makeFactory(t, base)))
+	maintconformance.RunPropertyMaintenanceSafety(t, maintconformance.Factory(makeFactory(t, base)))
 }

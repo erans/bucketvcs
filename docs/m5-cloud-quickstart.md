@@ -57,3 +57,5 @@ your bucket to abort incomplete multipart uploads automatically.
 
 For AWS S3 and Cloudflare R2 lifecycle recipes, see
 [docs/m8-gc-operator-guide.md §5](m8-gc-operator-guide.md#5-bucket-lifecycle-for-incomplete-multipart-uploads-335).
+
+> See also [`docs/m9-maintenance-operator-guide.md`](m9-maintenance-operator-guide.md) for the recommended `bucketvcs maintenance` scheduling alongside `bucketvcs gc`.

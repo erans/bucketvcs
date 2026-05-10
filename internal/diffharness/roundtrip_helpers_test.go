@@ -14,6 +14,9 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/exporter"
 	"github.com/bucketvcs/bucketvcs/internal/gitcli"
 	"github.com/bucketvcs/bucketvcs/internal/importer"
+	maintpkg "github.com/bucketvcs/bucketvcs/internal/maintenance"
+	"github.com/bucketvcs/bucketvcs/internal/repo"
+	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 )
@@ -69,6 +72,90 @@ func ImportThenExportAndCompare(t *testing.T, name string, build fixtures.Builde
 		DefaultBranch: defaultBranch,
 	}); err != nil {
 		t.Fatalf("Import: %v", err)
+	}
+
+	dstDir := filepath.Join(t.TempDir(), "out")
+	if _, err := exporter.Export(context.Background(), store, exporter.Options{
+		Tenant: "diff", Repo: name, DestDir: dstDir,
+	}); err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	gitFsck(t, dstDir)
+
+	srcRefs := gitShowRef(t, srcDir)
+	dstRefs := gitShowRef(t, dstDir)
+	if !equalRefs(srcRefs, dstRefs) {
+		t.Fatalf("refs differ.\nsrc=%v\ndst=%v", srcRefs, dstRefs)
+	}
+	srcHead, errS := gitcli.SymbolicRef(context.Background(), srcDir, "HEAD")
+	dstHead, errD := gitcli.SymbolicRef(context.Background(), dstDir, "HEAD")
+	if (errS == nil) != (errD == nil) {
+		t.Fatalf("HEAD presence differs: src err=%v, dst err=%v", errS, errD)
+	}
+	if errS == nil && srcHead != dstHead {
+		t.Fatalf("HEAD differs: src=%q dst=%q", srcHead, dstHead)
+	}
+	srcOIDs := gitRevListAllObjects(t, srcDir)
+	dstOIDs := gitRevListAllObjects(t, dstDir)
+	if !equalOIDLists(srcOIDs, dstOIDs) {
+		t.Fatalf("reachable OIDs differ.\nsrc=%v\ndst=%v", srcOIDs, dstOIDs)
+	}
+	for _, oid := range srcOIDs {
+		got := gitCatFilePretty(t, dstDir, oid)
+		want := gitCatFilePretty(t, srcDir, oid)
+		ensureBytesEqual(t, "cat-file -p "+oid, got, want)
+	}
+}
+
+// ImportMaintenanceExportAndCompare runs the round-trip oracle but
+// inserts a maintenance.Run (with --force) between Import and Export.
+// The post-maintenance manifest must export to a repo identical to
+// the upstream source: same refs, same HEAD, same reachable OID set,
+// and identical cat-file output for every OID.
+//
+// This is the §40.3 differential check that maintenance is a no-op
+// on observable Git semantics.
+func ImportMaintenanceExportAndCompare(t *testing.T, name string, build fixtures.Builder) {
+	t.Helper()
+	srcDir := filepath.Join(t.TempDir(), "src")
+	fx := build(t, srcDir)
+	if fx.Name != name {
+		t.Fatalf("fixture name mismatch")
+	}
+	gitFsck(t, srcDir)
+
+	store := newTestStore(t)
+
+	// For the "empty" fixture the importer's DefaultBranch validation
+	// requires a real refs/* name; supply refs/heads/main so it passes.
+	defaultBranch := ""
+	if len(fx.Refs) == 0 {
+		defaultBranch = "refs/heads/main"
+	}
+	if _, err := importer.Import(context.Background(), store, importer.Options{
+		SourceDir: srcDir, Tenant: "diff", Repo: name, Actor: "harness",
+		DefaultBranch: defaultBranch,
+	}); err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+
+	// Empty fixture has no refs/packs; maintenance is a no-op by design.
+	if len(fx.Refs) > 0 {
+		r, err := repo.Open(context.Background(), store, "diff", name)
+		if err != nil {
+			t.Fatalf("repo.Open: %v", err)
+		}
+		k, err := keys.NewRepo("diff", name)
+		if err != nil {
+			t.Fatalf("keys.NewRepo: %v", err)
+		}
+		rep, err := maintpkg.Run(context.Background(), store, r, k, maintpkg.RunOptions{Force: true})
+		if err != nil {
+			t.Fatalf("maintenance.Run: %v", err)
+		}
+		if rep.Outcome != "success" {
+			t.Fatalf("maintenance outcome = %q, want success", rep.Outcome)
+		}
 	}
 
 	dstDir := filepath.Join(t.TempDir(), "out")

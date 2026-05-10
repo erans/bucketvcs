@@ -23,3 +23,12 @@ func TestRoundTrip_AllFixtures(t *testing.T) {
 		})
 	}
 }
+
+func TestRoundTrip_WithMaintenance_AllFixtures(t *testing.T) {
+	skipIfNoGit(t)
+	for name, build := range fixtures.Registry {
+		t.Run(name, func(t *testing.T) {
+			ImportMaintenanceExportAndCompare(t, name, build)
+		})
+	}
+}

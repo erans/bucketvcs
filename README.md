@@ -29,6 +29,7 @@ end-to-end walkthrough using Cloudflare R2.
 - `bucketvcs import` — import a Git pack bundle into a repository
 - `bucketvcs init` — initialize a new repository
 - `bucketvcs inspect-manifest` — dump the current root manifest
+- `bucketvcs maintenance` — operator-driven repack + commit-graph / object-map refresh per spec §15.3 (M9)
 - `bucketvcs serve` — start the Git-protocol HTTPS/SSH gateway
 
 ## Documentation
