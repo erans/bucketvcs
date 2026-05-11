@@ -36,7 +36,7 @@ These choices were made during brainstorming and govern the rest of the spec.
 | Q1 | Scope between bundle-uri and packfile-uri | **Both, full M11.** Ship together; they share the URL-delivery substrate and amortize the new storage-adapter capability. |
 | Q2 | Bundle generation pattern | **Default-branch full bundle only.** One bundle per repo covering refs/heads/<default-branch> tip closure. Schema is forward-compatible with rolling-base / release-tag successors. |
 | Q3 | Ownership of generation and freshness evaluation | **Maintenance generates; gateway evaluates freshness on-the-fly at advertise time.** Push never touches bundles. Mirrors M9/M10's "heavy work in maintenance, hot path stays clean" pattern. |
-| Q4 | URI delivery mechanism | **Adapter `Sign()` capability + gateway-proxied fallback.** Cloud adapters implement signed URLs; localfs (and any non-signing adapter) gets a gateway-served `/_bundle/<hash>` and `/_pack/<hash>` path guarded by an HMAC token. Per-fetch decision: prefer direct signed URL; fall back to proxied. |
+| Q4 | URI delivery mechanism | **`SignedGetURL` (existing M0 capability) + gateway-proxied fallback.** Cloud adapters already implement `SignedGetURL`; M11 extends `SignedURLOptions` with optional `ExpectedHash` for integrity binding. Localfs (and any non-signing adapter, reported via `Capabilities.SignedURLs == false`) gets a gateway-served `/_bundle/<hash>` and `/_pack/<hash>` path guarded by an HMAC token. Per-fetch decision: prefer direct signed URL; fall back to proxied. |
 | Q5 | Pack-uri eligibility | **Narrow: only when the planned fetch is exactly "send canonical pack X in full."** Mixed delivery deferred. |
 
 Three derived constraints carried forward without an explicit question:
@@ -77,36 +77,61 @@ The bundle's content-addressed `BundleKey` lives at `tenants/<t>/repos/<r>/bundl
 
 The `Indexes.Reachability.BaseManifest` field already records the manifest version that produced the current `(ObjectMap, CommitGraph)` pair (M10). `BundleRef.CoversManifestVersion` plays the analogous role for bundles — used for freshness evaluation, never as a storage key.
 
-## 3. Storage adapter Sign() capability
+## 3. Storage adapter SignedGetURL extension
 
-`internal/storage` gets a new optional capability interface:
+`internal/storage` already exposes the URL-minting capability that M11 needs:
 
 ```go
-// Signer is implemented by storage adapters that can mint short-lived
-// signed URLs for direct client GET. Unimplemented for backends without
-// native presigning (notably localfs).
-type Signer interface {
-    Sign(ctx context.Context, key string, ttl time.Duration, expectedHash string) (string, error)
+// (existing M0 contract)
+type ObjectStore interface {
+    // ...
+    SignedGetURL(ctx context.Context, key string, opts SignedURLOptions) (string, error)
+    Capabilities() Capabilities  // includes .SignedURLs bool
+}
+
+type SignedURLOptions struct {
+    Expires time.Duration
+    Method  string  // typically "GET"
 }
 ```
 
-Conventions:
+All four cloud adapters (`s3compat`, `gcs`, `azureblob`, plus R2 via `s3compat`) implement `SignedGetURL` against their SDK presigners. `localfs` returns `ErrNotSupported` and reports `Capabilities.SignedURLs == false`. The existing M0 conformance suite asserts the negative path ("if `Capabilities.SignedURLs == false`, `SignedGetURL` returns `ErrNotSupported`") for every adapter.
 
-- `expectedHash` is the SHA-256 of the object body. Adapters that support per-object integrity headers (S3 `x-amz-checksum-sha256`, GCS `X-Goog-Hash`, Azure `x-ms-content-crc64`/MD5) SHOULD bind the URL to that hash so a misconfigured replacement cannot be silently served. Adapters without such binding SHOULD return the URL anyway and rely on M8 retention dominance for safety.
-- `ttl` is bounded by adapter config (`Config.MaxSignTTL`, default 24h, hard ceiling 168h). The gateway passes the configured per-call TTL (default 1h pack, 4h bundle); the adapter caps to its `MaxSignTTL` and returns the lower of the two.
-- Errors: `ErrNotSupported` (adapter cannot sign — gateway falls back to proxied), `ErrInvalidTTL` (caller asked for ttl ≤ 0 or > ceiling), context errors propagated.
+M11 extends `SignedURLOptions` with one optional integrity-binding field and adds positive-path conformance:
 
-Per-adapter implementations:
+```go
+type SignedURLOptions struct {
+    Expires      time.Duration
+    Method       string
+    ExpectedHash string  // NEW: optional. If non-empty AND adapter supports
+                         // server-side integrity headers, the URL binds the
+                         // GET to objects whose content matches the hash.
+                         // Adapters without integrity-header support ignore.
+                         // Hash format: "sha256:<64-hex>".
+}
+```
 
-| Adapter | Mechanism | TTL ceiling |
-|---------|-----------|-------------|
-| `s3compat` (AWS S3) | AWS SDK `s3.PresignClient.PresignGetObject` (V4 signature) | 7 days (SDK limit) |
-| `s3compat` (Cloudflare R2) | Same V4 presign; R2 honors AWS SDK presigns | 7 days |
-| `gcs` | `storage.SignedURL` V4 with the configured service-account key | 7 days |
-| `azureblob` | Account SAS via `azblob` SDK (read-only, single-blob, range) | bounded by SAS expiry config |
-| `localfs` | Returns `ErrNotSupported` |  — |
+Per-adapter `ExpectedHash` handling:
 
-The conformance suite gains an optional `RunCapabilitySigning` factory: skipped on adapters that return `ErrNotSupported`; on signing adapters, asserts that a freshly-signed URL fetches a byte-identical copy of an uploaded test object, that an expired signature is rejected, and that a tampered query string is rejected (provider returns 4xx).
+| Adapter | Mechanism | Behavior when `ExpectedHash` unset |
+|---------|-----------|-----------------------------------|
+| `s3compat` (AWS S3) | `x-amz-checksum-sha256` enforced via `If-Match`-style precondition or post-fetch verification (S3 supports `x-amz-checksum-mode: ENABLED` on GET — adapter sets it when `ExpectedHash` is provided so the response includes the checksum and a 4xx is returned by the SDK on mismatch). | Plain V4 presign, no integrity binding. Behavior unchanged from M0. |
+| `s3compat` (Cloudflare R2) | Same as AWS S3 if R2 honors the AWS V4 checksum mode header. If not, the URL is still minted; integrity falls back to retention dominance. | Same as above. |
+| `gcs` | `x-goog-hash` is a response header on GET; the adapter sets the SDK's `Content-Hash` precondition when supported, otherwise the URL is unbinder. | Plain V4 SignedURL. |
+| `azureblob` | Account SAS supports content-MD5 binding via `rscc`/`rscm`/`rsce` headers; SHA-256 binding is not first-class, so M11's `azureblob` adapter ignores `ExpectedHash` for v1 and the URL relies on retention dominance. | Plain SAS. Behavior unchanged. |
+| `localfs` | Returns `ErrNotSupported`. | Same. |
+
+The TTL bound: each cloud adapter has a `Config.PresignDefaultTTL` (already in M0's adapter config) that bounds `Expires`. M11 callers pass per-call TTLs (1h pack, 4h bundle); adapters cap to their own ceiling and return the lower of the two.
+
+The conformance suite gains a new optional factory `RunCapabilitySigning(t, factory)` that runs only when `Capabilities().SignedURLs == true`. It asserts:
+
+- A freshly-minted URL fetches a byte-identical copy of an uploaded test object.
+- An expired signature returns 4xx.
+- A tampered query string (e.g., flipped one signature byte) returns 4xx.
+- TTL clamping: requesting `Expires = config.PresignDefaultTTL * 100` returns a URL whose expiry is `≤ config.MaxSignTTL` (or `PresignDefaultTTL`, whichever the adapter exposes).
+- `ExpectedHash` binding (where the adapter supports it): a URL minted with the *correct* expected hash fetches successfully; a URL minted with a *deliberately-wrong* expected hash returns 4xx.
+
+The factory is wired into all four cloud adapters' conformance harnesses; `localfs` skips it (caps reports false).
 
 ## 4. Bundle generation in maintenance
 
@@ -197,9 +222,9 @@ States:
 
 The gateway picks the URI mode per the configured `--bundle-uri-mode={auto|direct|proxied|off}`:
 
-- `direct`: call `Signer.Sign(ctx, BundleKey, bundleTTL, BundleHash)`. On `ErrNotSupported`, error out the bundle-uri response (clients fall through to fetch). Operator chose `direct` knowing it requires a signing adapter.
-- `proxied`: skip Sign; mint a gateway-proxied URL (see §7).
-- `auto` (default): try Sign first; on `ErrNotSupported`, mint proxied URL.
+- `direct`: call `store.SignedGetURL(ctx, BundleKey, SignedURLOptions{Expires: bundleTTL, Method: "GET", ExpectedHash: "sha256:" + BundleHash})`. On `ErrNotSupported`, error out the bundle-uri response (clients fall through to fetch). Operator chose `direct` knowing it requires a signing adapter.
+- `proxied`: skip `SignedGetURL`; mint a gateway-proxied URL (see §7).
+- `auto` (default): try `SignedGetURL` first; on `ErrNotSupported`, mint proxied URL.
 - `off`: do not advertise `bundle-uri` capability at all.
 
 Response body (per Git bundle-uri protocol):
@@ -335,14 +360,15 @@ No flag changes. The mark-sweep contract from M8 handles bundle and old-pack cle
 
 ### 9.1 M0 — storage conformance
 
-Add `RunCapabilitySigning(t, store, factory)` to the conformance suite. Skipped on adapters that return `ErrNotSupported` from `Sign()`. Asserts:
+Add `RunCapabilitySigning(t, factory)` to the conformance suite. Skipped on adapters where `Capabilities().SignedURLs == false`. Asserts (per §3):
 
 - Signed URL fetches a byte-identical copy
 - Expired signature returns 4xx
 - Tampered query string returns 4xx
-- TTL clamped to adapter `MaxSignTTL` ceiling
+- TTL clamped to adapter's configured ceiling
+- `ExpectedHash` binding (where the adapter supports it): correct hash succeeds, wrong hash returns 4xx
 
-Wired into all four cloud adapters (`s3compat`, `gcs`, `azureblob`, plus R2 via `s3compat`). Skipped on `localfs`.
+Wired into all four cloud adapters' conformance harnesses (`s3compat`, `gcs`, `azureblob`, R2 via `s3compat`). Skipped on `localfs`.
 
 ### 9.2 M2 — manifest schema
 
@@ -414,9 +440,9 @@ Audit emission consistent with M8/M9/M10 conventions: structured logs to the con
 
 ### 11.1 Unit
 
-- `internal/storage/{s3compat,gcs,azureblob}` Sign() tests — signed-URL roundtrip against the adapter's `httptest`/SDK fakes; TTL clamping; integrity-header binding (where supported); error class mapping.
+- `internal/storage/{s3compat,gcs,azureblob}` `SignedGetURL` extension tests — `ExpectedHash` binding (success and mismatch); TTL clamping; integrity-header propagation; error class mapping.
 - `internal/maintenance/bundle` — Phase 0 trigger evaluation against synthetic manifests; bundle generation against a fixture mirror via `gitcli.BundleCreate`; CAS-merge race against a concurrent push.
-- `internal/gateway/v2/bundleuri` — freshness state machine truth table; URI minting fallback (Sign succeeds, Sign returns ErrNotSupported, Sign errors otherwise); response stanza format.
+- `internal/gateway/v2/bundleuri` — freshness state machine truth table; URI minting fallback (`SignedGetURL` succeeds, returns `ErrNotSupported`, errors otherwise); response stanza format.
 - `internal/gateway/v2/packuri` — `FullPackRequested` plan-shape detection; eligibility gating; legacy-pack fallback (missing `PackChecksum`).
 - `internal/gateway/proxiedurl` — token mint/verify roundtrip; expired token rejection; tampered-path rejection; range-request streaming.
 
@@ -474,7 +500,7 @@ Audit emission consistent with M8/M9/M10 conventions: structured logs to the con
 The plan-writing skill will turn this into ~10–14 phases. High-level slicing:
 
 1. Manifest schema additions + JSON codec tests
-2. Storage adapter `Signer` interface + per-adapter implementations + conformance
+2. Storage adapter `SignedURLOptions.ExpectedHash` extension + per-adapter implementation + positive-path conformance (`RunCapabilitySigning`)
 3. `gitcli.BundleCreate` wrapper + maintenance Phase `bundle-refresh` (no gateway integration yet)
 4. Maintenance CLI flags + JSON output
 5. Gateway-proxied URL endpoints + HMAC token + range streaming
