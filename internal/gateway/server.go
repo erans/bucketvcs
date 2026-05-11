@@ -17,6 +17,14 @@ type Options struct {
 	Version      string
 	AuthStore    auth.Store
 	MaxBodyBytes int64
+
+	// ProxiedURLSigningKey, when non-empty, enables the gateway-proxied
+	// bundle/pack URL endpoints (/_bundle/<hash>, /_pack/<hash>). M11.
+	// Must be at least 16 bytes when set (matches proxiedurl.Mint).
+	ProxiedURLSigningKey []byte
+	// ProxiedKeyResolver maps URL-path hashes to storage keys. REQUIRED
+	// when ProxiedURLSigningKey is set; ignored otherwise.
+	ProxiedKeyResolver ProxiedKeyResolver
 }
 
 // Server implements http.Handler.
@@ -44,6 +52,14 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 	if opts.AuthStore == nil {
 		return nil, fmt.Errorf("gateway: AuthStore is required")
 	}
+	if len(opts.ProxiedURLSigningKey) > 0 {
+		if len(opts.ProxiedURLSigningKey) < 16 {
+			return nil, fmt.Errorf("gateway: ProxiedURLSigningKey too short (%d bytes); need >= 16", len(opts.ProxiedURLSigningKey))
+		}
+		if opts.ProxiedKeyResolver == nil {
+			return nil, fmt.Errorf("gateway: ProxiedKeyResolver required when ProxiedURLSigningKey is set")
+		}
+	}
 	mgr, err := mirror.NewManager(opts.MirrorDir, store)
 	if err != nil {
 		return nil, fmt.Errorf("gateway: mirror manager: %w", err)
@@ -51,6 +67,11 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 	s := &Server{store: store, mgr: mgr, opts: opts}
 	s.mux = http.NewServeMux()
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
+	if len(opts.ProxiedURLSigningKey) > 0 {
+		proxied := NewProxiedHandler(store, opts.ProxiedURLSigningKey, "/_bundle/", "/_pack/", opts.ProxiedKeyResolver)
+		s.mux.Handle("/_bundle/", proxied)
+		s.mux.Handle("/_pack/", proxied)
+	}
 	s.mux.HandleFunc("/", s.routeRoot)
 	return s, nil
 }
