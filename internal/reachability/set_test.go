@@ -193,3 +193,144 @@ func uploadBytesStore(t *testing.T, ctx context.Context, store storage.ObjectSto
 		t.Fatalf("PutIfAbsent(%s): %v", key, err)
 	}
 }
+
+func TestSet_WalkBackOID_Found(t *testing.T) {
+	fx := rtest.NewBaseWithDeltaRepo(t)
+	set, err := reachability.Load(context.Background(), fx.Store, fx.Keys, fx.Body)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	n, err := set.WalkBackOID(fx.D.String(), fx.A.String(), 10)
+	if err != nil || n != 3 {
+		t.Fatalf("WalkBackOID(D, A, 10) = (%d, %v); want (3, nil)", n, err)
+	}
+}
+
+func TestSet_WalkBackOID_NotFoundWithinBound(t *testing.T) {
+	fx := rtest.NewBaseWithDeltaRepo(t)
+	set, err := reachability.Load(context.Background(), fx.Store, fx.Keys, fx.Body)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	n, err := set.WalkBackOID(fx.D.String(), fx.A.String(), 2)
+	if err != nil || n != -1 {
+		t.Fatalf("WalkBackOID(D, A, 2) = (%d, %v); want (-1, nil)", n, err)
+	}
+}
+
+func TestSet_WalkBackOID_FromEqualsTarget(t *testing.T) {
+	fx := rtest.NewBaseOnlyRepo(t)
+	set, err := reachability.Load(context.Background(), fx.Store, fx.Keys, fx.Body)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	n, err := set.WalkBackOID(fx.C.String(), fx.C.String(), 10)
+	if err != nil || n != 0 {
+		t.Fatalf("WalkBackOID(C, C, 10) = (%d, %v); want (0, nil)", n, err)
+	}
+}
+
+func TestSet_IsAncestor(t *testing.T) {
+	fx := rtest.NewBaseWithDeltaRepo(t)
+	set, err := reachability.Load(context.Background(), fx.Store, fx.Keys, fx.Body)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !set.IsAncestor(fx.A.String(), fx.D.String(), 10) {
+		t.Errorf("A should be ancestor of D")
+	}
+	if set.IsAncestor(fx.D.String(), fx.A.String(), 10) {
+		t.Errorf("D should NOT be ancestor of A")
+	}
+}
+
+func TestSet_IsAncestor_SelfAncestry(t *testing.T) {
+	fx := rtest.NewBaseOnlyRepo(t)
+	set, err := reachability.Load(context.Background(), fx.Store, fx.Keys, fx.Body)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !set.IsAncestor(fx.C.String(), fx.C.String(), 10) {
+		t.Errorf("C should be its own ancestor (depth 0)")
+	}
+}
+
+func TestSet_IsAncestor_DescendantMissingFromSet(t *testing.T) {
+	fx := rtest.NewBaseOnlyRepo(t)
+	set, err := reachability.Load(context.Background(), fx.Store, fx.Keys, fx.Body)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	const unknown = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	if set.IsAncestor(fx.A.String(), unknown, 10) {
+		t.Errorf("unknown descendant should yield false")
+	}
+}
+
+func TestSet_IsAncestor_MalformedOID(t *testing.T) {
+	fx := rtest.NewBaseOnlyRepo(t)
+	set, err := reachability.Load(context.Background(), fx.Store, fx.Keys, fx.Body)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if set.IsAncestor("not-an-oid", fx.C.String(), 10) {
+		t.Errorf("malformed ancestor should yield false")
+	}
+	if set.IsAncestor(fx.A.String(), "also-bad", 10) {
+		t.Errorf("malformed descendant should yield false")
+	}
+}
+
+func TestSet_WalkBackOID_MalformedFromEqualsTarget(t *testing.T) {
+	fx := rtest.NewBaseOnlyRepo(t)
+	set, err := reachability.Load(context.Background(), fx.Store, fx.Keys, fx.Body)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// Even when from == target, a malformed OID must surface as an error;
+	// the equality short-circuit cannot bypass input validation.
+	if _, err := set.WalkBackOID("", "", 5); err == nil {
+		t.Errorf("empty OIDs should error, not return (0, nil)")
+	}
+}
+
+func TestSet_WalkBackOID_FromNotInSet(t *testing.T) {
+	fx := rtest.NewBaseOnlyRepo(t)
+	set, err := reachability.Load(context.Background(), fx.Store, fx.Keys, fx.Body)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	const unknown = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	if _, err := set.WalkBackOID(unknown, fx.A.String(), 5); err == nil {
+		t.Errorf("expected error when from is not in set")
+	}
+}
+
+func TestSet_WalkBackOID_MalformedTarget(t *testing.T) {
+	fx := rtest.NewBaseOnlyRepo(t)
+	set, err := reachability.Load(context.Background(), fx.Store, fx.Keys, fx.Body)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, err := set.WalkBackOID(fx.C.String(), "not-hex", 5); err == nil {
+		t.Errorf("expected error on malformed target with valid from")
+	}
+}
+
+func TestSet_WalkBackOID_UnreachableTarget(t *testing.T) {
+	// Walk from C looking for an OID that parses fine but is not on
+	// C's ancestor chain. Walk should exhaust normally and return -1.
+	fx := rtest.NewBaseOnlyRepo(t)
+	set, err := reachability.Load(context.Background(), fx.Store, fx.Keys, fx.Body)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	const unreachable = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	n, err := set.WalkBackOID(fx.C.String(), unreachable, 10)
+	if err != nil {
+		t.Fatalf("WalkBackOID: %v", err)
+	}
+	if n != -1 {
+		t.Errorf("got n=%d, want -1 (target unreachable)", n)
+	}
+}

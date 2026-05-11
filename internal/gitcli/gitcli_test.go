@@ -1227,6 +1227,48 @@ func TestUpdateRefCAS_RejectsStaleOldOID(t *testing.T) {
 	}
 }
 
+// TestRevParse_Branch verifies that RevParse against a bare repo
+// resolves refs/heads/<name> to the same 40-hex OID that the underlying
+// git binary reports via `git rev-parse`. The fixture builds a single-
+// commit bare mirror and compares; bundle generation (M11 Phase 3) calls
+// RevParse to capture the tip OID stored on BundleEntry.TipOID, so this
+// happy-path test guards that contract.
+func TestRevParse_Branch(t *testing.T) {
+	skipIfNoGit(t)
+	bare := makeRepoWithOneCommit(t)
+	refs, err := ShowRef(context.Background(), bare)
+	if err != nil {
+		t.Fatalf("ShowRef: %v", err)
+	}
+	// Pick a deterministic ref — map iteration order is randomized and
+	// the fixture may grow to multiple refs in the future.
+	const ref = "refs/heads/main"
+	want, ok := refs[ref]
+	if !ok {
+		t.Fatalf("expected fixture to contain %q; got refs=%v", ref, refs)
+	}
+	got, err := RevParse(context.Background(), bare, ref)
+	if err != nil {
+		t.Fatalf("RevParse(%q): %v", ref, err)
+	}
+	if got != want {
+		t.Fatalf("RevParse(%q) = %q, want %q", ref, got, want)
+	}
+}
+
+// TestRevParse_RejectsBadRef confirms that validRefOrOID is the gate:
+// dash-prefixed refs are refused before git is invoked.
+func TestRevParse_RejectsBadRef(t *testing.T) {
+	skipIfNoGit(t)
+	dir := t.TempDir()
+	if err := InitBare(context.Background(), dir); err != nil {
+		t.Fatalf("InitBare: %v", err)
+	}
+	if _, err := RevParse(context.Background(), dir, "--config=foo"); err == nil {
+		t.Fatalf("expected rejection of dash-prefixed ref")
+	}
+}
+
 func TestRevListNotAll_RejectsNonHexInputs(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

@@ -1,6 +1,8 @@
 package maintenance_test
 
 import (
+	"bytes"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -87,5 +89,73 @@ func TestThresholds_ReachabilityDefaults(t *testing.T) {
 	}
 	if d.ReachabilityDeltaBytes != 64*1024*1024 {
 		t.Errorf("ReachabilityDeltaBytes = %d, want 64MiB", d.ReachabilityDeltaBytes)
+	}
+}
+
+func TestThresholds_BundleDefaults(t *testing.T) {
+	th := maintenance.DefaultThresholds()
+	if th.BundleCommits != 100 {
+		t.Errorf("BundleCommits default = %d, want 100", th.BundleCommits)
+	}
+	if th.BundleAge != 24*time.Hour {
+		t.Errorf("BundleAge default = %v, want 24h", th.BundleAge)
+	}
+}
+
+func TestRunOptions_BundleFlags_Validate(t *testing.T) {
+	cases := []struct {
+		name    string
+		opts    maintenance.RunOptions
+		wantErr bool
+	}{
+		{"both bundle-only and no-bundle", maintenance.RunOptions{BundleOnly: true, NoBundle: true}, true},
+		{"bundle-only ok", maintenance.RunOptions{BundleOnly: true}, false},
+		{"no-bundle ok", maintenance.RunOptions{NoBundle: true}, false},
+		{"neither ok", maintenance.RunOptions{}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			c.opts.Normalize()
+			err := c.opts.Validate()
+			if (err != nil) != c.wantErr {
+				t.Fatalf("Validate err=%v wantErr=%v", err, c.wantErr)
+			}
+		})
+	}
+}
+
+func TestReport_BundleResult_JSONOmittedWhenZero(t *testing.T) {
+	r := maintenance.Report{RepoID: "t/r", Outcome: "noop"}
+	b, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if bytes.Contains(b, []byte("bundle_result")) {
+		t.Fatalf("expected bundle_result omitted when zero, got: %s", b)
+	}
+}
+
+func TestReport_BundleResult_JSONIncludedWhenSet(t *testing.T) {
+	r := maintenance.Report{
+		RepoID: "t/r", Outcome: "success_bundle_only",
+		BundleResult: &maintenance.BundleResult{
+			Generated:             true,
+			BundleID:              "bundle_t_r_42_abc",
+			BundleHash:            "sha256-aa",
+			CoversManifestVersion: 42,
+			ByteSize:              1024,
+			DurationMS:            12,
+			TriggerReason:         "missing",
+		},
+	}
+	b, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !bytes.Contains(b, []byte(`"bundle_result"`)) {
+		t.Fatalf("expected bundle_result in JSON, got: %s", b)
+	}
+	if !bytes.Contains(b, []byte(`"trigger_reason":"missing"`)) {
+		t.Fatalf("trigger_reason missing: %s", b)
 	}
 }

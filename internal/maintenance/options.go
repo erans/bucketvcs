@@ -34,6 +34,12 @@ type Thresholds struct {
 	ReachabilityDeltaCommits int
 	ReachabilityDeltaPushes  int
 	ReachabilityDeltaBytes   int64
+
+	// §16.3 — bundle regeneration triggers (M11). 0 disables the
+	// specific check (matches M9/M10 convention). Defaults: 100 commits,
+	// 24h.
+	BundleCommits int
+	BundleAge     time.Duration
 }
 
 // DefaultThresholds returns the spec §15.3 recommended values.
@@ -46,6 +52,9 @@ func DefaultThresholds() Thresholds {
 		ReachabilityDeltaCommits: 1000,
 		ReachabilityDeltaPushes:  100,
 		ReachabilityDeltaBytes:   64 * 1024 * 1024,
+
+		BundleCommits: 100,
+		BundleAge:     24 * time.Hour,
 	}
 }
 
@@ -55,10 +64,34 @@ type RunOptions struct {
 	RecentWindow time.Duration // window for "recent" pack classification
 	CASRetry     int           // bound on Phase 6 CAS-merge retries
 	Force        bool          // skip threshold evaluation; always proceed
-	DryRun       bool          // walk + plan + report; write nothing
+	// DryRun: walk + plan + report; no manifest commit is written.
+	//
+	// Side-effect asymmetry under BundleOnly: the bundle-refresh phase
+	// uploads the bundle artifact + sidecar to content-addressed
+	// storage BEFORE it considers whether to CAS-merge. Under
+	// DryRun+BundleOnly the uploads still happen (since the artifact
+	// is needed to construct the BundleEntry that the dry-run is
+	// previewing), but the manifest is not modified. Those bundle
+	// blobs are unreferenced from the manifest and are GC'd by M8 on
+	// the next sweep. Operators who require a true zero-side-effect
+	// probe should not combine DryRun with BundleOnly.
+	DryRun       bool
 	Actor        string        // tx record actor; "u_op" if empty
 	Logger       *slog.Logger  // defaults to slog.Default()
 	Now          func() time.Time
+
+	// BundleOnly skips repack + compact phases; only the bundle-refresh
+	// phase runs. Mutually exclusive with NoBundle.
+	BundleOnly bool
+
+	// NoBundle skips the bundle-refresh phase. Repack and compact
+	// proceed as configured. Mutually exclusive with BundleOnly.
+	NoBundle bool
+
+	// BundleDefaultBranch overrides the auto-detected default branch
+	// for bundle generation. Empty means use HEAD's resolution from
+	// the manifest. Format: "refs/heads/<name>".
+	BundleDefaultBranch string
 
 	// BetweenRepackAndCAS is a test hook invoked inside the first
 	// buildBody callback of Phase 6 CAS-merge, before the merged body
@@ -103,6 +136,10 @@ func (o RunOptions) Validate() error {
 		return fmt.Errorf("%w: RecentWindow=%s is below the 1h minimum",
 			ErrInvalidFlags, o.RecentWindow)
 	}
+	if o.BundleOnly && o.NoBundle {
+		return fmt.Errorf("%w: --bundle-only and --no-bundle are mutually exclusive",
+			ErrInvalidFlags)
+	}
 	return nil
 }
 
@@ -112,6 +149,40 @@ type ReachabilityCompactionReport struct {
 	TriggerReason string `json:"trigger_reason,omitempty"`
 	DeltasDropped int    `json:"deltas_dropped,omitempty"`
 	BaseSwapped   bool   `json:"base_swapped,omitempty"`
+}
+
+// BundleResult records the outcome of the bundle-refresh phase. Nil
+// when the phase did not run (NoBundle, no triggers fired in non-Force
+// mode, or the maintenance run failed before reaching the phase).
+type BundleResult struct {
+	// Generated is true if a fresh bundle was uploaded and CAS-merged.
+	// False indicates the phase ran but decided no regeneration was
+	// needed (Generated=false, TriggerReason="no_trigger").
+	Generated bool `json:"generated"`
+
+	// BundleID is the new BundleEntry.ID. Empty when !Generated.
+	BundleID string `json:"bundle_id,omitempty"`
+
+	// BundleHash is the SHA-256 of the bundle file body. Empty when !Generated.
+	BundleHash string `json:"bundle_hash,omitempty"`
+
+	// CoversManifestVersion is the M_now version captured at generation start.
+	CoversManifestVersion uint64 `json:"covers_manifest_version,omitempty"`
+
+	// ByteSize is the bundle file size. Zero when !Generated.
+	ByteSize int64 `json:"byte_size,omitempty"`
+
+	// DurationMS is the wall time of the phase.
+	DurationMS int64 `json:"duration_ms,omitempty"`
+
+	// TriggerReason is one of: "missing", "age", "commits", "force",
+	// "no_trigger", "skipped_no_default_branch",
+	// "skipped_reachability_load_error", "skipped_trigger_eval_error".
+	TriggerReason string `json:"trigger_reason,omitempty"`
+
+	// ErrorMessage is non-empty if the phase failed and the rest of
+	// the maintenance run continued. Failure does not set Generated.
+	ErrorMessage string `json:"error_message,omitempty"`
 }
 
 // Report summarizes one Run for the caller (CLI, future scheduler).
@@ -137,6 +208,9 @@ type Report struct {
 
 	// M10 reachability compaction detail.
 	ReachabilityCompaction ReachabilityCompactionReport `json:"reachability_compaction,omitempty"`
+
+	// M11 bundle-refresh phase detail. Nil when the phase did not run.
+	BundleResult *BundleResult `json:"bundle_result,omitempty"`
 }
 
 // TriggerReport records what Phase 0 saw, regardless of outcome.

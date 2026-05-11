@@ -233,3 +233,54 @@ func (s *Set) ObjectPack(oid pack.OID) (string, bool) {
 	packID, _, ok := s.omap.Lookup(oid)
 	return packID, ok
 }
+
+// WalkBackOID walks backward through commits from `from`, looking for
+// `target`. Returns the count of commits walked (0 if from == target,
+// 1 if target is from's parent, etc.) bounded by max. Returns -1 if
+// target is not reached within max steps. Returns an error if either
+// OID fails to parse or `from` is not present in the set.
+func (s *Set) WalkBackOID(from, target string, max int) (int, error) {
+	fromOID, err := pack.ParseOID(from)
+	if err != nil {
+		return -1, fmt.Errorf("reachability: WalkBackOID: parse from: %w", err)
+	}
+	targetOID, err := pack.ParseOID(target)
+	if err != nil {
+		return -1, fmt.Errorf("reachability: WalkBackOID: parse target: %w", err)
+	}
+	if !s.Has(fromOID) {
+		return -1, fmt.Errorf("reachability: WalkBackOID: %s not in set", from)
+	}
+	if fromOID == targetOID {
+		return 0, nil
+	}
+	visited := map[pack.OID]bool{fromOID: true}
+	frontier := []pack.OID{fromOID}
+	depth := 0
+	for len(frontier) > 0 && depth < max {
+		depth++
+		var next []pack.OID
+		for _, oid := range frontier {
+			parents := s.Parents(oid)
+			for _, p := range parents {
+				if p == targetOID {
+					return depth, nil
+				}
+				if !visited[p] {
+					visited[p] = true
+					next = append(next, p)
+				}
+			}
+		}
+		frontier = next
+	}
+	return -1, nil
+}
+
+// IsAncestor reports whether ancestor is reachable from descendant
+// within max parent hops. Returns false (no error) when not found
+// within bound or when descendant is not present in the set.
+func (s *Set) IsAncestor(ancestor, descendant string, max int) bool {
+	n, err := s.WalkBackOID(descendant, ancestor, max)
+	return err == nil && n >= 0
+}
