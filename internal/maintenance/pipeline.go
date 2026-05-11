@@ -120,6 +120,54 @@ func runPipeline(ctx context.Context, s storage.ObjectStore, r *repo.Repo, k *ke
 	}
 	report.TriggerEval = trigReport
 
+	// ----------------------------------------------------------------
+	// Phase 0b — Lazy backfill of legacy PackChecksum (M11 Phase 5.2)
+	// ----------------------------------------------------------------
+	// Pre-M11 manifests have PackEntry rows with empty PackChecksum
+	// (the importer / receive-pack didn't record the pack trailer
+	// SHA-1). §16.4 packfile-uri advertisement needs that hex, so the
+	// first maintenance run to touch a legacy repo backfills it by
+	// reading the trailing 20 bytes of each affected pack from object
+	// storage and CAS-merging the populated rows back into the
+	// manifest.
+	//
+	// Runs BEFORE the noop early-return below so even noop maintenance
+	// runs (no trigger, not Force) still migrate legacy repos. Skipped
+	// under DryRun: no mutations.
+	if !opts.DryRun {
+		updated, didBackfill, berr := BackfillPackChecksumsIfNeeded(ctx, s, r, m0, opts.CASRetry, opts.Actor, opts.Logger)
+		if berr != nil {
+			// Non-fatal: per-pack trailer-read failures are absorbed inside
+			// the callback's WARN-and-skip loop, so an error here means CAS
+			// retries were exhausted, a corrupted prev manifest, or context
+			// cancellation. Continuing lets the rest of the pipeline make
+			// whatever progress it still can; the next maintenance run will
+			// retry the migration on the same legacy state.
+			opts.Logger.WarnContext(ctx, "PackChecksum backfill failed (non-fatal)",
+				slog.String("repo_id", repoID),
+				slog.String("err", berr.Error()))
+		} else if didBackfill {
+			// The manifest version advanced; refresh the in-memory
+			// view + report so downstream phases see the post-backfill
+			// state. BeforePackCount / BeforeManifestPB intentionally
+			// reflect the run-start snapshot — that's what "before
+			// this maintenance run started" means.
+			m0 = updated
+			refView, rerr := r.ReadRoot(ctx)
+			if rerr != nil {
+				report.Outcome = "failed_other"
+				report.DurationMS = elapsed()
+				emitFinalReport(ctx, opts.Logger, report)
+				return report, fmt.Errorf("maintenance: re-read after backfill: %w", rerr)
+			}
+			view = refView
+			report.ManifestVersionAt = view.Header.ManifestVersion
+			opts.Logger.WarnContext(ctx, "backfilled missing pack checksums (legacy pre-M11 manifest)",
+				slog.String("repo_id", repoID),
+				slog.Uint64("manifest_version_at", view.Header.ManifestVersion))
+		}
+	}
+
 	// No-refs / no-packs guard: nothing to repack. Under BundleOnly we
 	// also have nothing to bundle (no ref tip / no mirror to build), so
 	// short-circuit here too — but tag the outcome distinctly so the
@@ -295,11 +343,12 @@ func runPipeline(ctx context.Context, s storage.ObjectStore, r *repo.Repo, k *ke
 			mergeIn := mergeInput{
 				P0Keys: p0Keys,
 				NewPack: manifest.PackEntry{
-					PackID:      repackOut.PackID,
-					PackKey:     uploaded.PackKey,
-					IdxKey:      uploaded.IdxKey,
-					SizeBytes:   repackOut.SizeBytes,
-					ObjectCount: idx.ObjectCount,
+					PackID:       repackOut.PackID,
+					PackKey:      uploaded.PackKey,
+					IdxKey:       uploaded.IdxKey,
+					SizeBytes:    repackOut.SizeBytes,
+					ObjectCount:  idx.ObjectCount,
+					PackChecksum: repackOut.PackChecksum,
 				},
 				NewObjectMap:       manifest.IndexRef{Key: uploaded.ObjectMapKey, Hash: idx.ObjectMapHash},
 				NewCommitGraph:     manifest.IndexRef{Key: uploaded.CommitGraphKey, Hash: idx.CommitGraphHash},

@@ -2,7 +2,9 @@ package maintenance
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -11,10 +13,11 @@ import (
 
 // RepackOutput describes the local artifacts produced by Repack.
 type RepackOutput struct {
-	PackID    string // git's trailing SHA-1 over the pack bytes
-	PackPath  string // <bareDir>/out/pack-<PackID>.pack
-	IdxPath   string // <bareDir>/out/pack-<PackID>.idx
-	SizeBytes int64  // size of the .pack file
+	PackID       string // git's trailing SHA-1 over the pack bytes
+	PackPath     string // <bareDir>/out/pack-<PackID>.pack
+	IdxPath      string // <bareDir>/out/pack-<PackID>.idx
+	SizeBytes    int64  // size of the .pack file
+	PackChecksum string // 40-hex SHA-1 read from the pack's last 20 bytes
 }
 
 // Repack invokes gitcli.PackObjectsAll against <bareDir>/bare.git and
@@ -40,10 +43,35 @@ func Repack(ctx context.Context, bareDir string) (*RepackOutput, error) {
 	if err != nil {
 		return nil, fmt.Errorf("repack: stat pack: %w", err)
 	}
+	trailer, err := readPackTrailer(packPath)
+	if err != nil {
+		return nil, fmt.Errorf("repack: read trailer: %w", err)
+	}
 	return &RepackOutput{
-		PackID:    packID,
-		PackPath:  packPath,
-		IdxPath:   idxPath,
-		SizeBytes: st.Size(),
+		PackID:       packID,
+		PackPath:     packPath,
+		IdxPath:      idxPath,
+		SizeBytes:    st.Size(),
+		PackChecksum: trailer,
 	}, nil
+}
+
+// readPackTrailer returns the 40-hex SHA-1 stored in the final 20 bytes of
+// a Git pack file (Git's pack-checksum trailer). This is distinct from the
+// SHA-256 storage hash recorded elsewhere; the trailer is what §16.4
+// packfile-uri advertisement embeds in the protocol stanza.
+func readPackTrailer(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if _, err := f.Seek(-20, io.SeekEnd); err != nil {
+		return "", err
+	}
+	var buf [20]byte
+	if _, err := io.ReadFull(f, buf[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf[:]), nil
 }
