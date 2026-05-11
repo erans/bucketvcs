@@ -269,12 +269,12 @@ func runMaintenanceAll(ctx context.Context, store storage.ObjectStore, opts main
 			failed++
 		} else {
 			switch rep.Outcome {
-			case "success":
+			case "success", "success_bundle_only":
 				succeeded++
-			case "noop":
+			case "noop", "noop_bundle_only":
 				noop++
 			}
-			// runPipeline only returns success/noop when err == nil; the
+			// runPipeline only returns success/noop variants when err == nil; the
 			// failed_* outcomes are paired with a non-nil err and handled
 			// in the err != nil arm above.
 		}
@@ -282,8 +282,14 @@ func runMaintenanceAll(ctx context.Context, store storage.ObjectStore, opts main
 	}
 	emitMaintenanceReport(stdout, reports, output)
 	if output == "text" {
-		fmt.Fprintf(stdout, "summary: processed=%d succeeded=%d noop=%d failed=%d\n",
-			len(repos), succeeded, noop, failed)
+		var bundleGenerated int
+		for _, rep := range reports {
+			if rep.BundleResult != nil && rep.BundleResult.Generated {
+				bundleGenerated++
+			}
+		}
+		fmt.Fprintf(stdout, "summary: processed=%d succeeded=%d noop=%d failed=%d bundle_generated=%d\n",
+			len(repos), succeeded, noop, failed, bundleGenerated)
 	}
 	// Surface buckets that didn't sum to processed — e.g. an outcome
 	// value the switch didn't recognize. Emitted in both text and JSON

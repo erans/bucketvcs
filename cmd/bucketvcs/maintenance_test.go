@@ -296,3 +296,36 @@ func TestRunMaintenance_BundleOnlyAndNoBundle_Reject(t *testing.T) {
 	}
 }
 
+func TestRunMaintenance_AllRepos_BundleOnlySummary(t *testing.T) {
+	bucketRoot := t.TempDir()
+	storeURL := "localfs:" + bucketRoot
+
+	var b bytes.Buffer
+	if rc := runInit(context.Background(), []string{"--store=" + storeURL, "t", "r1"}, &b, &b); rc != 0 {
+		t.Fatalf("init r1: rc=%d %s", rc, b.String())
+	}
+	b.Reset()
+	if rc := runInit(context.Background(), []string{"--store=" + storeURL, "t", "r2"}, &b, &b); rc != 0 {
+		t.Fatalf("init r2: rc=%d %s", rc, b.String())
+	}
+
+	var stdout, stderr bytes.Buffer
+	rc := runMaintenance(context.Background(), []string{
+		"--store=" + storeURL,
+		"--all-repos",
+		"--bundle-only",
+		"--output=text",
+	}, &stdout, &stderr)
+	if rc != 0 {
+		t.Fatalf("rc = %d, stderr: %s", rc, stderr.String())
+	}
+	// Summary line must include bundle_generated count.
+	if !strings.Contains(stdout.String(), "bundle_generated=") {
+		t.Errorf("expected bundle_generated= in summary: %s", stdout.String())
+	}
+	// noop_bundle_only outcomes must not trigger the divergence warning.
+	if strings.Contains(stderr.String(), "summary divergence") {
+		t.Errorf("unexpected summary divergence warning: %s", stderr.String())
+	}
+}
+
