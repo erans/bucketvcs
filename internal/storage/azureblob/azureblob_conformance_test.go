@@ -112,3 +112,18 @@ func TestAzureBlob_ReachabilitySafety(t *testing.T) {
 	}
 	reachconformance.RunPropertyReachabilitySafety(t, reachconformance.Factory(makeFactory(t, base)))
 }
+
+func TestAzureBlob_Signing(t *testing.T) {
+	cont := os.Getenv("BUCKETVCS_AZURE_CONTAINER")
+	if cont == "" {
+		t.Skip("BUCKETVCS_AZURE_CONTAINER unset — skipping live azureblob signing conformance")
+	}
+	base := azureblob.Config{
+		Container:        cont,
+		Account:          os.Getenv("BUCKETVCS_AZURE_ACCOUNT"),
+		AccountKey:       os.Getenv("BUCKETVCS_AZURE_ACCOUNT_KEY"),
+		ConnectionString: os.Getenv("BUCKETVCS_AZURE_CONNECTION_STRING"),
+		ServiceURL:       os.Getenv("BUCKETVCS_AZURE_SERVICE_URL"),
+	}
+	conformance.RunCapabilitySigning(t, makeFactory(t, base))
+}

@@ -106,3 +106,16 @@ func TestGcs_ReachabilitySafety(t *testing.T) {
 	}
 	reachconformance.RunPropertyReachabilitySafety(t, reachconformance.Factory(makeGCSFactory(t, base)))
 }
+
+func TestGCS_Signing(t *testing.T) {
+	bucket := os.Getenv("BUCKETVCS_GCS_BUCKET")
+	if bucket == "" {
+		t.Skip("BUCKETVCS_GCS_BUCKET unset — skipping live GCS signing conformance")
+	}
+	base := gcs.Config{
+		Bucket:          bucket,
+		Endpoint:        os.Getenv("BUCKETVCS_GCS_ENDPOINT"),
+		CredentialsFile: os.Getenv("BUCKETVCS_GCS_CREDENTIALS_FILE"),
+	}
+	conformance.RunCapabilitySigning(t, makeGCSFactory(t, base))
+}

@@ -96,4 +96,23 @@ type MultipartOptions struct {
 type SignedURLOptions struct {
 	Expires time.Duration
 	Method  string // typically "GET"
+
+	// ExpectedHash, if non-empty, asks the adapter to bind the signed
+	// URL to integrity metadata so a downstream verifier can detect a
+	// content mismatch. Format: "sha256:<64-hex>".
+	//
+	// The expected hash value itself is NOT transmitted to the backend.
+	// Adapters that support server-side checksum metadata (e.g., S3
+	// x-amz-checksum-mode=ENABLED) configure the URL so the response
+	// carries the stored object checksum; the caller (or a proxy) is
+	// responsible for comparing it against ExpectedHash and rejecting a
+	// mismatch. Adapters without such support ignore the field; for
+	// those, integrity rests on the M8 retention-window dominance
+	// contract (signed-URL TTL << retention window).
+	//
+	// Values that do not match the documented format may still enable
+	// an adapter's checksum-binding code path (the gate is a prefix
+	// check on "sha256:"). The contract guarantees nothing useful in
+	// that case; callers are expected to supply a well-formed value.
+	ExpectedHash string
 }

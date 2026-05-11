@@ -75,3 +75,50 @@ func TestSignedGetURLAppliesPrefix(t *testing.T) {
 		t.Fatalf("URL path = %q, want suffix /acme/foo", u.Path)
 	}
 }
+
+func TestSignedGetURL_ExpectedHash_AddsChecksumMode(t *testing.T) {
+	// newMockBackendStrictChecksum sets ResponseChecksumValidation=WhenRequired,
+	// disabling the AWS SDK default (WhenSupported) that would otherwise inject
+	// X-Amz-Checksum-Mode=ENABLED unconditionally. With that default disabled,
+	// the adapter's explicit `in.ChecksumMode = types.ChecksumModeEnabled` set
+	// in signed.go is the sole source of the header — this test genuinely guards
+	// that code path.
+	s, _ := newMockBackendStrictChecksum(t)
+	raw, err := s.SignedGetURL(context.Background(), "k", storage.SignedURLOptions{
+		Expires:      30 * time.Second,
+		Method:       "GET",
+		ExpectedHash: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	})
+	if err != nil {
+		t.Fatalf("SignedGetURL: %v", err)
+	}
+	u, perr := url.Parse(raw)
+	if perr != nil {
+		t.Fatalf("parse url: %v", perr)
+	}
+	mode := u.Query().Get("X-Amz-Checksum-Mode")
+	if !strings.EqualFold(mode, "ENABLED") {
+		t.Errorf("expected X-Amz-Checksum-Mode=ENABLED in presigned URL; got %q", mode)
+	}
+}
+
+func TestSignedGetURL_NoExpectedHash_NoChecksumMode(t *testing.T) {
+	// With no ExpectedHash the adapter must not inject ChecksumMode.
+	// newMockBackendStrictChecksum sets ResponseChecksumValidation=WhenRequired,
+	// disabling the AWS SDK default that would otherwise add the header anyway.
+	s, _ := newMockBackendStrictChecksum(t)
+	raw, err := s.SignedGetURL(context.Background(), "k", storage.SignedURLOptions{
+		Expires: 30 * time.Second,
+		Method:  "GET",
+	})
+	if err != nil {
+		t.Fatalf("SignedGetURL: %v", err)
+	}
+	u, perr := url.Parse(raw)
+	if perr != nil {
+		t.Fatalf("parse url: %v", perr)
+	}
+	if mode := u.Query().Get("X-Amz-Checksum-Mode"); mode != "" {
+		t.Errorf("did not expect X-Amz-Checksum-Mode without ExpectedHash; got %q", mode)
+	}
+}

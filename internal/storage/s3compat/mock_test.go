@@ -20,6 +20,11 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 type mockUpload struct {
@@ -85,6 +90,54 @@ func newMockBackendWithPrefix(t *testing.T, prefix string) (*S3Compat, *mockBack
 		t.Fatalf("Open: %v", err)
 	}
 	return s, mb, srv
+}
+
+// newMockBackendStrictChecksum returns an S3Compat configured with
+// ResponseChecksumValidation=WhenRequired so the AWS SDK does NOT
+// inject x-amz-checksum-mode=ENABLED into every GetObject presign by
+// default. With that off, signed-URL tests can prove that the adapter's
+// own ExpectedHash branch (signed.go) is the sole source of the
+// checksum-mode header. Bypasses Open so we can thread the load option;
+// Open's public signature does not accept extra awsconfig.LoadOptions.
+func newMockBackendStrictChecksum(t *testing.T) (*S3Compat, *mockBackend) {
+	t.Helper()
+	mb := &mockBackend{t: t, objects: map[string]mockObject{}, uploads: map[string]*mockUpload{}}
+	srv := httptest.NewServer(http.HandlerFunc(mb.serve))
+	t.Cleanup(srv.Close)
+	cfg := Config{
+		Bucket:          "test-bucket",
+		Region:          "us-east-1",
+		Endpoint:        srv.URL,
+		ForcePathStyle:  true,
+		AccessKeyID:     "AKID",
+		SecretAccessKey: "SECRET",
+	}
+	cfg.applyDefaults()
+	loadOpts := []func(*awsconfig.LoadOptions) error{
+		awsconfig.WithRegion(cfg.Region),
+		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+			cfg.AccessKeyID, cfg.SecretAccessKey, cfg.SessionToken,
+		)),
+		awsconfig.WithResponseChecksumValidation(aws.ResponseChecksumValidationWhenRequired),
+	}
+	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(), loadOpts...)
+	if err != nil {
+		t.Fatalf("LoadDefaultConfig: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	awsCfg.Retryer = func() aws.Retryer { return newRetryer(cfg.MaxRetries) }
+	clientOpts := []func(*s3.Options){
+		func(o *s3.Options) { o.UsePathStyle = cfg.ForcePathStyle },
+		func(o *s3.Options) { o.BaseEndpoint = aws.String(cfg.Endpoint) },
+	}
+	client := s3.NewFromConfig(awsCfg, clientOpts...)
+	return &S3Compat{
+		cfg:     cfg,
+		client:  client,
+		presign: s3.NewPresignClient(client),
+	}, mb
 }
 
 func (m *mockBackend) put(key string, body []byte, etag string) {

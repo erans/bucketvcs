@@ -205,3 +205,39 @@ func TestS3Compat_ReachabilitySafety_S3(t *testing.T) {
 	}
 	reachconformance.RunPropertyReachabilitySafety(t, reachconformance.Factory(makeFactory(t, cfg)))
 }
+
+func TestS3Compat_Signing_R2(t *testing.T) {
+	bucket := os.Getenv("BUCKETVCS_R2_BUCKET")
+	endpoint := os.Getenv("BUCKETVCS_R2_ENDPOINT")
+	if bucket == "" || endpoint == "" {
+		t.Skip("R2 signing: set BUCKETVCS_R2_BUCKET, BUCKETVCS_R2_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY")
+	}
+	cfg := s3compat.Config{
+		Bucket:          bucket,
+		Region:          envOr("BUCKETVCS_R2_REGION", "auto"),
+		Endpoint:        endpoint,
+		ForcePathStyle:  true,
+		AccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
+		SecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
+		SessionToken:    os.Getenv("AWS_SESSION_TOKEN"),
+	}
+	conformance.RunCapabilitySigning(t, makeFactory(t, cfg))
+}
+
+func TestS3Compat_Signing_S3(t *testing.T) {
+	bucket := os.Getenv("BUCKETVCS_S3_BUCKET")
+	region := os.Getenv("BUCKETVCS_S3_REGION")
+	if bucket == "" || region == "" {
+		t.Skip("S3 signing: set BUCKETVCS_S3_BUCKET, BUCKETVCS_S3_REGION, AWS credentials")
+	}
+	cfg := s3compat.Config{
+		Bucket:          bucket,
+		Region:          region,
+		Endpoint:        os.Getenv("BUCKETVCS_S3_ENDPOINT"),
+		ForcePathStyle:  os.Getenv("BUCKETVCS_S3_FORCE_PATH_STYLE") == "true",
+		AccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
+		SecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
+		SessionToken:    os.Getenv("AWS_SESSION_TOKEN"),
+	}
+	conformance.RunCapabilitySigning(t, makeFactory(t, cfg))
+}

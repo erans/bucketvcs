@@ -16,9 +16,48 @@ type Body struct {
 	Bundles       []BundleEntry     `json:"bundles"`
 }
 
-// BundleEntry is reserved for M11 — placeholder type so the field exists
-// in the wire format from M1 onwards.
-type BundleEntry struct{}
+// BundleEntry references one bundle file (default-branch full bundle in
+// M11; rolling-base / release-tag entries land in successor milestones).
+// Stored under body.Bundles; freshness is computed at advertise time and
+// is NOT persisted here.
+type BundleEntry struct {
+	// ID is "bundle_<repo>_<version>_<sha256[:8]>". Unique within the manifest.
+	ID string `json:"id"`
+
+	// Kind discriminates bundle variants. M11 only writes "full_default".
+	// Future kinds: "full_tag", "rolling_base", "rolling_increment".
+	Kind string `json:"kind"`
+
+	// BundleKey is the storage key under tenants/.../bundles/<sha256>.bundle.
+	BundleKey string `json:"bundle_key"`
+
+	// SidecarKey is the storage key for the JSON sidecar (mirror of these
+	// fields plus a SHA-256 trailer of the bundle file). Present so an
+	// out-of-band tool can reconstruct BundleEntry if the manifest is lost.
+	SidecarKey string `json:"sidecar_key"`
+
+	// BundleHash is the SHA-256 of the bundle file body, hex-encoded
+	// ("sha256-<64-hex>" form matches IndexRef.Hash convention).
+	BundleHash string `json:"bundle_hash"`
+
+	// Ref is the bundle's covered ref (M11: always refs/heads/<default>).
+	Ref string `json:"ref"`
+
+	// TipOID is the 40-hex SHA-1 the bundle's tip resolves to.
+	TipOID string `json:"tip_oid"`
+
+	// CoversManifestVersion records the header's ManifestVersion at
+	// generation time. Used by the freshness state machine; never
+	// used as a key.
+	CoversManifestVersion uint64 `json:"covers_manifest_version"`
+
+	// ByteSize is the on-disk bundle size. Reported in audit + metrics.
+	ByteSize int64 `json:"byte_size"`
+
+	// GeneratedAt is RFC3339 UTC. Bundle freshness uses this for the
+	// age-threshold check.
+	GeneratedAt string `json:"generated_at"`
+}
 
 // PackEntry references one pack uploaded under packs/canonical/.
 type PackEntry struct {
@@ -27,6 +66,14 @@ type PackEntry struct {
 	IdxKey      string `json:"idx_key"`
 	SizeBytes   int64  `json:"size_bytes"`
 	ObjectCount int    `json:"object_count"`
+
+	// PackChecksum is the 40-hex SHA-1 of the pack's trailer (Git's
+	// pack-checksum, distinct from the SHA-256 storage hash). Required
+	// for §16.4 packfile-uri advertisement so the gateway can populate
+	// the `packfile-uri=<sha1>` packet stanza without re-reading the
+	// pack trailer at advertise time. Empty for legacy (pre-M11) packs;
+	// M11 maintenance backfills lazily.
+	PackChecksum string `json:"pack_checksum,omitempty"`
 }
 
 // Indexes carries pointers to reachability index objects. ObjectMap
