@@ -52,10 +52,10 @@ Three derived constraints carried forward without an explicit question:
 ```go
 type Body struct {
     // ... existing fields ...
-    Bundles []BundleRef `json:"bundles,omitempty"`
+    Bundles []BundleEntry `json:"bundles,omitempty"`
 }
 
-type BundleRef struct {
+type BundleEntry struct {
     ID                    string `json:"id"`                          // "bundle_<repo>_<version>_<short-hash>"
     Kind                  string `json:"kind"`                        // M11: only "full_default"
     BundleKey             string `json:"bundle_key"`                  // "bundles/<sha256>.bundle"
@@ -73,9 +73,9 @@ type BundleRef struct {
 
 The spec's example `freshness` field is **not** stored. Freshness is computed by the gateway at advertise time; storing it would require eager updates on every threshold crossing, which adds CAS surface area for no protocol gain.
 
-The bundle's content-addressed `BundleKey` lives at `tenants/<t>/repos/<r>/bundles/<sha256>.bundle` (matches §6's reserved layout). The sidecar is a small JSON document mirroring the `BundleRef` fields plus a SHA-256 trailer of the bundle file; it exists so an out-of-band tool can reconstruct `BundleRef` if the manifest is lost (M16 territory).
+The bundle's content-addressed `BundleKey` lives at `tenants/<t>/repos/<r>/bundles/<sha256>.bundle` (matches §6's reserved layout). The sidecar is a small JSON document mirroring the `BundleEntry` fields plus a SHA-256 trailer of the bundle file; it exists so an out-of-band tool can reconstruct `BundleEntry` if the manifest is lost (M16 territory).
 
-The `Indexes.Reachability.BaseManifest` field already records the manifest version that produced the current `(ObjectMap, CommitGraph)` pair (M10). `BundleRef.CoversManifestVersion` plays the analogous role for bundles — used for freshness evaluation, never as a storage key.
+The `Indexes.Reachability.BaseManifest` field already records the manifest version that produced the current `(ObjectMap, CommitGraph)` pair (M10). `BundleEntry.CoversManifestVersion` plays the analogous role for bundles — used for freshness evaluation, never as a storage key.
 
 ## 3. Storage adapter SignedGetURL extension
 
@@ -143,8 +143,8 @@ The factory is wired into all four cloud adapters' conformance harnesses; `local
 
 | Flag | Default | Spec | Notes |
 |------|---------|------|-------|
-| `--bundle-commits` | 100 | §16.3 | Default-branch tip moved by ≥N commits since `BundleRef.TipOID`. Computed from the M10 `.bvcg` v2 commit graph by walking backward from the current default-branch tip looking for `BundleRef.TipOID`; the count of commits walked is the delta. If `BundleRef.TipOID` is not found within `--bundle-commits` of walk depth, treat the delta as infinite (force-push or rewind detected) and regenerate. Bounded walk in pure Go, no mirror needed. |
-| `--bundle-age` | 24h | §16.3 | `now - BundleRef.GeneratedAt`. |
+| `--bundle-commits` | 100 | §16.3 | Default-branch tip moved by ≥N commits since `BundleEntry.TipOID`. Computed from the M10 `.bvcg` v2 commit graph by walking backward from the current default-branch tip looking for `BundleEntry.TipOID`; the count of commits walked is the delta. If `BundleEntry.TipOID` is not found within `--bundle-commits` of walk depth, treat the delta as infinite (force-push or rewind detected) and regenerate. Bounded walk in pure Go, no mirror needed. |
+| `--bundle-age` | 24h | §16.3 | `now - BundleEntry.GeneratedAt`. |
 | `--bundle-missing` | implicit | §16.3 | `Bundles == nil` or no entry with `Kind == "full_default"`. |
 | `--bundle-hit-ratio` | omitted | §16.3 | Wired-but-inert; needs §32 metric not yet emitted. Documented in operator guide as future work. |
 
@@ -158,9 +158,9 @@ If any trigger fires, Phase `bundle-refresh` runs.
 2. **Resolve default branch.** Read `HEAD` from the manifest's symbolic-ref table (M3 inline refs §19.1). Fall back to `refs/heads/main` then `refs/heads/master` if `HEAD` is unset (rare for OSS-imported repos).
 3. **Generate bundle file.** Invoke `gitcli.BundleCreate(ctx, mirrorPath, bundleTmpPath, ref)` — wraps `git bundle create <bundleTmpPath> <ref>`. This writes a Git v3 bundle with prerequisite chain (none, since we're at refs/heads/<ref> tip closure) and the packfile.
 4. **Hash and upload.** Stream the bundle file through SHA-256 to `tenants/<t>/repos/<r>/bundles/<sha256>.bundle` via `ObjectStore.Put` (uses M0's content-addressed write semantics). Build the sidecar JSON, upload to `bundles/<sha256>.json`.
-5. **Build `BundleRef`.** ID format: `bundle_<repo>_<version>_<sha256[:8]>`.
+5. **Build `BundleEntry`.** ID format: `bundle_<repo>_<version>_<sha256[:8]>`.
 6. **CAS-merge into manifest.** Read current manifest; replace `Bundles` slice contents with the single new entry; CAS-write. On CAS conflict, re-read and re-merge (the new bundle file is content-addressed so the upload is idempotent under retry; only the manifest slot needs re-CAS).
-7. **Old bundle file becomes M8-eligible.** No explicit unlink — the moment the previous `BundleRef` is replaced in the manifest, the old `bundles/<old-sha256>.bundle` and its sidecar become orphan candidates. M8's mark/sweep with retention dominance handles cleanup.
+7. **Old bundle file becomes M8-eligible.** No explicit unlink — the moment the previous `BundleEntry` is replaced in the manifest, the old `bundles/<old-sha256>.bundle` and its sidecar become orphan candidates. M8's mark/sweep with retention dominance handles cleanup.
 
 ### 4.3 Failure semantics
 
@@ -372,7 +372,7 @@ Wired into all four cloud adapters' conformance harnesses (`s3compat`, `gcs`, `a
 
 ### 9.2 M2 — manifest schema
 
-- `BundleRef` struct added (§2 above).
+- `BundleEntry` struct added (§2 above).
 - `Pack.PackChecksum` field added (§6.3 above).
 - Both `omitempty`; legacy decode unchanged.
 
