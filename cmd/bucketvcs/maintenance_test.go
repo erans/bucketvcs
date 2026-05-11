@@ -268,3 +268,31 @@ func TestParseByteSize_OverflowG(t *testing.T) {
 	}
 }
 
+func TestRunMaintenance_BundleFlags_Parsed(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	rc := runMaintenance(context.Background(), []string{"--help"}, &stdout, &stderr)
+	if rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	for _, want := range []string{"--bundle-only", "--no-bundle", "--bundle-commits", "--bundle-age", "--bundle-default-branch"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("usage missing %q", want)
+		}
+	}
+}
+
+func TestRunMaintenance_BundleOnlyAndNoBundle_Reject(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	rc := runMaintenance(context.Background(), []string{
+		"--store=localfs:" + t.TempDir(),
+		"--repo=t/r",
+		"--bundle-only", "--no-bundle",
+	}, &stdout, &stderr)
+	if rc != 2 {
+		t.Fatalf("rc = %d, want 2", rc)
+	}
+	if !strings.Contains(stderr.String(), "mutually exclusive") {
+		t.Errorf("expected mutually-exclusive error: %s", stderr.String())
+	}
+}
+

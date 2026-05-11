@@ -72,6 +72,11 @@ Flags:
   --reachability-delta-commits=N        Default 1000 (0 disables)
   --reachability-delta-pushes=N         Default 100 (0 disables)
   --reachability-delta-bytes=SIZE       Default 64M, suffix K/M/G (0 disables)
+  --bundle-only                         Run only the bundle-refresh phase (mutex with --no-bundle)
+  --no-bundle                           Skip the bundle-refresh phase (mutex with --bundle-only)
+  --bundle-commits=N                    Default 100; regenerate bundle when default-branch moved >= N commits (0 disables)
+  --bundle-age=DURATION                 Default 24h; regenerate bundle when older than this (0 disables)
+  --bundle-default-branch=REF           Override default-branch detection (e.g. refs/heads/main)
   --help                                Show this help
 
 Exit codes:
@@ -102,6 +107,12 @@ func runMaintenance(ctx context.Context, args []string, stdout, stderr io.Writer
 	deltaCommits := fs.Int("reachability-delta-commits", 1000, "compact when delta chain exceeds this commit count (0 disables)")
 	deltaPushes := fs.Int("reachability-delta-pushes", 100, "compact when delta chain exceeds this push count (0 disables)")
 	deltaBytesStr := fs.String("reachability-delta-bytes", "64M", "compact when delta chain exceeds this byte size (suffix K/M/G; 0 disables)")
+
+	bundleOnly := fs.Bool("bundle-only", false, "Run only the bundle-refresh phase (skip repack and compact)")
+	noBundle := fs.Bool("no-bundle", false, "Skip the bundle-refresh phase")
+	bundleCommits := fs.Int("bundle-commits", 100, "Regenerate bundle when default-branch tip moved by >= N commits since last bundle (0 disables)")
+	bundleAge := fs.Duration("bundle-age", 24*time.Hour, "Regenerate bundle when older than this (0 disables)")
+	bundleDefaultBranch := fs.String("bundle-default-branch", "", "Override default-branch detection for bundle generation (e.g. refs/heads/main)")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -143,6 +154,18 @@ func runMaintenance(ctx context.Context, args []string, stdout, stderr io.Writer
 		fmt.Fprintf(stderr, "maintenance: --reachability-delta-bytes: %v\n", err)
 		return 2
 	}
+	if *bundleOnly && *noBundle {
+		fmt.Fprintln(stderr, "maintenance: --bundle-only and --no-bundle are mutually exclusive")
+		return 2
+	}
+	if *bundleCommits < 0 {
+		fmt.Fprintln(stderr, "maintenance: --bundle-commits must be >= 0")
+		return 2
+	}
+	if *bundleAge < 0 {
+		fmt.Fprintln(stderr, "maintenance: --bundle-age must be >= 0")
+		return 2
+	}
 	store, err := openStore(*storeURL)
 	if err != nil {
 		fmt.Fprintf(stderr, "maintenance: open store: %v\n", err)
@@ -158,11 +181,16 @@ func runMaintenance(ctx context.Context, args []string, stdout, stderr io.Writer
 			ReachabilityDeltaCommits: *deltaCommits,
 			ReachabilityDeltaPushes:  *deltaPushes,
 			ReachabilityDeltaBytes:   deltaBytes,
+			BundleCommits:            *bundleCommits,
+			BundleAge:                *bundleAge,
 		},
-		RecentWindow: *recentWindow,
-		CASRetry:     *casRetry,
-		Force:        *force,
-		DryRun:       *dryRun,
+		RecentWindow:        *recentWindow,
+		CASRetry:            *casRetry,
+		Force:               *force,
+		DryRun:              *dryRun,
+		BundleOnly:          *bundleOnly,
+		NoBundle:            *noBundle,
+		BundleDefaultBranch: *bundleDefaultBranch,
 	}
 
 	if *allRepos {
