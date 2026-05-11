@@ -331,6 +331,13 @@ makes the trigger more sensitive to short burst activity. Widening it (e.g.,
 `--recent-window=168h`) smooths over weekly cycles. Values below `1h` are rejected
 with exit code 2.
 
+### Reachability thresholds (M10)
+
+M10 adds three thresholds (`--reachability-delta-commits`, `--reachability-delta-pushes`,
+`--reachability-delta-bytes`) and a new "compact-only" outcome — maintenance refreshes
+`.bvom` and `.bvcg` without producing a new pack. See `docs/m10-reachability-operator-guide.md`
+for tuning guidance and the cold-fetch SLO contract.
+
 ---
 
 ## 5. What Changes After a Successful Run

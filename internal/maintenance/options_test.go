@@ -76,3 +76,16 @@ func TestRunOptions_NormalizeBumpsZeroCASRetry(t *testing.T) {
 		t.Fatalf("Validate after Normalize: %v", err)
 	}
 }
+
+func TestThresholds_ReachabilityDefaults(t *testing.T) {
+	d := maintenance.DefaultThresholds()
+	if d.ReachabilityDeltaCommits != 1000 {
+		t.Errorf("ReachabilityDeltaCommits = %d, want 1000", d.ReachabilityDeltaCommits)
+	}
+	if d.ReachabilityDeltaPushes != 100 {
+		t.Errorf("ReachabilityDeltaPushes = %d, want 100", d.ReachabilityDeltaPushes)
+	}
+	if d.ReachabilityDeltaBytes != 64*1024*1024 {
+		t.Errorf("ReachabilityDeltaBytes = %d, want 64MiB", d.ReachabilityDeltaBytes)
+	}
+}

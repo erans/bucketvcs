@@ -170,3 +170,15 @@ func (r *Repo) GCSweepKey(sweepID string) string {
 func (r *Repo) RefShardKey(shardHash string) string {
 	return r.prefix + "manifest/ref-shards/" + shardHash + ".json"
 }
+
+// ReachabilityDeltaKey returns the storage key for a .bvrd delta-index
+// file (M10). The hash is the SHA-256 of the file body (hex).
+func (r *Repo) ReachabilityDeltaKey(hash string) string {
+	return r.prefix + "indexes/reachability-delta/" + hash + ".bvrd"
+}
+
+// ReachabilityDeltaPrefix returns the common prefix for all .bvrd
+// files for this repo. Used by GC sweep enumeration.
+func (r *Repo) ReachabilityDeltaPrefix() string {
+	return r.prefix + "indexes/reachability-delta/"
+}

@@ -30,6 +30,32 @@ type uploadResult struct {
 	CommitGraphKey string
 }
 
+// uploadIndexesOnly uploads only the .bvcg artifact — no pack, idx, or
+// .bvom. Used by the compact-only path where Packs and .bvom are unchanged.
+// ObjectMapHash/Bytes are intentionally absent: compact-only must not upload
+// a .bvom that references a locally-built pack that is never stored.
+type uploadIndexesInput struct {
+	CommitGraphHash  string
+	CommitGraphBytes []byte
+}
+
+type uploadIndexesResult struct {
+	CommitGraphKey string
+}
+
+// uploadIndexesOnlyArtifacts PutIfAbsent's only the .bvcg artifact. It is
+// the compact-only counterpart to uploadArtifacts; .bvom is intentionally
+// skipped because the compact-only path preserves prev.Indexes.ObjectMap.
+func uploadIndexesOnlyArtifacts(ctx context.Context, s storage.ObjectStore, k *keys.Repo, in uploadIndexesInput) (uploadIndexesResult, error) {
+	res := uploadIndexesResult{
+		CommitGraphKey: k.CommitGraphKey(in.CommitGraphHash),
+	}
+	if err := putIfAbsentBytes(ctx, s, res.CommitGraphKey, in.CommitGraphBytes); err != nil && !errors.Is(err, storage.ErrAlreadyExists) {
+		return res, fmt.Errorf("upload indexes: bvcg: %w", err)
+	}
+	return res, nil
+}
+
 // uploadArtifacts PutIfAbsent's all four canonical artifacts (pack, idx,
 // .bvom, .bvcg). Each key is content-addressed (the pack/idx by git's
 // trailing SHA-1 over the pack bytes; .bvom/.bvcg by SHA-256 of their

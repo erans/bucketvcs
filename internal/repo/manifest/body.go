@@ -29,17 +29,33 @@ type PackEntry struct {
 	ObjectCount int    `json:"object_count"`
 }
 
-// Indexes carries pointers to M2 reachability index objects.
+// Indexes carries pointers to reachability index objects. ObjectMap
+// and CommitGraph form the base; Reachability lists deltas since the
+// base. Legacy (pre-M10) manifests have Reachability == nil.
 type Indexes struct {
-	ObjectMap   *IndexRef `json:"object_map,omitempty"`
-	CommitGraph *IndexRef `json:"commit_graph,omitempty"`
+	ObjectMap    *IndexRef        `json:"object_map,omitempty"`
+	CommitGraph  *IndexRef        `json:"commit_graph,omitempty"`
+	Reachability *ReachabilityRef `json:"reachability,omitempty"`
 }
 
-// IndexRef is a key + content-hash pair.
+// IndexRef is a key + content-hash pair. SizeBytes is populated when
+// the producer knows the on-disk size (receive-pack for .bvrd,
+// maintenance for .bvom/.bvcg). Consumers MAY use it for O(1)
+// threshold evaluation; omit on legacy values.
 type IndexRef struct {
-	Key  string `json:"key"`
-	Hash string `json:"hash"`
+	Key       string `json:"key"`
+	Hash      string `json:"hash"`
+	SizeBytes int64  `json:"size_bytes,omitempty"`
 }
+
+// ReachabilityRef lists the delta chain layered on top of the base
+// (ObjectMap + CommitGraph). BaseManifest records the manifest version
+// that produced the base — paper-trail field, never used as a key.
+type ReachabilityRef struct {
+	BaseManifest string     `json:"base_manifest"`
+	Deltas       []IndexRef `json:"deltas"`
+}
+
 
 // MarshalBody emits canonical Body JSON. Pretty-printed (2-space indent)
 // to keep on-disk diffs readable; the indent is part of the wire format.
@@ -55,6 +71,11 @@ func MarshalBody(b Body) ([]byte, error) {
 	}
 	if b.Bundles == nil {
 		b.Bundles = []BundleEntry{}
+	}
+	if b.Indexes.Reachability != nil && b.Indexes.Reachability.Deltas == nil {
+		rcopy := *b.Indexes.Reachability
+		rcopy.Deltas = []IndexRef{}
+		b.Indexes.Reachability = &rcopy
 	}
 	out, err := json.MarshalIndent(b, "", "  ")
 	if err != nil {

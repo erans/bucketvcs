@@ -28,14 +28,17 @@ end-to-end walkthrough using Cloudflare R2.
 - `bucketvcs gc` — operator-driven garbage collection (orphan packs, unreachable packs, stale indexes, orphan tx records) per spec §25 / §43.6
 - `bucketvcs import` — import a Git pack bundle into a repository
 - `bucketvcs init` — initialize a new repository
-- `bucketvcs inspect-manifest` — dump the current root manifest
-- `bucketvcs maintenance` — operator-driven repack + commit-graph / object-map refresh per spec §15.3 (M9)
+- `bucketvcs inspect-manifest` — dump the current root manifest (includes `reachability` block in `--json` mode for M10 repos)
+- `bucketvcs maintenance` — operator-driven repack + commit-graph / object-map refresh + reachability compaction per spec §15.3 (M9/M10)
+- `bucketvcs negotiate` — ad-hoc debug tool for upload-pack negotiation via the M10 reachability index
 - `bucketvcs serve` — start the Git-protocol HTTPS/SSH gateway
 
 ## Documentation
 
 - [`docs/`](docs/) — design specs, quickstart guides, milestone plans
+- [`docs/m10-reachability-operator-guide.md`](docs/m10-reachability-operator-guide.md) — M10 reachability index and delta-chain compaction
 - [`internal/gc/README.md`](internal/gc/README.md) — garbage-collection package overview
+- [`internal/reachability/`](internal/reachability/) — reachability index (`.bvom` + `.bvcg` + `.bvrd` delta chain); `Set`, `Load`, `WalkAncestors`, `GenLookup`
 - [`internal/storage/README.md`](internal/storage/README.md) — storage
   interface contract and conformance suite
 - [`internal/storage/s3compat/README.md`](internal/storage/s3compat/README.md) — AWS S3 / R2 adapter

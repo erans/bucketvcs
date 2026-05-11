@@ -16,11 +16,22 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/pack"
 )
 
+// Format versions:
+//
+//   v1 (pre-M10) — no generation numbers; reader returns 0.
+//   v2 (M10)     — adds u32 generation_number after the oid in each
+//                  commit record.
+const (
+	VersionV1      uint32 = 1
+	VersionV2      uint32 = 2
+	VersionCurrent uint32 = VersionV2
+)
+
 const (
 	headerSize  = 32
 	tipSize     = 24
 	trailerSize = 32
-	currentVer  = uint32(1)
+	currentVer  = VersionCurrent // v2: includes generation number in each commit record
 	maxParents  = 255 // n_parents is uint8
 )
 
@@ -35,8 +46,11 @@ type Tip struct {
 	OID pack.OID
 }
 
-// Record is one commit's entry: its OID and parent OIDs in commit order.
+// Record is one commit's entry: its OID, generation number, and parent OIDs in commit order.
+// Generation = 1 + max(generations of parents); root commits have generation = 1.
+// On v1 files, Generation is 0 after read.
 type Record struct {
-	OID     pack.OID
-	Parents []pack.OID
+	OID        pack.OID
+	Generation uint32
+	Parents    []pack.OID
 }

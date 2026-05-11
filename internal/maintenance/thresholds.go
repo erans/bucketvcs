@@ -22,6 +22,10 @@ import (
 // from doing 10k * N Head calls when a cheaper trigger would have
 // answered the question already. The Head loop also early-exits as
 // soon as `recent` exceeds the threshold.
+//
+// Reachability byte/push thresholds are also evaluated cheaply from the
+// manifest body. The commit-count threshold is IO-bound and evaluated
+// separately via EvaluateReachabilityCommits.
 func Evaluate(ctx context.Context, s storage.ObjectStore, body manifest.Body, thresh Thresholds, recentWindow time.Duration, now time.Time) (TriggerReport, error) {
 	pb, err := json.Marshal(body.Packs)
 	if err != nil {
@@ -42,6 +46,10 @@ func Evaluate(ctx context.Context, s storage.ObjectStore, body manifest.Body, th
 		rep.Reason = fmt.Sprintf("manifest_pack_bytes(%d>%d)", rep.ManifestPackBytes, thresh.ManifestPackBytes)
 		return rep, nil
 	}
+
+	// Reachability cheap checks (bytes + pushes) — no IO.
+	evaluateReachabilityPure(body, thresh, &rep)
+
 	if thresh.RecentPackCount <= 0 {
 		return rep, nil
 	}
@@ -95,5 +103,37 @@ func evaluatePure(body manifest.Body, recentOverride *int, thresh Thresholds) (T
 		rep.Triggered = true
 		rep.Reason = fmt.Sprintf("recent_pack_count(%d>%d)", rep.RecentPackCount, thresh.RecentPackCount)
 	}
+
+	// Reachability cheap checks — only when pack triggers haven't already fired.
+	if !rep.Triggered {
+		evaluateReachabilityPure(body, thresh, &rep)
+	}
 	return rep, nil
 }
+
+// evaluateReachabilityPure applies the cheap (bytes + pushes) reachability
+// thresholds to rep in place. It is called from both Evaluate and
+// evaluatePure after pack triggers have been checked.
+func evaluateReachabilityPure(body manifest.Body, thresh Thresholds, rep *TriggerReport) {
+	if body.Indexes.Reachability == nil {
+		return
+	}
+	if thresh.ReachabilityDeltaBytes > 0 {
+		var totalBytes int64
+		for _, ref := range body.Indexes.Reachability.Deltas {
+			totalBytes += ref.SizeBytes
+		}
+		if totalBytes > thresh.ReachabilityDeltaBytes {
+			rep.CompactReachability = true
+			rep.CompactReachabilityReason = "delta-bytes"
+			return
+		}
+	}
+	if thresh.ReachabilityDeltaPushes > 0 {
+		if len(body.Indexes.Reachability.Deltas) > thresh.ReachabilityDeltaPushes {
+			rep.CompactReachability = true
+			rep.CompactReachabilityReason = "delta-pushes"
+		}
+	}
+}
+

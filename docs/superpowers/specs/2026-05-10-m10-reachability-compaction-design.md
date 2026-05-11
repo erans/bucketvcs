@@ -328,7 +328,7 @@ Wired into `internal/storage/conformance` for all 4 canonical backends (localfs,
   "triggered": true,
   "trigger_reason": "delta-pushes",
   "deltas_dropped": 47,
-  "base_swapped": true
+  "base_swapped": false
 }
 ```
 

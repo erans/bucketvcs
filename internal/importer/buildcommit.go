@@ -24,6 +24,22 @@ import (
 // the receive-pack wire protocol to mean "delete this ref".
 const nullOIDHex = "0000000000000000000000000000000000000000"
 
+// BodyPatcher is an optional callback invoked by BuildAndCommit after all
+// pack/idx/.bvom/.bvcg artifacts are uploaded and a draft Body has been
+// assembled, but BEFORE the body is marshaled and CAS-committed.
+//
+// The patcher receives the current manifest body (pre-push), the draft new
+// body, and the set of object OIDs new in this push (output of
+// RevListNotAll). It may perform additional uploads (e.g. a .bvrd delta)
+// and return a modified body. Returning an error aborts the push before
+// the manifest is committed.
+//
+// The patcher is called exactly ONCE per BuildAndCommit invocation (not
+// on CAS retries, since BuildAndCommit does not retry — it returns an
+// error on CAS version mismatch). Callers that need CAS-retry semantics
+// must re-invoke BuildAndCommit from scratch.
+type BodyPatcher func(ctx context.Context, prevBody manifest.Body, draft manifest.Body, newOIDs []string) (manifest.Body, error)
+
 // BuildAndCommit applies a push to a bucketvcs repo. It assumes:
 //
 //   - The repo already exists (created by an earlier Import).
@@ -53,6 +69,8 @@ const nullOIDHex = "0000000000000000000000000000000000000000"
 //
 // Cost: O(repo size) per push. For M3 OSS scope this is acceptable;
 // incremental .bvom merge is a future M9 optimization.
+//
+// patcher may be nil (no-op). See BodyPatcher for semantics.
 func BuildAndCommit(
 	ctx context.Context,
 	store storage.ObjectStore,
@@ -60,6 +78,7 @@ func BuildAndCommit(
 	bareDir string,
 	refUpdates map[string]string,
 	actor string,
+	patcher BodyPatcher,
 ) (*manifest.Body, error) {
 	if store == nil {
 		return nil, fmt.Errorf("importer: BuildAndCommit: nil store")
@@ -207,6 +226,48 @@ func BuildAndCommit(
 		},
 		Bundles: currentBody.Bundles,
 	}
+
+	// Optional body-patcher hook (e.g. M10 .bvrd delta production).
+	// Runs after all artifacts are uploaded, before the manifest CAS.
+	// The patcher receives the set of new object OIDs introduced by this
+	// push (commits reachable from new tips but not old tips).
+	if patcher != nil {
+		// Compute "new commits" as: git rev-list <new_tips> --not <all_pre_push_tips>
+		// where new_tips are the incoming ref OIDs and all_pre_push_tips are
+		// ALL pre-push ref OIDs from currentBody.Refs (not just those being
+		// updated). This ensures that a push creating a new branch pointing to
+		// an already-indexed commit produces an empty delta — the commit is
+		// already reachable from an existing ref.
+		var newTipArgs []string
+		// Seed excludes from every existing ref (these are all "haves" relative
+		// to this push). This correctly handles the case where a new ref points
+		// to a commit already reachable from another pre-existing ref.
+		excludeArgs := make([]string, 0, len(currentBody.Refs))
+		for _, oldOID := range currentBody.Refs {
+			if oldOID == "" || oldOID == nullOIDHex {
+				continue
+			}
+			excludeArgs = append(excludeArgs, "^"+oldOID)
+		}
+		for _, oid := range refUpdates {
+			if oid == "" || oid == nullOIDHex {
+				continue
+			}
+			newTipArgs = append(newTipArgs, oid)
+		}
+		var newOIDs []string
+		if len(newTipArgs) > 0 {
+			newOIDs, err = revListCommitsOnly(ctx, bareDir, newTipArgs, excludeArgs)
+			if err != nil {
+				return nil, fmt.Errorf("importer: BuildAndCommit: revlist new commits: %w", err)
+			}
+		}
+		body, err = patcher(ctx, currentBody, body, newOIDs)
+		if err != nil {
+			return nil, fmt.Errorf("importer: BuildAndCommit: body patcher: %w", err)
+		}
+	}
+
 	bodyBytes, err := manifest.MarshalBody(body)
 	if err != nil {
 		return nil, fmt.Errorf("importer: BuildAndCommit: marshal body: %w", err)
@@ -284,8 +345,16 @@ func mergeRefs(prev, updates map[string]string) (map[string]string, error) {
 	return out, nil
 }
 
+// revListCommitsOnly returns commit OIDs reachable from tips but not from
+// excludes (in "^<oid>" form). Unlike the --objects form it omits trees and
+// blobs, so it's appropriate when the caller only needs commits
+// (e.g. building a .bvrd reachability delta).
+func revListCommitsOnly(ctx context.Context, bareDir string, tips, excludes []string) ([]string, error) {
+	return gitcli.RevListCommitsOnly(ctx, bareDir, tips, excludes)
+}
+
 // removeKeepFiles deletes any *.keep files left in <bareDir>/objects/pack
-// by IndexPackStrict. With keeps in place, `git pack-objects --revs --all`
+// by IndexPackStrict. With keeps in place, git pack-objects --revs --all
 // in modern git will still see all reachable objects (keeps gate `git
 // repack`, not `pack-objects`), but removing them defensively makes the
 // repack a clean single-pack consolidation regardless of git version

@@ -6,6 +6,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/maintenance"
@@ -14,6 +17,40 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
 
+// parseByteSize parses a human-readable byte size with optional suffix K, M, or G
+// (case-insensitive). "0" disables the threshold. Returns an error on invalid input.
+//
+// Examples: "64M" → 67108864, "1024K" → 1048576, "2G" → 2147483648, "0" → 0.
+func parseByteSize(s string) (int64, error) {
+	if s == "" {
+		return 0, fmt.Errorf("empty byte-size string")
+	}
+	upper := strings.ToUpper(strings.TrimSpace(s))
+	var multiplier int64 = 1
+	switch {
+	case strings.HasSuffix(upper, "G"):
+		multiplier = 1 << 30
+		upper = upper[:len(upper)-1]
+	case strings.HasSuffix(upper, "M"):
+		multiplier = 1 << 20
+		upper = upper[:len(upper)-1]
+	case strings.HasSuffix(upper, "K"):
+		multiplier = 1 << 10
+		upper = upper[:len(upper)-1]
+	}
+	n, err := strconv.ParseInt(upper, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("byte-size %q: %w", s, err)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("byte-size %q must be non-negative", s)
+	}
+	if multiplier != 1 && n > math.MaxInt64/multiplier {
+		return 0, fmt.Errorf("byte-size %q overflows int64", s)
+	}
+	return n * multiplier, nil
+}
+
 const maintenanceUsage = `usage: bucketvcs maintenance --store=<URL> {--repo=<t>/<r> | --all-repos} [flags]
 
 Run a single full repack against one repo (or every repo discovered
@@ -21,18 +58,21 @@ under tenants/*/repos/*). Default thresholds match spec §15.3
 recommendations; --force runs unconditionally.
 
 Flags:
-  --store=URL                       Storage URL (required)
-  --repo=<tenant>/<repo>            Single repo (mutex with --all-repos)
-  --all-repos                       Process every discovered repo
-  --force                           Skip threshold check
-  --dry-run                         Walk + plan only; no writes
-  --recent-pack-threshold=N         Default 1000 (0 disables)
-  --total-pack-threshold=N          Default 10000 (0 disables)
-  --manifest-pack-bytes-threshold=N Default 8388608 (0 disables)
-  --recent-window=DURATION          Default 24h, minimum 1h
-  --cas-retry=N                     Default 5
-  --output=text|json                Default text
-  --help                            Show this help
+  --store=URL                           Storage URL (required)
+  --repo=<tenant>/<repo>                Single repo (mutex with --all-repos)
+  --all-repos                           Process every discovered repo
+  --force                               Skip threshold check
+  --dry-run                             Walk + plan only; no writes
+  --recent-pack-threshold=N             Default 1000 (0 disables)
+  --total-pack-threshold=N              Default 10000 (0 disables)
+  --manifest-pack-bytes-threshold=N     Default 8388608 (0 disables)
+  --recent-window=DURATION              Default 24h, minimum 1h
+  --cas-retry=N                         Default 5
+  --output=text|json                    Default text
+  --reachability-delta-commits=N        Default 1000 (0 disables)
+  --reachability-delta-pushes=N         Default 100 (0 disables)
+  --reachability-delta-bytes=SIZE       Default 64M, suffix K/M/G (0 disables)
+  --help                                Show this help
 
 Exit codes:
   0 success or dry-run completed
@@ -58,6 +98,10 @@ func runMaintenance(ctx context.Context, args []string, stdout, stderr io.Writer
 	output := fs.String("output", "text", "text|json")
 	help := fs.Bool("help", false, "")
 	fs.BoolVar(help, "h", false, "alias for --help")
+
+	deltaCommits := fs.Int("reachability-delta-commits", 1000, "compact when delta chain exceeds this commit count (0 disables)")
+	deltaPushes := fs.Int("reachability-delta-pushes", 100, "compact when delta chain exceeds this push count (0 disables)")
+	deltaBytesStr := fs.String("reachability-delta-bytes", "64M", "compact when delta chain exceeds this byte size (suffix K/M/G; 0 disables)")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -86,17 +130,34 @@ func runMaintenance(ctx context.Context, args []string, stdout, stderr io.Writer
 		fmt.Fprintf(stderr, "maintenance: --output=%q must be text|json\n", *output)
 		return 2
 	}
+	if *deltaCommits < 0 {
+		fmt.Fprintln(stderr, "maintenance: --reachability-delta-commits must be >= 0")
+		return 2
+	}
+	if *deltaPushes < 0 {
+		fmt.Fprintln(stderr, "maintenance: --reachability-delta-pushes must be >= 0")
+		return 2
+	}
+	deltaBytes, err := parseByteSize(*deltaBytesStr)
+	if err != nil {
+		fmt.Fprintf(stderr, "maintenance: --reachability-delta-bytes: %v\n", err)
+		return 2
+	}
 	store, err := openStore(*storeURL)
 	if err != nil {
 		fmt.Fprintf(stderr, "maintenance: open store: %v\n", err)
 		return 1
 	}
+	defer closeStore(store)
 
 	opts := maintenance.RunOptions{
 		Thresholds: maintenance.Thresholds{
-			RecentPackCount:   *recentPackT,
-			TotalPackCount:    *totalPackT,
-			ManifestPackBytes: *manifestPackBytesT,
+			RecentPackCount:          *recentPackT,
+			TotalPackCount:           *totalPackT,
+			ManifestPackBytes:        *manifestPackBytesT,
+			ReachabilityDeltaCommits: *deltaCommits,
+			ReachabilityDeltaPushes:  *deltaPushes,
+			ReachabilityDeltaBytes:   deltaBytes,
 		},
 		RecentWindow: *recentWindow,
 		CASRetry:     *casRetry,

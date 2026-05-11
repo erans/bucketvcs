@@ -40,7 +40,64 @@ func Build(ctx context.Context, packReader *pack.Reader, tips []Tip) ([]byte, er
 	}); err != nil {
 		return nil, err
 	}
+	// Compute generation numbers and populate each record's Generation field.
+	gens := computeGenerations(commits)
+	for i := range commits {
+		commits[i].Generation = gens[commits[i].OID]
+	}
+
 	return build(commits, tips)
+}
+
+// computeGenerations computes generation numbers for all commits in the slice.
+// gen(c) = 1 + max(gen(parent) for parent in c.Parents); roots have gen = 1.
+// Parents whose OID is not in the slice resolve to gen 0 (they are not in
+// this pack; a full-rebuild caller would not normally have dangling parents
+// because Build validates them, but the helper is defensive).
+// The returned map has an entry for every OID in commits.
+func computeGenerations(commits []Record) map[pack.OID]uint32 {
+	// Build an index from OID to slice position for O(1) lookup.
+	idx := make(map[pack.OID]int, len(commits))
+	for i := range commits {
+		idx[commits[i].OID] = i
+	}
+
+	gensByOID := make(map[pack.OID]uint32, len(commits))
+	visiting := make(map[pack.OID]bool, len(commits))
+
+	var compute func(oid pack.OID) uint32
+	compute = func(oid pack.OID) uint32 {
+		if g, ok := gensByOID[oid]; ok {
+			return g
+		}
+		if visiting[oid] {
+			// Cycle guard: treat as gen 0 if we somehow re-enter.
+			return 0
+		}
+		visiting[oid] = true
+		defer delete(visiting, oid)
+
+		i, ok := idx[oid]
+		if !ok {
+			// OID not in this pack; treat as gen 0.
+			gensByOID[oid] = 0
+			return 0
+		}
+		var maxParent uint32
+		for _, p := range commits[i].Parents {
+			if g := compute(p); g > maxParent {
+				maxParent = g
+			}
+		}
+		g := maxParent + 1
+		gensByOID[oid] = g
+		return g
+	}
+
+	for i := range commits {
+		compute(commits[i].OID)
+	}
+	return gensByOID
 }
 
 // parseParents extracts parent OIDs from a commit body. Header lines:
@@ -76,7 +133,7 @@ func parseParents(body []byte) ([]pack.OID, error) {
 	return parents, nil
 }
 
-// build emits the .bvcg bytes for already-extracted commit records and tips.
+// build serializes the commit records and tips into the .bvcg binary format.
 func build(commits []Record, tips []Tip) ([]byte, error) {
 	// Sort by OID and reject duplicates.
 	sort.Slice(commits, func(i, j int) bool {
@@ -141,7 +198,7 @@ func build(commits []Record, tips []Tip) ([]byte, error) {
 	}
 
 	var buf bytes.Buffer
-	buf.Grow(headerSize + len(tips)*tipSize + len(commits)*40 + stringTable.Len() + trailerSize)
+	buf.Grow(headerSize + len(tips)*tipSize + len(commits)*45 + stringTable.Len() + trailerSize)
 
 	// Header.
 	buf.Write(magic)
@@ -163,6 +220,7 @@ func build(commits []Record, tips []Tip) ([]byte, error) {
 	// Commit records.
 	for _, c := range commits {
 		buf.Write(c.OID[:])
+		_ = binary.Write(&buf, binary.LittleEndian, c.Generation) // v2: gen u32 LE
 		buf.WriteByte(byte(len(c.Parents)))
 		for _, p := range c.Parents {
 			buf.Write(p[:])

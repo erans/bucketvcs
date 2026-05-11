@@ -1,14 +1,20 @@
 package receivepack
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"strings"
 
 	"github.com/bucketvcs/bucketvcs/internal/gitcli"
 	"github.com/bucketvcs/bucketvcs/internal/importer"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
+	"github.com/bucketvcs/bucketvcs/internal/pack"
+	"github.com/bucketvcs/bucketvcs/internal/reachability"
 	"github.com/bucketvcs/bucketvcs/internal/repo"
+	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
 )
 
@@ -222,7 +228,19 @@ func completeReceivePack(eng *EngineRequest, w io.Writer, m *mirror.Mirror, rp *
 			actorName = a.UserID
 		}
 	}
-	if _, err := importer.BuildAndCommit(ctx, eng.Store, tenant, repoID, m.BareDir(), refUpdates, actorName); err != nil {
+
+	// Build the M10 .bvrd delta patcher. Captures the pre-push body and
+	// the accepted ref updates so the patcher can build the delta from
+	// the new commits introduced by this push.
+	acceptedUpdates := make([]updateCommand, 0, len(rp.Updates))
+	for i, u := range rp.Updates {
+		if statuses[i] == "" {
+			acceptedUpdates = append(acceptedUpdates, u)
+		}
+	}
+	deltaPatcher := makeDeltaPatcher(eng, m.BareDir(), acceptedUpdates, preCommitVersion)
+
+	if _, err := importer.BuildAndCommit(ctx, eng.Store, tenant, repoID, m.BareDir(), refUpdates, actorName, deltaPatcher); err != nil {
 		// Refs are already applied to the local bare (step 9b above), but
 		// the bucket commit failed. Sentinel still matches the OLD bucket
 		// version, so SyncToCurrent would falsely consider the mirror
@@ -326,4 +344,92 @@ func completeReceivePack(eng *EngineRequest, w io.Writer, m *mirror.Mirror, rp *
 		}
 	}
 	writeReceiveReport(w, "ok", statuses, rp.Caps)
+}
+
+// makeDeltaPatcher returns an importer.BodyPatcher that builds and uploads a
+// .bvrd reachability delta for the push, then appends it to the manifest body.
+//
+// If the pre-push manifest has no base index (ErrNoIndex — legacy repo), the
+// patcher is a no-op: the draft body is returned unchanged, skipping delta
+// production. Errors from delta build/upload abort the push (BuildAndCommit
+// propagates them as a commit failure).
+func makeDeltaPatcher(eng *EngineRequest, bareDir string, acceptedUpdates []updateCommand, prePushVersion uint64) importer.BodyPatcher {
+	return func(ctx context.Context, freshPrevBody manifest.Body, draft manifest.Body, newOIDs []string) (manifest.Body, error) {
+		// CRITICAL: seed the prior reachability chain into the draft body
+		// BEFORE any early-return path that might commit draft unchanged.
+		// BuildAndCommit constructs draft from scratch on every push with only
+		// ObjectMap and CommitGraph; without this seed, any early-return branch
+		// (fully-rejected push, delete-only push) would silently wipe the prior
+		// chain and leave Reachability == nil in the committed manifest body.
+		// The seed fires unconditionally so all commit paths carry the chain.
+		if draft.Indexes.Reachability == nil && freshPrevBody.Indexes.Reachability != nil {
+			rcopy := *freshPrevBody.Indexes.Reachability
+			rcopy.Deltas = append([]manifest.IndexRef(nil), freshPrevBody.Indexes.Reachability.Deltas...)
+			draft.Indexes.Reachability = &rcopy
+		}
+
+		// Nothing to record when the push accepted no updates and introduced
+		// no new objects (e.g. a fully-rejected batch).
+		// Uploading an empty .bvrd wastes a delta slot and can prematurely
+		// trigger compaction.
+		if len(acceptedUpdates) == 0 && len(newOIDs) == 0 {
+			return draft, nil // chain preserved by seed above
+		}
+
+		k, err := keys.NewRepo(eng.Tenant, eng.Repo)
+		if err != nil {
+			return manifest.Body{}, err
+		}
+
+		// Load gen lookup from the fresh pre-commit body supplied by
+		// BuildAndCommit (not the outer-captured snapshot, which may be
+		// stale if a concurrent commit landed before BuildAndCommit's own
+		// ReadRoot). ErrNoIndex = legacy repo, skip delta production.
+		gl, err := reachability.LoadGenLookup(ctx, eng.Store, k, freshPrevBody)
+		if err != nil {
+			if errors.Is(err, reachability.ErrNoIndex) {
+				return draft, nil // legacy repo — no delta machinery yet
+			}
+			return manifest.Body{}, err
+		}
+
+		// Extract canonical pack OIDs from the draft body for the delta's
+		// Packs field (records which packs cover the new commits).
+		packIDs := make([]pack.OID, 0, len(draft.Packs))
+		for _, pe := range draft.Packs {
+			oid, e := pack.ParseOID(pe.PackID)
+			if e == nil {
+				packIDs = append(packIDs, oid)
+			}
+		}
+
+		d, err := buildDelta(ctx, bareDir, newOIDs, gl, acceptedUpdates, packIDs)
+		if err != nil {
+			return manifest.Body{}, err
+		}
+
+		deltaRef, err := uploadDelta(ctx, eng.Store, k, d)
+		if err != nil {
+			return manifest.Body{}, err
+		}
+
+		// Append the new delta to the Reachability chain.
+		// The chain was already seeded from freshPrevBody at the top of this
+		// function. If still nil here it means no prior chain exists (truly
+		// fresh / legacy repo that passed through ErrNoIndex earlier — but
+		// only if LoadGenLookup returned nil without ErrNoIndex, which can
+		// happen for repos initialised without a base index). Start a fresh chain
+		// with BaseManifest set to the pre-push manifest version so operator
+		// arithmetic (manifest_version - base) yields a meaningful delta-depth.
+		if draft.Indexes.Reachability == nil {
+			draft.Indexes.Reachability = &manifest.ReachabilityRef{
+				BaseManifest: fmt.Sprintf("v%08d", prePushVersion),
+			}
+		}
+		// Make a copy of the ReachabilityRef to avoid mutating the original.
+		rc := *draft.Indexes.Reachability
+		rc.Deltas = append(append([]manifest.IndexRef{}, rc.Deltas...), deltaRef)
+		draft.Indexes.Reachability = &rc
+		return draft, nil
+	}
 }

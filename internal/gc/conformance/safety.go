@@ -178,4 +178,21 @@ func RunPropertyGCSafety(t *testing.T, factory Factory) {
 			t.Fatalf("revived pack must still exist: %v", err)
 		}
 	})
+
+	// Property 4: compaction_during_mark — a maintenance compaction that
+	// swaps the reachability base + drops deltas between mark-walk and
+	// sweep does not cause false-positive deletions of the new base.
+	//
+	// This test is scaffolded: the concurrent-compaction harness requires
+	// a fuller integration with the maintenance pipeline (M10 Phase 5) to
+	// exercise properly. The t.Run block ensures the test compiles and the
+	// intent is registered; a follow-up task will replace the t.Skip with
+	// real assertions once the maintenance compaction helpers are importable
+	// from conformance tests.
+	t.Run("compaction_during_mark", func(t *testing.T) {
+		t.Skip("compaction_during_mark: scaffolded; concurrent-compaction harness deferred")
+		// When implemented: seed repo with base + N deltas, start RunMark
+		// concurrently with a maintenance compaction, then run Sweep and
+		// assert no still-live delta is deleted.
+	})
 }

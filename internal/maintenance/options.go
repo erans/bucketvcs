@@ -27,6 +27,13 @@ type Thresholds struct {
 	// ManifestPackBytes triggers when the JSON byte size of
 	// manifest.Packs exceeds this.
 	ManifestPackBytes int64
+
+	// M10 §14.2 — reachability delta-chain compaction triggers.
+	// 0 disables the specific check (matches M9 convention).
+	// Defaults: 1000 commits / 100 pushes / 64 MiB.
+	ReachabilityDeltaCommits int
+	ReachabilityDeltaPushes  int
+	ReachabilityDeltaBytes   int64
 }
 
 // DefaultThresholds returns the spec §15.3 recommended values.
@@ -35,6 +42,10 @@ func DefaultThresholds() Thresholds {
 		RecentPackCount:   1000,
 		TotalPackCount:    10000,
 		ManifestPackBytes: 8 << 20, // 8 MiB
+
+		ReachabilityDeltaCommits: 1000,
+		ReachabilityDeltaPushes:  100,
+		ReachabilityDeltaBytes:   64 * 1024 * 1024,
 	}
 }
 
@@ -53,7 +64,8 @@ type RunOptions struct {
 	// buildBody callback of Phase 6 CAS-merge, before the merged body
 	// is constructed. The hook fires exactly once per Run (gated by an
 	// internal flag in pipeline.go) so it triggers a CAS retry on the
-	// first attempt only. Production callers leave it nil.
+	// first attempt only. It fires for both the repack path and the
+	// compact-only CAS callback. Production callers leave it nil.
 	BetweenRepackAndCAS func() `json:"-"`
 }
 
@@ -94,6 +106,14 @@ func (o RunOptions) Validate() error {
 	return nil
 }
 
+// ReachabilityCompactionReport summarises the M10 compact-only phase.
+type ReachabilityCompactionReport struct {
+	Triggered     bool   `json:"triggered,omitempty"`
+	TriggerReason string `json:"trigger_reason,omitempty"`
+	DeltasDropped int    `json:"deltas_dropped,omitempty"`
+	BaseSwapped   bool   `json:"base_swapped,omitempty"`
+}
+
 // Report summarizes one Run for the caller (CLI, future scheduler).
 type Report struct {
 	RepoID            string        `json:"repo_id"`
@@ -114,6 +134,9 @@ type Report struct {
 	RepackedPackKeys  []string      `json:"repacked_pack_keys"`
 	CASAttempts       int           `json:"cas_attempts"`
 	DurationMS        int64         `json:"duration_ms"`
+
+	// M10 reachability compaction detail.
+	ReachabilityCompaction ReachabilityCompactionReport `json:"reachability_compaction,omitempty"`
 }
 
 // TriggerReport records what Phase 0 saw, regardless of outcome.
@@ -124,4 +147,8 @@ type TriggerReport struct {
 	TotalPackCount    int        `json:"total_pack_count"`
 	ManifestPackBytes int64      `json:"manifest_pack_bytes"`
 	Thresholds        Thresholds `json:"thresholds"`
+
+	// M10 reachability compaction trigger (separate from repack).
+	CompactReachability       bool   `json:"compact_reachability,omitempty"`
+	CompactReachabilityReason string `json:"compact_reachability_reason,omitempty"`
 }

@@ -49,6 +49,37 @@ func TestBuildLiveSet_IncludesRootTxAndPackTriples(t *testing.T) {
 	}
 }
 
+func TestWalk_IncludesReachabilityDeltas(t *testing.T) {
+	k, _ := keys.NewRepo("acme", "site")
+	deltaKey1 := k.ReachabilityDeltaKey("aabbcc")
+	deltaKey2 := k.ReachabilityDeltaKey("ddeeff")
+	body := manifest.Body{
+		DefaultBranch: "refs/heads/main",
+		Refs:          map[string]string{},
+		Indexes: manifest.Indexes{
+			Reachability: &manifest.ReachabilityRef{
+				BaseManifest: "v1",
+				Deltas: []manifest.IndexRef{
+					{Key: deltaKey1, Hash: "aabbcc"},
+					{Key: deltaKey2, Hash: "ddeeff"},
+				},
+			},
+		},
+	}
+	bodyJSON, _ := json.Marshal(body)
+	header := manifest.RootHeader{LatestTx: "tx_01HZ"}
+
+	live, err := gc.BuildLiveSet(k, header, bodyJSON)
+	if err != nil {
+		t.Fatalf("BuildLiveSet: %v", err)
+	}
+	for _, want := range []string{deltaKey1, deltaKey2} {
+		if _, ok := live[want]; !ok {
+			t.Errorf("live-set missing reachability delta key %q", want)
+		}
+	}
+}
+
 func TestBuildLiveSet_EmptyBodyJustHasHeaderKeys(t *testing.T) {
 	k, _ := keys.NewRepo("acme", "site")
 	header := manifest.RootHeader{LatestTx: "tx_01HZ"}

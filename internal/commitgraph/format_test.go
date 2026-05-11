@@ -47,7 +47,7 @@ func TestBuild_HeaderAndTrailer(t *testing.T) {
 	if string(out[:4]) != "BVCG" {
 		t.Fatalf("magic: %q", out[:4])
 	}
-	if v := binary.BigEndian.Uint32(out[4:8]); v != 1 {
+	if v := binary.BigEndian.Uint32(out[4:8]); v != VersionV2 {
 		t.Fatalf("version: %d", v)
 	}
 	if cnt := binary.BigEndian.Uint64(out[8:16]); cnt != 2 {
@@ -166,7 +166,7 @@ func TestOpenAndParents_RoundTrip(t *testing.T) {
 	if _, err := store.PutIfAbsent(context.Background(), "k.bvcg", strings.NewReader(string(out)), nil); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	g, err := Open(context.Background(), store, "k.bvcg")
+	g, err := OpenFromStore(context.Background(), store, "k.bvcg")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestOpen_RejectsBadMagic(t *testing.T) {
 	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader("XXXXgarbage"), nil); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	if _, err := Open(context.Background(), store, "k"); err == nil {
+	if _, err := OpenFromStore(context.Background(), store, "k"); err == nil {
 		t.Fatalf("expected bad-magic rejection")
 	}
 }
@@ -206,8 +206,8 @@ func TestOpen_RejectsBadTrailer(t *testing.T) {
 	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader(string(out)), nil); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	if _, err := Open(context.Background(), store, "k"); err == nil {
-		t.Fatalf("expected error on tampered body")
+	if _, err := OpenFromStore(context.Background(), store, "k"); err == nil {
+		t.Fatalf("expected bad-trailer rejection")
 	}
 }
 
@@ -222,7 +222,7 @@ func TestOpen_RejectsBadVersion(t *testing.T) {
 	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader(string(out)), nil); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	if _, err := Open(context.Background(), store, "k"); err == nil {
+	if _, err := OpenFromStore(context.Background(), store, "k"); err == nil {
 		t.Fatalf("expected version mismatch")
 	}
 }
@@ -232,7 +232,7 @@ func TestOpen_RejectsTooSmall(t *testing.T) {
 	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader("x"), nil); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	if _, err := Open(context.Background(), store, "k"); err == nil {
+	if _, err := OpenFromStore(context.Background(), store, "k"); err == nil {
 		t.Fatalf("expected file-too-small rejection")
 	}
 }
@@ -244,7 +244,7 @@ func TestOpen_ParentsMissForUnknownOID(t *testing.T) {
 	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader(string(out)), nil); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	g, err := Open(context.Background(), store, "k")
+	g, err := OpenFromStore(context.Background(), store, "k")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestOpen_RejectsTipNotInCommitSet(t *testing.T) {
 	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader(string(out)), nil); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	if _, err := Open(context.Background(), store, "k"); err == nil {
+	if _, err := OpenFromStore(context.Background(), store, "k"); err == nil {
 		t.Fatalf("expected dangling-tip rejection")
 	}
 }
@@ -290,11 +290,13 @@ func TestOpen_RejectsDanglingParent(t *testing.T) {
 		t.Fatalf("build: %v", err)
 	}
 	// commitsStart = headerSize + n_tips*tipSize = 32 + 0 = 32.
-	// First record (a, 20+1=21 bytes), second record (b at 32+21=53, 20+1+20=41 bytes).
-	// b's parent OID is at 32 + 21 + 20 + 1 = 74.
+	// v2 record layout: oid(20) + gen(4) + n_parents(1) + parents[n]*20.
+	// First record (a): 32..57 (25 bytes).
+	// Second record (b): starts at 57.
+	// b's parent OID is at 57 + 20 + 4 + 1 = 82.
 	bogus := make([]byte, 20)
 	bogus[0] = 0x42
-	copy(out[74:94], bogus)
+	copy(out[82:102], bogus)
 	pre := out[:len(out)-trailerSize]
 	want := sha256.Sum256(pre)
 	copy(out[len(out)-trailerSize:], want[:])
@@ -302,7 +304,74 @@ func TestOpen_RejectsDanglingParent(t *testing.T) {
 	if _, err := store.PutIfAbsent(context.Background(), "k", strings.NewReader(string(out)), nil); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	if _, err := Open(context.Background(), store, "k"); err == nil {
+	if _, err := OpenFromStore(context.Background(), store, "k"); err == nil {
 		t.Fatalf("expected dangling-parent rejection")
+	}
+}
+
+func TestFormat_VersionConstants(t *testing.T) {
+	if VersionV1 != 1 {
+		t.Errorf("VersionV1 = %d, want 1", VersionV1)
+	}
+	if VersionV2 != 2 {
+		t.Errorf("VersionV2 = %d, want 2", VersionV2)
+	}
+	if VersionCurrent != VersionV2 {
+		t.Errorf("VersionCurrent = %d, want %d", VersionCurrent, VersionV2)
+	}
+}
+
+func TestRecord_GenerationField(t *testing.T) {
+	r := Record{Generation: 7}
+	if r.Generation != 7 {
+		t.Fatalf("Record.Generation not honored")
+	}
+}
+
+// oidA and oidB are fixed test OIDs shared across reader and encoder tests.
+var oidA pack.OID = [20]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
+var oidB pack.OID = [20]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2}
+
+func TestEncode_V2_GoldenBytes(t *testing.T) {
+	// Single root commit with gen=1.
+	commits := []Record{{OID: oidA, Generation: 1, Parents: nil}}
+	tips := []Tip{{Ref: "refs/heads/main", OID: oidA}}
+	got, err := build(commits, tips)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if string(got[:4]) != "BVCG" {
+		t.Fatalf("magic = %q, want BVCG", got[:4])
+	}
+	ver := binary.BigEndian.Uint32(got[4:8])
+	if ver != VersionV2 {
+		t.Fatalf("version = %d, want %d", ver, VersionV2)
+	}
+}
+
+func TestEncode_V2_GenerationField_Position(t *testing.T) {
+	// Verify the on-disk per-commit record layout: oid(20) + gen(4) +
+	// n_parents(u8) + parents[n_parents]*20.
+	commits := []Record{{OID: oidA, Generation: 42, Parents: nil}}
+	tips := []Tip{{Ref: "refs/heads/main", OID: oidA}}
+	got, err := build(commits, tips)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	// Header is 32 bytes. Tip table is 1 tip × 24 bytes = 24. Then
+	// commit record starts at offset 56.
+	off := 32 + 24
+	// oid at offset 56..76
+	if got[off] != oidA[0] {
+		t.Fatalf("oid byte 0 mismatch at offset %d", off)
+	}
+	// gen at offset 76..80, expected little-endian 42.
+	gen := binary.LittleEndian.Uint32(got[off+20 : off+24])
+	if gen != 42 {
+		t.Fatalf("gen at offset %d = %d, want 42", off+20, gen)
+	}
+	// n_parents at offset 80
+	if got[off+24] != 0 {
+		t.Fatalf("n_parents at offset %d = %d, want 0", off+24, got[off+24])
 	}
 }

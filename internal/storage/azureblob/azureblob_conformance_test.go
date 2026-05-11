@@ -11,6 +11,7 @@ import (
 
 	gcconformance "github.com/bucketvcs/bucketvcs/internal/gc/conformance"
 	maintconformance "github.com/bucketvcs/bucketvcs/internal/maintenance/conformance"
+	reachconformance "github.com/bucketvcs/bucketvcs/internal/reachability/conformance"
 	bvstorage "github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/storage/azureblob"
 	"github.com/bucketvcs/bucketvcs/internal/storage/conformance"
@@ -95,4 +96,19 @@ func TestAzureBlob_GCSafety(t *testing.T) {
 	}
 	gcconformance.RunPropertyGCSafety(t, gcconformance.Factory(makeFactory(t, base)))
 	maintconformance.RunPropertyMaintenanceSafety(t, maintconformance.Factory(makeFactory(t, base)))
+}
+
+func TestAzureBlob_ReachabilitySafety(t *testing.T) {
+	cont := os.Getenv("BUCKETVCS_AZURE_CONTAINER")
+	if cont == "" {
+		t.Skip("BUCKETVCS_AZURE_CONTAINER unset — skipping live azureblob reachability safety")
+	}
+	base := azureblob.Config{
+		Container:        cont,
+		Account:          os.Getenv("BUCKETVCS_AZURE_ACCOUNT"),
+		AccountKey:       os.Getenv("BUCKETVCS_AZURE_ACCOUNT_KEY"),
+		ConnectionString: os.Getenv("BUCKETVCS_AZURE_CONNECTION_STRING"),
+		ServiceURL:       os.Getenv("BUCKETVCS_AZURE_SERVICE_URL"),
+	}
+	reachconformance.RunPropertyReachabilitySafety(t, reachconformance.Factory(makeFactory(t, base)))
 }

@@ -75,6 +75,107 @@ func TestBody_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestIndexRef_SizeBytes_Roundtrip(t *testing.T) {
+	ref := IndexRef{Key: "tenants/t/repos/r/indexes/object-map/aa.bvom", Hash: "aa", SizeBytes: 12345}
+	body := Body{Indexes: Indexes{ObjectMap: &ref}}
+	out, err := MarshalBody(body)
+	if err != nil {
+		t.Fatalf("MarshalBody: %v", err)
+	}
+	if !bytes.Contains(out, []byte(`"size_bytes"`)) {
+		t.Fatalf("size_bytes key missing from marshalled JSON:\n%s", out)
+	}
+	var got Body
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if got.Indexes.ObjectMap == nil || got.Indexes.ObjectMap.SizeBytes != 12345 {
+		t.Fatalf("size_bytes lost: got %+v", got.Indexes.ObjectMap)
+	}
+}
+
+func TestIndexRef_SizeBytes_OmittedWhenZero(t *testing.T) {
+	body := Body{Indexes: Indexes{ObjectMap: &IndexRef{Key: "k", Hash: "h"}}}
+	out, err := MarshalBody(body)
+	if err != nil {
+		t.Fatalf("MarshalBody: %v", err)
+	}
+	if bytes.Contains(out, []byte(`"size_bytes"`)) {
+		t.Fatalf("size_bytes should be omitted when zero, got:\n%s", out)
+	}
+}
+
+func TestReachability_Roundtrip(t *testing.T) {
+	body := Body{
+		DefaultBranch: "main",
+		Refs:          map[string]string{},
+		Indexes: Indexes{
+			ObjectMap:   &IndexRef{Key: "ok", Hash: "oh"},
+			CommitGraph: &IndexRef{Key: "ck", Hash: "ch"},
+			Reachability: &ReachabilityRef{
+				BaseManifest: "v00000042",
+				Deltas: []IndexRef{
+					{Key: "d1k", Hash: "d1h", SizeBytes: 1024},
+					{Key: "d2k", Hash: "d2h", SizeBytes: 2048},
+				},
+			},
+		},
+	}
+	out, err := MarshalBody(body)
+	if err != nil {
+		t.Fatalf("MarshalBody: %v", err)
+	}
+	var got Body
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if got.Indexes.Reachability == nil {
+		t.Fatalf("Reachability lost")
+	}
+	if got.Indexes.Reachability.BaseManifest != "v00000042" {
+		t.Fatalf("BaseManifest got %q", got.Indexes.Reachability.BaseManifest)
+	}
+	if len(got.Indexes.Reachability.Deltas) != 2 {
+		t.Fatalf("Deltas len=%d", len(got.Indexes.Reachability.Deltas))
+	}
+}
+
+func TestReachability_OmittedByDefault(t *testing.T) {
+	body := Body{Indexes: Indexes{}}
+	out, err := MarshalBody(body)
+	if err != nil {
+		t.Fatalf("MarshalBody: %v", err)
+	}
+	if bytes.Contains(out, []byte(`"reachability"`)) {
+		t.Fatalf("reachability should be omitted when nil")
+	}
+}
+
+func TestReachability_Deltas_NormalizedToEmptyArray(t *testing.T) {
+	body := Body{Indexes: Indexes{Reachability: &ReachabilityRef{BaseManifest: "v00000001"}}}
+	out, err := MarshalBody(body)
+	if err != nil {
+		t.Fatalf("MarshalBody: %v", err)
+	}
+	if bytes.Contains(out, []byte(`"deltas": null`)) {
+		t.Fatalf("Deltas should normalize to [], got JSON containing null:\n%s", out)
+	}
+	if !bytes.Contains(out, []byte(`"deltas": []`)) {
+		t.Fatalf("Deltas missing or wrong form, got JSON:\n%s", out)
+	}
+}
+
+func TestReachability_NormalizationDoesNotMutateCaller(t *testing.T) {
+	r := &ReachabilityRef{BaseManifest: "v1"}
+	body := Body{Indexes: Indexes{Reachability: r}}
+	if _, err := MarshalBody(body); err != nil {
+		t.Fatalf("MarshalBody: %v", err)
+	}
+	if r.Deltas != nil {
+		t.Fatalf("MarshalBody mutated caller's Deltas (was nil, now %v)", r.Deltas)
+	}
+}
+
 func checkGolden(t *testing.T, name string, body Body) {
 	t.Helper()
 	got, err := MarshalBody(body)

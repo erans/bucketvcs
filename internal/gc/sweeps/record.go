@@ -26,9 +26,10 @@ type Record struct {
 
 // Deleted lists keys removed in the sweep, grouped by category.
 type Deleted struct {
-	TxRecords      []string `json:"tx_records"`
-	CanonicalPacks []string `json:"canonical_packs"`
-	Indexes        []string `json:"indexes"`
+	TxRecords          []string `json:"tx_records"`
+	CanonicalPacks     []string `json:"canonical_packs"`
+	Indexes            []string `json:"indexes"`
+	ReachabilityDeltas []string `json:"reachability_deltas"`
 }
 
 // SkippedEntry records one candidate that was not deleted.
@@ -82,6 +83,9 @@ func (r Record) MarshalJSON() ([]byte, error) {
 	}
 	if m.Deleted.Indexes == nil {
 		m.Deleted.Indexes = []string{}
+	}
+	if m.Deleted.ReachabilityDeltas == nil {
+		m.Deleted.ReachabilityDeltas = []string{}
 	}
 	if m.Skipped == nil {
 		m.Skipped = []SkippedEntry{}

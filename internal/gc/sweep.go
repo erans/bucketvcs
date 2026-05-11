@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/rand"
+	"strings"
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/gc/marks"
@@ -85,8 +87,14 @@ func RunSweep(ctx context.Context, s storage.ObjectStore, r *repo.Repo, mark mar
 		applyDecision(ctx, s, p.Key, "canonical_packs", decision, opts.DryRun, &out)
 	}
 	for _, i := range mark.Candidates.Indexes {
-		decision := classify(i.Key, "indexes", i.FirstSeenUnreachableAt, retention, now, freshLive, true /* armed N/A */)
-		applyDecision(ctx, s, i.Key, "indexes", decision, opts.DryRun, &out)
+		// Route reachability-delta keys into their own Deleted bucket so
+		// callers can distinguish them from object-map / commit-graph sweeps.
+		category := "indexes"
+		if strings.Contains(i.Key, "/indexes/reachability-delta/") {
+			category = "reachability_deltas"
+		}
+		decision := classify(i.Key, category, i.FirstSeenUnreachableAt, retention, now, freshLive, true /* armed N/A */)
+		applyDecision(ctx, s, i.Key, category, decision, opts.DryRun, &out)
 	}
 
 	out.CompletedAt = opts.Now().UTC()
@@ -138,8 +146,12 @@ func applyDecision(ctx context.Context, s storage.ObjectStore, key, category str
 			out.Deleted.TxRecords = append(out.Deleted.TxRecords, key)
 		case "canonical_packs":
 			out.Deleted.CanonicalPacks = append(out.Deleted.CanonicalPacks, key)
+		case "reachability_deltas":
+			out.Deleted.ReachabilityDeltas = append(out.Deleted.ReachabilityDeltas, key)
 		case "indexes":
 			out.Deleted.Indexes = append(out.Deleted.Indexes, key)
+		default:
+			slog.WarnContext(ctx, "gc.sweep.unknown_category", "category", category, "key", key)
 		}
 		return
 	}
@@ -173,8 +185,12 @@ func applyDecision(ctx context.Context, s storage.ObjectStore, key, category str
 		// clean its own markers — this code path does not.
 	case "canonical_packs":
 		out.Deleted.CanonicalPacks = append(out.Deleted.CanonicalPacks, key)
+	case "reachability_deltas":
+		out.Deleted.ReachabilityDeltas = append(out.Deleted.ReachabilityDeltas, key)
 	case "indexes":
 		out.Deleted.Indexes = append(out.Deleted.Indexes, key)
+	default:
+		slog.WarnContext(ctx, "gc.sweep.unknown_category", "category", category, "key", key)
 	}
 }
 

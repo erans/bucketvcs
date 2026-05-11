@@ -137,7 +137,7 @@ func TestBuildAndCommit_AppendsToExistingRepo(t *testing.T) {
 
 	newOID := ir.addSecondCommit(t)
 	updates := map[string]string{"refs/heads/main": newOID}
-	body, err := BuildAndCommit(context.Background(), ir.store, ir.tenant, ir.repo, ir.bareDir, updates, "pusher")
+	body, err := BuildAndCommit(context.Background(), ir.store, ir.tenant, ir.repo, ir.bareDir, updates, "pusher", nil)
 	if err != nil {
 		t.Fatalf("BuildAndCommit: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestBuildAndCommit_AddsNewBranch(t *testing.T) {
 		"refs/heads/main":    newOID,
 		"refs/heads/feature": ir.mainOID,
 	}
-	body, err := BuildAndCommit(context.Background(), ir.store, ir.tenant, ir.repo, ir.bareDir, updates, "pusher")
+	body, err := BuildAndCommit(context.Background(), ir.store, ir.tenant, ir.repo, ir.bareDir, updates, "pusher", nil)
 	if err != nil {
 		t.Fatalf("BuildAndCommit: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestBuildAndCommit_DeletesRef(t *testing.T) {
 	// First push: add the feature ref through BuildAndCommit so the
 	// committed manifest has it.
 	if _, err := BuildAndCommit(context.Background(), ir.store, ir.tenant, ir.repo, ir.bareDir,
-		map[string]string{"refs/heads/feature": ir.mainOID}, "setup"); err != nil {
+		map[string]string{"refs/heads/feature": ir.mainOID}, "setup", nil); err != nil {
 		t.Fatalf("setup BuildAndCommit: %v", err)
 	}
 	pre, _ := ir.readBody(t)
@@ -228,7 +228,7 @@ func TestBuildAndCommit_DeletesRef(t *testing.T) {
 		t.Fatalf("delete feature in mirror: %v: %s", err, out)
 	}
 	body, err := BuildAndCommit(context.Background(), ir.store, ir.tenant, ir.repo, ir.bareDir,
-		map[string]string{"refs/heads/feature": nullOIDHex}, "deleter")
+		map[string]string{"refs/heads/feature": nullOIDHex}, "deleter", nil)
 	if err != nil {
 		t.Fatalf("BuildAndCommit delete: %v", err)
 	}
@@ -269,7 +269,7 @@ func TestBuildAndCommit_RepackProducesCanonical(t *testing.T) {
 	_ = newOID
 
 	body, err := BuildAndCommit(context.Background(), ir.store, ir.tenant, ir.repo, ir.bareDir,
-		map[string]string{"refs/heads/main": c3OID}, "pusher")
+		map[string]string{"refs/heads/main": c3OID}, "pusher", nil)
 	if err != nil {
 		t.Fatalf("BuildAndCommit: %v", err)
 	}
@@ -413,13 +413,13 @@ func TestBuildAndCommit_StaleManifestRaceDetected(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		b, e := BuildAndCommit(context.Background(), ir.store, ir.tenant, ir.repo, mirrorA,
-			map[string]string{"refs/heads/main": oidA}, "racerA")
+			map[string]string{"refs/heads/main": oidA}, "racerA", nil)
 		out <- result{b, e}
 	}()
 	go func() {
 		defer wg.Done()
 		b, e := BuildAndCommit(context.Background(), ir.store, ir.tenant, ir.repo, mirrorB,
-			map[string]string{"refs/heads/main": oidB}, "racerB")
+			map[string]string{"refs/heads/main": oidB}, "racerB", nil)
 		out <- result{b, e}
 	}()
 	wg.Wait()
@@ -547,7 +547,7 @@ func TestBuildAndCommit_RejectsBadRefOID(t *testing.T) {
 		// 40 hex chars but no such object exists in the bare.
 		"refs/heads/wedged": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
 	}
-	_, err := BuildAndCommit(context.Background(), ir.store, ir.tenant, ir.repo, ir.bareDir, updates, "x")
+	_, err := BuildAndCommit(context.Background(), ir.store, ir.tenant, ir.repo, ir.bareDir, updates, "x", nil)
 	if err == nil {
 		t.Fatalf("expected error: nonexistent OID should be rejected")
 	}
@@ -563,7 +563,7 @@ func TestBuildAndCommit_RejectsMissingRepo(t *testing.T) {
 	if out, err := gitcli.RunForTest(t.TempDir(), "init", "--bare", bare); err != nil {
 		t.Fatalf("init bare: %v: %s", err, out)
 	}
-	_, err := BuildAndCommit(context.Background(), store, "no", "such", bare, map[string]string{}, "x")
+	_, err := BuildAndCommit(context.Background(), store, "no", "such", bare, map[string]string{}, "x", nil)
 	if err == nil {
 		t.Fatalf("expected error opening missing repo")
 	}
@@ -611,7 +611,7 @@ func TestBuildAndCommit_RejectsDeletingDefaultBranch(t *testing.T) {
 	updates := map[string]string{
 		body.DefaultBranch: nullOIDHex,
 	}
-	_, err := BuildAndCommit(context.Background(), ir.store, ir.tenant, ir.repo, ir.bareDir, updates, "tester")
+	_, err := BuildAndCommit(context.Background(), ir.store, ir.tenant, ir.repo, ir.bareDir, updates, "tester", nil)
 	if err == nil {
 		t.Fatalf("BuildAndCommit: expected error on deleting default branch, got nil")
 	}
@@ -638,7 +638,7 @@ func TestBuildAndCommit_RefOnlyUpdateSucceeds(t *testing.T) {
 	// canonical pack covering both commits.
 	newOID := ir.addSecondCommit(t)
 	body1, err := BuildAndCommit(context.Background(), ir.store, ir.tenant, ir.repo, ir.bareDir,
-		map[string]string{"refs/heads/main": newOID}, "pusher")
+		map[string]string{"refs/heads/main": newOID}, "pusher", nil)
 	if err != nil {
 		t.Fatalf("first BuildAndCommit: %v", err)
 	}
@@ -656,7 +656,7 @@ func TestBuildAndCommit_RefOnlyUpdateSucceeds(t *testing.T) {
 	// Second BuildAndCommit: ref-only update. Must succeed and the body
 	// must contain both refs.
 	body2, err := BuildAndCommit(context.Background(), ir.store, ir.tenant, ir.repo, ir.bareDir,
-		map[string]string{"refs/heads/feature": ir.mainOID}, "pusher")
+		map[string]string{"refs/heads/feature": ir.mainOID}, "pusher", nil)
 	if err != nil {
 		t.Fatalf("ref-only BuildAndCommit: %v", err)
 	}
@@ -766,7 +766,7 @@ func TestBuildAndCommit_FirstPushOnUnbornDefault(t *testing.T) {
 	// (e.g. refs/heads/main) is not in the update set and was never in
 	// the manifest. The guard MUST allow this through.
 	body, err := BuildAndCommit(context.Background(), store, "t", "r", mirror,
-		map[string]string{"refs/heads/feature": featOID}, "first-pusher")
+		map[string]string{"refs/heads/feature": featOID}, "first-pusher", nil)
 	if err != nil {
 		t.Fatalf("first push on unborn default: %v", err)
 	}
@@ -790,4 +790,52 @@ func equalRefMap(a, b map[string]string) bool {
 		}
 	}
 	return true
+}
+
+// TestBuildAndCommit_BodyPatcherIsCalled verifies that a non-nil BodyPatcher
+// is called during BuildAndCommit and can modify the committed body (e.g.
+// to add a reachability delta reference).
+func TestBuildAndCommit_BodyPatcherIsCalled(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git")
+	}
+	ir := setupImportedRepo(t)
+	newOID := ir.addSecondCommit(t)
+	updates := map[string]string{"refs/heads/main": newOID}
+
+	var patcherCalled bool
+	var patcherGotNewOIDs []string
+
+	patcher := BodyPatcher(func(ctx context.Context, prevBody manifest.Body, draft manifest.Body, newOIDs []string) (manifest.Body, error) {
+		patcherCalled = true
+		patcherGotNewOIDs = newOIDs
+		// Simulate adding a fake delta ref to the draft body.
+		draft.Indexes.Reachability = &manifest.ReachabilityRef{
+			BaseManifest: "test",
+			Deltas: []manifest.IndexRef{
+				{Key: "fake/delta/key", Hash: "abc123", SizeBytes: 42},
+			},
+		}
+		return draft, nil
+	})
+
+	body, err := BuildAndCommit(context.Background(), ir.store, ir.tenant, ir.repo, ir.bareDir, updates, "pusher", patcher)
+	if err != nil {
+		t.Fatalf("BuildAndCommit with patcher: %v", err)
+	}
+	if !patcherCalled {
+		t.Error("BodyPatcher was not called")
+	}
+	if len(patcherGotNewOIDs) == 0 {
+		t.Error("BodyPatcher received empty newOIDs (expected at least the new commit)")
+	}
+	if body.Indexes.Reachability == nil {
+		t.Fatal("committed body has nil Reachability (patcher modification not persisted)")
+	}
+	if len(body.Indexes.Reachability.Deltas) != 1 {
+		t.Errorf("committed body Deltas len = %d, want 1", len(body.Indexes.Reachability.Deltas))
+	}
+	if body.Indexes.Reachability.Deltas[0].Key != "fake/delta/key" {
+		t.Errorf("committed delta key = %q, want %q", body.Indexes.Reachability.Deltas[0].Key, "fake/delta/key")
+	}
 }

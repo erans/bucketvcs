@@ -59,10 +59,13 @@ func BuildLiveSet(k *keys.Repo, header manifest.RootHeader, bodyJSON []byte) (Li
 	if body.Indexes.CommitGraph != nil && body.Indexes.CommitGraph.Key != "" {
 		live[body.Indexes.CommitGraph.Key] = struct{}{}
 	}
-	// TODO(M11/M2-update): when manifest.Indexes adds a Reachability field,
-	// add it to the live-set here. DiscoverIndexes already lists the
-	// indexes/reachability/ prefix, so any reachability index without a
-	// live-set entry will be classified as orphan and swept after retention.
+	if body.Indexes.Reachability != nil {
+		for _, ref := range body.Indexes.Reachability.Deltas {
+			if ref.Key != "" {
+				live[ref.Key] = struct{}{}
+			}
+		}
+	}
 	// body.Bundles is M11 placeholder — currently empty struct, no keys to add.
 	return live, nil
 }

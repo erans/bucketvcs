@@ -10,6 +10,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/bucketvcs/bucketvcs/internal/repo"
+	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
 )
 
 // classifyOpenErr returns the canonical exit code (2/3/1) and writes a
@@ -31,12 +32,53 @@ func classifyOpenErr(err error, tenantID, repoID string, stderr io.Writer) int {
 	}
 }
 
+// reachabilityBlock is the JSON shape emitted under "reachability" in the
+// inspect-manifest JSON output.
+type reachabilityBlock struct {
+	BaseManifest    string           `json:"base_manifest"`
+	DeltaChainLen   int              `json:"delta_chain_length"`
+	DeltaChainBytes int64            `json:"delta_chain_bytes"`
+	DeltaFiles      []deltaFileEntry `json:"delta_files"`
+}
+
+// deltaFileEntry describes one .bvrd file in the delta chain.
+type deltaFileEntry struct {
+	Key       string `json:"key"`
+	Hash      string `json:"hash"`
+	SizeBytes int64  `json:"size_bytes"`
+}
+
+// buildReachabilityBlock constructs the reachability block from a manifest.Body.
+// Returns nil when the body has no reachability data (pre-M10 repo).
+func buildReachabilityBlock(body manifest.Body) *reachabilityBlock {
+	if body.Indexes.Reachability == nil {
+		return nil
+	}
+	r := body.Indexes.Reachability
+	var totalBytes int64
+	files := make([]deltaFileEntry, 0, len(r.Deltas))
+	for _, d := range r.Deltas {
+		totalBytes += d.SizeBytes
+		files = append(files, deltaFileEntry{
+			Key:       d.Key,
+			Hash:      d.Hash,
+			SizeBytes: d.SizeBytes,
+		})
+	}
+	return &reachabilityBlock{
+		BaseManifest:    r.BaseManifest,
+		DeltaChainLen:   len(r.Deltas),
+		DeltaChainBytes: totalBytes,
+		DeltaFiles:      files,
+	}
+}
+
 // runInspect is the body of `bucketvcs inspect-manifest`.
 func runInspect(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("inspect-manifest", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	storeURL := fs.String("store", "", `Store URL (e.g. "localfs:/var/lib/bucketvcs")`)
-	asJSON := fs.Bool("json", false, "Print the raw root manifest as JSON")
+	asJSON := fs.Bool("json", false, "Print the root manifest as JSON (includes reachability block)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -79,7 +121,28 @@ func runInspect(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		for k, v := range headerMap {
 			bodyMap[k] = v
 		}
-		out, _ := json.MarshalIndent(bodyMap, "", "  ")
+
+		// Inject structured reachability summary block when the manifest has one.
+		// The raw "reachability" field (base_manifest + deltas) is left intact;
+		// the derived summary is emitted under "reachability_summary" so that
+		// operators can still access the raw delta list via jq .reachability.deltas.
+		var parsedBody manifest.Body
+		if err := json.Unmarshal(view.Body, &parsedBody); err == nil {
+			if rb := buildReachabilityBlock(parsedBody); rb != nil {
+				rbJSON, err := json.Marshal(rb)
+				if err != nil {
+					fmt.Fprintf(stderr, "inspect-manifest: marshal reachability block: %v\n", err)
+					return 1
+				}
+				bodyMap["reachability_summary"] = rbJSON
+			}
+		}
+
+		out, err := json.MarshalIndent(bodyMap, "", "  ")
+		if err != nil {
+			fmt.Fprintf(stderr, "inspect-manifest: marshal output: %v\n", err)
+			return 1
+		}
 		fmt.Fprintln(stdout, string(out))
 		return 0
 	}

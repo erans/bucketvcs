@@ -141,3 +141,24 @@ func TestPackIdxKey_RejectsBadArea(t *testing.T) {
 	}()
 	_ = r.PackIdxKey("h", "loose")
 }
+
+func TestReachabilityDeltaKey(t *testing.T) {
+	r, err := keys.NewRepo("t", "r")
+	if err != nil {
+		t.Fatalf("NewRepo: %v", err)
+	}
+	got := r.ReachabilityDeltaKey("abcd")
+	want := "tenants/t/repos/r/indexes/reachability-delta/abcd.bvrd"
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
+func TestReachabilityDeltaPrefix(t *testing.T) {
+	r, _ := keys.NewRepo("t", "r")
+	got := r.ReachabilityDeltaPrefix()
+	want := "tenants/t/repos/r/indexes/reachability-delta/"
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}

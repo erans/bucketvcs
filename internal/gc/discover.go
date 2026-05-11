@@ -22,16 +22,11 @@ func DiscoverCanonicalPacks(ctx context.Context, s storage.ObjectStore, k *keys.
 	return listExcludingLive(ctx, s, prefix, live)
 }
 
-// DiscoverIndexes lists all objects under indexes/{object-map,commit-graph,reachability}/
+// DiscoverIndexes lists all objects under indexes/{object-map,commit-graph,reachability,reachability-delta}/
 // and returns keys NOT in live.
-//
-// TODO(M11/M2-update): when manifest.Indexes adds a Reachability field, update
-// BuildLiveSet to add it to the live-set. This function already enumerates the
-// indexes/reachability/ sub-prefix; any reachability index absent from the
-// live-set will be classified as an orphan and swept after retention.
 func DiscoverIndexes(ctx context.Context, s storage.ObjectStore, k *keys.Repo, live LiveSet) ([]string, error) {
 	var out []string
-	for _, sub := range []string{"object-map/", "commit-graph/", "reachability/"} {
+	for _, sub := range []string{"object-map/", "commit-graph/", "reachability/", "reachability-delta/"} {
 		got, err := listExcludingLive(ctx, s, k.Prefix()+"indexes/"+sub, live)
 		if err != nil {
 			return nil, err

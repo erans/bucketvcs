@@ -223,6 +223,54 @@ func TestSweep_TxRecordsDisarmed_AllSkippedWithDisarmedReason(t *testing.T) {
 	}
 }
 
+func TestSweep_CollectsUnreferencedDeltas(t *testing.T) {
+	store, _ := localfs.Open(t.TempDir())
+	ctx := context.Background()
+	r, _ := repo.Create(ctx, store, "acme", "site", repo.CreateOptions{Actor: "u_test"})
+	k, _ := keys.NewRepo("acme", "site")
+
+	// Upload a stray .bvrd file not referenced by any manifest.
+	strayKey := k.ReachabilityDeltaKey("deadbeef")
+	gctest.PutEmpty(t, store, strayKey)
+
+	// Build a synthetic mark that has the stray key as an index candidate
+	// with FirstSeenUnreachableAt one hour ago (retention window already
+	// met since RetentionSeconds=0 bypasses the normalizing RunMark call).
+	mark := marks.Record{
+		SchemaVersion:    marks.SchemaVersion,
+		MarkID:           "mk_01HZTEST_BVRD",
+		StartedAt:        time.Now().Add(-time.Hour),
+		CompletedAt:      time.Now().Add(-time.Hour),
+		RetentionSeconds: 0,
+		Candidates: marks.Candidates{
+			Indexes: []marks.IndexCandidate{
+				{Key: strayKey, FirstSeenUnreachableAt: time.Now().Add(-time.Hour)},
+			},
+		},
+	}
+
+	rep, err := gc.RunSweep(ctx, store, r, mark, gc.SweepOptions{Now: time.Now})
+	if err != nil {
+		t.Fatalf("RunSweep: %v", err)
+	}
+
+	// Stray .bvrd must appear in Deleted.ReachabilityDeltas, not Deleted.Indexes.
+	found := false
+	for _, dk := range rep.Deleted.ReachabilityDeltas {
+		if dk == strayKey {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("stray .bvrd %q not in Deleted.ReachabilityDeltas; report=%+v", strayKey, rep.Deleted)
+	}
+	for _, dk := range rep.Deleted.Indexes {
+		if dk == strayKey {
+			t.Fatalf("stray .bvrd %q incorrectly placed in Deleted.Indexes", strayKey)
+		}
+	}
+}
+
 func makePushTxBody() tx.Body {
 	return tx.Body{Type: "push", Actor: "u_test"}
 }

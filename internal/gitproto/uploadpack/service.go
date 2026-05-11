@@ -5,11 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 
 	"github.com/bucketvcs/bucketvcs/internal/gitcli"
+	"github.com/bucketvcs/bucketvcs/internal/pack"
 	"github.com/bucketvcs/bucketvcs/internal/pktline"
+	"github.com/bucketvcs/bucketvcs/internal/reachability"
 	"github.com/bucketvcs/bucketvcs/internal/repo"
+	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
 	"github.com/bucketvcs/bucketvcs/internal/repo/repoerrs"
 	"github.com/bucketvcs/bucketvcs/internal/v2proto"
@@ -145,6 +149,20 @@ func serveFetch(req *EngineRequest, tokens []pktline.Token, body *manifest.Body)
 	// same probe twice and pass duplicate args to rev-list.
 	fetchReq.Wants = dedupOIDs(fetchReq.Wants)
 	fetchReq.Haves = dedupOIDs(fetchReq.Haves)
+
+	// Lazy-negotiation fast path: if the reachability index is available,
+	// compute the shipping plan before materialising the mirror. When the
+	// plan is empty (client is already up-to-date), we can respond with a
+	// no-op ACK and skip the mirror entirely — avoiding a full export that
+	// costs hundreds of ms for large repos.
+	//
+	// On any reachability error (ErrNoIndex, decode failure, etc.)
+	// we fall through to the normal mirror-first path and log a structured
+	// warning so operators can monitor the fallback rate.
+	if done, err := serveFetchLazyPath(req, fetchReq, body); done {
+		return err
+	}
+
 	m, err := req.Mirror.Open(req.Ctx, req.Tenant, req.Repo)
 	if err != nil {
 		return fmt.Errorf("mirror: %w", err)
@@ -411,3 +429,165 @@ func drainPktLine(r io.Reader) ([]pktline.Token, error) {
 		}
 	}
 }
+
+// serveFetchLazyPath attempts pure-Go negotiation via the reachability index
+// BEFORE opening the mirror. It returns (true, err) when the request is fully
+// handled (either a no-op ACK because the plan is empty, or an error that
+// aborted the session). It returns (false, nil) when the caller should fall
+// through to the normal mirror-first path.
+//
+// The two cases that result in falling through:
+//  1. The reachability index is unavailable (ErrNoIndex, decode failure,
+//     etc.) — logged as a structured warning with a fallback_reason label.
+//  2. The client has wants that ARE present in the index and there ARE commits
+//     to ship — the caller must materialise the mirror and run pack-objects.
+//
+// On ErrUnknownWant, falls through to the mirror path (returns false, nil).
+// We cannot distinguish "client wants an annotated tag / tree / blob the
+// Set doesn't index" from "client wants a missing commit", and the mirror
+// has full object knowledge. Falling through is the safe choice.
+func serveFetchLazyPath(req *EngineRequest, fetchReq v2proto.FetchRequest, body *manifest.Body) (done bool, _ error) {
+	// Build keys.Repo to satisfy reachability.Load's signature. If the
+	// tenant/repo names are invalid at the keys layer we skip the lazy path
+	// (they will be caught downstream by the existing mirror path or have
+	// already been caught by the repo.Open call above in serviceImpl).
+	k, err := keys.NewRepo(req.Tenant, req.Repo)
+	if err != nil {
+		return false, nil
+	}
+
+	set, err := reachability.Load(req.Ctx, req.Store, k, *body)
+	if err != nil {
+		// Log a structured fallback warning so operators can track the
+		// fallback rate on dashboards. ClassifyFallback provides a bounded
+		// label set (no_index, delta_decode, unknown) for easy alert pivots.
+		slog.WarnContext(req.Ctx, "upload-pack: reachability index unavailable; falling back to mirror path",
+			"tenant", req.Tenant,
+			"repo", req.Repo,
+			"fallback_reason", reachability.ClassifyFallback(err),
+			"error", err.Error(),
+		)
+		return false, nil
+	}
+
+	// Convert hex-string OIDs from ParseFetchArgs to pack.OID.
+	wants := make([]pack.OID, 0, len(fetchReq.Wants))
+	for _, h := range fetchReq.Wants {
+		o, err := pack.ParseOID(h)
+		if err != nil {
+			// ParseFetchArgs already validated hex format; this branch is
+			// defensive. Log the unexpected input and fall through to mirror.
+			slog.ErrorContext(req.Ctx, "upload-pack: lazy path: ParseOID failed for want (should not happen after ParseFetchArgs)",
+				"input", h, "error", err.Error())
+			return false, nil
+		}
+		wants = append(wants, o)
+	}
+	haves := make([]pack.OID, 0, len(fetchReq.Haves))
+	for _, h := range fetchReq.Haves {
+		o, err := pack.ParseOID(h)
+		if err != nil {
+			// Same defensive fallback as wants above.
+			slog.ErrorContext(req.Ctx, "upload-pack: lazy path: ParseOID failed for have (should not happen after ParseFetchArgs)",
+				"input", h, "error", err.Error())
+			return false, nil
+		}
+		haves = append(haves, o)
+	}
+
+	plan, err := Negotiate(req.Ctx, set, NegotiateInput{
+		Wants: wants,
+		Haves: haves,
+		Done:  fetchReq.Done,
+	})
+	if err != nil {
+		if errors.Is(err, ErrUnknownWant) {
+			// The want OID is not in the reachability index. Two possible causes:
+			//   (a) The client asked for something that genuinely doesn't exist.
+			//   (b) The OID is a tag, tree, or blob — the commit-graph index
+			//       covers commits only, so annotated tags, tree wants, etc.
+			//       won't be found here. Fall through to the mirror path which
+			//       can validate and serve them correctly.
+			// We cannot distinguish (a) from (b) without examining the object
+			// type, so the safe choice is always to fall through.
+			return false, nil
+		}
+		// Other negotiate errors (e.g. context cancellation, storage read
+		// failures): log at Warn so operators can track them, then fall through
+		// to the mirror path.
+		slog.WarnContext(req.Ctx, "reachability.fallback",
+			"fallback_reason", "negotiate_error",
+			"err", err,
+			"repo", k.Prefix(),
+		)
+		return false, nil
+	}
+
+	// No commits to ship. Two cases:
+	//
+	//   done=false (interim negotiation round): the client is still sending
+	//   haves and waiting for more acks. A bare "acknowledgments + flush"
+	//   response is correct here — it tells the client "here's what we agree
+	//   on so far; keep going". No packfile section is expected by the client.
+	//
+	//   done=true (final round): protocol v2 §fetch requires the server to
+	//   terminate with a final-response that includes a packfile section (even
+	//   if the pack would be empty). Emitting only "acknowledgments + flush"
+	//   violates the grammar and strict clients may hang waiting for the
+	//   packfile section. The simplest correct response is to fall through to
+	//   the mirror path and let git upload-pack produce the proper
+	//   "acknowledgments delim-pkt packfile flush" shape, including an empty
+	//   pack when no objects need to be sent.
+	if len(plan.Commits) == 0 {
+		if fetchReq.Done {
+			// Fall through to mirror — it will emit the proper empty-pack
+			// final response that satisfies the protocol v2 grammar.
+			return false, nil
+		}
+		// Interim continuation with haves. Only fall through to the mirror
+		// when at least one have is known to the Set — if ALL haves are
+		// unknown, the lazy NAK+flush path is the correct response and the
+		// mirror would produce the same result, so we stay on the lazy path
+		// rather than opening the mirror unnecessarily.
+		if len(haves) > 0 {
+			var anyKnown bool
+			for _, h := range haves {
+				if set.Has(h) {
+					anyKnown = true
+					break
+				}
+			}
+			if anyKnown {
+				// At least one known have: the lazy path can ACK it via
+				// set.Has(o) even when the commit is not reachable from an
+				// advertised ref (e.g. an abandoned force-pushed commit still
+				// present in an old .bvrd delta). The eager mirror path
+				// filters to ref-reachable commits, so the two paths would
+				// disagree on haves disclosure. Punt to mirror for consistency.
+				return false, nil
+			}
+			// All haves unknown to the Set: lazy NAK+flush is correct.
+			// Fall through to the NAK+flush emission below.
+		}
+		// No haves AND no commits to ship: emit an empty acknowledgments
+		// section + flush so the client advances its negotiation round.
+		// Protocol v2 §fetch allows either an empty acknowledgments section
+		// or a bare flush as the interim continuation when there are no known
+		// commons to report; WriteAcknowledgments with nil commons and nil
+		// unknowns emits only the section header + flush, which clients treat
+		// as "continue". This matches what the mirror path would emit.
+		if err := v2proto.WriteAcknowledgments(req.Stdout, nil, nil, false); err != nil {
+			return true, fmt.Errorf("lazy fetch: write acks: %w", err)
+		}
+		pw := pktline.NewWriter(req.Stdout)
+		if err := pw.WriteFlush(); err != nil {
+			return true, fmt.Errorf("lazy fetch: flush: %w", err)
+		}
+		return true, nil
+	}
+
+	// There are commits to ship — fall through to the mirror path which
+	// knows how to materialise the pack via git pack-objects.
+	return false, nil
+}
+

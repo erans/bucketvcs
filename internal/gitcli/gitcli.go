@@ -816,6 +816,45 @@ func RevListNotAll(ctx context.Context, dir string, oids []string) ([]string, er
 	return found, nil
 }
 
+// RevListCommitsOnly runs `git rev-list <tips> [excludes...]` in dir, emitting
+// only commit OIDs (no --objects flag, so trees and blobs are excluded).
+// excludes should be in "^<oid>" form. Useful when the caller only needs commits
+// (e.g. building a commit-graph delta) and wants to avoid per-object type probes.
+func RevListCommitsOnly(ctx context.Context, dir string, tips, excludes []string) ([]string, error) {
+	for _, o := range tips {
+		if !validHexOID(o) {
+			return nil, fmt.Errorf("gitcli: RevListCommitsOnly: invalid tip oid %q", o)
+		}
+	}
+	for i, ex := range excludes {
+		if len(ex) != 41 || ex[0] != '^' {
+			return nil, fmt.Errorf("gitcli: RevListCommitsOnly: invalid exclude %q at index %d", ex, i)
+		}
+		if !validHexOID(ex[1:]) {
+			return nil, fmt.Errorf("gitcli: RevListCommitsOnly: invalid exclude OID %q at index %d", ex, i)
+		}
+	}
+	args := []string{"--no-replace-objects", "rev-list"}
+	args = append(args, tips...)
+	args = append(args, excludes...)
+	out, err := run(ctx, dir, args...)
+	if err != nil {
+		return nil, err
+	}
+	trimmed := strings.TrimSpace(string(out))
+	if trimmed == "" {
+		return nil, nil
+	}
+	var found []string
+	for _, line := range strings.Split(trimmed, "\n") {
+		if line == "" {
+			continue
+		}
+		found = append(found, line)
+	}
+	return found, nil
+}
+
 // FsckConnectivityOnly runs `git fsck --connectivity-only --no-dangling
 // --no-progress` against dir. Used as a defensive double-check after
 // IndexPackStrict.
