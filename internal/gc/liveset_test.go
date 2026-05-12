@@ -80,6 +80,49 @@ func TestWalk_IncludesReachabilityDeltas(t *testing.T) {
 	}
 }
 
+func TestBuildLiveSet_IncludesBundleKeys(t *testing.T) {
+	k, _ := keys.NewRepo("acme", "r")
+
+	bundleKey := "tenants/acme/repos/r/bundles/sha256-aabbccdd.bundle"
+	sidecarKey := "tenants/acme/repos/r/bundles/sha256-aabbccdd.bundle.json"
+
+	body := manifest.Body{
+		DefaultBranch: "refs/heads/main",
+		Refs:          map[string]string{},
+		Bundles: []manifest.BundleEntry{
+			{BundleKey: bundleKey, SidecarKey: sidecarKey},
+		},
+	}
+	bodyJSON, _ := json.Marshal(body)
+	header := manifest.RootHeader{}
+
+	live, err := gc.BuildLiveSet(k, header, bodyJSON)
+	if err != nil {
+		t.Fatalf("BuildLiveSet: %v", err)
+	}
+	if _, ok := live[bundleKey]; !ok {
+		t.Errorf("live-set missing BundleKey %q", bundleKey)
+	}
+	if _, ok := live[sidecarKey]; !ok {
+		t.Errorf("live-set missing SidecarKey %q", sidecarKey)
+	}
+
+	// An entry with empty keys must not add "" to the live set.
+	body2 := manifest.Body{
+		DefaultBranch: "refs/heads/main",
+		Refs:          map[string]string{},
+		Bundles:       []manifest.BundleEntry{{BundleKey: "", SidecarKey: ""}},
+	}
+	bodyJSON2, _ := json.Marshal(body2)
+	live2, err := gc.BuildLiveSet(k, header, bodyJSON2)
+	if err != nil {
+		t.Fatalf("BuildLiveSet (empty keys): %v", err)
+	}
+	if _, ok := live2[""]; ok {
+		t.Error("live-set must not contain empty-string key from empty BundleEntry")
+	}
+}
+
 func TestBuildLiveSet_EmptyBodyJustHasHeaderKeys(t *testing.T) {
 	k, _ := keys.NewRepo("acme", "site")
 	header := manifest.RootHeader{LatestTx: "tx_01HZ"}

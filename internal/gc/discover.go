@@ -36,6 +36,18 @@ func DiscoverIndexes(ctx context.Context, s storage.ObjectStore, k *keys.Repo, l
 	return out, nil
 }
 
+// DiscoverBundles lists all objects under bundles/ for the repo and
+// returns the keys NOT in live. Both .bundle and .json sidecar files
+// live under this prefix and become independent sweep candidates;
+// mark-then-sweep is responsible for filtering anything still
+// referenced by the manifest.
+// Wiring this discoverer into RunMark (and the corresponding sweep
+// path) is a deferred follow-up; see plan §Phase 9 Task 9.2.
+func DiscoverBundles(ctx context.Context, s storage.ObjectStore, k *keys.Repo, live LiveSet) ([]string, error) {
+	prefix := k.Prefix() + "bundles/"
+	return listExcludingLive(ctx, s, prefix, live)
+}
+
 // DiscoverTxRecords lists all tx records for the repo and returns:
 //   - the keys of tx records that are orphan candidates (no .commit
 //     marker, not the current latest_tx),

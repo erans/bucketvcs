@@ -49,6 +49,42 @@ func TestDiscover_OrphanIndexes(t *testing.T) {
 	}
 }
 
+func TestDiscover_OrphanBundles(t *testing.T) {
+	store, _ := localfs.Open(t.TempDir())
+	k, _ := keys.NewRepo("acme", "site")
+	live := gc.LiveSet{
+		k.BundleKey("live"):         {},
+		k.BundleManifestKey("live"): {},
+	}
+	gctest.PutEmpty(t, store, k.BundleKey("live"))
+	gctest.PutEmpty(t, store, k.BundleManifestKey("live"))
+	gctest.PutEmpty(t, store, k.BundleKey("orphan"))
+	gctest.PutEmpty(t, store, k.BundleManifestKey("orphan"))
+
+	got, err := gc.DiscoverBundles(context.Background(), store, k, live)
+	if err != nil {
+		t.Fatalf("DiscoverBundles: %v", err)
+	}
+	want := map[string]bool{
+		k.BundleKey("orphan"):         true,
+		k.BundleManifestKey("orphan"): true,
+	}
+	gotSet := map[string]bool{}
+	for _, key := range got {
+		gotSet[key] = true
+	}
+	for k := range want {
+		if !gotSet[k] {
+			t.Errorf("missing candidate %q", k)
+		}
+	}
+	for k := range gotSet {
+		if !want[k] {
+			t.Errorf("unexpected candidate %q (want one of %v)", k, want)
+		}
+	}
+}
+
 func TestDiscover_OrphanTxRecords_ExcludesMarkedAndCurrent(t *testing.T) {
 	store, _ := localfs.Open(t.TempDir())
 	k, _ := keys.NewRepo("acme", "site")
