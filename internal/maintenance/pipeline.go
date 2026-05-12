@@ -34,6 +34,9 @@ func emitFinalReport(ctx context.Context, logger *slog.Logger, report Report) {
 	if report.CASAttempts > 0 {
 		emitMetric(ctx, logger, "maintenance_cas_attempts", int64(report.CASAttempts))
 	}
+	if report.BundleResult != nil {
+		emitBundleResultMetrics(ctx, logger, report.RepoID, report.BundleResult)
+	}
 }
 
 // runPipeline executes the full §4 maintenance pipeline against a single

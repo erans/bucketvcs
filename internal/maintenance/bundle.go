@@ -292,6 +292,17 @@ func runBundlePhase(
 				DurationMS:    elapsed(),
 			}, err
 		}
+
+		// 8. Audit events. Scan the pre-merge manifest snapshot (m0) for any
+		//    full_default entry that is being replaced by this generation.
+		//    Emit bundle.retired for each predecessor, then bundle.generated.
+		repoID := r.TenantID() + "/" + r.RepoID()
+		for _, oldEntry := range m0.Bundles {
+			if oldEntry.Kind == "full_default" && oldEntry.ID != art.Entry.ID {
+				emitBundleRetired(ctx, opts.Logger, repoID, oldEntry.ID, "replaced", art.Entry.ID)
+			}
+		}
+		emitBundleGenerated(ctx, opts.Logger, repoID, art, elapsed())
 	}
 
 	return &BundleResult{
