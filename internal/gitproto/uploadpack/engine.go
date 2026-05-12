@@ -64,9 +64,9 @@ type EngineRequest struct {
 	// PackURIEnabled drives the packfile-uris capability advertisement
 	// AND the in-fetch URI advertisement gate. Mirrors BundleURIEnabled
 	// but for packs (Git protocol-v2 packfile-uris). When false, the
-	// "packfile-uris=https" cap is omitted and the in-fetch gate
-	// short-circuits to "no advertisement" (clients receive only the
-	// inline packfile section).
+	// "fetch=packfile-uris" sub-feature is omitted and the in-fetch
+	// gate short-circuits to "no advertisement" (clients receive only
+	// the inline packfile section).
 	PackURIEnabled bool
 
 	// PackURIBuildURL mints the URL the packfile-uris response advertises.

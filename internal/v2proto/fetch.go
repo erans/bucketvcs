@@ -138,17 +138,48 @@ func ParseFetchArgs(args []pktline.Token) (FetchRequest, error) {
 			req.Shallow = append(req.Shallow, oid)
 		case strings.HasPrefix(line, "filter "):
 			return fmt.Errorf("fetch: filter not supported in M3")
-		case strings.HasPrefix(line, "packfile-uris="):
+		case strings.HasPrefix(line, "packfile-uris") &&
+			!strings.HasPrefix(line, "packfile-uris ") &&
+			!strings.HasPrefix(line, "packfile-uris="):
+			// Reject malformed "packfile-uris<X>..." where X is neither
+			// space (canonical fetch-pack form) nor '=' (legacy form).
+			// This arm also catches the bare "packfile-uris" keyword
+			// (no separator at all): HasPrefix is true, and neither
+			// the " " nor "=" guard matches, so the line is reported
+			// as malformed rather than falling through to "unknown
+			// argument" (which is correct but obscures the root
+			// cause) or — worse — silently dropping it if the default
+			// arm were ever relaxed. A client emitting
+			// `packfile-uris\t<csv>` or `packfile-uris<csv>` is buggy;
+			// surface that explicitly.
+			return fmt.Errorf("fetch: malformed packfile-uris line %q (expected `packfile-uris <csv>` or `packfile-uris=<csv>`)", line)
+		case strings.HasPrefix(line, "packfile-uris "), strings.HasPrefix(line, "packfile-uris="):
 			// Per Git protocol-v2 packfile-uris: the value is a comma-
 			// separated list of URI protocol schemes the client accepts.
-			// This is a capability negotiation — the client offers the schemes
-			// it can handle; the server picks the ones it supports. Unknown
-			// schemes are silently dropped rather than rejected, so a stock
-			// Git client sending "https,http" (or any superset) still works.
-			// Multiple "packfile-uris=" lines are allowed and accumulate.
-			// We still reject: empty value (malformed) and empty CSV entries
-			// (malformed — not the same as an unknown scheme).
-			csv := strings.TrimPrefix(line, "packfile-uris=")
+			// The on-the-wire framing emitted by git's fetch-pack.c is
+			// `packfile-uris <csv>` (space-separated; see
+			// `packet_buf_write(&req_buf, "packfile-uris %s", ...)`),
+			// not `packfile-uris=<csv>`. We accept either prefix
+			// defensively: the canonical form per the spec is the
+			// space-separated one (which real git clients send), but
+			// the `=`-separated form preserves backward compatibility
+			// with any older internal callers that adopted the
+			// arguments-style format before the wire-level fix.
+			//
+			// This is a capability negotiation — the client offers the
+			// schemes it can handle; the server picks the ones it
+			// supports. Unknown schemes are silently dropped rather
+			// than rejected, so a stock Git client sending "https,http"
+			// (or any superset) still works. Multiple lines are allowed
+			// and accumulate. We still reject: empty value (malformed)
+			// and empty CSV entries (malformed — not the same as an
+			// unknown scheme).
+			var csv string
+			if strings.HasPrefix(line, "packfile-uris=") {
+				csv = strings.TrimPrefix(line, "packfile-uris=")
+			} else {
+				csv = strings.TrimPrefix(line, "packfile-uris ")
+			}
 			if csv == "" {
 				return fmt.Errorf("fetch: empty packfile-uris value")
 			}

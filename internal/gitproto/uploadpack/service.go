@@ -85,10 +85,17 @@ func serviceImpl(req *EngineRequest) error {
 		// A leading Flush with no command means end-of-stream on SSH.
 		return ErrEOF
 	}
-	if tokens[0].Type != pktline.Data {
-		return errBadRequestf("empty command")
+	// Locate the command= pkt-line. Protocol-v2 nominally puts it first, but
+	// git's bundle-uri client (observed in git 2.54) sends capability lines
+	// like "agent=" and "object-format=" BEFORE the "command=bundle-uri"
+	// line. findCommandLine scans data tokens up to the first delim/flush
+	// (or first non-Data token) so the "command=" line can be at any
+	// position before the delimiter — one error path covers both
+	// "no command= line at all" and "leading non-Data token" variants.
+	cmdLine, ok := findCommandLine(tokens)
+	if !ok {
+		return errBadRequestf("missing command= pkt-line")
 	}
-	cmdLine := strings.TrimRight(string(tokens[0].Payload), "\n")
 
 	r, err := repo.Open(req.Ctx, req.Store, req.Tenant, req.Repo)
 	if err != nil {
@@ -128,6 +135,34 @@ func serviceImpl(req *EngineRequest) error {
 // to detect "client error" vs "server error".
 func errBadRequestf(format string, args ...any) error {
 	return fmt.Errorf("%w: "+format, append([]any{ErrBadRequest}, args...)...)
+}
+
+// findCommandLine scans tokens for the first Data pkt-line whose payload
+// begins with "command=" and returns its trimmed payload. It stops at the
+// first non-Data token (Delim or Flush), so the scan only considers the
+// initial run of Data frames that protocol-v2 uses for command + capability
+// advertisement.
+//
+// Returns (cmdLine, true) on match. Returns ("", false) when:
+//   - tokens is empty
+//   - the leading token is non-Data (e.g. a stray Delim/Flush at position 0)
+//   - no Data token in the leading run starts with "command="
+//
+// Protocol-v2 nominally puts "command=" at tokens[0], but git's bundle-uri
+// client (observed in git 2.54) emits capability lines like "agent=..." and
+// "object-format=sha1" before "command=bundle-uri". This helper accommodates
+// either layout without changing the rest of the dispatcher.
+func findCommandLine(tokens []pktline.Token) (string, bool) {
+	for _, tok := range tokens {
+		if tok.Type != pktline.Data {
+			return "", false
+		}
+		s := strings.TrimRight(string(tok.Payload), "\n")
+		if strings.HasPrefix(s, "command=") {
+			return s, true
+		}
+	}
+	return "", false
 }
 
 // serveFetch is a verbatim port of handleFetch from internal/gateway/upload_pack.go.
@@ -294,13 +329,29 @@ func serveFetch(req *EngineRequest, tokens []pktline.Token, body *manifest.Body)
 	// request shape matches FullPackRequested (single canonical pack
 	// covers every want with no haves), and BuildURL succeeds, we emit
 	// a packfile-uris response section between the acknowledgments and
-	// the packfile section. The inline pack still flows unchanged — per
-	// Git protocol-v2, a packfile section MUST follow when packfile-uris
-	// is present, and elision via gitcli.PackObjectsForFetch
-	// `--exclude-packfile=<sha1>` is a future optimization (out of scope
-	// for Task 8.2). All gate inputs are pure functions of fetchReq +
-	// body; no storage I/O happens until BuildURL is called.
+	// the packfile section, AND exclude the URI-covered objects from the
+	// inline pack via `--keep-pack=pack-<PackID>.pack` (M11 Phase 10).
+	// Per Git protocol-v2, a packfile section MUST follow when
+	// packfile-uris is present; the inline pack becomes empty/near-empty
+	// once its objects are elided. The empty-inline-pack path is
+	// necessary because a non-empty inline pack alongside the URI pack
+	// trips a known git fetch-pack bug (b664e9ffa1); see the
+	// excludeFromInlinePackID comment below. All gate inputs are pure
+	// functions of fetchReq + body; no storage I/O happens until
+	// BuildURL is called.
 	var packURIStanza string
+	// excludeFromInlinePackID is the PackID of the pack the URI advertise
+	// points at, used to tell `git pack-objects` to skip those objects via
+	// `--keep-pack=pack-<PackID>.pack`. Empty when no URI is advertised.
+	// Per Phase 8 spec: protocol-v2 requires a packfile section even when
+	// packfile-uris is sent, but the inline pack MUST NOT contain objects
+	// already covered by the advertised URI — otherwise the client's
+	// http-fetch -> index-pack pipeline observes a "no new objects" pack
+	// and fetch-pack errors with "expected keep then TAB at start of
+	// http-fetch output" (a known git fetch-pack bug; see git's
+	// b664e9ffa1). Stock GitHub/Gitlab elide URI-pack objects exactly
+	// this way.
+	var excludeFromInlinePackID string
 	if req.PackURIEnabled && req.PackURIBuildURL != nil && len(fetchReq.PackfileURIs) > 0 && len(fetchReq.Haves) == 0 {
 		refTips := make([]string, 0, len(body.Refs))
 		for _, oid := range body.Refs {
@@ -320,10 +371,21 @@ func serveFetch(req *EngineRequest, tokens []pktline.Token, body *manifest.Body)
 				FullPackRequested: true,
 				PackChecksum:      pe.PackChecksum,
 				PackKey:           pe.PackKey,
+				PackID:            pe.PackID,
 				BuildURL:          req.PackURIBuildURL,
 			})
-			if gerr == nil {
+			if gerr == nil && res.Stanza != "" {
 				packURIStanza = res.Stanza
+				// Pack files in the bare mirror are named
+				// `pack-<PackID>.pack` (see exporter.downloadAndIndexPack).
+				// Pass that basename to pack-objects --keep-pack so the
+				// inline pack excludes its objects. A non-empty
+				// res.Stanza implies EvaluatePackURIAdvertise has
+				// already validated pe.PackID is 40 lowercase hex
+				// (matching gitcli.validPackBasename's shape), so
+				// advertise emission and keep-pack elision cannot
+				// desynchronize mid-response.
+				excludeFromInlinePackID = pe.PackID
 			}
 		}
 	}
@@ -348,6 +410,7 @@ func serveFetch(req *EngineRequest, tokens []pktline.Token, body *manifest.Body)
 		IncludeTag: fetchReq.IncludeTag,
 		OfsDelta:   fetchReq.OfsDelta,
 		NoProgress: fetchReq.NoProgress,
+		KeepPacks:  keepPackBasenames(excludeFromInlinePackID),
 	})
 	if err != nil {
 		// If we already wrote acknowledgments, we have to surface this on
@@ -380,9 +443,14 @@ func serveFetch(req *EngineRequest, tokens []pktline.Token, body *manifest.Body)
 		// the section header is "packfile-uris\n" followed by one
 		// "<sha1> <uri>\n" line per advertised pack, terminated by a
 		// delim-pkt before the next ("packfile") section. The inline pack
-		// still flows in the packfile section that follows — Task 8.2 keeps
-		// the protocol shape backwards-compatible; pack elision via
-		// `--exclude-packfile=<sha1>` is a future optimization.
+		// still flows in the packfile section that follows for protocol
+		// framing, but it excludes objects already covered by the URI
+		// pack via `--keep-pack=pack-<PackID>.pack` (forwarded through
+		// PackForFetchOptions.KeepPacks above). Without this elision a
+		// single-canonical-pack clone delivers the same objects on both
+		// surfaces and the client's http-fetch -> index-pack pipeline
+		// errors with "expected keep then TAB at start of http-fetch
+		// output" (a known git fetch-pack bug; see git's b664e9ffa1).
 		if err := pw.WriteString("packfile-uris\n"); err != nil {
 			_ = pack.Close()
 			return nil
@@ -615,6 +683,24 @@ func drainPktLine(r io.Reader) ([]pktline.Token, error) {
 			return out, nil
 		}
 	}
+}
+
+// keepPackBasenames returns the pack basenames to pass to
+// `git pack-objects --keep-pack=<name>` so the inline pack excludes
+// objects already covered by an advertised pack URL. Returns nil when
+// packID is empty (no URI advertised) — `nil` rather than an empty
+// slice so the caller's PackForFetchOptions.KeepPacks remains zero
+// and pack-objects sees no extra args.
+//
+// The pack file inside the bare mirror is named `pack-<PackID>.pack`
+// (see exporter.downloadAndIndexPack), so the basename is derived
+// directly from the canonical pack entry's PackID without any storage
+// lookup.
+func keepPackBasenames(packID string) []string {
+	if packID == "" {
+		return nil
+	}
+	return []string{"pack-" + packID + ".pack"}
 }
 
 // serveFetchLazyPath attempts pure-Go negotiation via the reachability index

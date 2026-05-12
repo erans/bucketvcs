@@ -33,13 +33,15 @@ func (s *Server) handleInfoRefs(w http.ResponseWriter, r *http.Request, tenant, 
 		// advertisement to begin immediately without it).
 		var body bytes.Buffer
 		req := &uploadpack.EngineRequest{
-			Ctx:             r.Context(),
-			Tenant:          tenant,
-			Repo:            repoID,
-			Stdout:          &body,
-			ProtocolVersion: proto,
-			Store:           s.store,
-			AgentVersion:    s.opts.Version,
+			Ctx:              r.Context(),
+			Tenant:           tenant,
+			Repo:             repoID,
+			Stdout:           &body,
+			ProtocolVersion:  proto,
+			Store:            s.store,
+			AgentVersion:     s.opts.Version,
+			BundleURIEnabled: s.opts.BundleURIEnabled,
+			PackURIEnabled:   s.opts.PackURIEnabled,
 		}
 		if err := uploadpack.Advertise(req); err != nil {
 			if errors.Is(err, uploadpack.ErrRepoNotFound) {

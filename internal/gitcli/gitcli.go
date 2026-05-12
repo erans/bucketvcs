@@ -194,6 +194,23 @@ func validHexOID(s string) bool {
 	return true
 }
 
+// validPackBasename returns true iff s matches exactly `pack-<40hex>.pack`.
+// This is the canonical form pack files take inside a bare repo's
+// `objects/pack/` directory (set by `git index-pack` and by our
+// exporter.downloadAndIndexPack). Strict matching prevents an
+// attacker-influenced KeepPacks value from injecting option syntax via
+// `--keep-pack=<value>` argv elements.
+func validPackBasename(s string) bool {
+	const prefix, suffix = "pack-", ".pack"
+	if len(s) != len(prefix)+40+len(suffix) {
+		return false
+	}
+	if !strings.HasPrefix(s, prefix) || !strings.HasSuffix(s, suffix) {
+		return false
+	}
+	return validHexOID(s[len(prefix) : len(prefix)+40])
+}
+
 // Version returns the output of `git --version` (e.g. "git version 2.43.0").
 func Version(ctx context.Context) (string, error) {
 	out, err := run(ctx, "", "--version")
@@ -532,6 +549,22 @@ type PackForFetchOptions struct {
 	// is via the ShallowFile contents written by the caller before invocation.
 	// Stored for caller bookkeeping; not consumed by this package.
 	Depth int
+	// KeepPacks is a list of pack basenames (e.g. "pack-<40hex>.pack")
+	// forwarded to `git pack-objects --keep-pack=<name>`. Objects already
+	// present in any named pack are excluded from the output stream even
+	// if they would otherwise be packed. Used by M11 Phase 8.2's
+	// packfile-uri path: when the server advertises a pack URL for an
+	// existing canonical pack, the inline pack returned in the same
+	// response MUST NOT contain those objects — otherwise the client's
+	// http-fetch -> index-pack pipeline observes a no-new-objects pack
+	// and fetch-pack errors with "expected keep then TAB at start of
+	// http-fetch output" (a known git fetch-pack bug; see git's
+	// b664e9ffa1).
+	//
+	// Each entry MUST match `pack-<40hex>.pack` exactly; arbitrary path
+	// fragments are rejected to prevent option-value injection from a
+	// caller that hands us a partly-controlled string.
+	KeepPacks []string
 }
 
 // PackObjectsForFetch invokes "git pack-objects --revs --stdout" against the
@@ -586,6 +619,20 @@ func PackObjectsForFetch(ctx context.Context, dir string, opts PackForFetchOptio
 	}
 	if opts.NoProgress {
 		args = append(args, "-q")
+	}
+	// Strict allowlist validation of KeepPacks: each entry must match
+	// `pack-<40hex>.pack` exactly. The basename is forwarded verbatim to
+	// `git pack-objects --keep-pack=<name>` as a single shell-safe argv
+	// element, but a partly-attacker-controlled value containing `=`,
+	// `--`, or path separators could still confuse downstream tooling
+	// that re-parses the argv string (e.g. an operator running `ps`).
+	// Rejecting non-conforming values keeps every supported input
+	// canonical.
+	for i, kp := range opts.KeepPacks {
+		if !validPackBasename(kp) {
+			return nil, fmt.Errorf("pack-objects: invalid keep-pack[%d] %q (must match pack-<40hex>.pack)", i, kp)
+		}
+		args = append(args, "--keep-pack="+kp)
 	}
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Dir = dir

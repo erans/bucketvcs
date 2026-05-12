@@ -26,10 +26,15 @@ type CapsOptions struct {
 	// Sourced from EngineRequest.BundleURIEnabled, which the gateway and
 	// sshd transports populate from their respective Options.
 	BundleURI bool
-	// PackURI, when true, includes "packfile-uris=https" in the capability
-	// list (Git protocol-v2 packfile-uris). The M11 server only mints HTTPS
-	// URLs so the proto-list is fixed to "https". Sourced from
-	// EngineRequest.PackURIEnabled.
+	// PackURI, when true, appends "packfile-uris" as a feature qualifier
+	// on the "fetch" command capability line (i.e. emits
+	// "fetch=packfile-uris" instead of bare "fetch"). Per Git protocol-v2,
+	// packfile-uris is a sub-feature of the fetch command, not a top-
+	// level cap; the client's fetch-pack uses server_supports_feature
+	// ("fetch", "packfile-uris", 0) to detect support. The supported-
+	// protocol list (https only on this server) is communicated by the
+	// client in its `packfile-uris <protos>` request line, not in the
+	// advertisement. Sourced from EngineRequest.PackURIEnabled.
 	PackURI bool
 }
 
@@ -45,10 +50,9 @@ type CapsOptions struct {
 //	pkt-line: "version 2\n"
 //	pkt-line: "agent=bucketvcs/<version>\n"
 //	pkt-line: "ls-refs=unborn\n"
-//	pkt-line: "fetch\n"
+//	pkt-line: "fetch\n"               // or "fetch=packfile-uris\n" when opts.PackURI
 //	pkt-line: "object-format=sha1\n"
 //	[pkt-line: "bundle-uri\n"]   // only when opts.BundleURI is true
-//	[pkt-line: "packfile-uris=https\n"]   // only when opts.PackURI is true
 //	flush
 //
 // Note: "fetch" is advertised without the "=shallow" feature qualifier
@@ -89,10 +93,9 @@ func WriteV2Advertisement(w io.Writer, service, version string, opts CapsOptions
 //	pkt-line: "version 2\n"
 //	pkt-line: "agent=bucketvcs/<version>\n"
 //	pkt-line: "ls-refs=unborn\n"
-//	pkt-line: "fetch\n"
+//	pkt-line: "fetch\n"               // or "fetch=packfile-uris\n" when opts.PackURI
 //	pkt-line: "object-format=sha1\n"
 //	[pkt-line: "bundle-uri\n"]   // only when opts.BundleURI is true
-//	[pkt-line: "packfile-uris=https\n"]   // only when opts.PackURI is true
 //	flush
 func WriteV2AdvertisementSSH(w io.Writer, version string, opts CapsOptions) error {
 	if strings.ContainsAny(version, "\r\n\x00") {
@@ -117,19 +120,44 @@ func V2Capabilities(version string) []string {
 // V2CapabilitiesWithOptions returns the capability advertisement lines for
 // protocol v2, conditionally including optional capabilities per opts.
 // Each string is a bare capability name (no trailing newline).
+//
+// packfile-uris is advertised per Git protocol-v2 §Capability Advertisement
+// as a feature on the "fetch" command capability, not as a separate top-
+// level cap. The client's `fetch-pack.c` uses
+// `server_supports_feature("fetch", "packfile-uris", 0)` to detect server
+// support; that helper checks for the bare feature name in the space-
+// separated value list on the "fetch" line. A standalone
+// "packfile-uris=https\n" line — which we previously emitted — does NOT
+// trigger that detection, so the client silently skips sending its
+// `packfile-uris <protos>` request line and the in-fetch advertise gate
+// never fires. See git/upload-pack.c:upload_pack_advertise where
+// `strbuf_addstr(value, " packfile-uris")` is appended onto the fetch
+// capability's value buffer for the canonical wire shape.
+//
+// The `=https` suffix the old code carried was a server-side hint about
+// which schemes the server would mint (HTTPS only). Per the spec, the
+// supported-protocol list is communicated by the CLIENT in its
+// `packfile-uris <protos>` request line and the server simply chooses
+// whichever URLs honor that list. So the suffix is dropped here; the
+// server's HTTPS-only behavior is enforced when minting URLs, not in
+// the cap advertisement.
 func V2CapabilitiesWithOptions(version string, opts CapsOptions) []string {
+	fetchCap := "fetch"
+	if opts.PackURI {
+		// Single sub-feature on the "fetch" command cap. If a second
+		// sub-feature is added later, switch to space-separated
+		// composition (e.g. "fetch=packfile-uris shallow") at that time.
+		fetchCap = "fetch=packfile-uris"
+	}
 	caps := []string{
 		"version 2",
 		"agent=" + AgentName + "/" + version,
 		"ls-refs=unborn",
-		"fetch",
+		fetchCap,
 		"object-format=sha1",
 	}
 	if opts.BundleURI {
 		caps = append(caps, "bundle-uri")
-	}
-	if opts.PackURI {
-		caps = append(caps, "packfile-uris=https")
 	}
 	return caps
 }

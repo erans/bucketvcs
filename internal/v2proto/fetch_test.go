@@ -3,6 +3,7 @@ package v2proto
 import (
 	"bytes"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -371,6 +372,48 @@ func TestParseFetchArgs_PackfileURIs_Single(t *testing.T) {
 	}
 }
 
+// TestParseFetchArgs_PackfileURIs_SpaceSeparated_Single covers the
+// canonical wire form sent by stock `git` clients: "packfile-uris <csv>"
+// (space, not `=`). See fetch-pack.c:send_fetch_request — the on-the-wire
+// emission is `packet_buf_write(&req_buf, "packfile-uris %s", to_send.buf)`.
+// Phase 10.2 surfaced that we previously only accepted the `=`-separated
+// form, which silently dropped real-client opt-ins.
+func TestParseFetchArgs_PackfileURIs_SpaceSeparated_Single(t *testing.T) {
+	args := tokensFromLines(
+		"command=fetch\n",
+		"DELIM",
+		"want 1111111111111111111111111111111111111111\n",
+		"packfile-uris https\n",
+		"FLUSH",
+	)
+	got, err := ParseFetchArgs(args)
+	if err != nil {
+		t.Fatalf("ParseFetchArgs: %v", err)
+	}
+	if !reflect.DeepEqual(got.PackfileURIs, []string{"https"}) {
+		t.Fatalf("PackfileURIs: got %v, want [https]", got.PackfileURIs)
+	}
+}
+
+// TestParseFetchArgs_PackfileURIs_SpaceSeparated_RejectsEmpty rejects
+// "packfile-uris " with an empty trailing value (the space-separated
+// counterpart to TestParseFetchArgs_PackfileURIs_RejectsEmpty). A
+// stock client would never emit this shape, but a malformed proxy or
+// rewriting middlebox might, and silently accepting it would mask the
+// bug.
+func TestParseFetchArgs_PackfileURIs_SpaceSeparated_RejectsEmpty(t *testing.T) {
+	args := tokensFromLines(
+		"command=fetch\n",
+		"DELIM",
+		"want 1111111111111111111111111111111111111111\n",
+		"packfile-uris \n",
+		"FLUSH",
+	)
+	if _, err := ParseFetchArgs(args); err == nil {
+		t.Fatalf("ParseFetchArgs: expected error on empty space-separated packfile-uris value")
+	}
+}
+
 // TestParseFetchArgs_PackfileURIs_RejectsEmpty rejects "packfile-uris=" with
 // no value (an empty CSV is not a valid client opt-in).
 func TestParseFetchArgs_PackfileURIs_RejectsEmpty(t *testing.T) {
@@ -383,6 +426,30 @@ func TestParseFetchArgs_PackfileURIs_RejectsEmpty(t *testing.T) {
 	)
 	if _, err := ParseFetchArgs(args); err == nil {
 		t.Fatalf("ParseFetchArgs: expected error on empty packfile-uris value")
+	}
+}
+
+// TestParseFetchArgs_PackfileURIs_RejectsTabSeparated rejects the
+// malformed `packfile-uris<TAB><csv>` form. A buggy client emitting tab
+// instead of space (or running the bytes together as
+// `packfile-urishttps`) should get an explicit malformed-line error
+// rather than the more confusing "unknown argument" diagnostic. This
+// guards the parser's explicit pre-case that sits ahead of the
+// space/`=` accepting case.
+func TestParseFetchArgs_PackfileURIs_RejectsTabSeparated(t *testing.T) {
+	args := tokensFromLines(
+		"command=fetch\n",
+		"DELIM",
+		"want 1111111111111111111111111111111111111111\n",
+		"packfile-uris\thttps\n",
+		"FLUSH",
+	)
+	_, err := ParseFetchArgs(args)
+	if err == nil {
+		t.Fatalf("ParseFetchArgs: expected error on tab-separated packfile-uris")
+	}
+	if !strings.Contains(err.Error(), "malformed packfile-uris") {
+		t.Fatalf("ParseFetchArgs: error %q does not name the malformed packfile-uris case", err)
 	}
 }
 

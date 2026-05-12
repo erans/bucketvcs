@@ -25,6 +25,15 @@ type PackURIInputs struct {
 	// PackKey is the storage key of the canonical pack. Required
 	// (gate skips on empty); passed to BuildURL as the storageKey arg.
 	PackKey string
+	// PackID is the canonical pack's content-addressed identifier. The
+	// bare-mirror filename is `pack-<PackID>.pack`, which the upload-pack
+	// service forwards to `git pack-objects --keep-pack=` to elide
+	// URI-covered objects from the inline pack. Required (gate skips on
+	// empty) and must be 40 lowercase hex — same shape as PackChecksum,
+	// enforced here so the advertise decision and the downstream
+	// keep-pack basename validation (gitcli.validPackBasename) cannot
+	// disagree mid-response.
+	PackID string
 	// BuildURL mints a URL via the gateway's URLBuilder. The closure
 	// receives the manifest pack hash, storage key, and an expected
 	// hash hint (currently empty). On error or empty URL the gate
@@ -56,14 +65,17 @@ type PackURIResult struct {
 func EvaluatePackURIAdvertise(ctx context.Context, in PackURIInputs) (PackURIResult, error) {
 	// Gate 1: client must have opted in AND the request must be servable
 	// by a single canonical pack AND we must know which pack to advertise.
-	if !in.ClientOptedIn || !in.FullPackRequested || in.PackChecksum == "" || in.PackKey == "" {
+	if !in.ClientOptedIn || !in.FullPackRequested || in.PackChecksum == "" || in.PackKey == "" || in.PackID == "" {
 		return PackURIResult{}, nil
 	}
 
-	// Gate 2: strict 40-hex lowercase validation of the SHA-1 trailer.
-	// A malformed checksum would produce an invalid `<sha1> <uri>\n`
-	// line that some clients reject as a malformed advertisement.
-	if !validPackSHA1(in.PackChecksum) {
+	// Gate 2: strict 40-hex lowercase validation of the SHA-1 trailer
+	// AND of the PackID. Validating PackID here (not at the keep-pack
+	// call site downstream) ensures advertise emission and inline-pack
+	// elision stay in lockstep: if either value is malformed we skip
+	// the whole URI advertise rather than emit a stanza whose paired
+	// `--keep-pack=pack-<PackID>.pack` would be rejected mid-response.
+	if !validPackSHA1(in.PackChecksum) || !validPackSHA1(in.PackID) {
 		return PackURIResult{}, nil
 	}
 

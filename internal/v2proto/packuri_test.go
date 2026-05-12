@@ -41,6 +41,7 @@ func TestEvaluatePackURIAdvertise_Eligible(t *testing.T) {
 		FullPackRequested: true,
 		PackChecksum:      validPackChecksum,
 		PackKey:           "tenants/t/repos/r/packs/canonical/sha256-ff.pack",
+		PackID:            validPackChecksum,
 		BuildURL:          build,
 	})
 	if err != nil {
@@ -70,6 +71,7 @@ func TestEvaluatePackURIAdvertise_NotOptedIn(t *testing.T) {
 		FullPackRequested: true,
 		PackChecksum:      validPackChecksum,
 		PackKey:           "k",
+		PackID:            validPackChecksum,
 		BuildURL:          build,
 	})
 	if err != nil {
@@ -92,6 +94,7 @@ func TestEvaluatePackURIAdvertise_NotFullPack(t *testing.T) {
 		FullPackRequested: false,
 		PackChecksum:      validPackChecksum,
 		PackKey:           "k",
+		PackID:            validPackChecksum,
 		BuildURL:          build,
 	})
 	if err != nil {
@@ -115,6 +118,7 @@ func TestEvaluatePackURIAdvertise_MissingChecksum_Skips(t *testing.T) {
 		FullPackRequested: true,
 		PackChecksum:      "",
 		PackKey:           "k",
+		PackID:            validPackChecksum,
 		BuildURL:          build,
 	})
 	if err != nil {
@@ -150,6 +154,67 @@ func TestEvaluatePackURIAdvertise_MissingPackKey_Skips(t *testing.T) {
 	}
 }
 
+// TestEvaluatePackURIAdvertise_MissingPackID_Skips covers a manifest
+// inconsistency where PackID is empty. Gate skips silently — without
+// PackID we cannot derive the bare-mirror keep-pack basename, so the
+// inline-pack elision would fail mid-response if we advertised.
+func TestEvaluatePackURIAdvertise_MissingPackID_Skips(t *testing.T) {
+	build, rec := fakeBuildURL("https://cdn.example.com/pack.pack", nil)
+	res, err := EvaluatePackURIAdvertise(context.Background(), PackURIInputs{
+		ClientOptedIn:     true,
+		FullPackRequested: true,
+		PackChecksum:      validPackChecksum,
+		PackKey:           "k",
+		PackID:            "",
+		BuildURL:          build,
+	})
+	if err != nil {
+		t.Fatalf("EvaluatePackURIAdvertise: %v", err)
+	}
+	if res.Stanza != "" {
+		t.Fatalf("Stanza: got %q, want empty", res.Stanza)
+	}
+	if rec.called {
+		t.Fatalf("BuildURL must not be called when PackID is empty")
+	}
+}
+
+// TestEvaluatePackURIAdvertise_InvalidPackIDFormat — PackID must be 40
+// lowercase hex, same shape as PackChecksum and as gitcli.validPackBasename
+// requires for `pack-<id>.pack`. Validating at the advertise gate keeps
+// stanza emission and downstream keep-pack elision in lockstep: skip the
+// whole URI advertise rather than emit a stanza paired with a basename
+// that the inline-pack stage would reject mid-response.
+func TestEvaluatePackURIAdvertise_InvalidPackIDFormat(t *testing.T) {
+	for name, id := range map[string]string{
+		"uppercase": strings.ToUpper(validPackChecksum),
+		"too_short": validPackChecksum[:39],
+		"too_long":  validPackChecksum + "a",
+		"non_hex":   "0123456789abcdef0123456789abcdef0123456g",
+	} {
+		t.Run(name, func(t *testing.T) {
+			build, rec := fakeBuildURL("https://cdn.example.com/pack.pack", nil)
+			res, err := EvaluatePackURIAdvertise(context.Background(), PackURIInputs{
+				ClientOptedIn:     true,
+				FullPackRequested: true,
+				PackChecksum:      validPackChecksum,
+				PackKey:           "k",
+				PackID:            id,
+				BuildURL:          build,
+			})
+			if err != nil {
+				t.Fatalf("EvaluatePackURIAdvertise: %v", err)
+			}
+			if res.Stanza != "" {
+				t.Fatalf("Stanza: got %q, want empty (bad PackID %q)", res.Stanza, id)
+			}
+			if rec.called {
+				t.Fatalf("BuildURL must not be called for malformed PackID")
+			}
+		})
+	}
+}
+
 // TestEvaluatePackURIAdvertise_BuildURLError_Skips — BuildURL returned an
 // error; gate must produce empty stanza with nil error so the caller
 // falls through to the inline pack section without disturbing the
@@ -161,6 +226,7 @@ func TestEvaluatePackURIAdvertise_BuildURLError_Skips(t *testing.T) {
 		FullPackRequested: true,
 		PackChecksum:      validPackChecksum,
 		PackKey:           "k",
+		PackID:            validPackChecksum,
 		BuildURL:          build,
 	})
 	if err != nil {
@@ -181,6 +247,7 @@ func TestEvaluatePackURIAdvertise_BuildURLEmptyString_Skips(t *testing.T) {
 		FullPackRequested: true,
 		PackChecksum:      validPackChecksum,
 		PackKey:           "k",
+		PackID:            validPackChecksum,
 		BuildURL:          build,
 	})
 	if err != nil {
@@ -207,6 +274,7 @@ func TestEvaluatePackURIAdvertise_RejectsControlCharsInURI(t *testing.T) {
 				FullPackRequested: true,
 				PackChecksum:      validPackChecksum,
 				PackKey:           "k",
+				PackID:            validPackChecksum,
 				BuildURL:          build,
 			})
 			if err != nil {
@@ -236,6 +304,7 @@ func TestEvaluatePackURIAdvertise_InvalidChecksumFormat(t *testing.T) {
 				FullPackRequested: true,
 				PackChecksum:      sum,
 				PackKey:           "k",
+				PackID:            validPackChecksum,
 				BuildURL:          build,
 			})
 			if err != nil {
@@ -259,6 +328,7 @@ func TestEvaluatePackURIAdvertise_NilBuildURL(t *testing.T) {
 		FullPackRequested: true,
 		PackChecksum:      validPackChecksum,
 		PackKey:           "k",
+		PackID:            validPackChecksum,
 		BuildURL:          nil,
 	})
 	if err != nil {

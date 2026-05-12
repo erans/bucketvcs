@@ -218,45 +218,49 @@ func TestWriteV2AdvertisementSSH_BundleURICapability(t *testing.T) {
 }
 
 // TestV2Capabilities_PackURIConditional verifies the slice form of the cap
-// list: packfile-uris=https absent by default, present when opted in.
+// list: the "fetch" capability gains a "=packfile-uris" feature qualifier
+// when PackURI is enabled (per Git protocol-v2: packfile-uris is a sub-
+// feature of fetch, not a top-level cap).
 func TestV2Capabilities_PackURIConditional(t *testing.T) {
 	capsOff := V2CapabilitiesWithOptions("0.1", CapsOptions{PackURI: false})
 	for _, c := range capsOff {
-		if c == "packfile-uris=https" {
-			t.Errorf("V2CapabilitiesWithOptions(PackURI=false) should not include packfile-uris=https, got %v", capsOff)
-			break
+		if strings.HasPrefix(c, "fetch=") {
+			t.Errorf("V2CapabilitiesWithOptions(PackURI=false) should not qualify fetch, got %v", capsOff)
+		}
+		if c == "packfile-uris=https" || c == "packfile-uris" {
+			t.Errorf("V2CapabilitiesWithOptions(PackURI=false) should not include packfile-uris cap, got %v", capsOff)
 		}
 	}
 	capsOn := V2CapabilitiesWithOptions("0.1", CapsOptions{PackURI: true})
 	found := false
 	for _, c := range capsOn {
-		if c == "packfile-uris=https" {
+		if c == "fetch=packfile-uris" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("V2CapabilitiesWithOptions(PackURI=true) should include packfile-uris=https, got %v", capsOn)
+		t.Errorf("V2CapabilitiesWithOptions(PackURI=true) should include fetch=packfile-uris, got %v", capsOn)
 	}
 
 	// BundleURI and PackURI are independent: enabling both yields both caps.
 	capsBoth := V2CapabilitiesWithOptions("0.1", CapsOptions{BundleURI: true, PackURI: true})
-	var hasBundle, hasPack bool
+	var hasBundle, hasFetchPack bool
 	for _, c := range capsBoth {
 		if c == "bundle-uri" {
 			hasBundle = true
 		}
-		if c == "packfile-uris=https" {
-			hasPack = true
+		if c == "fetch=packfile-uris" {
+			hasFetchPack = true
 		}
 	}
-	if !hasBundle || !hasPack {
-		t.Errorf("expected both bundle-uri and packfile-uris=https, got %v", capsBoth)
+	if !hasBundle || !hasFetchPack {
+		t.Errorf("expected both bundle-uri and fetch=packfile-uris, got %v", capsBoth)
 	}
 }
 
 // TestWriteV2Advertisement_PackURICapability checks the HTTP advertisement
-// emits "packfile-uris=https" iff opts.PackURI is true.
+// emits "fetch=packfile-uris" iff opts.PackURI is true.
 func TestWriteV2Advertisement_PackURICapability(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -274,20 +278,20 @@ func TestWriteV2Advertisement_PackURICapability(t *testing.T) {
 			caps := collectCapLines(t, &buf)
 			found := false
 			for _, c := range caps {
-				if c == "packfile-uris=https" {
+				if c == "fetch=packfile-uris" {
 					found = true
 					break
 				}
 			}
 			if found != tc.wantCap {
-				t.Errorf("packfile-uris=https found=%v, want %v; caps=%v", found, tc.wantCap, caps)
+				t.Errorf("fetch=packfile-uris found=%v, want %v; caps=%v", found, tc.wantCap, caps)
 			}
 		})
 	}
 }
 
 // TestWriteV2AdvertisementSSH_PackURICapability checks the SSH advertisement
-// emits "packfile-uris=https" iff opts.PackURI is true.
+// emits "fetch=packfile-uris" iff opts.PackURI is true.
 func TestWriteV2AdvertisementSSH_PackURICapability(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -311,13 +315,13 @@ func TestWriteV2AdvertisementSSH_PackURICapability(t *testing.T) {
 			}
 			found := false
 			for _, c := range caps {
-				if c == "packfile-uris=https" {
+				if c == "fetch=packfile-uris" {
 					found = true
 					break
 				}
 			}
 			if found != tc.wantCap {
-				t.Errorf("packfile-uris=https found=%v, want %v; caps=%v", found, tc.wantCap, caps)
+				t.Errorf("fetch=packfile-uris found=%v, want %v; caps=%v", found, tc.wantCap, caps)
 			}
 		})
 	}

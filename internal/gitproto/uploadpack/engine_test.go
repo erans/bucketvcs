@@ -506,8 +506,10 @@ func TestService_BundleURI_Advertises(t *testing.T) {
 }
 
 // TestAdvertise_V2_PackURI_Cap verifies that setting PackURIEnabled=true
-// causes the packfile-uris=https capability to appear in the v2 advertisement,
-// and is absent when disabled.
+// causes the "fetch=packfile-uris" capability to appear in the v2
+// advertisement (packfile-uris is a sub-feature of the fetch command,
+// not a top-level cap; the client's server_supports_feature() helper
+// requires this exact shape), and is absent when disabled.
 func TestAdvertise_V2_PackURI_Cap(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires git binary")
@@ -536,8 +538,8 @@ func TestAdvertise_V2_PackURI_Cap(t *testing.T) {
 	if err := Advertise(reqOn); err != nil {
 		t.Fatalf("Advertise (enabled): %v", err)
 	}
-	if !bytes.Contains(bufOn.Bytes(), []byte("packfile-uris=https")) {
-		t.Fatalf("expected packfile-uris=https cap in advertisement, got: %q", bufOn.Bytes())
+	if !bytes.Contains(bufOn.Bytes(), []byte("fetch=packfile-uris")) {
+		t.Fatalf("expected fetch=packfile-uris cap in advertisement, got: %q", bufOn.Bytes())
 	}
 
 	// Disabled: cap must be absent.
@@ -555,8 +557,8 @@ func TestAdvertise_V2_PackURI_Cap(t *testing.T) {
 	if err := Advertise(reqOff); err != nil {
 		t.Fatalf("Advertise (disabled): %v", err)
 	}
-	if bytes.Contains(bufOff.Bytes(), []byte("packfile-uris=https")) {
-		t.Fatalf("packfile-uris=https cap must be absent when PackURIEnabled=false, got: %q", bufOff.Bytes())
+	if bytes.Contains(bufOff.Bytes(), []byte("fetch=packfile-uris")) {
+		t.Fatalf("fetch=packfile-uris cap must be absent when PackURIEnabled=false, got: %q", bufOff.Bytes())
 	}
 }
 
