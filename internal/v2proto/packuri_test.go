@@ -51,6 +51,9 @@ func TestEvaluatePackURIAdvertise_Eligible(t *testing.T) {
 	if res.Stanza != want {
 		t.Fatalf("Stanza: got %q, want %q", res.Stanza, want)
 	}
+	if res.URL != "https://cdn.example.com/pack.pack" {
+		t.Fatalf("URL: got %q, want %q", res.URL, "https://cdn.example.com/pack.pack")
+	}
 	if !rec.called {
 		t.Fatalf("BuildURL was not called")
 	}

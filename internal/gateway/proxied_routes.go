@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -37,7 +38,13 @@ type ProxiedKeyResolver interface {
 // The handler is mounted at root; the prefix arguments determine which
 // path segment it serves. Pass "/_bundle/" and "/_pack/" for the M11
 // defaults.
-func NewProxiedHandler(store storage.ObjectStore, key []byte, bundlePrefix, packPrefix string, resolver ProxiedKeyResolver) http.Handler {
+//
+// logger is used for served-* metrics and the proxied.url.served audit
+// event. If nil, slog.Default() is used.
+func NewProxiedHandler(store storage.ObjectStore, key []byte, bundlePrefix, packPrefix string, resolver ProxiedKeyResolver, logger *slog.Logger) http.Handler {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &proxiedHandler{
 		store:        store,
 		key:          key,
@@ -45,6 +52,7 @@ func NewProxiedHandler(store storage.ObjectStore, key []byte, bundlePrefix, pack
 		packPrefix:   packPrefix,
 		resolver:     resolver,
 		now:          time.Now,
+		logger:       logger,
 	}
 }
 
@@ -55,6 +63,7 @@ type proxiedHandler struct {
 	packPrefix   string
 	resolver     ProxiedKeyResolver
 	now          func() time.Time
+	logger       *slog.Logger
 }
 
 func (h *proxiedHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -62,6 +71,13 @@ func (h *proxiedHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// Wrap the writer to count body bytes written. Wrapping after the
+	// method-not-allowed check means 405 responses bypass the counter
+	// entirely. HEAD requests DO go through the counter (the method check
+	// passes), but the HEAD short-circuits in serveObject return before
+	// reaching the emitServed call sites, so served-* metrics fire only
+	// on successful GET (200/206) paths regardless of HEAD's traversal.
+	cw := &countingWriter{ResponseWriter: w}
 	var kind, hash string
 	switch {
 	case strings.HasPrefix(r.URL.Path, h.bundlePrefix):
@@ -71,11 +87,11 @@ func (h *proxiedHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		kind = "pack"
 		hash = strings.TrimPrefix(r.URL.Path, h.packPrefix)
 	default:
-		http.NotFound(w, r)
+		http.NotFound(cw, r)
 		return
 	}
 	if hash == "" {
-		http.NotFound(w, r)
+		http.NotFound(cw, r)
 		return
 	}
 	// Defense-in-depth: reject hashes that don't match the documented
@@ -85,24 +101,39 @@ func (h *proxiedHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// "sha256-<64-hex>" for bundles and 40-hex for packs; everything
 	// else 404s indistinguishably from an unadvertised hash.
 	if !validProxiedHash(kind, hash) {
-		http.NotFound(w, r)
+		http.NotFound(cw, r)
 		return
 	}
 	// Token verification BEFORE resolver dispatch: a probe with no/bad
 	// token gets a uniform 403 regardless of whether the hash is
 	// advertised, so an unauthenticated attacker can't enumerate which
 	// hashes this gateway serves by toggling between 403 and 404.
+	//
+	// The metric's reason label is a 4-value bounded vocabulary:
+	// "missing" (no token query param), "expired" (exp time passed),
+	// "kind_mismatch" (token minted for a different endpoint kind), or
+	// "invalid" (HMAC/base64/hash failure, the catch-all). Missing and
+	// invalid have different operational remediations, so they're split
+	// rather than folded. User-facing 403 bodies do NOT leak the
+	// kind_mismatch distinction (collapsed to "invalid token") so
+	// attackers can't probe the verifier's classification.
 	tok := r.URL.Query().Get("token")
 	if tok == "" {
-		http.Error(w, "missing token", http.StatusForbidden)
+		emitMetric(r.Context(), h.logger, "proxied_url_token_invalid_total", 1, "reason", "missing")
+		http.Error(cw, "missing token", http.StatusForbidden)
 		return
 	}
 	if _, err := proxiedurl.Verify(h.key, tok, kind, hash, h.now()); err != nil {
-		if errors.Is(err, proxiedurl.ErrTokenExpired) {
-			http.Error(w, "token expired", http.StatusForbidden)
-			return
+		reason := "invalid"
+		msg := "invalid token"
+		switch {
+		case errors.Is(err, proxiedurl.ErrTokenExpired):
+			reason, msg = "expired", "token expired"
+		case errors.Is(err, proxiedurl.ErrKindMismatch):
+			reason = "kind_mismatch"
 		}
-		http.Error(w, "invalid token", http.StatusForbidden)
+		emitMetric(r.Context(), h.logger, "proxied_url_token_invalid_total", 1, "reason", reason)
+		http.Error(cw, msg, http.StatusForbidden)
 		return
 	}
 	// Only after the token validates do we ask the resolver to map
@@ -121,10 +152,10 @@ func (h *proxiedHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if storageKey == "" {
-		http.NotFound(w, r)
+		http.NotFound(cw, r)
 		return
 	}
-	h.serveObject(r.Context(), w, r, storageKey)
+	h.serveObject(r.Context(), cw, r, kind, hash, storageKey)
 }
 
 // validProxiedHash returns true if hash matches the on-the-wire charset
@@ -163,7 +194,7 @@ func isHex(s string, n int) bool {
 	return true
 }
 
-func (h *proxiedHandler) serveObject(ctx context.Context, w http.ResponseWriter, r *http.Request, key string) {
+func (h *proxiedHandler) serveObject(ctx context.Context, w *countingWriter, r *http.Request, kind, hash, key string) {
 	rangeHdr := r.Header.Get("Range")
 	if rangeHdr == "" {
 		// Full object.
@@ -189,6 +220,7 @@ func (h *proxiedHandler) serveObject(ctx context.Context, w http.ResponseWriter,
 		}
 		defer obj.Body.Close()
 		_, _ = io.Copy(w, obj.Body)
+		h.emitServed(ctx, kind, hash, w.bytes, http.StatusOK, false)
 		return
 	}
 	// Range: bytes=<start>-<end>
@@ -244,6 +276,7 @@ func (h *proxiedHandler) serveObject(ctx context.Context, w http.ResponseWriter,
 	defer rc.Close()
 	w.WriteHeader(http.StatusPartialContent)
 	_, _ = io.Copy(w, rc)
+	h.emitServed(ctx, kind, hash, w.bytes, http.StatusPartialContent, true)
 }
 
 // writeStoreError maps storage sentinel errors to HTTP status codes.
@@ -286,4 +319,46 @@ func parseSimpleByteRange(h string) (start, end int64, ok bool) {
 		return 0, 0, false
 	}
 	return s, e, true
+}
+
+// emitServed emits the served-* metric pair and the proxied.url.served audit
+// event. Called only on successful GET (200/206) paths; HEAD probes and error
+// paths do not emit.
+//
+// Truncated-serve note: emitServed fires after io.Copy returns, regardless of
+// whether the copy completed in full. A client that disconnects mid-stream
+// produces a counted served_total event with bytes_served reflecting only
+// what reached the wire. Operators using served_total as a fan-out measure
+// of "completed downloads" should compare bytes_served against the object
+// size to distinguish full from truncated serves; the metric pair does not
+// surface the boolean separately.
+func (h *proxiedHandler) emitServed(ctx context.Context, kind, hash string, bytesServed int64, statusCode int, rangeRequest bool) {
+	// Metric: bundle_uri_served_total / pack_uri_served_total
+	emitMetric(ctx, h.logger, kind+"_uri_served_total", 1, "via", "proxied")
+	// Metric: bundle_uri_served_bytes / pack_uri_served_bytes
+	emitMetric(ctx, h.logger, kind+"_uri_served_bytes", bytesServed, "via", "proxied")
+	// Audit event
+	emitProxiedURLServed(ctx, h.logger, kind, hash, bytesServed, statusCode, rangeRequest)
+}
+
+// countingWriter wraps an http.ResponseWriter to record the number of body
+// bytes written. Used by the proxied handler to report actual bytes served
+// in the bundle_uri_served_bytes / pack_uri_served_bytes metrics and in the
+// proxied.url.served audit event's bytes_served field. The count reflects
+// what reached the client (which may be less than Content-Length when the
+// client disconnects mid-stream).
+//
+// Intentionally does NOT promote http.Flusher / http.Hijacker / http.Pusher
+// from the wrapped writer — the proxied routes only do plain Write of
+// bundle/pack bytes (no SSE, WebSocket, or HTTP/2 push). A future handler
+// that needs those interfaces should re-wrap with explicit passthroughs.
+type countingWriter struct {
+	http.ResponseWriter
+	bytes int64
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.ResponseWriter.Write(p)
+	c.bytes += int64(n)
+	return n, err
 }

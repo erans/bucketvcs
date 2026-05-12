@@ -82,3 +82,29 @@ func TestServer_UnknownPathReturns404(t *testing.T) {
 		t.Fatalf("status: %d", resp.StatusCode)
 	}
 }
+
+func TestNewServer_NilLogger_DefaultsToSlogDefault(t *testing.T) {
+	// NewServer must not panic with Options.Logger == nil; it should
+	// fall back to slog.Default().
+	store, err := localfs.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	srv, err := NewServer(store, Options{
+		MirrorDir: t.TempDir(),
+		Version:   "0.1-test",
+		AuthStore: newAnonymousTestAuthStore(t, "acme", "demo", true),
+		// Logger intentionally omitted — must default to slog.Default().
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	if srv == nil {
+		t.Fatal("nil server")
+	}
+	if srv.logger == nil {
+		t.Fatal("srv.logger should be normalized to slog.Default() when Options.Logger is nil")
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+}

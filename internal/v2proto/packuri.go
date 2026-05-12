@@ -53,6 +53,14 @@ type PackURIResult struct {
 	// should be advertised — the caller must then skip emitting the
 	// section entirely.
 	Stanza string
+
+	// URL is the resolved bundle URL the Stanza encodes, exposed
+	// separately so callers that need to classify proxied-vs-direct
+	// transport (for observability) can avoid re-parsing the Stanza.
+	// Mirrors the Task 2 BundleURIOutcome shape where observability
+	// needs are surfaced through structured return types rather than
+	// scraped from wire bytes. Empty when Stanza is empty.
+	URL string
 }
 
 // EvaluatePackURIAdvertise returns the wire stanza to emit inside a
@@ -97,7 +105,7 @@ func EvaluatePackURIAdvertise(ctx context.Context, in PackURIInputs) (PackURIRes
 		return PackURIResult{}, nil
 	}
 
-	return PackURIResult{Stanza: in.PackChecksum + " " + url + "\n"}, nil
+	return PackURIResult{Stanza: in.PackChecksum + " " + url + "\n", URL: url}, nil
 }
 
 // validPackSHA1 returns true iff s is exactly 40 lowercase hex chars.

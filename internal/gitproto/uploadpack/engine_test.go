@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -809,4 +810,805 @@ func TestService_PackURI_NotAdvertisedWhenClientSilent(t *testing.T) {
 // constructing a tx.Body{Type, Actor} pair for the Commit retry callback.
 func txBody(typ string) tx.Body {
 	return tx.Body{Type: typ, Actor: "u_test"}
+}
+
+// captureLogger returns a slog.Logger that writes JSON to a bytes.Buffer.
+// The buffer is returned so callers can inspect emitted log lines.
+func captureLogger(buf *bytes.Buffer) *slog.Logger {
+	return slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
+// logContains returns true if any JSON-encoded log line in buf has the given key==value pair.
+func logContains(buf *bytes.Buffer, key, value string) bool {
+	for _, line := range bytes.Split(buf.Bytes(), []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal(line, &m); err != nil {
+			continue
+		}
+		if v, ok := m[key]; ok {
+			switch vt := v.(type) {
+			case string:
+				if vt == value {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// logContainsMetric returns true if buf contains a "metric" log line with
+// metric_name==name AND the given label key==value.
+func logContainsMetric(buf *bytes.Buffer, name, labelKey, labelValue string) bool {
+	for _, line := range bytes.Split(buf.Bytes(), []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal(line, &m); err != nil {
+			continue
+		}
+		if m["msg"] != "metric" {
+			continue
+		}
+		if m["metric_name"] != name {
+			continue
+		}
+		if lv, ok := m[labelKey]; ok {
+			if s, ok := lv.(string); ok && s == labelValue {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// TestServeBundleURI_EmitsAdvertisedMetric_NoEntry verifies that when the
+// manifest has no full_default bundle entry, bundle_advertised_total with
+// freshness=retired is emitted but bundle_uri_advertised_total and the
+// bundle.uri.advertised audit event are NOT emitted.
+func TestServeBundleURI_EmitsAdvertisedMetric_NoEntry(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeUploadPackStore(t, storeDir, "acme", "demo")
+
+	store, err := localfs.Open(storeDir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	defer store.Close()
+
+	mirrorDir := t.TempDir()
+	mgr, err := mirror.NewManager(mirrorDir, store)
+	if err != nil {
+		t.Fatalf("mirror.NewManager: %v", err)
+	}
+	defer mgr.Close()
+
+	var out bytes.Buffer
+	var logBuf bytes.Buffer
+	req := &EngineRequest{
+		Ctx:             context.Background(),
+		Tenant:          "acme",
+		Repo:            "demo",
+		Stdin:           bytes.NewReader(buildBundleURIRequest()),
+		Stdout:          &out,
+		Stderr:          &bytes.Buffer{},
+		ProtocolVersion: 2,
+		Store:           store,
+		Mirror:          mgr,
+		AgentVersion:    "test",
+		Logger:          captureLogger(&logBuf),
+		BundleURIEnabled: true,
+		BundleWarmCommits: 5000,
+		BundleWarmAge:     24 * time.Hour,
+		BundleURIBuildURL: func(_ context.Context, _, _, _ string) (string, error) {
+			t.Fatalf("BuildURL must not be called when no bundles exist")
+			return "", nil
+		},
+	}
+	if err := Service(req); err != nil {
+		t.Fatalf("Service: %v", err)
+	}
+
+	// bundle_advertised_total{freshness=no_bundle} must be emitted.
+	if !logContainsMetric(&logBuf, "bundle_advertised_total", "freshness", "no_bundle") {
+		t.Errorf("expected bundle_advertised_total{freshness=no_bundle} in logs:\n%s", logBuf.String())
+	}
+	// bundle_uri_advertised_total must NOT be emitted.
+	if logContainsMetric(&logBuf, "bundle_uri_advertised_total", "via", "direct") ||
+		logContainsMetric(&logBuf, "bundle_uri_advertised_total", "via", "proxied") {
+		t.Errorf("bundle_uri_advertised_total must not be emitted when no bundle advertised:\n%s", logBuf.String())
+	}
+	// bundle.uri.advertised audit must NOT be emitted.
+	if logContains(&logBuf, "event", "bundle.uri.advertised") {
+		t.Errorf("bundle.uri.advertised audit must not fire when no URI advertised:\n%s", logBuf.String())
+	}
+}
+
+// TestServeBundleURI_EmitsAdvertisedMetricAndAudit_Current verifies that
+// when a current full_default bundle is advertised via a proxied URL, all
+// three observability outputs are emitted: bundle_advertised_total{freshness=current},
+// bundle_uri_advertised_total{via=proxied}, and bundle.uri.advertised audit.
+func TestServeBundleURI_EmitsAdvertisedMetricAndAudit_Current(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeUploadPackStore(t, storeDir, "acme", "demo")
+
+	store, err := localfs.Open(storeDir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	r, openErr := repo.Open(ctx, store, "acme", "demo")
+	if openErr != nil {
+		t.Fatalf("repo.Open: %v", openErr)
+	}
+	view, viewErr := r.ReadRoot(ctx)
+	if viewErr != nil {
+		t.Fatalf("r.ReadRoot: %v", viewErr)
+	}
+	var body manifest.Body
+	if jsonErr := json.Unmarshal(view.Body, &body); jsonErr != nil {
+		t.Fatalf("unmarshal: %v", jsonErr)
+	}
+	tipOID, ok := body.Refs["refs/heads/main"]
+	if !ok {
+		t.Fatalf("refs/heads/main not found in manifest")
+	}
+
+	const bundleHashHex = "deadbeef0123456789abcdef0123456789abcdef0123456789abcdef01234567"
+	entry := manifest.BundleEntry{
+		ID: "b1", Kind: "full_default", Ref: "refs/heads/main",
+		TipOID:      tipOID,
+		GeneratedAt: time.Now().Add(-time.Minute).Format(time.RFC3339),
+		BundleHash:  "sha256-" + bundleHashHex,
+		BundleKey:   "bundles/test.bundle",
+	}
+	if casErr := maintenance.RunBundleCASMerge(ctx, r, entry, "test", 1); casErr != nil {
+		t.Fatalf("RunBundleCASMerge: %v", casErr)
+	}
+
+	mirrorDir := t.TempDir()
+	mgr, err := mirror.NewManager(mirrorDir, store)
+	if err != nil {
+		t.Fatalf("mirror.NewManager: %v", err)
+	}
+	defer mgr.Close()
+
+	var out bytes.Buffer
+	var logBuf bytes.Buffer
+	req := &EngineRequest{
+		Ctx:             ctx,
+		Tenant:          "acme",
+		Repo:            "demo",
+		Stdin:           bytes.NewReader(buildBundleURIRequest()),
+		Stdout:          &out,
+		Stderr:          &bytes.Buffer{},
+		ProtocolVersion: 2,
+		Store:           store,
+		Mirror:          mgr,
+		AgentVersion:    "test",
+		Logger:          captureLogger(&logBuf),
+		BundleURIEnabled:  true,
+		BundleWarmCommits: 5000,
+		BundleWarmAge:     24 * time.Hour,
+		BundleURIBuildURL: func(_ context.Context, _, _, _ string) (string, error) {
+			// Proxied URL shape: contains /_bundle/
+			return "https://gw.example.com/_bundle/b1?token=abc", nil
+		},
+	}
+	if err := Service(req); err != nil {
+		t.Fatalf("Service: %v", err)
+	}
+
+	// bundle must be advertised in the response.
+	if !bytes.Contains(out.Bytes(), []byte("bundle.b1.uri=")) {
+		t.Fatalf("expected bundle.b1.uri= in response, got: %q", out.String())
+	}
+	// bundle_advertised_total{freshness=current} must be emitted.
+	if !logContainsMetric(&logBuf, "bundle_advertised_total", "freshness", "current") {
+		t.Errorf("expected bundle_advertised_total{freshness=current}:\n%s", logBuf.String())
+	}
+	// bundle_uri_advertised_total{via=proxied} must be emitted.
+	if !logContainsMetric(&logBuf, "bundle_uri_advertised_total", "via", "proxied") {
+		t.Errorf("expected bundle_uri_advertised_total{via=proxied}:\n%s", logBuf.String())
+	}
+	// bundle.uri.advertised audit must be emitted.
+	if !logContains(&logBuf, "event", "bundle.uri.advertised") {
+		t.Errorf("expected bundle.uri.advertised audit event:\n%s", logBuf.String())
+	}
+}
+
+// TestServeBundleURI_EmitsAdvertisedMetric_OnlyWhen_BuildURLEmpty verifies
+// that when the freshness state is current but BuildURL returns empty string,
+// bundle_advertised_total{freshness=current} is emitted but
+// bundle_uri_advertised_total and the bundle.uri.advertised audit are NOT.
+func TestServeBundleURI_EmitsAdvertisedMetric_OnlyWhen_BuildURLEmpty(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeUploadPackStore(t, storeDir, "acme", "demo")
+
+	store, err := localfs.Open(storeDir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	r, openErr := repo.Open(ctx, store, "acme", "demo")
+	if openErr != nil {
+		t.Fatalf("repo.Open: %v", openErr)
+	}
+	view, viewErr := r.ReadRoot(ctx)
+	if viewErr != nil {
+		t.Fatalf("r.ReadRoot: %v", viewErr)
+	}
+	var body manifest.Body
+	if jsonErr := json.Unmarshal(view.Body, &body); jsonErr != nil {
+		t.Fatalf("unmarshal: %v", jsonErr)
+	}
+	tipOID, ok := body.Refs["refs/heads/main"]
+	if !ok {
+		t.Fatalf("refs/heads/main not found in manifest")
+	}
+
+	entry := manifest.BundleEntry{
+		ID: "b1", Kind: "full_default", Ref: "refs/heads/main",
+		TipOID:      tipOID,
+		GeneratedAt: time.Now().Add(-time.Minute).Format(time.RFC3339),
+		BundleKey:   "bundles/test.bundle",
+	}
+	if casErr := maintenance.RunBundleCASMerge(ctx, r, entry, "test", 1); casErr != nil {
+		t.Fatalf("RunBundleCASMerge: %v", casErr)
+	}
+
+	mirrorDir := t.TempDir()
+	mgr, err := mirror.NewManager(mirrorDir, store)
+	if err != nil {
+		t.Fatalf("mirror.NewManager: %v", err)
+	}
+	defer mgr.Close()
+
+	var out bytes.Buffer
+	var logBuf bytes.Buffer
+	req := &EngineRequest{
+		Ctx:             ctx,
+		Tenant:          "acme",
+		Repo:            "demo",
+		Stdin:           bytes.NewReader(buildBundleURIRequest()),
+		Stdout:          &out,
+		Stderr:          &bytes.Buffer{},
+		ProtocolVersion: 2,
+		Store:           store,
+		Mirror:          mgr,
+		AgentVersion:    "test",
+		Logger:          captureLogger(&logBuf),
+		BundleURIEnabled:  true,
+		BundleWarmCommits: 5000,
+		BundleWarmAge:     24 * time.Hour,
+		BundleURIBuildURL: func(_ context.Context, _, _, _ string) (string, error) {
+			return "", nil // misconfigured backend: empty URL, nil error
+		},
+	}
+	if err := Service(req); err != nil {
+		t.Fatalf("Service: %v", err)
+	}
+
+	// Response must be empty (flush only).
+	if out.String() != "0000" {
+		t.Fatalf("expected flush-only response when BuildURL returns empty, got: %q", out.String())
+	}
+	// bundle_advertised_total{freshness=current} must still be emitted
+	// (state was evaluated before BuildURL was called).
+	if !logContainsMetric(&logBuf, "bundle_advertised_total", "freshness", "current") {
+		t.Errorf("expected bundle_advertised_total{freshness=current} even when BuildURL returns empty:\n%s", logBuf.String())
+	}
+	// bundle_uri_advertised_total must NOT be emitted.
+	if logContainsMetric(&logBuf, "bundle_uri_advertised_total", "via", "direct") ||
+		logContainsMetric(&logBuf, "bundle_uri_advertised_total", "via", "proxied") {
+		t.Errorf("bundle_uri_advertised_total must not be emitted when outcome.URI is empty:\n%s", logBuf.String())
+	}
+	// bundle.uri.advertised audit must NOT be emitted.
+	if logContains(&logBuf, "event", "bundle.uri.advertised") {
+		t.Errorf("bundle.uri.advertised audit must not fire when outcome.URI is empty:\n%s", logBuf.String())
+	}
+}
+
+// TestServeFetch_EmitsPackURIAdvertisedMetric_WhenStanzaFires verifies that
+// pack_uri_advertised_total{via=proxied} is emitted when the packfile-uris
+// gate produces a non-empty stanza (all preconditions hold and BuildURL
+// returns a proxied URL).
+func TestServeFetch_EmitsPackURIAdvertisedMetric_WhenStanzaFires(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeUploadPackStore(t, storeDir, "acme", "demo")
+
+	store, err := localfs.Open(storeDir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	r, err := repo.Open(ctx, store, "acme", "demo")
+	if err != nil {
+		t.Fatalf("repo.Open: %v", err)
+	}
+	view, err := r.ReadRoot(ctx)
+	if err != nil {
+		t.Fatalf("r.ReadRoot: %v", err)
+	}
+	var body manifest.Body
+	if err := json.Unmarshal(view.Body, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	tipOID, ok := body.Refs["refs/heads/main"]
+	if !ok {
+		t.Fatalf("refs/heads/main not in manifest")
+	}
+
+	// Backfill PackChecksum so EvaluateFullPackRequested gate passes.
+	const fakeSha1 = "0123456789abcdef0123456789abcdef01234567"
+	if _, err := r.Commit(ctx, txBody("test_packchecksum_backfill"), func(prev *repo.RootView) ([]byte, error) {
+		var pb manifest.Body
+		if uerr := json.Unmarshal(prev.Body, &pb); uerr != nil {
+			return nil, uerr
+		}
+		pb.Packs[0].PackChecksum = fakeSha1
+		return manifest.MarshalBody(pb)
+	}); err != nil {
+		t.Fatalf("Commit (backfill PackChecksum): %v", err)
+	}
+
+	var body2 bytes.Buffer
+	writePkt := func(s string) {
+		n := len(s) + 4
+		body2.WriteByte(hexNibbleUP(byte(n >> 12)))
+		body2.WriteByte(hexNibbleUP(byte(n >> 8 & 0xf)))
+		body2.WriteByte(hexNibbleUP(byte(n >> 4 & 0xf)))
+		body2.WriteByte(hexNibbleUP(byte(n & 0xf)))
+		body2.WriteString(s)
+	}
+	writePkt("command=fetch\n")
+	body2.WriteString("0001")
+	writePkt("want " + tipOID + "\n")
+	writePkt("done\n")
+	writePkt("packfile-uris=https\n")
+	body2.WriteString("0000")
+
+	mirrorDir := t.TempDir()
+	mgr, err := mirror.NewManager(mirrorDir, store)
+	if err != nil {
+		t.Fatalf("mirror.NewManager: %v", err)
+	}
+	defer mgr.Close()
+
+	var out bytes.Buffer
+	var logBuf bytes.Buffer
+	req := &EngineRequest{
+		Ctx:             ctx,
+		Tenant:          "acme",
+		Repo:            "demo",
+		Stdin:           bytes.NewReader(body2.Bytes()),
+		Stdout:          &out,
+		Stderr:          &bytes.Buffer{},
+		ProtocolVersion: 2,
+		Store:           store,
+		Mirror:          mgr,
+		AgentVersion:    "test",
+		Logger:          captureLogger(&logBuf),
+		PackURIEnabled:  true,
+		PackURIBuildURL: func(_ context.Context, _, _, _ string) (string, error) {
+			// Proxied URL shape: path contains /_pack/
+			return "https://gw.example.com/_pack/" + fakeSha1 + "?token=abc", nil
+		},
+	}
+	if err := Service(req); err != nil {
+		t.Fatalf("Service: %v", err)
+	}
+
+	// packfile-uris section must be present in the response.
+	if !bytes.Contains(out.Bytes(), []byte("packfile-uris\n")) {
+		t.Fatalf("expected packfile-uris section in response, got: %q", out.Bytes())
+	}
+	// pack_uri_advertised_total{via=proxied} must be emitted.
+	if !logContainsMetric(&logBuf, "pack_uri_advertised_total", "via", "proxied") {
+		t.Errorf("expected pack_uri_advertised_total{via=proxied} in logs:\n%s", logBuf.String())
+	}
+	// pack_uri_advertised_total{repo_id=acme/demo} must be emitted.
+	if !logContainsMetric(&logBuf, "pack_uri_advertised_total", "repo_id", "acme/demo") {
+		t.Errorf("expected pack_uri_advertised_total{repo_id=acme/demo} in logs:\n%s", logBuf.String())
+	}
+}
+
+// TestServeFetch_NoPackURIMetric_WhenGateClosed verifies that
+// pack_uri_advertised_total is NOT emitted when the packfile-uris gate is
+// closed (PackURIEnabled=false, regardless of BuildURL or client opt-in).
+func TestServeFetch_NoPackURIMetric_WhenGateClosed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeUploadPackStore(t, storeDir, "acme", "demo")
+
+	store, err := localfs.Open(storeDir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	r, err := repo.Open(ctx, store, "acme", "demo")
+	if err != nil {
+		t.Fatalf("repo.Open: %v", err)
+	}
+	view, err := r.ReadRoot(ctx)
+	if err != nil {
+		t.Fatalf("r.ReadRoot: %v", err)
+	}
+	var body manifest.Body
+	if err := json.Unmarshal(view.Body, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	tipOID := body.Refs["refs/heads/main"]
+
+	// Backfill PackChecksum so the only thing preventing the metric is
+	// PackURIEnabled=false.
+	if _, err := r.Commit(ctx, txBody("test_packchecksum_backfill"), func(prev *repo.RootView) ([]byte, error) {
+		var pb manifest.Body
+		if uerr := json.Unmarshal(prev.Body, &pb); uerr != nil {
+			return nil, uerr
+		}
+		pb.Packs[0].PackChecksum = "0123456789abcdef0123456789abcdef01234567"
+		return manifest.MarshalBody(pb)
+	}); err != nil {
+		t.Fatalf("Commit (backfill PackChecksum): %v", err)
+	}
+
+	var body2 bytes.Buffer
+	writePkt := func(s string) {
+		n := len(s) + 4
+		body2.WriteByte(hexNibbleUP(byte(n >> 12)))
+		body2.WriteByte(hexNibbleUP(byte(n >> 8 & 0xf)))
+		body2.WriteByte(hexNibbleUP(byte(n >> 4 & 0xf)))
+		body2.WriteByte(hexNibbleUP(byte(n & 0xf)))
+		body2.WriteString(s)
+	}
+	writePkt("command=fetch\n")
+	body2.WriteString("0001")
+	writePkt("want " + tipOID + "\n")
+	writePkt("done\n")
+	writePkt("packfile-uris=https\n")
+	body2.WriteString("0000")
+
+	mirrorDir := t.TempDir()
+	mgr, err := mirror.NewManager(mirrorDir, store)
+	if err != nil {
+		t.Fatalf("mirror.NewManager: %v", err)
+	}
+	defer mgr.Close()
+
+	var out bytes.Buffer
+	var logBuf bytes.Buffer
+	req := &EngineRequest{
+		Ctx:             ctx,
+		Tenant:          "acme",
+		Repo:            "demo",
+		Stdin:           bytes.NewReader(body2.Bytes()),
+		Stdout:          &out,
+		Stderr:          &bytes.Buffer{},
+		ProtocolVersion: 2,
+		Store:           store,
+		Mirror:          mgr,
+		AgentVersion:    "test",
+		Logger:          captureLogger(&logBuf),
+		PackURIEnabled:  false, // gate closed
+		PackURIBuildURL: func(_ context.Context, _, _, _ string) (string, error) {
+			t.Fatalf("BuildURL must not be called when PackURIEnabled=false")
+			return "", nil
+		},
+	}
+	if err := Service(req); err != nil {
+		t.Fatalf("Service: %v", err)
+	}
+
+	// packfile-uris section must be absent.
+	if bytes.Contains(out.Bytes(), []byte("packfile-uris\n")) {
+		t.Fatalf("packfile-uris section must be absent when gate closed, got: %q", out.Bytes())
+	}
+	// pack_uri_advertised_total must NOT be emitted.
+	if logContainsMetric(&logBuf, "pack_uri_advertised_total", "via", "direct") ||
+		logContainsMetric(&logBuf, "pack_uri_advertised_total", "via", "proxied") {
+		t.Errorf("pack_uri_advertised_total must not be emitted when gate is closed:\n%s", logBuf.String())
+	}
+	// Normal fetch must still work (packfile section present).
+	if !bytes.Contains(out.Bytes(), []byte("packfile\n")) {
+		t.Fatalf("expected packfile section in normal fetch, got: %q", out.Bytes())
+	}
+}
+
+// TestServeBundleURI_EmitsAdvertisedMetric_FeatureDisabled verifies that when
+// BundleURIEnabled=false, bundle_advertised_total{freshness=disabled} is emitted
+// but bundle_uri_advertised_total and the bundle.uri.advertised audit are NOT.
+func TestServeBundleURI_EmitsAdvertisedMetric_FeatureDisabled(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeUploadPackStore(t, storeDir, "acme", "demo")
+
+	store, err := localfs.Open(storeDir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	defer store.Close()
+
+	mirrorDir := t.TempDir()
+	mgr, err := mirror.NewManager(mirrorDir, store)
+	if err != nil {
+		t.Fatalf("mirror.NewManager: %v", err)
+	}
+	defer mgr.Close()
+
+	var out bytes.Buffer
+	var logBuf bytes.Buffer
+	req := &EngineRequest{
+		Ctx:             context.Background(),
+		Tenant:          "acme",
+		Repo:            "demo",
+		Stdin:           bytes.NewReader(buildBundleURIRequest()),
+		Stdout:          &out,
+		Stderr:          &bytes.Buffer{},
+		ProtocolVersion: 2,
+		Store:           store,
+		Mirror:          mgr,
+		AgentVersion:    "test",
+		Logger:          captureLogger(&logBuf),
+		BundleURIEnabled: false, // feature disabled
+		BundleWarmCommits: 5000,
+		BundleWarmAge:     24 * time.Hour,
+		// BundleURIBuildURL intentionally nil to match the disabled path.
+	}
+	if err := Service(req); err != nil {
+		t.Fatalf("Service: %v", err)
+	}
+
+	// Response must be empty (flush only).
+	if out.String() != "0000" {
+		t.Fatalf("expected flush-only response when feature disabled, got: %q", out.String())
+	}
+	// bundle_advertised_total{freshness=disabled} must be emitted.
+	if !logContainsMetric(&logBuf, "bundle_advertised_total", "freshness", "disabled") {
+		t.Errorf("expected bundle_advertised_total{freshness=disabled} in logs:\n%s", logBuf.String())
+	}
+	// bundle_uri_advertised_total must NOT be emitted.
+	if logContainsMetric(&logBuf, "bundle_uri_advertised_total", "via", "direct") ||
+		logContainsMetric(&logBuf, "bundle_uri_advertised_total", "via", "proxied") {
+		t.Errorf("bundle_uri_advertised_total must not be emitted when feature disabled:\n%s", logBuf.String())
+	}
+	// bundle.uri.advertised audit must NOT be emitted.
+	if logContains(&logBuf, "event", "bundle.uri.advertised") {
+		t.Errorf("bundle.uri.advertised audit must not fire when feature disabled:\n%s", logBuf.String())
+	}
+}
+
+// TestServeBundleURI_EmitsAdvertisedMetricAndAudit_DirectURL verifies that
+// when BuildURL returns a non-proxied (direct cloud-shaped) URL,
+// bundle_uri_advertised_total{via=direct} and the audit event fire with via=direct.
+func TestServeBundleURI_EmitsAdvertisedMetricAndAudit_DirectURL(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeUploadPackStore(t, storeDir, "acme", "demo")
+
+	store, err := localfs.Open(storeDir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	r, openErr := repo.Open(ctx, store, "acme", "demo")
+	if openErr != nil {
+		t.Fatalf("repo.Open: %v", openErr)
+	}
+	view, viewErr := r.ReadRoot(ctx)
+	if viewErr != nil {
+		t.Fatalf("r.ReadRoot: %v", viewErr)
+	}
+	var body manifest.Body
+	if jsonErr := json.Unmarshal(view.Body, &body); jsonErr != nil {
+		t.Fatalf("unmarshal: %v", jsonErr)
+	}
+	tipOID, ok := body.Refs["refs/heads/main"]
+	if !ok {
+		t.Fatalf("refs/heads/main not found in manifest")
+	}
+
+	entry := manifest.BundleEntry{
+		ID: "b1", Kind: "full_default", Ref: "refs/heads/main",
+		TipOID:      tipOID,
+		GeneratedAt: time.Now().Add(-time.Minute).Format(time.RFC3339),
+		BundleKey:   "bundles/test.bundle",
+	}
+	if casErr := maintenance.RunBundleCASMerge(ctx, r, entry, "test", 1); casErr != nil {
+		t.Fatalf("RunBundleCASMerge: %v", casErr)
+	}
+
+	mirrorDir := t.TempDir()
+	mgr, err := mirror.NewManager(mirrorDir, store)
+	if err != nil {
+		t.Fatalf("mirror.NewManager: %v", err)
+	}
+	defer mgr.Close()
+
+	// Direct URL: S3 pre-signed URL shape — no /_bundle/ or /_pack/ in path.
+	const directURL = "https://s3.amazonaws.com/mybucket/bundles/abc.bundle?X-Amz-Signature=fakesig"
+
+	var out bytes.Buffer
+	var logBuf bytes.Buffer
+	req := &EngineRequest{
+		Ctx:             ctx,
+		Tenant:          "acme",
+		Repo:            "demo",
+		Stdin:           bytes.NewReader(buildBundleURIRequest()),
+		Stdout:          &out,
+		Stderr:          &bytes.Buffer{},
+		ProtocolVersion: 2,
+		Store:           store,
+		Mirror:          mgr,
+		AgentVersion:    "test",
+		Logger:          captureLogger(&logBuf),
+		BundleURIEnabled:  true,
+		BundleWarmCommits: 5000,
+		BundleWarmAge:     24 * time.Hour,
+		BundleURIBuildURL: func(_ context.Context, _, _, _ string) (string, error) {
+			return directURL, nil
+		},
+	}
+	if err := Service(req); err != nil {
+		t.Fatalf("Service: %v", err)
+	}
+
+	// Bundle must be advertised in the response.
+	if !bytes.Contains(out.Bytes(), []byte("bundle.b1.uri=")) {
+		t.Fatalf("expected bundle.b1.uri= in response, got: %q", out.String())
+	}
+	// bundle_advertised_total{freshness=current} must be emitted.
+	if !logContainsMetric(&logBuf, "bundle_advertised_total", "freshness", "current") {
+		t.Errorf("expected bundle_advertised_total{freshness=current}:\n%s", logBuf.String())
+	}
+	// bundle_uri_advertised_total{via=direct} must be emitted.
+	if !logContainsMetric(&logBuf, "bundle_uri_advertised_total", "via", "direct") {
+		t.Errorf("expected bundle_uri_advertised_total{via=direct}:\n%s", logBuf.String())
+	}
+	// bundle.uri.advertised audit must be emitted with via=direct.
+	if !logContains(&logBuf, "event", "bundle.uri.advertised") {
+		t.Errorf("expected bundle.uri.advertised audit event:\n%s", logBuf.String())
+	}
+}
+
+// TestServeFetch_EmitsPackURIAdvertisedMetric_DirectURL verifies that when
+// BuildURL returns a non-proxied (direct cloud-shaped) URL for a pack,
+// pack_uri_advertised_total{via=direct} is emitted.
+func TestServeFetch_EmitsPackURIAdvertisedMetric_DirectURL(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeUploadPackStore(t, storeDir, "acme", "demo")
+
+	store, err := localfs.Open(storeDir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	r, err := repo.Open(ctx, store, "acme", "demo")
+	if err != nil {
+		t.Fatalf("repo.Open: %v", err)
+	}
+	view, err := r.ReadRoot(ctx)
+	if err != nil {
+		t.Fatalf("r.ReadRoot: %v", err)
+	}
+	var body manifest.Body
+	if err := json.Unmarshal(view.Body, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	tipOID, ok := body.Refs["refs/heads/main"]
+	if !ok {
+		t.Fatalf("refs/heads/main not in manifest")
+	}
+
+	// Backfill PackChecksum so EvaluateFullPackRequested gate passes.
+	const fakeSha1 = "0123456789abcdef0123456789abcdef01234567"
+	if _, err := r.Commit(ctx, txBody("test_packchecksum_backfill"), func(prev *repo.RootView) ([]byte, error) {
+		var pb manifest.Body
+		if uerr := json.Unmarshal(prev.Body, &pb); uerr != nil {
+			return nil, uerr
+		}
+		pb.Packs[0].PackChecksum = fakeSha1
+		return manifest.MarshalBody(pb)
+	}); err != nil {
+		t.Fatalf("Commit (backfill PackChecksum): %v", err)
+	}
+
+	var body2 bytes.Buffer
+	writePkt := func(s string) {
+		n := len(s) + 4
+		body2.WriteByte(hexNibbleUP(byte(n >> 12)))
+		body2.WriteByte(hexNibbleUP(byte(n >> 8 & 0xf)))
+		body2.WriteByte(hexNibbleUP(byte(n >> 4 & 0xf)))
+		body2.WriteByte(hexNibbleUP(byte(n & 0xf)))
+		body2.WriteString(s)
+	}
+	writePkt("command=fetch\n")
+	body2.WriteString("0001")
+	writePkt("want " + tipOID + "\n")
+	writePkt("done\n")
+	writePkt("packfile-uris=https\n")
+	body2.WriteString("0000")
+
+	mirrorDir := t.TempDir()
+	mgr, err := mirror.NewManager(mirrorDir, store)
+	if err != nil {
+		t.Fatalf("mirror.NewManager: %v", err)
+	}
+	defer mgr.Close()
+
+	// Direct URL: Cloudflare R2 pre-signed URL shape.
+	const directPackURL = "https://my-r2-bucket.r2.cloudflarestorage.com/packs/def.pack?X-Amz-Signature=fakesig"
+
+	var out bytes.Buffer
+	var logBuf bytes.Buffer
+	req := &EngineRequest{
+		Ctx:             ctx,
+		Tenant:          "acme",
+		Repo:            "demo",
+		Stdin:           bytes.NewReader(body2.Bytes()),
+		Stdout:          &out,
+		Stderr:          &bytes.Buffer{},
+		ProtocolVersion: 2,
+		Store:           store,
+		Mirror:          mgr,
+		AgentVersion:    "test",
+		Logger:          captureLogger(&logBuf),
+		PackURIEnabled:  true,
+		PackURIBuildURL: func(_ context.Context, hash, key, expected string) (string, error) {
+			return directPackURL, nil
+		},
+	}
+	if err := Service(req); err != nil {
+		t.Fatalf("Service: %v", err)
+	}
+
+	// packfile-uris section must be present in the response.
+	if !bytes.Contains(out.Bytes(), []byte("packfile-uris\n")) {
+		t.Fatalf("expected packfile-uris section in response, got: %q", out.Bytes())
+	}
+	// pack_uri_advertised_total{via=direct} must be emitted.
+	if !logContainsMetric(&logBuf, "pack_uri_advertised_total", "via", "direct") {
+		t.Errorf("expected pack_uri_advertised_total{via=direct} in logs:\n%s", logBuf.String())
+	}
+	// pack_uri_advertised_total{repo_id=acme/demo} must be emitted.
+	if !logContainsMetric(&logBuf, "pack_uri_advertised_total", "repo_id", "acme/demo") {
+		t.Errorf("expected pack_uri_advertised_total{repo_id=acme/demo} in logs:\n%s", logBuf.String())
+	}
 }

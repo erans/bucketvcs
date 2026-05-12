@@ -104,6 +104,12 @@ type Options struct {
 	// the legacy internal URLBuilder. Ignored when PackURIBuildURL is
 	// provided.
 	PackURITTL time.Duration
+
+	// Logger is used for structured metric + audit emission. When nil, the
+	// gateway falls back to slog.Default(). M11 Phase 12.5 adds this for
+	// gateway-side observability; before that the gateway only used slog.Default()
+	// ad-hoc for startup warnings.
+	Logger *slog.Logger
 }
 
 // Server implements http.Handler.
@@ -111,6 +117,7 @@ type Server struct {
 	store             storage.ObjectStore
 	mgr               *mirror.Manager
 	opts              Options
+	logger            *slog.Logger
 	mux               *http.ServeMux
 	urlBuilder        *URLBuilder
 	bundleURIBuildURL func(ctx context.Context, hash, storageKey, expectedHash string) (string, error)
@@ -147,7 +154,10 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gateway: mirror manager: %w", err)
 	}
-	s := &Server{store: store, mgr: mgr, opts: opts}
+	if opts.Logger == nil {
+		opts.Logger = slog.Default()
+	}
+	s := &Server{store: store, mgr: mgr, opts: opts, logger: opts.Logger}
 
 	// Apply BundleURI defaults and construct the URLBuilder once at startup.
 	if opts.BundleURIEnabled {
@@ -271,7 +281,7 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 	s.mux = http.NewServeMux()
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
 	if len(opts.ProxiedURLSigningKey) > 0 {
-		proxied := NewProxiedHandler(store, opts.ProxiedURLSigningKey, "/_bundle/", "/_pack/", opts.ProxiedKeyResolver)
+		proxied := NewProxiedHandler(store, opts.ProxiedURLSigningKey, "/_bundle/", "/_pack/", opts.ProxiedKeyResolver, s.logger)
 		s.mux.Handle("/_bundle/", proxied)
 		s.mux.Handle("/_pack/", proxied)
 	}

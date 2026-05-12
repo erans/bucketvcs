@@ -386,6 +386,10 @@ func serveFetch(req *EngineRequest, tokens []pktline.Token, body *manifest.Body)
 				// advertise emission and keep-pack elision cannot
 				// desynchronize mid-response.
 				excludeFromInlinePackID = pe.PackID
+				emitMetric(req.Ctx, req.Logger, "pack_uri_advertised_total", 1,
+					"repo_id", req.Tenant+"/"+req.Repo,
+					"via", classifyVia(res.URL),
+				)
 			}
 		}
 	}
@@ -511,6 +515,22 @@ func serveFetch(req *EngineRequest, tokens []pktline.Token, body *manifest.Body)
 // HandleBundleURI writes an empty response (flush-pkt only) and the client
 // falls through to a standard fetch.
 func serveBundleURI(req *EngineRequest, body *manifest.Body) error {
+	outcome, encodeErr := doServeBundleURI(req, body)
+	emitBundleURIObservability(req, outcome)
+	return encodeErr
+}
+
+// doServeBundleURI contains the existing serveBundleURI logic and returns a
+// BundleURIOutcome so emitBundleURIObservability can emit metrics + audit
+// without re-running the freshness state machine.
+//
+// Reason-vocabulary sync: the short-circuits below set the same Reason strings
+// (no_bundle, no_ref) that v2proto.HandleBundleURI's equivalent branches set
+// at internal/v2proto/bundleuri.go:HandleBundleURI. They're duplicated here as
+// an optimization (avoids the reachability.Load storage read for known-empty
+// cases). If either set diverges, the gateway's freshness label will desync
+// from a direct HandleBundleURI caller's. Keep them in sync.
+func doServeBundleURI(req *EngineRequest, body *manifest.Body) (v2proto.BundleURIOutcome, error) {
 	// Short-circuit when the feature is disabled or unconfigured. The
 	// dispatch arm is always reachable (a misbehaving client can send
 	// command=bundle-uri even when the cap wasn't advertised) so we
@@ -518,7 +538,8 @@ func serveBundleURI(req *EngineRequest, body *manifest.Body) error {
 	// AND we skip the reachability.Load storage read that would
 	// otherwise amplify bogus requests into backend traffic.
 	if !req.BundleURIEnabled || req.BundleURIBuildURL == nil {
-		return v2proto.EncodeBundleURIResponse(req.Stdout, nil)
+		return v2proto.BundleURIOutcome{State: v2proto.FreshnessRetired, Reason: "disabled"},
+			v2proto.EncodeBundleURIResponse(req.Stdout, nil)
 	}
 
 	// Also short-circuit when the manifest has no full_default bundle to
@@ -532,7 +553,8 @@ func serveBundleURI(req *EngineRequest, body *manifest.Body) error {
 		}
 	}
 	if entry == nil {
-		return v2proto.EncodeBundleURIResponse(req.Stdout, nil)
+		return v2proto.BundleURIOutcome{State: v2proto.FreshnessRetired, Reason: "no_bundle"},
+			v2proto.EncodeBundleURIResponse(req.Stdout, nil)
 	}
 
 	// Look up the current tip once. If the ref is missing (deleted) or
@@ -540,7 +562,8 @@ func serveBundleURI(req *EngineRequest, body *manifest.Body) error {
 	// avoids the reachability.Load storage read for a known-dead ref.
 	currentTip, refPresent := body.Refs[entry.Ref]
 	if !refPresent || currentTip == "" {
-		return v2proto.EncodeBundleURIResponse(req.Stdout, nil)
+		return v2proto.BundleURIOutcome{State: v2proto.FreshnessRetired, Reason: "no_ref"},
+			v2proto.EncodeBundleURIResponse(req.Stdout, nil)
 	}
 
 	// Hot path: when the bundle's tip already matches the current ref tip,
@@ -621,6 +644,46 @@ func serveBundleURI(req *EngineRequest, body *manifest.Body) error {
 		BuildURL:    wrappedBuildURL,
 	}
 	return v2proto.HandleBundleURI(req.Ctx, req.Stdout, deps)
+}
+
+// emitBundleURIObservability emits bundle_advertised_total + (when an
+// advertisement was emitted) bundle_uri_advertised_total + bundle.uri.advertised
+// audit. Fires once per command=bundle-uri dispatch, including the
+// encode-error path — the metric counts dispatch attempts, not successful
+// response writes. Operators wiring success-rate dashboards should pair this
+// with the gateway's request-success / response-error metrics rather than
+// treating it as a "succeeded" signal.
+//
+// Rate-amplification note: bundle_advertised_total fires once per
+// command=bundle-uri dispatch, INCLUDING short-circuits where the feature
+// is disabled (freshness=disabled) or where a misbehaving client sends the
+// command even though the cap wasn't advertised. Operators tracking this
+// metric should expect rogue clients can pump it at unbounded rate; alert
+// on freshness=current/warm/stale rates instead of the overall total when
+// they need rate that reflects "real" advertise traffic.
+func emitBundleURIObservability(req *EngineRequest, outcome v2proto.BundleURIOutcome) {
+	repoID := req.Tenant + "/" + req.Repo
+	freshnessLabel := outcome.Reason
+	if freshnessLabel == "" {
+		freshnessLabel = outcome.State.String() // defensive fallback
+	}
+	emitMetric(req.Ctx, req.Logger, "bundle_advertised_total", 1,
+		"repo_id", repoID,
+		"freshness", freshnessLabel,
+	)
+	if outcome.URI != "" {
+		via := classifyVia(outcome.URI)
+		emitMetric(req.Ctx, req.Logger, "bundle_uri_advertised_total", 1,
+			"repo_id", repoID,
+			"via", via,
+		)
+		// TODO(M12): when multiple bundle kinds (incremental, delta, rolling_base)
+		// are advertised, compute bundleCount from the full set of emitted bundles
+		// rather than the hardcoded 1. M11 emits exactly one full_default bundle
+		// per advertise, so bundleCount == 1 by construction.
+		emitBundleURIAdvertised(req.Ctx, req.Logger, repoID,
+			freshnessLabel, via, 1, outcome.FirstTipOID)
+	}
 }
 
 // dedupOIDs returns oids with duplicates removed in first-seen order.

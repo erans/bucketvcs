@@ -176,6 +176,7 @@ run:
 			BundleWarmAge:     s.opts.BundleWarmAge,
 			PackURIEnabled:    s.opts.PackURIEnabled,
 			PackURIBuildURL:   s.opts.PackURIBuildURL,
+			Logger:            s.opts.Logger,
 		}
 		// Advertise once, then handle multiple commands until EOF.
 		// Over SSH the channel stays open; git sends multiple commands

@@ -3,6 +3,7 @@ package uploadpack
 import (
 	"context"
 	"io"
+	"log/slog"
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
@@ -74,6 +75,12 @@ type EngineRequest struct {
 	// (the in-fetch gate returns an empty stanza, the response falls
 	// through to the inline packfile section).
 	PackURIBuildURL func(ctx context.Context, hash, storageKey, expectedHash string) (string, error)
+
+	// Logger is used by the engine to emit advertise-time metrics + audit events
+	// from internal/gitproto/uploadpack/service.go::serveFetch and serveBundleURI.
+	// When nil, falls back to slog.Default(). The HTTP gateway and SSH transport
+	// thread their own Logger from their respective Options.
+	Logger *slog.Logger
 }
 
 // Service runs the negotiation/pack-streaming loop reading req.Stdin

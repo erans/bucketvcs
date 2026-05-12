@@ -65,6 +65,7 @@ func (s *Server) handleUploadPack(w http.ResponseWriter, r *http.Request, tenant
 	if s.packURIBuildURL != nil {
 		req.PackURIBuildURL = s.packURIBuildURL
 	}
+	req.Logger = s.logger
 	if err := uploadpack.Service(req); err != nil {
 		// Map engine errors to HTTP statuses. Note: bytes may already
 		// have been written before some failures; this matches M3.

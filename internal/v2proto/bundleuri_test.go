@@ -24,7 +24,7 @@ func TestHandleBundleURI_Current_Advertises(t *testing.T) {
 	}
 	var sawExpected string
 	var out bytes.Buffer
-	err := HandleBundleURI(context.Background(), &out, BundleURIDeps{
+	outcome, err := HandleBundleURI(context.Background(), &out, BundleURIDeps{
 		Body:        body,
 		Now:         time.Now(),
 		WarmCommits: 100, WarmAge: 24 * time.Hour,
@@ -47,6 +47,18 @@ func TestHandleBundleURI_Current_Advertises(t *testing.T) {
 	if want := "sha256:" + validHex; sawExpected != want {
 		t.Fatalf("BuildURL got expectedHash=%q, want %q", sawExpected, want)
 	}
+	if outcome.State != FreshnessCurrent {
+		t.Errorf("outcome.State = %v, want FreshnessCurrent", outcome.State)
+	}
+	if outcome.Reason != "current" {
+		t.Errorf("outcome.Reason = %q, want \"current\"", outcome.Reason)
+	}
+	if outcome.URI != "https://example/u" {
+		t.Errorf("outcome.URI = %q, want https://example/u", outcome.URI)
+	}
+	if outcome.FirstTipOID != "tip" {
+		t.Errorf("outcome.FirstTipOID = %q, want \"tip\"", outcome.FirstTipOID)
+	}
 }
 
 func TestHandleBundleURI_Stale_Omits(t *testing.T) {
@@ -58,7 +70,7 @@ func TestHandleBundleURI_Stale_Omits(t *testing.T) {
 		}},
 	}
 	var out bytes.Buffer
-	err := HandleBundleURI(context.Background(), &out, BundleURIDeps{
+	outcome, err := HandleBundleURI(context.Background(), &out, BundleURIDeps{
 		Body:        body,
 		Now:         time.Now(),
 		WarmCommits: 100, WarmAge: 24 * time.Hour,
@@ -71,6 +83,15 @@ func TestHandleBundleURI_Stale_Omits(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "bundle.b1.uri=") {
 		t.Fatalf("stale bundle should not be advertised:\n%s", out.String())
+	}
+	if outcome.State != FreshnessStale {
+		t.Errorf("outcome.State = %v, want FreshnessStale", outcome.State)
+	}
+	if outcome.Reason != "stale" {
+		t.Errorf("outcome.Reason = %q, want \"stale\"", outcome.Reason)
+	}
+	if outcome.URI != "" {
+		t.Errorf("outcome.URI = %q, want empty for stale", outcome.URI)
 	}
 }
 
@@ -85,7 +106,7 @@ func TestHandleBundleURI_RefDeleted_Omits(t *testing.T) {
 		}},
 	}
 	var out bytes.Buffer
-	err := HandleBundleURI(context.Background(), &out, BundleURIDeps{
+	outcome, err := HandleBundleURI(context.Background(), &out, BundleURIDeps{
 		Body:        body,
 		Now:         time.Now(),
 		WarmCommits: 100, WarmAge: 24 * time.Hour,
@@ -102,6 +123,12 @@ func TestHandleBundleURI_RefDeleted_Omits(t *testing.T) {
 	if strings.Contains(out.String(), "bundle.b1.uri=") {
 		t.Fatalf("deleted-ref bundle must not be advertised:\n%s", out.String())
 	}
+	if outcome.State != FreshnessRetired {
+		t.Errorf("outcome.State = %v, want FreshnessRetired (ref-missing modeled as retired)", outcome.State)
+	}
+	if outcome.Reason != "no_ref" {
+		t.Errorf("outcome.Reason = %q, want \"no_ref\"", outcome.Reason)
+	}
 }
 
 func TestHandleBundleURI_BuildURLError_Omits(t *testing.T) {
@@ -113,7 +140,7 @@ func TestHandleBundleURI_BuildURLError_Omits(t *testing.T) {
 		}},
 	}
 	var out bytes.Buffer
-	err := HandleBundleURI(context.Background(), &out, BundleURIDeps{
+	outcome, err := HandleBundleURI(context.Background(), &out, BundleURIDeps{
 		Body:        body,
 		Now:         time.Now(),
 		WarmCommits: 100, WarmAge: 24 * time.Hour,
@@ -129,6 +156,16 @@ func TestHandleBundleURI_BuildURLError_Omits(t *testing.T) {
 	if strings.Contains(out.String(), "bundle.b1.uri=") {
 		t.Fatalf("BuildURL error must not be advertised:\n%s", out.String())
 	}
+	// State is preserved (current) even though we couldn't advertise.
+	if outcome.State != FreshnessCurrent {
+		t.Errorf("outcome.State = %v, want FreshnessCurrent (state preserved despite BuildURL error)", outcome.State)
+	}
+	if outcome.Reason != "current" {
+		t.Errorf("outcome.Reason = %q, want \"current\"", outcome.Reason)
+	}
+	if outcome.URI != "" {
+		t.Errorf("outcome.URI = %q, want empty when BuildURL errored", outcome.URI)
+	}
 }
 
 func TestHandleBundleURI_BuildURLEmptyString_Omits(t *testing.T) {
@@ -140,7 +177,7 @@ func TestHandleBundleURI_BuildURLEmptyString_Omits(t *testing.T) {
 		}},
 	}
 	var out bytes.Buffer
-	err := HandleBundleURI(context.Background(), &out, BundleURIDeps{
+	outcome, err := HandleBundleURI(context.Background(), &out, BundleURIDeps{
 		Body:        body,
 		Now:         time.Now(),
 		WarmCommits: 100, WarmAge: 24 * time.Hour,
@@ -155,5 +192,15 @@ func TestHandleBundleURI_BuildURLEmptyString_Omits(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "bundle.b1.uri=") {
 		t.Fatalf("empty URL must not be advertised (would emit malformed bundle.b1.uri=):\n%s", out.String())
+	}
+	// State is preserved (current) even though we couldn't advertise.
+	if outcome.State != FreshnessCurrent {
+		t.Errorf("outcome.State = %v, want FreshnessCurrent (state preserved despite empty URL)", outcome.State)
+	}
+	if outcome.Reason != "current" {
+		t.Errorf("outcome.Reason = %q, want \"current\"", outcome.Reason)
+	}
+	if outcome.URI != "" {
+		t.Errorf("outcome.URI = %q, want empty when BuildURL returned empty string", outcome.URI)
 	}
 }
