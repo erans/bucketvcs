@@ -19,6 +19,15 @@ import (
 // in user-agent-shaped contexts. The version is filled in by callers.
 const AgentName = "bucketvcs"
 
+// CapsOptions controls which optional capabilities are included in the v2
+// advertisement. The zero value advertises no optional capabilities.
+type CapsOptions struct {
+	// BundleURI, when true, includes "bundle-uri" in the capability list.
+	// Sourced from EngineRequest.BundleURIEnabled, which the gateway and
+	// sshd transports populate from their respective Options.
+	BundleURI bool
+}
+
 // WriteV2Advertisement writes the "smart" /info/refs body advertising
 // protocol v2 with the M3 capability set. The service argument is the
 // requested service ("git-upload-pack" or "git-receive-pack") and is echoed
@@ -33,6 +42,7 @@ const AgentName = "bucketvcs"
 //	pkt-line: "ls-refs=unborn\n"
 //	pkt-line: "fetch\n"
 //	pkt-line: "object-format=sha1\n"
+//	[pkt-line: "bundle-uri\n"]   // only when opts.BundleURI is true
 //	flush
 //
 // Note: "fetch" is advertised without the "=shallow" feature qualifier
@@ -41,7 +51,7 @@ const AgentName = "bucketvcs"
 // server advertises that feature, so this prevents protocol-level failures
 // for shallow clones. The fetch handler still defensively rejects shallow
 // arguments in case a non-compliant client sends them.
-func WriteV2Advertisement(w io.Writer, service, version string) error {
+func WriteV2Advertisement(w io.Writer, service, version string, opts CapsOptions) error {
 	if strings.ContainsAny(version, "\r\n\x00") {
 		return fmt.Errorf("v2proto: agent version contains forbidden control characters")
 	}
@@ -55,7 +65,7 @@ func WriteV2Advertisement(w io.Writer, service, version string) error {
 	if err := pw.WriteFlush(); err != nil {
 		return err
 	}
-	for _, line := range V2Capabilities(version) {
+	for _, line := range V2CapabilitiesWithOptions(version, opts) {
 		if err := pw.WriteString(line + "\n"); err != nil {
 			return err
 		}
@@ -75,25 +85,41 @@ func WriteV2Advertisement(w io.Writer, service, version string) error {
 //	pkt-line: "ls-refs=unborn\n"
 //	pkt-line: "fetch\n"
 //	pkt-line: "object-format=sha1\n"
+//	[pkt-line: "bundle-uri\n"]   // only when opts.BundleURI is true
 //	flush
-func WriteV2AdvertisementSSH(w io.Writer, version string) error {
+func WriteV2AdvertisementSSH(w io.Writer, version string, opts CapsOptions) error {
 	if strings.ContainsAny(version, "\r\n\x00") {
 		return fmt.Errorf("v2proto: agent version contains forbidden control characters")
 	}
 	pw := pktline.NewWriter(w)
-	for _, line := range V2Capabilities(version) {
+	for _, line := range V2CapabilitiesWithOptions(version, opts) {
 		if err := pw.WriteString(line + "\n"); err != nil {
 			return err
 		}
 	}
 	return pw.WriteFlush()
 }
+
+// V2Capabilities returns the list of capability advertisement lines for
+// protocol v2 with no optional capabilities enabled. It is preserved as a
+// backwards-compatible wrapper around V2CapabilitiesWithOptions.
 func V2Capabilities(version string) []string {
-	return []string{
+	return V2CapabilitiesWithOptions(version, CapsOptions{})
+}
+
+// V2CapabilitiesWithOptions returns the capability advertisement lines for
+// protocol v2, conditionally including optional capabilities per opts.
+// Each string is a bare capability name (no trailing newline).
+func V2CapabilitiesWithOptions(version string, opts CapsOptions) []string {
+	caps := []string{
 		"version 2",
 		"agent=" + AgentName + "/" + version,
 		"ls-refs=unborn",
 		"fetch",
 		"object-format=sha1",
 	}
+	if opts.BundleURI {
+		caps = append(caps, "bundle-uri")
+	}
+	return caps
 }

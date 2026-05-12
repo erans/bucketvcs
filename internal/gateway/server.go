@@ -2,8 +2,11 @@
 package gateway
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"time"
 	"unicode"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
@@ -25,14 +28,59 @@ type Options struct {
 	// ProxiedKeyResolver maps URL-path hashes to storage keys. REQUIRED
 	// when ProxiedURLSigningKey is set; ignored otherwise.
 	ProxiedKeyResolver ProxiedKeyResolver
+
+	// BundleURIEnabled advertises the bundle-uri capability and serves
+	// command=bundle-uri. Default false: clients fall through to standard fetch.
+	BundleURIEnabled bool
+
+	// BundleWarmCommits caps the commits-behind window for "warm" bundles.
+	// Defaults to 5000 when BundleURIEnabled is true.
+	BundleWarmCommits int
+
+	// BundleWarmAge caps the age window for "warm" bundles. Defaults to 24h
+	// when BundleURIEnabled is true.
+	BundleWarmAge time.Duration
+
+	// BundleURIMode controls how bundle URLs are minted: direct (signed),
+	// proxied (HMAC gateway URL), auto (try direct, fall back to proxied),
+	// or off. The zero value is URIModeAuto, so leaving this unset selects
+	// auto. Ignored when BundleURIEnabled is false.
+	//
+	// Note on URIModeAuto / URIModeDirect: NewServer cannot detect at
+	// startup whether the storage backend supports SignedGetURL — that
+	// capability is reported per-call via storage.ErrNotSupported. When
+	// the backend doesn't support signing AND no proxied fallback is
+	// configured (URIModeAuto with no ProxiedURLSigningKey/ProxiedBaseURL,
+	// or URIModeDirect at all), every bundle-uri request silently falls
+	// back to an empty advertisement and the client falls through to
+	// fetch. NewServer emits a startup warning via slog.Default() when
+	// this configuration is detected; operators should either configure
+	// proxied fallback or pair URIModeDirect/Auto only with signed-URL-
+	// capable backends (S3, GCS, AzureBlob). Use URIModeProxied for
+	// localfs / dev backends.
+	BundleURIMode URIMode
+
+	// BundleURITTL is the URL lifetime applied to BOTH bundle and pack
+	// URLs minted by the URLBuilder. Defaults to 5 minutes. M11 has no
+	// operator knob to split bundle and pack TTLs; a successor task can
+	// add one if cache-window divergence becomes necessary.
+	BundleURITTL time.Duration
+
+	// ProxiedBaseURL is the absolute base URL the gateway is reachable at
+	// (e.g. "https://gw.example.com"); required when mode is "proxied"
+	// or "auto" and the storage backend doesn't support direct signed URLs.
+	// Ignored when BundleURIEnabled is false.
+	ProxiedBaseURL string
 }
 
 // Server implements http.Handler.
 type Server struct {
-	store storage.ObjectStore
-	mgr   *mirror.Manager
-	opts  Options
-	mux   *http.ServeMux
+	store             storage.ObjectStore
+	mgr               *mirror.Manager
+	opts              Options
+	mux               *http.ServeMux
+	urlBuilder        *URLBuilder
+	bundleURIBuildURL func(ctx context.Context, hash, storageKey, expectedHash string) (string, error)
 }
 
 // NewServer constructs a Server. The mirror manager acquires a process flock
@@ -65,6 +113,68 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 		return nil, fmt.Errorf("gateway: mirror manager: %w", err)
 	}
 	s := &Server{store: store, mgr: mgr, opts: opts}
+
+	// Apply BundleURI defaults and construct the URLBuilder once at startup.
+	if opts.BundleURIEnabled {
+		// Reject configurations where URL minting cannot succeed.
+		// URIModeOff with BundleURIEnabled=true is contradictory; URIModeProxied
+		// requires both pieces of proxied-URL configuration.
+		switch opts.BundleURIMode {
+		case URIModeOff:
+			return nil, fmt.Errorf("gateway: BundleURIEnabled with BundleURIMode=off is contradictory")
+		case URIModeProxied:
+			if len(opts.ProxiedURLSigningKey) == 0 || opts.ProxiedBaseURL == "" {
+				return nil, fmt.Errorf("gateway: BundleURIMode=proxied requires ProxiedURLSigningKey and ProxiedBaseURL")
+			}
+		case URIModeAuto, URIModeDirect:
+			// Auto/Direct depend on storage signed-URL support; we can't
+			// probe that without a sentinel SignedGetURL call against a
+			// real key. Emit a startup warning when proxied fallback isn't
+			// available either, so operators see the silent-degradation
+			// risk in logs instead of debugging an "empty advertisement
+			// every request" mystery in production.
+			if len(opts.ProxiedURLSigningKey) == 0 || opts.ProxiedBaseURL == "" {
+				slog.Default().Warn("gateway: BundleURIEnabled with no proxied fallback configured; bundle-uri will silently no-op on backends that lack SignedGetURL support",
+					"mode", opts.BundleURIMode.String())
+			}
+		}
+		// URIModeAuto and URIModeDirect tolerate either signed-URL-capable
+		// storage OR proxied fallback (Auto only); the URLBuilder reports
+		// a runtime error per-request if neither path works for a given
+		// backend, and HandleBundleURI degrades to an empty response.
+		if opts.BundleWarmCommits == 0 {
+			opts.BundleWarmCommits = 5000
+		}
+		if opts.BundleWarmAge == 0 {
+			opts.BundleWarmAge = 24 * time.Hour
+		}
+		// BundleURIMode's zero value happens to be URIModeAuto today; no
+		// explicit defaulting is required. Documented in the Options
+		// field comment.
+		if opts.BundleURITTL == 0 {
+			opts.BundleURITTL = 5 * time.Minute
+		}
+		s.opts = opts
+		s.urlBuilder = &URLBuilder{
+			Store:          store,
+			ProxiedKey:     opts.ProxiedURLSigningKey,
+			ProxiedBaseURL: opts.ProxiedBaseURL,
+			BundleTTL:      opts.BundleURITTL,
+			PackTTL:        opts.BundleURITTL,
+			Mode:           opts.BundleURIMode,
+		}
+		// Pre-build the adapter closure once at startup so the hot fetch
+		// path doesn't allocate one per request. The closure drops the
+		// "via" return from URLBuilder.BuildBundleURL — direct-vs-proxied
+		// selection is still observable from the underlying SignedGetURL /
+		// ProxiedHandler counters; we don't bubble it up through v2proto.
+		ub := s.urlBuilder
+		s.bundleURIBuildURL = func(ctx context.Context, hash, storageKey, expectedHash string) (string, error) {
+			url, _, err := ub.BuildBundleURL(ctx, hash, storageKey, expectedHash)
+			return url, err
+		}
+	}
+
 	s.mux = http.NewServeMux()
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
 	if len(opts.ProxiedURLSigningKey) > 0 {

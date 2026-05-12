@@ -1,12 +1,14 @@
 package uploadpack
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/gitcli"
 	"github.com/bucketvcs/bucketvcs/internal/pack"
@@ -115,6 +117,8 @@ func serviceImpl(req *EngineRequest) error {
 		return nil
 	case "command=fetch":
 		return serveFetch(req, tokens, &body)
+	case "command=bundle-uri":
+		return serveBundleURI(req, &body)
 	default:
 		return errBadRequestf("unsupported command %s", cmdLine)
 	}
@@ -366,6 +370,126 @@ func serveFetch(req *EngineRequest, tokens []pktline.Token, body *manifest.Body)
 	}
 	_ = pw.WriteFlush()
 	return nil
+}
+
+// serveBundleURI handles command=bundle-uri. The dispatch arm is always
+// present so that even when BundleURIEnabled=false, a misbehaving client
+// that sends the command gets a well-formed empty response rather than a
+// 400 bad-request that might abort the session. When disabled, or when
+// BundleURIBuildURL is nil, or when no warm bundle exists in the manifest,
+// HandleBundleURI writes an empty response (flush-pkt only) and the client
+// falls through to a standard fetch.
+func serveBundleURI(req *EngineRequest, body *manifest.Body) error {
+	// Short-circuit when the feature is disabled or unconfigured. The
+	// dispatch arm is always reachable (a misbehaving client can send
+	// command=bundle-uri even when the cap wasn't advertised) so we
+	// answer with a well-formed empty response rather than 400-ing,
+	// AND we skip the reachability.Load storage read that would
+	// otherwise amplify bogus requests into backend traffic.
+	if !req.BundleURIEnabled || req.BundleURIBuildURL == nil {
+		return v2proto.EncodeBundleURIResponse(req.Stdout, nil)
+	}
+
+	// Also short-circuit when the manifest has no full_default bundle to
+	// advertise — saves the reachability.Load roundtrip in the common
+	// "repo has no bundle yet" case.
+	var entry *manifest.BundleEntry
+	for i := range body.Bundles {
+		if body.Bundles[i].Kind == "full_default" {
+			entry = &body.Bundles[i]
+			break
+		}
+	}
+	if entry == nil {
+		return v2proto.EncodeBundleURIResponse(req.Stdout, nil)
+	}
+
+	// Look up the current tip once. If the ref is missing (deleted) or
+	// empty, HandleBundleURI will return empty too — but bailing here
+	// avoids the reachability.Load storage read for a known-dead ref.
+	currentTip, refPresent := body.Refs[entry.Ref]
+	if !refPresent || currentTip == "" {
+		return v2proto.EncodeBundleURIResponse(req.Stdout, nil)
+	}
+
+	// Hot path: when the bundle's tip already matches the current ref tip,
+	// EvaluateFreshness will return "current" without ever consulting
+	// IsAncestor/WalkBack. Skip the reachability.Load storage read in
+	// that case — every fetch immediately after a maintenance cycle hits
+	// this branch. The stubs panic on call so a future refactor that
+	// removes EvaluateFreshness's "current" early-return is caught
+	// immediately in tests instead of silently downgrading current
+	// bundles to stale.
+	var isAncestor func(a, d string, max int) bool
+	var walkBack func(from, target string, max int) (int, error)
+	if currentTip == entry.TipOID {
+		isAncestor = func(a, d string, max int) bool {
+			panic("uploadpack: hot-path IsAncestor stub called; EvaluateFreshness should have returned current before reaching it")
+		}
+		walkBack = func(from, target string, max int) (int, error) {
+			panic("uploadpack: hot-path WalkBack stub called; EvaluateFreshness should have returned current before reaching it")
+		}
+	} else {
+		// Build reachability closures. When the index is unavailable, use
+		// fallback closures that report "not ancestor" so HandleBundleURI
+		// omits the advertisement safely.
+		k, err := keys.NewRepo(req.Tenant, req.Repo)
+		if err != nil {
+			// keys.NewRepo only errors on invalid names; tenant/repo were already
+			// validated by repo.Open above, so this is a defensive fallback.
+			isAncestor = func(a, d string, max int) bool { return false }
+			walkBack = func(from, target string, max int) (int, error) { return -1, nil }
+		} else {
+			set, rerr := reachability.Load(req.Ctx, req.Store, k, *body)
+			if rerr == nil {
+				isAncestor = set.IsAncestor
+				walkBack = set.WalkBackOID
+			} else {
+				// No index (ErrNoIndex) or decode failure → safe fallback: omit
+				// advertisement. The freshness state machine will see IsAncestor
+				// returning false and classify the bundle as stale. Surface a
+				// warn log for decode/storage failures so operators with a
+				// broken .bvrd see the silent degradation; ErrNoIndex is the
+				// expected pre-maintenance state and stays silent.
+				if !errors.Is(rerr, reachability.ErrNoIndex) {
+					slog.WarnContext(req.Ctx, "upload-pack: bundle-uri reachability load failed",
+						"tenant", req.Tenant, "repo", req.Repo, "err", rerr)
+				}
+				isAncestor = func(a, d string, max int) bool { return false }
+				walkBack = func(from, target string, max int) (int, error) { return -1, nil }
+			}
+		}
+	}
+
+	// Wrap BuildURL to surface configuration errors (signed-URL backend
+	// unavailable, proxied URL mint failure, empty URL with nil error)
+	// in operator logs. HandleBundleURI treats both error and "" as
+	// soft failures and degrades to empty response; without this log
+	// the operator would see "bundle-uri advertised but every response
+	// is empty" with no signal pointing at the URL-build root cause.
+	logBuildURL := req.BundleURIBuildURL
+	wrappedBuildURL := func(ctx context.Context, hash, key, expected string) (string, error) {
+		url, err := logBuildURL(ctx, hash, key, expected)
+		if err != nil {
+			slog.WarnContext(ctx, "upload-pack: bundle-uri BuildURL error",
+				"tenant", req.Tenant, "repo", req.Repo, "err", err)
+		} else if url == "" {
+			slog.WarnContext(ctx, "upload-pack: bundle-uri BuildURL returned empty URL with nil error (misconfigured backend?)",
+				"tenant", req.Tenant, "repo", req.Repo)
+		}
+		return url, err
+	}
+
+	deps := v2proto.BundleURIDeps{
+		Body:        *body,
+		Now:         time.Now(),
+		WarmCommits: req.BundleWarmCommits,
+		WarmAge:     req.BundleWarmAge,
+		IsAncestor:  isAncestor,
+		WalkBack:    walkBack,
+		BuildURL:    wrappedBuildURL,
+	}
+	return v2proto.HandleBundleURI(req.Ctx, req.Stdout, deps)
 }
 
 // dedupOIDs returns oids with duplicates removed in first-seen order.

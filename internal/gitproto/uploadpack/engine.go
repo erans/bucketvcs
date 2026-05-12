@@ -3,6 +3,7 @@ package uploadpack
 import (
 	"context"
 	"io"
+	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
@@ -39,6 +40,26 @@ type EngineRequest struct {
 
 	Store  storage.ObjectStore
 	Mirror *mirror.Manager
+
+	// BundleURIEnabled drives v2 capability advertisement AND the
+	// command=bundle-uri dispatch arm. When false, the cap is omitted and
+	// the dispatch arm returns an empty response (clients fall through to
+	// standard fetch).
+	BundleURIEnabled bool
+
+	// BundleURIBuildURL mints the URL the bundle-uri response advertises.
+	// Required when BundleURIEnabled is true; nil disables the feature
+	// (HandleBundleURI returns an empty response and the client falls
+	// through to standard fetch).
+	BundleURIBuildURL func(ctx context.Context, hash, storageKey, expectedHash string) (string, error)
+
+	// BundleWarmCommits and BundleWarmAge bound the freshness window. A
+	// bundle whose tip is more than BundleWarmCommits commits behind the
+	// current ref tip, OR whose generation timestamp is older than
+	// BundleWarmAge, is treated as stale and not advertised. Zero values
+	// disable the feature.
+	BundleWarmCommits int
+	BundleWarmAge     time.Duration
 }
 
 // Service runs the negotiation/pack-streaming loop reading req.Stdin

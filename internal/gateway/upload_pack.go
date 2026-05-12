@@ -43,16 +43,23 @@ func (s *Server) handleUploadPack(w http.ResponseWriter, r *http.Request, tenant
 	w.Header().Set("Cache-Control", "no-cache")
 
 	req := &uploadpack.EngineRequest{
-		Ctx:             r.Context(),
-		Tenant:          tenant,
-		Repo:            repoID,
-		Stdin:           body,
-		Stdout:          w,
-		Stderr:          io.Discard,
-		ProtocolVersion: 2,
-		Store:           s.store,
-		Mirror:          s.mgr,
-		AgentVersion:    s.opts.Version,
+		Ctx:               r.Context(),
+		Tenant:            tenant,
+		Repo:              repoID,
+		Stdin:             body,
+		Stdout:            w,
+		Stderr:            io.Discard,
+		ProtocolVersion:   2,
+		Store:             s.store,
+		Mirror:            s.mgr,
+		AgentVersion:      s.opts.Version,
+		BundleURIEnabled:  s.opts.BundleURIEnabled,
+		BundleWarmCommits: s.opts.BundleWarmCommits,
+		BundleWarmAge:     s.opts.BundleWarmAge,
+	}
+	if s.bundleURIBuildURL != nil {
+		// Closure built once in NewServer (avoid per-request allocation).
+		req.BundleURIBuildURL = s.bundleURIBuildURL
 	}
 	if err := uploadpack.Service(req); err != nil {
 		// Map engine errors to HTTP statuses. Note: bytes may already

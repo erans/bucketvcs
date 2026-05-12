@@ -158,18 +158,22 @@ run:
 	switch cmd.Op {
 	case OpUpload:
 		req := &uploadpack.EngineRequest{
-			Ctx:             ctx,
-			Tenant:          cmd.Tenant,
-			Repo:            cmd.Repo,
-			Actor:           actor,
-			Stdin:           ch,
-			Stdout:          ch,
-			Stderr:          ch.Stderr(),
-			ProtocolVersion: pv,
-			SSH:             true,
-			Store:           s.opts.BVStore,
-			Mirror:          s.opts.Mirror,
-			AgentVersion:    s.opts.AgentVersion,
+			Ctx:               ctx,
+			Tenant:            cmd.Tenant,
+			Repo:              cmd.Repo,
+			Actor:             actor,
+			Stdin:             ch,
+			Stdout:            ch,
+			Stderr:            ch.Stderr(),
+			ProtocolVersion:   pv,
+			SSH:               true,
+			Store:             s.opts.BVStore,
+			Mirror:            s.opts.Mirror,
+			AgentVersion:      s.opts.AgentVersion,
+			BundleURIEnabled:  s.opts.BundleURIEnabled,
+			BundleURIBuildURL: s.opts.BundleURIBuildURL,
+			BundleWarmCommits: s.opts.BundleWarmCommits,
+			BundleWarmAge:     s.opts.BundleWarmAge,
 		}
 		// Advertise once, then handle multiple commands until EOF.
 		// Over SSH the channel stays open; git sends multiple commands

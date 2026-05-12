@@ -38,6 +38,16 @@ type Options struct {
 	BVStore storage.ObjectStore
 	Mirror  *mirror.Manager
 	Logger  *slog.Logger
+
+	// BundleURIEnabled, BundleWarmCommits, BundleWarmAge, and
+	// BundleURIBuildURL are forwarded directly into uploadpack.EngineRequest.
+	// See gateway.Options for field semantics.
+	BundleURIEnabled  bool
+	BundleWarmCommits int
+	BundleWarmAge     time.Duration
+	// BundleURIBuildURL mints the URL advertised in command=bundle-uri
+	// responses. nil disables the feature (empty response).
+	BundleURIBuildURL func(ctx context.Context, hash, storageKey, expectedHash string) (string, error)
 }
 
 // Server is the bucketvcs SSH listener. Construct via NewServer.
@@ -66,6 +76,23 @@ func NewServer(opts Options) (*Server, error) {
 	}
 	if opts.Addr == "" {
 		return nil, errors.New("sshd: Options.Addr is required")
+	}
+
+	// Apply BundleURI defaults so an SSH operator who enables BundleURI
+	// without explicit warm-window values gets the same behavior as the
+	// HTTP gateway (gateway.NewServer applies identical defaults). Without
+	// these, BundleWarmCommits=0 causes IsAncestor(_, _, 0) to return false
+	// for every non-current bundle and the cap silently becomes a no-op.
+	if opts.BundleURIEnabled {
+		if opts.BundleURIBuildURL == nil {
+			return nil, errors.New("sshd: Options.BundleURIBuildURL is required when BundleURIEnabled is true")
+		}
+		if opts.BundleWarmCommits == 0 {
+			opts.BundleWarmCommits = 5000
+		}
+		if opts.BundleWarmAge == 0 {
+			opts.BundleWarmAge = 24 * time.Hour
+		}
 	}
 
 	signer, err := LoadOrGenerateHostKey(opts.HostKeyPath, opts.Logger)

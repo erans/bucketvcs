@@ -3,15 +3,20 @@ package uploadpack
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/importer"
+	"github.com/bucketvcs/bucketvcs/internal/maintenance"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
+	"github.com/bucketvcs/bucketvcs/internal/repo"
+	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 	"github.com/bucketvcs/bucketvcs/internal/v2proto"
 )
@@ -213,10 +218,288 @@ func TestAdvertise_V2_DelegatesToV2Proto(t *testing.T) {
 
 	// Compare against the reference output from v2proto directly.
 	var ref bytes.Buffer
-	if err := v2proto.WriteV2Advertisement(&ref, "git-upload-pack", "0.0.0"); err != nil {
+	if err := v2proto.WriteV2Advertisement(&ref, "git-upload-pack", "0.0.0", v2proto.CapsOptions{}); err != nil {
 		t.Fatalf("WriteV2Advertisement: %v", err)
 	}
 	if !bytes.Equal(buf.Bytes(), ref.Bytes()) {
 		t.Fatalf("V2 output does not match v2proto reference.\ngot: %q\nwant: %q", buf.Bytes(), ref.Bytes())
+	}
+}
+
+// TestAdvertise_V2_BundleURI_Cap verifies that setting BundleURIEnabled=true
+// causes the bundle-uri capability to appear in the v2 advertisement.
+func TestAdvertise_V2_BundleURI_Cap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeUploadPackStore(t, storeDir, "acme", "demo")
+
+	store, err := localfs.Open(storeDir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	defer store.Close()
+
+	var buf bytes.Buffer
+	req := &EngineRequest{
+		Ctx:              context.Background(),
+		Tenant:           "acme",
+		Repo:             "demo",
+		Stdout:           &buf,
+		ProtocolVersion:  2,
+		Store:            store,
+		AgentVersion:     "0.0.0",
+		BundleURIEnabled: true,
+	}
+	if err := Advertise(req); err != nil {
+		t.Fatalf("Advertise: %v", err)
+	}
+	if !bytes.Contains(buf.Bytes(), []byte("bundle-uri")) {
+		t.Fatalf("expected bundle-uri cap in advertisement, got: %q", buf.Bytes())
+	}
+
+	// A second request with BundleURIEnabled=false must NOT carry the cap.
+	var buf2 bytes.Buffer
+	req2 := &EngineRequest{
+		Ctx:              context.Background(),
+		Tenant:           "acme",
+		Repo:             "demo",
+		Stdout:           &buf2,
+		ProtocolVersion:  2,
+		Store:            store,
+		AgentVersion:     "0.0.0",
+		BundleURIEnabled: false,
+	}
+	if err := Advertise(req2); err != nil {
+		t.Fatalf("Advertise (disabled): %v", err)
+	}
+	if bytes.Contains(buf2.Bytes(), []byte("bundle-uri")) {
+		t.Fatalf("bundle-uri cap must be absent when BundleURIEnabled=false, got: %q", buf2.Bytes())
+	}
+}
+
+// buildBundleURIPktLine builds the pkt-line encoding of a single-command request.
+// format: command=bundle-uri\n DELIM FLUSH
+func buildBundleURIRequest() []byte {
+	var body bytes.Buffer
+	writePkt := func(s string) {
+		n := len(s) + 4
+		body.WriteByte(hexNibbleUP(byte(n >> 12)))
+		body.WriteByte(hexNibbleUP(byte(n >> 8 & 0xf)))
+		body.WriteByte(hexNibbleUP(byte(n >> 4 & 0xf)))
+		body.WriteByte(hexNibbleUP(byte(n & 0xf)))
+		body.WriteString(s)
+	}
+	writePkt("command=bundle-uri\n")
+	body.WriteString("0001") // delim
+	body.WriteString("0000") // flush
+	return body.Bytes()
+}
+
+// TestService_BundleURI_Disabled writes command=bundle-uri when BundleURIEnabled
+// is false. The dispatch arm is always present; when disabled, serveBundleURI
+// produces an empty response (flush-pkt only) rather than a 400 bad-request.
+func TestService_BundleURI_Disabled(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeUploadPackStore(t, storeDir, "acme", "demo")
+
+	store, err := localfs.Open(storeDir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	defer store.Close()
+
+	mirrorDir := t.TempDir()
+	mgr, err := mirror.NewManager(mirrorDir, store)
+	if err != nil {
+		t.Fatalf("mirror.NewManager: %v", err)
+	}
+	defer mgr.Close()
+
+	var out bytes.Buffer
+	req := &EngineRequest{
+		Ctx:              context.Background(),
+		Tenant:           "acme",
+		Repo:             "demo",
+		Stdin:            bytes.NewReader(buildBundleURIRequest()),
+		Stdout:           &out,
+		Stderr:           &bytes.Buffer{},
+		ProtocolVersion:  2,
+		Store:            store,
+		Mirror:           mgr,
+		AgentVersion:     "test",
+		BundleURIEnabled: false, // disabled: no BuildURL configured
+	}
+	if err := Service(req); err != nil {
+		t.Fatalf("Service returned error (expected empty response): %v", err)
+	}
+	// Empty bundle-uri response is just a flush-pkt ("0000").
+	if out.String() != "0000" {
+		t.Fatalf("expected flush-only response, got: %q", out.String())
+	}
+}
+
+// TestService_BundleURI_NoBundles verifies that with BundleURIEnabled=true but
+// no bundles in the manifest, the response is an empty flush.
+func TestService_BundleURI_NoBundles(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeUploadPackStore(t, storeDir, "acme", "demo")
+
+	store, err := localfs.Open(storeDir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	defer store.Close()
+
+	mirrorDir := t.TempDir()
+	mgr, err := mirror.NewManager(mirrorDir, store)
+	if err != nil {
+		t.Fatalf("mirror.NewManager: %v", err)
+	}
+	defer mgr.Close()
+
+	buildURLCalled := false
+	var out bytes.Buffer
+	req := &EngineRequest{
+		Ctx:             context.Background(),
+		Tenant:          "acme",
+		Repo:            "demo",
+		Stdin:           bytes.NewReader(buildBundleURIRequest()),
+		Stdout:          &out,
+		Stderr:          &bytes.Buffer{},
+		ProtocolVersion: 2,
+		Store:           store,
+		Mirror:          mgr,
+		AgentVersion:    "test",
+		BundleURIEnabled: true,
+		BundleWarmCommits: 5000,
+		BundleWarmAge:     24 * time.Hour,
+		BundleURIBuildURL: func(_ context.Context, _, _, _ string) (string, error) {
+			buildURLCalled = true
+			return "https://example.com/bundle", nil
+		},
+	}
+	if err := Service(req); err != nil {
+		t.Fatalf("Service: %v", err)
+	}
+	// No bundles in the manifest → HandleBundleURI returns empty response.
+	if out.String() != "0000" {
+		t.Fatalf("expected flush-only response when no bundles exist, got: %q", out.String())
+	}
+	if buildURLCalled {
+		t.Fatalf("BuildURL should not be called when no bundles exist")
+	}
+}
+
+// TestService_BundleURI_Advertises verifies that with BundleURIEnabled=true,
+// a current bundle in the manifest, and a working BuildURL, the response
+// contains bundle.<id>.uri=.
+func TestService_BundleURI_Advertises(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	// makeUploadPackStore sets up a repo with refs/heads/main pointing at a real commit.
+	makeUploadPackStore(t, storeDir, "acme", "demo")
+
+	store, err := localfs.Open(storeDir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	defer store.Close()
+
+	// Look up the current tip OID of refs/heads/main so we can set
+	// the bundle TipOID to match (making it "current").
+	ctx := context.Background()
+	r, openErr := repo.Open(ctx, store, "acme", "demo")
+	if openErr != nil {
+		t.Fatalf("repo.Open: %v", openErr)
+	}
+	view, viewErr := r.ReadRoot(ctx)
+	if viewErr != nil {
+		t.Fatalf("r.ReadRoot: %v", viewErr)
+	}
+	var body manifest.Body
+	if jsonErr := json.Unmarshal(view.Body, &body); jsonErr != nil {
+		t.Fatalf("unmarshal: %v", jsonErr)
+	}
+	tipOID, ok := body.Refs["refs/heads/main"]
+	if !ok {
+		t.Fatalf("refs/heads/main not found in manifest")
+	}
+
+	// Write a current bundle entry into the manifest. BundleHash uses a
+	// well-formed 64-char lowercase hex body so the bundleHashHex path
+	// is exercised end-to-end (the BuildURL closure below asserts the
+	// expected hash threads through correctly).
+	const bundleHashHex = "deadbeef0123456789abcdef0123456789abcdef0123456789abcdef01234567"
+	entry := manifest.BundleEntry{
+		ID: "b1", Kind: "full_default", Ref: "refs/heads/main",
+		TipOID:      tipOID,
+		GeneratedAt: time.Now().Add(-time.Minute).Format(time.RFC3339),
+		BundleHash:  "sha256-" + bundleHashHex,
+		BundleKey:   "bundles/test.bundle",
+	}
+	if casErr := maintenance.RunBundleCASMerge(ctx, r, entry, "test", 1); casErr != nil {
+		t.Fatalf("RunBundleCASMerge: %v", casErr)
+	}
+
+	mirrorDir := t.TempDir()
+	mgr, err := mirror.NewManager(mirrorDir, store)
+	if err != nil {
+		t.Fatalf("mirror.NewManager: %v", err)
+	}
+	defer mgr.Close()
+
+	var out bytes.Buffer
+	req := &EngineRequest{
+		Ctx:             context.Background(),
+		Tenant:          "acme",
+		Repo:            "demo",
+		Stdin:           bytes.NewReader(buildBundleURIRequest()),
+		Stdout:          &out,
+		Stderr:          &bytes.Buffer{},
+		ProtocolVersion: 2,
+		Store:           store,
+		Mirror:          mgr,
+		AgentVersion:    "test",
+		BundleURIEnabled:  true,
+		BundleWarmCommits: 5000,
+		BundleWarmAge:     24 * time.Hour,
+		BundleURIBuildURL: func(_ context.Context, hash, key, expected string) (string, error) {
+			if want := "sha256:" + bundleHashHex; expected != want {
+				t.Errorf("BuildURL got expectedHash=%q, want %q", expected, want)
+			}
+			return "https://cdn.example.com/bundle.git", nil
+		},
+	}
+	if err := Service(req); err != nil {
+		t.Fatalf("Service: %v", err)
+	}
+	// The response must contain bundle.b1.uri=.
+	if !bytes.Contains(out.Bytes(), []byte("bundle.b1.uri=")) {
+		t.Fatalf("expected bundle.b1.uri= in response, got: %q", out.String())
+	}
+	if !bytes.Contains(out.Bytes(), []byte("https://cdn.example.com/bundle.git")) {
+		t.Fatalf("expected bundle URL in response, got: %q", out.String())
+	}
+	// Per Git's protocol-v2 bundle-uri spec, bundle.version=1 and
+	// bundle.mode=all MUST precede the per-bundle keys. Without them a
+	// compliant client treats the entire list as invalid.
+	if !bytes.Contains(out.Bytes(), []byte("bundle.version=1")) {
+		t.Fatalf("expected bundle.version=1 header, got: %q", out.String())
+	}
+	if !bytes.Contains(out.Bytes(), []byte("bundle.mode=all")) {
+		t.Fatalf("expected bundle.mode=all header, got: %q", out.String())
+	}
+	if modeIdx := bytes.Index(out.Bytes(), []byte("bundle.mode=all")); modeIdx < 0 || modeIdx > bytes.Index(out.Bytes(), []byte("bundle.b1.uri=")) {
+		t.Fatalf("bundle.mode=all must precede per-bundle keys; got: %q", out.String())
 	}
 }

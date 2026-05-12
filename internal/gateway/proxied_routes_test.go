@@ -159,19 +159,28 @@ func TestProxiedRoute_Bundle_TamperedToken_403(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Flip the last base64 character — this lands inside the HMAC suffix
-	// for any practical token length, so Verify must reject.
-	if len(tok) == 0 {
-		t.Fatalf("empty token")
+	// Flip a middle base64 character — the last character of a no-padding
+	// base64url-encoded token may have unused trailing bits (when the
+	// input byte count is not a multiple of 3), so swapping only the
+	// top-bit half of the base64 alphabet at the end can produce a
+	// "tampered" token whose decoded bytes are identical. Swapping a
+	// middle character avoids that — every interior char encodes 6
+	// useful bits, and we pick a target from a different base64-alphabet
+	// quadrant than the source to guarantee at least one decoded bit
+	// flips.
+	if len(tok) < 4 {
+		t.Fatalf("token too short to tamper: len=%d", len(tok))
 	}
-	last := tok[len(tok)-1]
-	var swap byte
-	if last == 'A' {
-		swap = 'B'
-	} else {
-		swap = 'A'
+	mid := len(tok) / 2
+	orig := tok[mid]
+	// Pick a replacement char that's guaranteed to differ from orig
+	// across all 6 bits' top half (so the decoded bytes change even if
+	// orig happens to share the bottom bits with the replacement).
+	swap := byte('A')
+	if orig == 'A' {
+		swap = '_' // 63 = 111111 — differs from 'A' (000000) in every bit
 	}
-	bad := tok[:len(tok)-1] + string(swap)
+	bad := tok[:mid] + string(swap) + tok[mid+1:]
 
 	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", proxiedKeyResolver{rkeys: rkeys})
 	srv := httptest.NewServer(h)
