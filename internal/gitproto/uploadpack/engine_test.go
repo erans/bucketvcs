@@ -17,6 +17,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	"github.com/bucketvcs/bucketvcs/internal/repo/tx"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 	"github.com/bucketvcs/bucketvcs/internal/v2proto"
 )
@@ -502,4 +503,308 @@ func TestService_BundleURI_Advertises(t *testing.T) {
 	if modeIdx := bytes.Index(out.Bytes(), []byte("bundle.mode=all")); modeIdx < 0 || modeIdx > bytes.Index(out.Bytes(), []byte("bundle.b1.uri=")) {
 		t.Fatalf("bundle.mode=all must precede per-bundle keys; got: %q", out.String())
 	}
+}
+
+// TestAdvertise_V2_PackURI_Cap verifies that setting PackURIEnabled=true
+// causes the packfile-uris=https capability to appear in the v2 advertisement,
+// and is absent when disabled.
+func TestAdvertise_V2_PackURI_Cap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeUploadPackStore(t, storeDir, "acme", "demo")
+
+	store, err := localfs.Open(storeDir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	defer store.Close()
+
+	// Enabled: cap must appear.
+	var bufOn bytes.Buffer
+	reqOn := &EngineRequest{
+		Ctx:             context.Background(),
+		Tenant:          "acme",
+		Repo:            "demo",
+		Stdout:          &bufOn,
+		ProtocolVersion: 2,
+		Store:           store,
+		AgentVersion:    "0.0.0",
+		PackURIEnabled:  true,
+	}
+	if err := Advertise(reqOn); err != nil {
+		t.Fatalf("Advertise (enabled): %v", err)
+	}
+	if !bytes.Contains(bufOn.Bytes(), []byte("packfile-uris=https")) {
+		t.Fatalf("expected packfile-uris=https cap in advertisement, got: %q", bufOn.Bytes())
+	}
+
+	// Disabled: cap must be absent.
+	var bufOff bytes.Buffer
+	reqOff := &EngineRequest{
+		Ctx:             context.Background(),
+		Tenant:          "acme",
+		Repo:            "demo",
+		Stdout:          &bufOff,
+		ProtocolVersion: 2,
+		Store:           store,
+		AgentVersion:    "0.0.0",
+		PackURIEnabled:  false,
+	}
+	if err := Advertise(reqOff); err != nil {
+		t.Fatalf("Advertise (disabled): %v", err)
+	}
+	if bytes.Contains(bufOff.Bytes(), []byte("packfile-uris=https")) {
+		t.Fatalf("packfile-uris=https cap must be absent when PackURIEnabled=false, got: %q", bufOff.Bytes())
+	}
+}
+
+// TestService_PackURI_AdvertisedInFetchResponse exercises the full fetch
+// path with a FullPackRequested-shaped manifest and asserts that the
+// response carries a "packfile-uris\n" section header followed by the
+// "<sha1> <uri>\n" stanza, AND still contains the inline "packfile\n"
+// section (per protocol-v2: packfile-uris does not elide the packfile
+// section in Phase 8.2).
+func TestService_PackURI_AdvertisedInFetchResponse(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeUploadPackStore(t, storeDir, "acme", "demo")
+
+	store, err := localfs.Open(storeDir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	r, err := repo.Open(ctx, store, "acme", "demo")
+	if err != nil {
+		t.Fatalf("repo.Open: %v", err)
+	}
+	view, err := r.ReadRoot(ctx)
+	if err != nil {
+		t.Fatalf("r.ReadRoot: %v", err)
+	}
+	var body manifest.Body
+	if err := json.Unmarshal(view.Body, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	tipOID, ok := body.Refs["refs/heads/main"]
+	if !ok {
+		t.Fatalf("refs/heads/main not in manifest")
+	}
+	if len(body.Packs) != 1 {
+		t.Fatalf("expected single pack in manifest, got %d", len(body.Packs))
+	}
+
+	// Backfill PackChecksum so EvaluateFullPackRequested gate passes. The
+	// gate only validates 40-hex format and does not cross-check the value
+	// against the actual pack contents — using a synthetic checksum here
+	// keeps the test focused on the wire-up shape.
+	const fakeSha1 = "0123456789abcdef0123456789abcdef01234567"
+	if _, err := r.Commit(ctx, txBody("test_packchecksum_backfill"), func(prev *repo.RootView) ([]byte, error) {
+		var pb manifest.Body
+		if uerr := json.Unmarshal(prev.Body, &pb); uerr != nil {
+			return nil, uerr
+		}
+		if len(pb.Packs) != 1 {
+			t.Fatalf("expected single pack inside commit cb, got %d", len(pb.Packs))
+		}
+		pb.Packs[0].PackChecksum = fakeSha1
+		return manifest.MarshalBody(pb)
+	}); err != nil {
+		t.Fatalf("Commit (backfill PackChecksum): %v", err)
+	}
+
+	// Build the fetch request: command=fetch + DELIM + want <tip> +
+	// done + packfile-uris=https + FLUSH. Done=true short-circuits
+	// negotiation so the server emits the final response (acks if any +
+	// packfile-uris if applicable + packfile + flush).
+	var body2 bytes.Buffer
+	writePkt := func(s string) {
+		n := len(s) + 4
+		body2.WriteByte(hexNibbleUP(byte(n >> 12)))
+		body2.WriteByte(hexNibbleUP(byte(n >> 8 & 0xf)))
+		body2.WriteByte(hexNibbleUP(byte(n >> 4 & 0xf)))
+		body2.WriteByte(hexNibbleUP(byte(n & 0xf)))
+		body2.WriteString(s)
+	}
+	writePkt("command=fetch\n")
+	body2.WriteString("0001") // DELIM
+	writePkt("want " + tipOID + "\n")
+	writePkt("done\n")
+	writePkt("packfile-uris=https\n")
+	body2.WriteString("0000") // FLUSH
+
+	mirrorDir := t.TempDir()
+	mgr, err := mirror.NewManager(mirrorDir, store)
+	if err != nil {
+		t.Fatalf("mirror.NewManager: %v", err)
+	}
+	defer mgr.Close()
+
+	const wantURL = "https://cdn.example.com/pack-uri.pack"
+	buildCalled := false
+	var out bytes.Buffer
+	req := &EngineRequest{
+		Ctx:             ctx,
+		Tenant:          "acme",
+		Repo:            "demo",
+		Stdin:           bytes.NewReader(body2.Bytes()),
+		Stdout:          &out,
+		Stderr:          &bytes.Buffer{},
+		ProtocolVersion: 2,
+		Store:           store,
+		Mirror:          mgr,
+		AgentVersion:    "test",
+		PackURIEnabled:  true,
+		PackURIBuildURL: func(_ context.Context, hash, key, expected string) (string, error) {
+			buildCalled = true
+			if hash != fakeSha1 {
+				t.Errorf("BuildURL hash arg: got %q, want %q", hash, fakeSha1)
+			}
+			if key == "" {
+				t.Errorf("BuildURL key arg unexpectedly empty")
+			}
+			return wantURL, nil
+		},
+	}
+	if err := Service(req); err != nil {
+		t.Fatalf("Service: %v", err)
+	}
+	if !buildCalled {
+		t.Fatalf("BuildURL was not called; gate likely short-circuited unexpectedly")
+	}
+	// Response must contain the packfile-uris section header.
+	if !bytes.Contains(out.Bytes(), []byte("packfile-uris\n")) {
+		t.Fatalf("expected packfile-uris section header in response, got: %q", out.Bytes())
+	}
+	// And the URL stanza.
+	if !bytes.Contains(out.Bytes(), []byte(wantURL)) {
+		t.Fatalf("expected URL %q in response, got: %q", wantURL, out.Bytes())
+	}
+	// And the SHA-1 prefix on the same line.
+	if !bytes.Contains(out.Bytes(), []byte(fakeSha1+" "+wantURL)) {
+		t.Fatalf("expected stanza %q in response, got: %q", fakeSha1+" "+wantURL, out.Bytes())
+	}
+	// Per protocol-v2, the packfile section MUST still follow.
+	if !bytes.Contains(out.Bytes(), []byte("packfile\n")) {
+		t.Fatalf("expected packfile section to follow packfile-uris, got: %q", out.Bytes())
+	}
+	// Section ordering: packfile-uris must precede packfile.
+	puriIdx := bytes.Index(out.Bytes(), []byte("packfile-uris\n"))
+	pfIdx := bytes.Index(out.Bytes(), []byte("packfile\n"))
+	if puriIdx < 0 || pfIdx < 0 || puriIdx >= pfIdx {
+		t.Fatalf("packfile-uris must precede packfile; puriIdx=%d pfIdx=%d", puriIdx, pfIdx)
+	}
+}
+
+// TestService_PackURI_NotAdvertisedWhenClientSilent verifies that the
+// gate does not advertise (and never invokes BuildURL) when the client
+// did not opt in via packfile-uris=, even with PackURIEnabled=true.
+func TestService_PackURI_NotAdvertisedWhenClientSilent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeUploadPackStore(t, storeDir, "acme", "demo")
+
+	store, err := localfs.Open(storeDir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	r, err := repo.Open(ctx, store, "acme", "demo")
+	if err != nil {
+		t.Fatalf("repo.Open: %v", err)
+	}
+	view, err := r.ReadRoot(ctx)
+	if err != nil {
+		t.Fatalf("r.ReadRoot: %v", err)
+	}
+	var body manifest.Body
+	if err := json.Unmarshal(view.Body, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	tipOID := body.Refs["refs/heads/main"]
+
+	// Backfill PackChecksum so the only thing keeping the gate from
+	// advertising is the missing client opt-in.
+	if _, err := r.Commit(ctx, txBody("test_packchecksum_backfill"), func(prev *repo.RootView) ([]byte, error) {
+		var pb manifest.Body
+		if uerr := json.Unmarshal(prev.Body, &pb); uerr != nil {
+			return nil, uerr
+		}
+		pb.Packs[0].PackChecksum = "0123456789abcdef0123456789abcdef01234567"
+		return manifest.MarshalBody(pb)
+	}); err != nil {
+		t.Fatalf("Commit (backfill PackChecksum): %v", err)
+	}
+
+	var body2 bytes.Buffer
+	writePkt := func(s string) {
+		n := len(s) + 4
+		body2.WriteByte(hexNibbleUP(byte(n >> 12)))
+		body2.WriteByte(hexNibbleUP(byte(n >> 8 & 0xf)))
+		body2.WriteByte(hexNibbleUP(byte(n >> 4 & 0xf)))
+		body2.WriteByte(hexNibbleUP(byte(n & 0xf)))
+		body2.WriteString(s)
+	}
+	writePkt("command=fetch\n")
+	body2.WriteString("0001")
+	writePkt("want " + tipOID + "\n")
+	writePkt("done\n")
+	// NB: no packfile-uris= line — client did not opt in.
+	body2.WriteString("0000")
+
+	mirrorDir := t.TempDir()
+	mgr, err := mirror.NewManager(mirrorDir, store)
+	if err != nil {
+		t.Fatalf("mirror.NewManager: %v", err)
+	}
+	defer mgr.Close()
+
+	buildCalled := false
+	var out bytes.Buffer
+	req := &EngineRequest{
+		Ctx:             ctx,
+		Tenant:          "acme",
+		Repo:            "demo",
+		Stdin:           bytes.NewReader(body2.Bytes()),
+		Stdout:          &out,
+		Stderr:          &bytes.Buffer{},
+		ProtocolVersion: 2,
+		Store:           store,
+		Mirror:          mgr,
+		AgentVersion:    "test",
+		PackURIEnabled:  true,
+		PackURIBuildURL: func(_ context.Context, _, _, _ string) (string, error) {
+			buildCalled = true
+			return "https://cdn.example.com/pack.pack", nil
+		},
+	}
+	if err := Service(req); err != nil {
+		t.Fatalf("Service: %v", err)
+	}
+	if buildCalled {
+		t.Fatalf("BuildURL must not be called when client did not opt in")
+	}
+	if bytes.Contains(out.Bytes(), []byte("packfile-uris\n")) {
+		t.Fatalf("packfile-uris section must be absent when client did not opt in, got: %q", out.Bytes())
+	}
+	// The packfile section must still be present (this is a normal fetch).
+	if !bytes.Contains(out.Bytes(), []byte("packfile\n")) {
+		t.Fatalf("expected packfile section in normal fetch, got: %q", out.Bytes())
+	}
+}
+
+// txBody is a tiny helper that wraps the maintenance test boilerplate of
+// constructing a tx.Body{Type, Actor} pair for the Commit retry callback.
+func txBody(typ string) tx.Body {
+	return tx.Body{Type: typ, Actor: "u_test"}
 }

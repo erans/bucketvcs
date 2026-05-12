@@ -289,6 +289,45 @@ func serveFetch(req *EngineRequest, tokens []pktline.Token, body *manifest.Body)
 		}
 	}
 
+	// Evaluate the packfile-uris advertise gate (M11 Phase 8). When the
+	// client opted in (sent at least one packfile-uris=<proto> line), the
+	// request shape matches FullPackRequested (single canonical pack
+	// covers every want with no haves), and BuildURL succeeds, we emit
+	// a packfile-uris response section between the acknowledgments and
+	// the packfile section. The inline pack still flows unchanged — per
+	// Git protocol-v2, a packfile section MUST follow when packfile-uris
+	// is present, and elision via gitcli.PackObjectsForFetch
+	// `--exclude-packfile=<sha1>` is a future optimization (out of scope
+	// for Task 8.2). All gate inputs are pure functions of fetchReq +
+	// body; no storage I/O happens until BuildURL is called.
+	var packURIStanza string
+	if req.PackURIEnabled && req.PackURIBuildURL != nil && len(fetchReq.PackfileURIs) > 0 && len(fetchReq.Haves) == 0 {
+		refTips := make([]string, 0, len(body.Refs))
+		for _, oid := range body.Refs {
+			refTips = append(refTips, oid)
+		}
+		full := v2proto.EvaluateFullPackRequested(v2proto.FullPackRequestedInputs{
+			Wants:   fetchReq.Wants,
+			Haves:   fetchReq.Haves,
+			Packs:   body.Packs,
+			RefTips: refTips,
+		})
+		if full {
+			// EvaluateFullPackRequested already ensured len(body.Packs)==1 && PackChecksum!="".
+			pe := body.Packs[0]
+			res, gerr := v2proto.EvaluatePackURIAdvertise(req.Ctx, v2proto.PackURIInputs{
+				ClientOptedIn:     true,
+				FullPackRequested: true,
+				PackChecksum:      pe.PackChecksum,
+				PackKey:           pe.PackKey,
+				BuildURL:          req.PackURIBuildURL,
+			})
+			if gerr == nil {
+				packURIStanza = res.Stanza
+			}
+		}
+	}
+
 	// Open the pack stream BEFORE writing the packfile section header.
 	// If pack-objects fails to start (missing binary, bad dir, invalid
 	// args), surfacing that as a clean error is only possible while
@@ -320,6 +359,9 @@ func serveFetch(req *EngineRequest, tokens []pktline.Token, body *manifest.Body)
 		// error return path because the body is still empty.
 		if ackEmitted {
 			_ = pw.WriteDelim()
+			// Skip the packfile-uris section on pack-objects start failure
+			// — we have nothing meaningful to advertise and the side-band
+			// fatal carries the error to the client.
 			_ = pw.WriteString("packfile\n")
 			sb := pktline.NewSidebandWriter(pw)
 			_, _ = sb.WriteFatal([]byte("pack-objects: " + err.Error()))
@@ -332,6 +374,27 @@ func serveFetch(req *EngineRequest, tokens []pktline.Token, body *manifest.Body)
 		// Per protocol-v2 §fetch, when both an acknowledgments section and
 		// a packfile section are present, they are separated by a delim-pkt.
 		_ = pw.WriteDelim()
+	}
+	if packURIStanza != "" {
+		// Emit the packfile-uris section. Per Git protocol-v2 packfile-uris,
+		// the section header is "packfile-uris\n" followed by one
+		// "<sha1> <uri>\n" line per advertised pack, terminated by a
+		// delim-pkt before the next ("packfile") section. The inline pack
+		// still flows in the packfile section that follows — Task 8.2 keeps
+		// the protocol shape backwards-compatible; pack elision via
+		// `--exclude-packfile=<sha1>` is a future optimization.
+		if err := pw.WriteString("packfile-uris\n"); err != nil {
+			_ = pack.Close()
+			return nil
+		}
+		if err := pw.WriteString(packURIStanza); err != nil {
+			_ = pack.Close()
+			return nil
+		}
+		if err := pw.WriteDelim(); err != nil {
+			_ = pack.Close()
+			return nil
+		}
 	}
 	if err := pw.WriteString("packfile\n"); err != nil {
 		_ = pack.Close()
@@ -662,6 +725,13 @@ func serveFetchLazyPath(req *EngineRequest, fetchReq v2proto.FetchRequest, body 
 	//   the mirror path and let git upload-pack produce the proper
 	//   "acknowledgments delim-pkt packfile flush" shape, including an empty
 	//   pack when no objects need to be sent.
+	//
+	// TODO(M11 Phase 8.x): when the request matches FullPackRequested AND the
+	// lazy path would otherwise fall through to mirror just to produce an
+	// empty pack, we could short-circuit by emitting only the
+	// packfile-uris section + an empty packfile section, skipping the
+	// gitcli.PackObjectsForFetch invocation entirely. Out of scope for
+	// Task 8.2.
 	if len(plan.Commits) == 0 {
 		if fetchReq.Done {
 			// Fall through to mirror — it will emit the proper empty-pack

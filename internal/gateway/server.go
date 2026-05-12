@@ -44,7 +44,8 @@ type Options struct {
 	// BundleURIMode controls how bundle URLs are minted: direct (signed),
 	// proxied (HMAC gateway URL), auto (try direct, fall back to proxied),
 	// or off. The zero value is URIModeAuto, so leaving this unset selects
-	// auto. Ignored when BundleURIEnabled is false.
+	// auto. Ignored when BundleURIEnabled is false. Ignored when
+	// BundleURIBuildURL is provided (legacy URLBuilder path only).
 	//
 	// Note on URIModeAuto / URIModeDirect: NewServer cannot detect at
 	// startup whether the storage backend supports SignedGetURL — that
@@ -60,17 +61,49 @@ type Options struct {
 	// localfs / dev backends.
 	BundleURIMode URIMode
 
-	// BundleURITTL is the URL lifetime applied to BOTH bundle and pack
-	// URLs minted by the URLBuilder. Defaults to 5 minutes. M11 has no
-	// operator knob to split bundle and pack TTLs; a successor task can
-	// add one if cache-window divergence becomes necessary.
+	// BundleURIBuildURL, when non-nil, mints the URL advertised in
+	// command=bundle-uri responses. Required when BundleURIEnabled is
+	// true. Constructed by the operator (typically from a URLBuilder)
+	// rather than internally so the same closure can be shared with the
+	// SSH listener (sshd.Options.BundleURIBuildURL).
+	BundleURIBuildURL func(ctx context.Context, hash, storageKey, expectedHash string) (string, error)
+
+	// BundleURITTL is the URL lifetime applied to bundle URLs only; see
+	// PackURITTL for pack URLs. Defaults to 5 minutes when
+	// BundleURIEnabled is true.
+	//
+	// Deprecated path: this field is retained for backward compatibility
+	// with operators that still want gateway to construct its own
+	// URLBuilder via the (BundleURIMode, ProxiedURLSigningKey,
+	// ProxiedBaseURL) triple. New code should pass BundleURIBuildURL
+	// directly.
 	BundleURITTL time.Duration
 
 	// ProxiedBaseURL is the absolute base URL the gateway is reachable at
-	// (e.g. "https://gw.example.com"); required when mode is "proxied"
-	// or "auto" and the storage backend doesn't support direct signed URLs.
-	// Ignored when BundleURIEnabled is false.
+	// (e.g. "https://gw.example.com"); required when bundle/pack URI
+	// mode is "proxied" or "auto" and the storage backend doesn't support
+	// direct signed URLs. Ignored when both BundleURIEnabled and
+	// PackURIEnabled are false. Only consulted by the legacy URLBuilder
+	// construction path; ignored when BundleURIBuildURL is provided.
 	ProxiedBaseURL string
+
+	// PackURIEnabled advertises the packfile-uris capability and emits
+	// the in-fetch packfile-uris section. Mirrors BundleURIEnabled but
+	// for packs (Git protocol-v2 packfile-uris).
+	PackURIEnabled bool
+
+	// PackURIBuildURL, when non-nil, mints pack URLs for the in-fetch
+	// packfile-uris response. Required when PackURIEnabled is true.
+	PackURIBuildURL func(ctx context.Context, hash, storageKey, expectedHash string) (string, error)
+
+	// PackURIMode controls how pack URLs are minted by the legacy internal
+	// URLBuilder. Ignored when PackURIBuildURL is provided.
+	PackURIMode URIMode
+
+	// PackURITTL is the URL lifetime applied to pack URLs constructed by
+	// the legacy internal URLBuilder. Ignored when PackURIBuildURL is
+	// provided.
+	PackURITTL time.Duration
 }
 
 // Server implements http.Handler.
@@ -81,6 +114,8 @@ type Server struct {
 	mux               *http.ServeMux
 	urlBuilder        *URLBuilder
 	bundleURIBuildURL func(ctx context.Context, hash, storageKey, expectedHash string) (string, error)
+	packURLBuilder    *URLBuilder
+	packURIBuildURL   func(ctx context.Context, hash, storageKey, expectedHash string) (string, error)
 }
 
 // NewServer constructs a Server. The mirror manager acquires a process flock
@@ -116,62 +151,120 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 
 	// Apply BundleURI defaults and construct the URLBuilder once at startup.
 	if opts.BundleURIEnabled {
-		// Reject configurations where URL minting cannot succeed.
-		// URIModeOff with BundleURIEnabled=true is contradictory; URIModeProxied
-		// requires both pieces of proxied-URL configuration.
-		switch opts.BundleURIMode {
-		case URIModeOff:
-			return nil, fmt.Errorf("gateway: BundleURIEnabled with BundleURIMode=off is contradictory")
-		case URIModeProxied:
-			if len(opts.ProxiedURLSigningKey) == 0 || opts.ProxiedBaseURL == "" {
-				return nil, fmt.Errorf("gateway: BundleURIMode=proxied requires ProxiedURLSigningKey and ProxiedBaseURL")
+		// Closure-supplied path (preferred). When the operator provides
+		// BundleURIBuildURL directly, gateway does no URL minting itself;
+		// the warm-window defaults still apply and the closure is wired
+		// straight into the engine request.
+		if opts.BundleURIBuildURL != nil {
+			if opts.BundleWarmCommits == 0 {
+				opts.BundleWarmCommits = 5000
 			}
-		case URIModeAuto, URIModeDirect:
-			// Auto/Direct depend on storage signed-URL support; we can't
-			// probe that without a sentinel SignedGetURL call against a
-			// real key. Emit a startup warning when proxied fallback isn't
-			// available either, so operators see the silent-degradation
-			// risk in logs instead of debugging an "empty advertisement
-			// every request" mystery in production.
-			if len(opts.ProxiedURLSigningKey) == 0 || opts.ProxiedBaseURL == "" {
-				slog.Default().Warn("gateway: BundleURIEnabled with no proxied fallback configured; bundle-uri will silently no-op on backends that lack SignedGetURL support",
-					"mode", opts.BundleURIMode.String())
+			if opts.BundleWarmAge == 0 {
+				opts.BundleWarmAge = 24 * time.Hour
+			}
+			s.opts = opts
+			s.bundleURIBuildURL = opts.BundleURIBuildURL
+		} else {
+			// Legacy path: gateway constructs URLBuilder from
+			// (BundleURIMode, ProxiedURLSigningKey, ProxiedBaseURL).
+			// Reject configurations where URL minting cannot succeed.
+			// URIModeOff with BundleURIEnabled=true is contradictory; URIModeProxied
+			// requires both pieces of proxied-URL configuration.
+			switch opts.BundleURIMode {
+			case URIModeOff:
+				return nil, fmt.Errorf("gateway: BundleURIEnabled with BundleURIMode=off is contradictory")
+			case URIModeProxied:
+				if len(opts.ProxiedURLSigningKey) == 0 || opts.ProxiedBaseURL == "" {
+					return nil, fmt.Errorf("gateway: BundleURIMode=proxied requires ProxiedURLSigningKey and ProxiedBaseURL")
+				}
+			case URIModeAuto, URIModeDirect:
+				// Auto/Direct depend on storage signed-URL support; we can't
+				// probe that without a sentinel SignedGetURL call against a
+				// real key. Emit a startup warning when proxied fallback isn't
+				// available either, so operators see the silent-degradation
+				// risk in logs instead of debugging an "empty advertisement
+				// every request" mystery in production.
+				if len(opts.ProxiedURLSigningKey) == 0 || opts.ProxiedBaseURL == "" {
+					slog.Default().Warn("gateway: BundleURIEnabled with no proxied fallback configured; bundle-uri will silently no-op on backends that lack SignedGetURL support",
+						"mode", opts.BundleURIMode.String())
+				}
+			default:
+				return nil, fmt.Errorf("gateway: unrecognized BundleURIMode %v", opts.BundleURIMode)
+			}
+			// URIModeAuto and URIModeDirect tolerate either signed-URL-capable
+			// storage OR proxied fallback (Auto only); the URLBuilder reports
+			// a runtime error per-request if neither path works for a given
+			// backend, and HandleBundleURI degrades to an empty response.
+			if opts.BundleWarmCommits == 0 {
+				opts.BundleWarmCommits = 5000
+			}
+			if opts.BundleWarmAge == 0 {
+				opts.BundleWarmAge = 24 * time.Hour
+			}
+			// BundleURIMode's zero value happens to be URIModeAuto today; no
+			// explicit defaulting is required. Documented in the Options
+			// field comment.
+			if opts.BundleURITTL == 0 {
+				opts.BundleURITTL = 5 * time.Minute
+			}
+			s.opts = opts
+			s.urlBuilder = &URLBuilder{
+				Store:          store,
+				ProxiedKey:     opts.ProxiedURLSigningKey,
+				ProxiedBaseURL: opts.ProxiedBaseURL,
+				BundleTTL:      opts.BundleURITTL,
+				Mode:           opts.BundleURIMode,
+			}
+			// Pre-build the adapter closure once at startup so the hot fetch
+			// path doesn't allocate one per request. The closure drops the
+			// "via" return from URLBuilder.BuildBundleURL — direct-vs-proxied
+			// selection is still observable from the underlying SignedGetURL /
+			// ProxiedHandler counters; we don't bubble it up through v2proto.
+			ub := s.urlBuilder
+			s.bundleURIBuildURL = func(ctx context.Context, hash, storageKey, expectedHash string) (string, error) {
+				url, _, err := ub.BuildBundleURL(ctx, hash, storageKey, expectedHash)
+				return url, err
 			}
 		}
-		// URIModeAuto and URIModeDirect tolerate either signed-URL-capable
-		// storage OR proxied fallback (Auto only); the URLBuilder reports
-		// a runtime error per-request if neither path works for a given
-		// backend, and HandleBundleURI degrades to an empty response.
-		if opts.BundleWarmCommits == 0 {
-			opts.BundleWarmCommits = 5000
-		}
-		if opts.BundleWarmAge == 0 {
-			opts.BundleWarmAge = 24 * time.Hour
-		}
-		// BundleURIMode's zero value happens to be URIModeAuto today; no
-		// explicit defaulting is required. Documented in the Options
-		// field comment.
-		if opts.BundleURITTL == 0 {
-			opts.BundleURITTL = 5 * time.Minute
-		}
-		s.opts = opts
-		s.urlBuilder = &URLBuilder{
-			Store:          store,
-			ProxiedKey:     opts.ProxiedURLSigningKey,
-			ProxiedBaseURL: opts.ProxiedBaseURL,
-			BundleTTL:      opts.BundleURITTL,
-			PackTTL:        opts.BundleURITTL,
-			Mode:           opts.BundleURIMode,
-		}
-		// Pre-build the adapter closure once at startup so the hot fetch
-		// path doesn't allocate one per request. The closure drops the
-		// "via" return from URLBuilder.BuildBundleURL — direct-vs-proxied
-		// selection is still observable from the underlying SignedGetURL /
-		// ProxiedHandler counters; we don't bubble it up through v2proto.
-		ub := s.urlBuilder
-		s.bundleURIBuildURL = func(ctx context.Context, hash, storageKey, expectedHash string) (string, error) {
-			url, _, err := ub.BuildBundleURL(ctx, hash, storageKey, expectedHash)
-			return url, err
+	}
+
+	// Apply PackURI defaults. Closure-supplied path is preferred, mirroring
+	// BundleURI above.
+	if opts.PackURIEnabled {
+		if opts.PackURIBuildURL != nil {
+			s.packURIBuildURL = opts.PackURIBuildURL
+		} else {
+			switch opts.PackURIMode {
+			case URIModeOff:
+				return nil, fmt.Errorf("gateway: PackURIEnabled with PackURIMode=off is contradictory")
+			case URIModeProxied:
+				if len(opts.ProxiedURLSigningKey) == 0 || opts.ProxiedBaseURL == "" {
+					return nil, fmt.Errorf("gateway: PackURIMode=proxied requires ProxiedURLSigningKey and ProxiedBaseURL")
+				}
+			case URIModeAuto, URIModeDirect:
+				if len(opts.ProxiedURLSigningKey) == 0 || opts.ProxiedBaseURL == "" {
+					slog.Default().Warn("gateway: PackURIEnabled with no proxied fallback configured; packfile-uris will silently no-op on backends that lack SignedGetURL support",
+						"mode", opts.PackURIMode.String())
+				}
+			default:
+				return nil, fmt.Errorf("gateway: unrecognized PackURIMode %v", opts.PackURIMode)
+			}
+			if opts.PackURITTL == 0 {
+				opts.PackURITTL = time.Hour
+			}
+			s.opts = opts
+			s.packURLBuilder = &URLBuilder{
+				Store:          store,
+				ProxiedKey:     opts.ProxiedURLSigningKey,
+				ProxiedBaseURL: opts.ProxiedBaseURL,
+				PackTTL:        opts.PackURITTL,
+				Mode:           opts.PackURIMode,
+			}
+			pub := s.packURLBuilder
+			s.packURIBuildURL = func(ctx context.Context, hash, storageKey, expectedHash string) (string, error) {
+				url, _, err := pub.BuildPackURL(ctx, hash, storageKey, expectedHash)
+				return url, err
+			}
 		}
 	}
 

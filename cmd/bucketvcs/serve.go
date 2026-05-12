@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -53,8 +54,55 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	sshHostKey := fs.String("ssh-host-key", "", "Path to SSH host key (default $XDG_STATE_HOME/bucketvcs/ssh_host_ed25519_key)")
 	sshGrace := fs.Duration("ssh-grace", 10*time.Second, "Graceful shutdown deadline for in-flight SSH sessions")
 
+	// Bundle/Pack URI delivery (M11). Defaults are off so existing
+	// invocations continue to work; enabling either mode requires a
+	// signing key + base URL when the mode is auto/proxied.
+	bundleURIMode := fs.String("bundle-uri-mode", "off", "Bundle URI delivery mode: auto|direct|proxied|off")
+	packURIMode := fs.String("pack-uri-mode", "off", "Pack URI delivery mode: auto|direct|proxied|off")
+	proxiedKeyFile := fs.String("proxied-url-signing-key", "", "Path to file containing >=16 byte HMAC key for gateway-proxied URLs (required when modes are auto or proxied)")
+	proxiedBundleTTL := fs.Duration("proxied-url-bundle-ttl", 4*time.Hour, "TTL for proxied/signed bundle URLs (kept long to cover initial-clone download windows)")
+	proxiedPackTTL := fs.Duration("proxied-url-pack-ttl", time.Hour, "TTL for proxied/signed pack URLs")
+	warmCommits := fs.Int("bundle-warm-commits", 5000, "Bundle freshness threshold: warm if behind by <= N commits")
+	warmAge := fs.Duration("bundle-warm-age", 24*time.Hour, "Bundle freshness threshold: warm if generated within D")
+	proxiedBaseURL := fs.String("proxied-url-base", "", "External base URL of this gateway, e.g. https://gw.example (required when modes are auto or proxied)")
+
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+
+	bMode, ok := gateway.ParseURIMode(*bundleURIMode)
+	if !ok {
+		fmt.Fprintf(stderr, "serve: --bundle-uri-mode=%q must be one of auto|direct|proxied|off\n", *bundleURIMode)
+		return 2
+	}
+	pMode, ok := gateway.ParseURIMode(*packURIMode)
+	if !ok {
+		fmt.Fprintf(stderr, "serve: --pack-uri-mode=%q must be one of auto|direct|proxied|off\n", *packURIMode)
+		return 2
+	}
+	needsKey := bMode == gateway.URIModeAuto || bMode == gateway.URIModeProxied ||
+		pMode == gateway.URIModeAuto || pMode == gateway.URIModeProxied
+	var signingKey []byte
+	if needsKey {
+		if *proxiedKeyFile == "" {
+			fmt.Fprintln(stderr, "serve: --proxied-url-signing-key is required when bundle-uri-mode or pack-uri-mode is auto or proxied")
+			return 2
+		}
+		if *proxiedBaseURL == "" {
+			fmt.Fprintln(stderr, "serve: --proxied-url-base is required when bundle-uri-mode or pack-uri-mode is auto or proxied")
+			return 2
+		}
+		raw, err := os.ReadFile(*proxiedKeyFile)
+		if err != nil {
+			fmt.Fprintf(stderr, "serve: read --proxied-url-signing-key: %v\n", err)
+			return 1
+		}
+		raw = bytes.TrimSpace(raw)
+		if len(raw) < 16 {
+			fmt.Fprintf(stderr, "serve: --proxied-url-signing-key file contents too short (%d bytes); need >= 16\n", len(raw))
+			return 2
+		}
+		signingKey = raw
 	}
 
 	// Apply the legacy default: when the user passes neither --addr nor
@@ -93,6 +141,48 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 
 	logger := slog.Default()
 
+	// Build URLBuilder-backed closures once and share between the HTTP
+	// gateway and the SSH listener. Building here (rather than letting
+	// gateway construct them internally) keeps the wiring symmetric across
+	// transports — both ends mint identical URLs from the same builder
+	// state — and avoids exposing gateway internals to sshd.
+	//
+	// NOTE: This task wires URL minting only; the gateway-proxied
+	// /_bundle/ and /_pack/ inbound routes are NOT mounted because the
+	// production ProxiedKeyResolver implementation is a separate task.
+	// As a consequence, "proxied" mode URLs minted here will fail to be
+	// servable from this gateway in M11 — operators should pair these
+	// modes with an external HTTP layer that resolves hashes to storage
+	// keys, or use "direct" mode against signed-URL-capable backends
+	// (S3, GCS, AzureBlob).
+	var bundleBuildURL, packBuildURL func(ctx context.Context, hash, storageKey, expectedHash string) (string, error)
+	if bMode != gateway.URIModeOff {
+		bub := &gateway.URLBuilder{
+			Store:          store,
+			ProxiedKey:     signingKey,
+			ProxiedBaseURL: *proxiedBaseURL,
+			BundleTTL:      *proxiedBundleTTL,
+			Mode:           bMode,
+		}
+		bundleBuildURL = func(ctx context.Context, hash, key, expected string) (string, error) {
+			u, _, err := bub.BuildBundleURL(ctx, hash, key, expected)
+			return u, err
+		}
+	}
+	if pMode != gateway.URIModeOff {
+		pub := &gateway.URLBuilder{
+			Store:          store,
+			ProxiedKey:     signingKey,
+			ProxiedBaseURL: *proxiedBaseURL,
+			PackTTL:        *proxiedPackTTL,
+			Mode:           pMode,
+		}
+		packBuildURL = func(ctx context.Context, hash, key, expected string) (string, error) {
+			u, _, err := pub.BuildPackURL(ctx, hash, key, expected)
+			return u, err
+		}
+	}
+
 	// Cancellable context wired to the signal handler so SSH and HTTP share
 	// the same shutdown trigger.
 	serveCtx, cancel := context.WithCancel(ctx)
@@ -103,10 +193,16 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	httpErrCh := make(chan error, 1)
 	if *addr != "" || ln != nil {
 		srv, err := gateway.NewServer(store, gateway.Options{
-			MirrorDir:    *mirrorDir,
-			Version:      buildVersion,
-			AuthStore:    authS,
-			MaxBodyBytes: *maxBody,
+			MirrorDir:         *mirrorDir,
+			Version:           buildVersion,
+			AuthStore:         authS,
+			MaxBodyBytes:      *maxBody,
+			BundleURIEnabled:  bundleBuildURL != nil,
+			BundleURIBuildURL: bundleBuildURL,
+			BundleWarmCommits: *warmCommits,
+			BundleWarmAge:     *warmAge,
+			PackURIEnabled:    packBuildURL != nil,
+			PackURIBuildURL:   packBuildURL,
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "serve: NewServer: %v\n", err)
@@ -153,14 +249,20 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 		defer sshMirror.Close()
 
 		sshSrv, err = sshd.NewServer(sshd.Options{
-			Addr:         *sshAddr,
-			HostKeyPath:  hostKeyPath,
-			Grace:        *sshGrace,
-			AgentVersion: buildVersion,
-			Store:        authS,
-			BVStore:      store,
-			Mirror:       sshMirror,
-			Logger:       logger,
+			Addr:              *sshAddr,
+			HostKeyPath:       hostKeyPath,
+			Grace:             *sshGrace,
+			AgentVersion:      buildVersion,
+			Store:             authS,
+			BVStore:           store,
+			Mirror:            sshMirror,
+			Logger:            logger,
+			BundleURIEnabled:  bundleBuildURL != nil,
+			BundleURIBuildURL: bundleBuildURL,
+			BundleWarmCommits: *warmCommits,
+			BundleWarmAge:     *warmAge,
+			PackURIEnabled:    packBuildURL != nil,
+			PackURIBuildURL:   packBuildURL,
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "serve: ssh new server: %v\n", err)

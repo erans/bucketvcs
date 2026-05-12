@@ -26,6 +26,11 @@ type CapsOptions struct {
 	// Sourced from EngineRequest.BundleURIEnabled, which the gateway and
 	// sshd transports populate from their respective Options.
 	BundleURI bool
+	// PackURI, when true, includes "packfile-uris=https" in the capability
+	// list (Git protocol-v2 packfile-uris). The M11 server only mints HTTPS
+	// URLs so the proto-list is fixed to "https". Sourced from
+	// EngineRequest.PackURIEnabled.
+	PackURI bool
 }
 
 // WriteV2Advertisement writes the "smart" /info/refs body advertising
@@ -43,6 +48,7 @@ type CapsOptions struct {
 //	pkt-line: "fetch\n"
 //	pkt-line: "object-format=sha1\n"
 //	[pkt-line: "bundle-uri\n"]   // only when opts.BundleURI is true
+//	[pkt-line: "packfile-uris=https\n"]   // only when opts.PackURI is true
 //	flush
 //
 // Note: "fetch" is advertised without the "=shallow" feature qualifier
@@ -86,6 +92,7 @@ func WriteV2Advertisement(w io.Writer, service, version string, opts CapsOptions
 //	pkt-line: "fetch\n"
 //	pkt-line: "object-format=sha1\n"
 //	[pkt-line: "bundle-uri\n"]   // only when opts.BundleURI is true
+//	[pkt-line: "packfile-uris=https\n"]   // only when opts.PackURI is true
 //	flush
 func WriteV2AdvertisementSSH(w io.Writer, version string, opts CapsOptions) error {
 	if strings.ContainsAny(version, "\r\n\x00") {
@@ -120,6 +127,9 @@ func V2CapabilitiesWithOptions(version string, opts CapsOptions) []string {
 	}
 	if opts.BundleURI {
 		caps = append(caps, "bundle-uri")
+	}
+	if opts.PackURI {
+		caps = append(caps, "packfile-uris=https")
 	}
 	return caps
 }

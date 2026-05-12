@@ -48,6 +48,12 @@ type Options struct {
 	// BundleURIBuildURL mints the URL advertised in command=bundle-uri
 	// responses. nil disables the feature (empty response).
 	BundleURIBuildURL func(ctx context.Context, hash, storageKey, expectedHash string) (string, error)
+
+	// PackURIEnabled and PackURIBuildURL gate the packfile-uris capability
+	// for SSH; semantics mirror BundleURI*. PackURIBuildURL is required
+	// when PackURIEnabled is true.
+	PackURIEnabled  bool
+	PackURIBuildURL func(ctx context.Context, hash, storageKey, expectedHash string) (string, error)
 }
 
 // Server is the bucketvcs SSH listener. Construct via NewServer.
@@ -93,6 +99,9 @@ func NewServer(opts Options) (*Server, error) {
 		if opts.BundleWarmAge == 0 {
 			opts.BundleWarmAge = 24 * time.Hour
 		}
+	}
+	if opts.PackURIEnabled && opts.PackURIBuildURL == nil {
+		return nil, errors.New("sshd: Options.PackURIBuildURL is required when PackURIEnabled is true")
 	}
 
 	signer, err := LoadOrGenerateHostKey(opts.HostKeyPath, opts.Logger)

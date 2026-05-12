@@ -174,6 +174,8 @@ run:
 			BundleURIBuildURL: s.opts.BundleURIBuildURL,
 			BundleWarmCommits: s.opts.BundleWarmCommits,
 			BundleWarmAge:     s.opts.BundleWarmAge,
+			PackURIEnabled:    s.opts.PackURIEnabled,
+			PackURIBuildURL:   s.opts.PackURIBuildURL,
 		}
 		// Advertise once, then handle multiple commands until EOF.
 		// Over SSH the channel stays open; git sends multiple commands

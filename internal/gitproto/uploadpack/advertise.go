@@ -39,13 +39,17 @@ func Advertise(req *EngineRequest) error {
 	}
 
 	if req.ProtocolVersion == 2 {
+		caps := v2proto.CapsOptions{
+			BundleURI: req.BundleURIEnabled,
+			PackURI:   req.PackURIEnabled,
+		}
 		if req.SSH {
 			// SSH protocol: skip the "# service=...\n" HTTP preamble.
 			// git over SSH expects the capability advertisement to begin
 			// directly with "version 2\n" (no Smart-HTTP service header).
-			return v2proto.WriteV2AdvertisementSSH(req.Stdout, req.AgentVersion, v2proto.CapsOptions{BundleURI: req.BundleURIEnabled})
+			return v2proto.WriteV2AdvertisementSSH(req.Stdout, req.AgentVersion, caps)
 		}
-		return v2proto.WriteV2Advertisement(req.Stdout, "git-upload-pack", req.AgentVersion, v2proto.CapsOptions{BundleURI: req.BundleURIEnabled})
+		return v2proto.WriteV2Advertisement(req.Stdout, "git-upload-pack", req.AgentVersion, caps)
 	}
 
 	view, err := r.ReadRoot(req.Ctx)

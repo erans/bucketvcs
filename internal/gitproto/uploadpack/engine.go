@@ -60,6 +60,20 @@ type EngineRequest struct {
 	// disable the feature.
 	BundleWarmCommits int
 	BundleWarmAge     time.Duration
+
+	// PackURIEnabled drives the packfile-uris capability advertisement
+	// AND the in-fetch URI advertisement gate. Mirrors BundleURIEnabled
+	// but for packs (Git protocol-v2 packfile-uris). When false, the
+	// "packfile-uris=https" cap is omitted and the in-fetch gate
+	// short-circuits to "no advertisement" (clients receive only the
+	// inline packfile section).
+	PackURIEnabled bool
+
+	// PackURIBuildURL mints the URL the packfile-uris response advertises.
+	// Required when PackURIEnabled is true; nil disables the feature
+	// (the in-fetch gate returns an empty stanza, the response falls
+	// through to the inline packfile section).
+	PackURIBuildURL func(ctx context.Context, hash, storageKey, expectedHash string) (string, error)
 }
 
 // Service runs the negotiation/pack-streaming loop reading req.Stdin

@@ -28,6 +28,13 @@ type FetchRequest struct {
 	DeepenNot      []string
 	DeepenRelative bool     // "deepen-relative": Depth is measured from current shallow boundary
 	Shallow        []string // client-side shallow boundary OIDs
+	// PackfileURIs is the list of URI protocol schemes the client will accept
+	// for a packfile-uris response (per Git protocol-v2 packfile-uris).
+	// ParseFetchArgs performs capability negotiation: unknown schemes are
+	// silently dropped, keeping only "https" (the only scheme the M11 server
+	// mints). A non-empty list signals client opt-in to the packfile-uris
+	// response section.
+	PackfileURIs []string
 }
 
 // ParseFetchArgs decodes the pkt-line stream of a "fetch" command body.
@@ -131,6 +138,30 @@ func ParseFetchArgs(args []pktline.Token) (FetchRequest, error) {
 			req.Shallow = append(req.Shallow, oid)
 		case strings.HasPrefix(line, "filter "):
 			return fmt.Errorf("fetch: filter not supported in M3")
+		case strings.HasPrefix(line, "packfile-uris="):
+			// Per Git protocol-v2 packfile-uris: the value is a comma-
+			// separated list of URI protocol schemes the client accepts.
+			// This is a capability negotiation — the client offers the schemes
+			// it can handle; the server picks the ones it supports. Unknown
+			// schemes are silently dropped rather than rejected, so a stock
+			// Git client sending "https,http" (or any superset) still works.
+			// Multiple "packfile-uris=" lines are allowed and accumulate.
+			// We still reject: empty value (malformed) and empty CSV entries
+			// (malformed — not the same as an unknown scheme).
+			csv := strings.TrimPrefix(line, "packfile-uris=")
+			if csv == "" {
+				return fmt.Errorf("fetch: empty packfile-uris value")
+			}
+			for _, raw := range strings.Split(csv, ",") {
+				proto := strings.TrimSpace(raw)
+				if proto == "" {
+					return fmt.Errorf("fetch: empty entry in packfile-uris %q", csv)
+				}
+				if proto == "https" {
+					req.PackfileURIs = append(req.PackfileURIs, proto)
+				}
+				// Unknown schemes are silently dropped (capability negotiation).
+			}
 		default:
 			return fmt.Errorf("fetch: unknown argument %q", line)
 		}

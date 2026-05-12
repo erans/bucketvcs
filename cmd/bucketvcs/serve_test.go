@@ -6,6 +6,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -151,3 +153,162 @@ func TestServe_RequiresAtLeastOneListener(t *testing.T) {
 
 // keep io import alive (used in earlier test files in this pkg)
 var _ = io.Discard
+
+// --- M11 Phase 8 Task 8.3: bundle/pack URI mode flag validation ---
+//
+// These tests exercise the flag.Parse and post-Parse validation paths in
+// runServeWithListener. They never bind a listener, so no temp store or
+// mirror dir is needed — validation failures happen before any setup.
+
+func TestRunServe_BundleURIMode_RequiresSigningKey(t *testing.T) {
+	_ = userCmdEnv(t)
+	var stdout, stderr bytes.Buffer
+	rc := runServe(context.Background(), []string{
+		"--addr", "127.0.0.1:0",
+		"--store", "localfs:" + t.TempDir(),
+		"--bundle-uri-mode", "auto",
+	}, &stdout, &stderr)
+	if rc == 0 {
+		t.Fatalf("rc = 0; want non-zero (stderr=%q)", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "signing-key") {
+		t.Fatalf("stderr should mention 'signing-key': %q", stderr.String())
+	}
+}
+
+func TestRunServe_PackURIMode_RequiresSigningKey(t *testing.T) {
+	_ = userCmdEnv(t)
+	var stdout, stderr bytes.Buffer
+	rc := runServe(context.Background(), []string{
+		"--addr", "127.0.0.1:0",
+		"--store", "localfs:" + t.TempDir(),
+		"--pack-uri-mode", "proxied",
+	}, &stdout, &stderr)
+	if rc == 0 {
+		t.Fatalf("rc = 0; want non-zero (stderr=%q)", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "signing-key") {
+		t.Fatalf("stderr should mention 'signing-key': %q", stderr.String())
+	}
+}
+
+func TestRunServe_BundleURIMode_Off_NoSigningKeyNeeded(t *testing.T) {
+	_ = userCmdEnv(t)
+	// Pass off/off; runServe binds an ephemeral port (--addr :0) and is
+	// torn down via the context timeout below. We assert there is no
+	// signing-key validation error in stderr (the modes don't require
+	// one) and the call returns rc=0 after graceful shutdown.
+	var stdout, stderr bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	rc := runServe(ctx, []string{
+		"--addr", "127.0.0.1:0",
+		"--store", "localfs:" + t.TempDir(),
+		"--mirror-dir", t.TempDir(),
+		"--bundle-uri-mode", "off",
+		"--pack-uri-mode", "off",
+		"--shutdown-timeout", "10ms",
+	}, &stdout, &stderr)
+	if rc != 0 {
+		t.Fatalf("rc = %d; want 0 (stderr=%q)", rc, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "signing-key") {
+		t.Fatalf("stderr should not mention signing-key when modes are off: %q", stderr.String())
+	}
+}
+
+func TestRunServe_BundleURIMode_InvalidValue(t *testing.T) {
+	_ = userCmdEnv(t)
+	var stdout, stderr bytes.Buffer
+	rc := runServe(context.Background(), []string{
+		"--addr", "127.0.0.1:0",
+		"--store", "localfs:" + t.TempDir(),
+		"--bundle-uri-mode", "garbage",
+	}, &stdout, &stderr)
+	if rc != 2 {
+		t.Fatalf("rc = %d; want 2 (stderr=%q)", rc, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "auto|direct|proxied|off") {
+		t.Fatalf("stderr should list valid modes: %q", stderr.String())
+	}
+}
+
+func TestRunServe_PackURIMode_InvalidValue(t *testing.T) {
+	_ = userCmdEnv(t)
+	var stdout, stderr bytes.Buffer
+	rc := runServe(context.Background(), []string{
+		"--addr", "127.0.0.1:0",
+		"--store", "localfs:" + t.TempDir(),
+		"--pack-uri-mode", "garbage",
+	}, &stdout, &stderr)
+	if rc != 2 {
+		t.Fatalf("rc = %d; want 2 (stderr=%q)", rc, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "auto|direct|proxied|off") {
+		t.Fatalf("stderr should enumerate valid modes: %s", stderr.String())
+	}
+}
+
+func TestRunServe_SigningKeyFile_TooShort(t *testing.T) {
+	_ = userCmdEnv(t)
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "key")
+	if err := os.WriteFile(keyPath, []byte("tooshort"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	rc := runServe(context.Background(), []string{
+		"--addr", "127.0.0.1:0",
+		"--store", "localfs:" + t.TempDir(),
+		"--bundle-uri-mode", "proxied",
+		"--proxied-url-signing-key", keyPath,
+		"--proxied-url-base", "https://gw.example",
+	}, &stdout, &stderr)
+	if rc != 2 {
+		t.Fatalf("rc = %d; want 2 (stderr=%q)", rc, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "8 bytes") && !strings.Contains(stderr.String(), "too short") {
+		t.Fatalf("stderr should mention byte count / too short: %q", stderr.String())
+	}
+}
+
+func TestRunServe_SigningKeyFile_NotReadable(t *testing.T) {
+	_ = userCmdEnv(t)
+	missing := filepath.Join(t.TempDir(), "no-such-file")
+	var stdout, stderr bytes.Buffer
+	rc := runServe(context.Background(), []string{
+		"--addr", "127.0.0.1:0",
+		"--store", "localfs:" + t.TempDir(),
+		"--bundle-uri-mode", "auto",
+		"--proxied-url-signing-key", missing,
+		"--proxied-url-base", "https://gw.example",
+	}, &stdout, &stderr)
+	if rc != 1 {
+		t.Fatalf("rc = %d; want 1 (stderr=%q)", rc, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "signing-key") {
+		t.Fatalf("stderr should mention 'signing-key' read error: %q", stderr.String())
+	}
+}
+
+func TestRunServe_ProxiedBaseURLRequired(t *testing.T) {
+	_ = userCmdEnv(t)
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "key")
+	if err := os.WriteFile(keyPath, []byte("0123456789abcdef0123456789abcdef"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	rc := runServe(context.Background(), []string{
+		"--addr", "127.0.0.1:0",
+		"--store", "localfs:" + t.TempDir(),
+		"--bundle-uri-mode", "auto",
+		"--proxied-url-signing-key", keyPath,
+	}, &stdout, &stderr)
+	if rc != 2 {
+		t.Fatalf("rc = %d; want 2 (stderr=%q)", rc, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "proxied-url-base") {
+		t.Fatalf("stderr should mention 'proxied-url-base': %q", stderr.String())
+	}
+}

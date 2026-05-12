@@ -61,6 +61,10 @@ func (s *Server) handleUploadPack(w http.ResponseWriter, r *http.Request, tenant
 		// Closure built once in NewServer (avoid per-request allocation).
 		req.BundleURIBuildURL = s.bundleURIBuildURL
 	}
+	req.PackURIEnabled = s.opts.PackURIEnabled
+	if s.packURIBuildURL != nil {
+		req.PackURIBuildURL = s.packURIBuildURL
+	}
 	if err := uploadpack.Service(req); err != nil {
 		// Map engine errors to HTTP statuses. Note: bytes may already
 		// have been written before some failures; this matches M3.

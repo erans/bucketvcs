@@ -216,3 +216,109 @@ func TestWriteV2AdvertisementSSH_BundleURICapability(t *testing.T) {
 		})
 	}
 }
+
+// TestV2Capabilities_PackURIConditional verifies the slice form of the cap
+// list: packfile-uris=https absent by default, present when opted in.
+func TestV2Capabilities_PackURIConditional(t *testing.T) {
+	capsOff := V2CapabilitiesWithOptions("0.1", CapsOptions{PackURI: false})
+	for _, c := range capsOff {
+		if c == "packfile-uris=https" {
+			t.Errorf("V2CapabilitiesWithOptions(PackURI=false) should not include packfile-uris=https, got %v", capsOff)
+			break
+		}
+	}
+	capsOn := V2CapabilitiesWithOptions("0.1", CapsOptions{PackURI: true})
+	found := false
+	for _, c := range capsOn {
+		if c == "packfile-uris=https" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("V2CapabilitiesWithOptions(PackURI=true) should include packfile-uris=https, got %v", capsOn)
+	}
+
+	// BundleURI and PackURI are independent: enabling both yields both caps.
+	capsBoth := V2CapabilitiesWithOptions("0.1", CapsOptions{BundleURI: true, PackURI: true})
+	var hasBundle, hasPack bool
+	for _, c := range capsBoth {
+		if c == "bundle-uri" {
+			hasBundle = true
+		}
+		if c == "packfile-uris=https" {
+			hasPack = true
+		}
+	}
+	if !hasBundle || !hasPack {
+		t.Errorf("expected both bundle-uri and packfile-uris=https, got %v", capsBoth)
+	}
+}
+
+// TestWriteV2Advertisement_PackURICapability checks the HTTP advertisement
+// emits "packfile-uris=https" iff opts.PackURI is true.
+func TestWriteV2Advertisement_PackURICapability(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		opts    CapsOptions
+		wantCap bool
+	}{
+		{"disabled", CapsOptions{PackURI: false}, false},
+		{"enabled", CapsOptions{PackURI: true}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := WriteV2Advertisement(&buf, "git-upload-pack", "0.1", tc.opts); err != nil {
+				t.Fatalf("WriteV2Advertisement: %v", err)
+			}
+			caps := collectCapLines(t, &buf)
+			found := false
+			for _, c := range caps {
+				if c == "packfile-uris=https" {
+					found = true
+					break
+				}
+			}
+			if found != tc.wantCap {
+				t.Errorf("packfile-uris=https found=%v, want %v; caps=%v", found, tc.wantCap, caps)
+			}
+		})
+	}
+}
+
+// TestWriteV2AdvertisementSSH_PackURICapability checks the SSH advertisement
+// emits "packfile-uris=https" iff opts.PackURI is true.
+func TestWriteV2AdvertisementSSH_PackURICapability(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		opts    CapsOptions
+		wantCap bool
+	}{
+		{"disabled", CapsOptions{PackURI: false}, false},
+		{"enabled", CapsOptions{PackURI: true}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := WriteV2AdvertisementSSH(&buf, "0.1", tc.opts); err != nil {
+				t.Fatalf("WriteV2AdvertisementSSH: %v", err)
+			}
+			tokens := drainTokens(t, &buf)
+			var caps []string
+			for _, tok := range tokens {
+				if tok.Type == pktline.Data {
+					caps = append(caps, strings.TrimSuffix(string(tok.Payload), "\n"))
+				}
+			}
+			found := false
+			for _, c := range caps {
+				if c == "packfile-uris=https" {
+					found = true
+					break
+				}
+			}
+			if found != tc.wantCap {
+				t.Errorf("packfile-uris=https found=%v, want %v; caps=%v", found, tc.wantCap, caps)
+			}
+		})
+	}
+}
