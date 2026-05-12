@@ -149,6 +149,7 @@ func TestS3Compat_GCSafety_R2(t *testing.T) {
 	}
 	gcconformance.RunPropertyGCSafety(t, gcconformance.Factory(makeFactory(t, cfg)))
 	maintconformance.RunPropertyMaintenanceSafety(t, maintconformance.Factory(makeFactory(t, cfg)))
+	maintconformance.RunPropertyBundleSafety(t, maintconformance.Factory(makeFactory(t, cfg)))
 }
 
 func TestS3Compat_GCSafety_S3(t *testing.T) {
@@ -168,6 +169,7 @@ func TestS3Compat_GCSafety_S3(t *testing.T) {
 	}
 	gcconformance.RunPropertyGCSafety(t, gcconformance.Factory(makeFactory(t, cfg)))
 	maintconformance.RunPropertyMaintenanceSafety(t, maintconformance.Factory(makeFactory(t, cfg)))
+	maintconformance.RunPropertyBundleSafety(t, maintconformance.Factory(makeFactory(t, cfg)))
 }
 
 func TestS3Compat_ReachabilitySafety_R2(t *testing.T) {

@@ -92,6 +92,7 @@ func TestGcs_GCSafety(t *testing.T) {
 	}
 	gcconformance.RunPropertyGCSafety(t, gcconformance.Factory(makeGCSFactory(t, base)))
 	maintconformance.RunPropertyMaintenanceSafety(t, maintconformance.Factory(makeGCSFactory(t, base)))
+	maintconformance.RunPropertyBundleSafety(t, maintconformance.Factory(makeGCSFactory(t, base)))
 }
 
 func TestGcs_ReachabilitySafety(t *testing.T) {

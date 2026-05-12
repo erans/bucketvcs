@@ -96,6 +96,7 @@ func TestAzureBlob_GCSafety(t *testing.T) {
 	}
 	gcconformance.RunPropertyGCSafety(t, gcconformance.Factory(makeFactory(t, base)))
 	maintconformance.RunPropertyMaintenanceSafety(t, maintconformance.Factory(makeFactory(t, base)))
+	maintconformance.RunPropertyBundleSafety(t, maintconformance.Factory(makeFactory(t, base)))
 }
 
 func TestAzureBlob_ReachabilitySafety(t *testing.T) {
