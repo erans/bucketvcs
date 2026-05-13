@@ -66,7 +66,7 @@ func emitCompleted(ctx context.Context, logger *slog.Logger, r Report) {
 //     matching the maintenance_run_duration_seconds convention. Labelled
 //     with "repo_id" for per-repo latency histograms.
 //
-//   - bundle_byte_size: emitted ONLY when Generated is true AND ByteSize > 0.
+//   - bundle_bytes: emitted ONLY when Generated is true AND ByteSize > 0.
 //     Captures the compressed on-disk size of the generated bundle artifact.
 //     Omitted on failure and noop to avoid misleading zero-byte data points
 //     that would skew size-distribution queries.
@@ -100,7 +100,7 @@ func emitBundleResultMetrics(ctx context.Context, logger *slog.Logger, repoID st
 	)
 
 	if br.Generated && br.ByteSize > 0 {
-		emitMetric(ctx, logger, "bundle_byte_size", br.ByteSize,
+		emitMetric(ctx, logger, "bundle_bytes", br.ByteSize,
 			"repo_id", repoID,
 		)
 	}

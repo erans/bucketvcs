@@ -122,13 +122,13 @@ func TestEmitBundleResultMetrics_Generated(t *testing.T) {
 		t.Errorf("line 1 repo_id = %v, want t/r", e1["repo_id"])
 	}
 
-	// Line 2: bundle_byte_size (1234)
+	// Line 2: bundle_bytes (1234)
 	var e2 map[string]any
 	if err := json.Unmarshal([]byte(lines[2]), &e2); err != nil {
 		t.Fatalf("parse line 2: %v", err)
 	}
-	if e2["metric_name"] != "bundle_byte_size" {
-		t.Errorf("line 2 metric_name = %v, want bundle_byte_size", e2["metric_name"])
+	if e2["metric_name"] != "bundle_bytes" {
+		t.Errorf("line 2 metric_name = %v, want bundle_bytes", e2["metric_name"])
 	}
 	if int(e2["value"].(float64)) != 1234 {
 		t.Errorf("byte_size value = %v, want 1234", e2["value"])
@@ -140,7 +140,7 @@ func TestEmitBundleResultMetrics_Generated(t *testing.T) {
 
 // TestEmitBundleResultMetrics_Failure_OmitsByteSize verifies that a failure
 // outcome emits bundle_generated_total and bundle_generation_duration_seconds
-// but NOT bundle_byte_size (ByteSize is 0 and Generated is false).
+// but NOT bundle_bytes (ByteSize is 0 and Generated is false).
 func TestEmitBundleResultMetrics_Failure_OmitsByteSize(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
@@ -170,15 +170,15 @@ func TestEmitBundleResultMetrics_Failure_OmitsByteSize(t *testing.T) {
 		t.Errorf("outcome = %v, want failure", e0["outcome"])
 	}
 
-	// Confirm bundle_byte_size is NOT anywhere in the output.
-	if strings.Contains(buf.String(), "bundle_byte_size") {
-		t.Errorf("bundle_byte_size should not be emitted on failure, got: %s", buf.String())
+	// Confirm bundle_bytes is NOT anywhere in the output.
+	if strings.Contains(buf.String(), "bundle_bytes") {
+		t.Errorf("bundle_bytes should not be emitted on failure, got: %s", buf.String())
 	}
 }
 
 // TestEmitBundleResultMetrics_Noop_OmitsByteSize verifies that a noop outcome
 // (no trigger fired) emits bundle_generated_total and
-// bundle_generation_duration_seconds but NOT bundle_byte_size.
+// bundle_generation_duration_seconds but NOT bundle_bytes.
 func TestEmitBundleResultMetrics_Noop_OmitsByteSize(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
@@ -210,9 +210,9 @@ func TestEmitBundleResultMetrics_Noop_OmitsByteSize(t *testing.T) {
 		t.Errorf("trigger_reason = %v, want no_trigger", e0["trigger_reason"])
 	}
 
-	// Confirm bundle_byte_size is NOT anywhere in the output.
-	if strings.Contains(buf.String(), "bundle_byte_size") {
-		t.Errorf("bundle_byte_size should not be emitted on noop, got: %s", buf.String())
+	// Confirm bundle_bytes is NOT anywhere in the output.
+	if strings.Contains(buf.String(), "bundle_bytes") {
+		t.Errorf("bundle_bytes should not be emitted on noop, got: %s", buf.String())
 	}
 }
 
@@ -250,20 +250,20 @@ func TestEmitBundleResultMetrics_GeneratedWinsOverError(t *testing.T) {
 		t.Errorf("outcome = %v, want success (Generated must win over ErrorMessage)", e0["outcome"])
 	}
 
-	// Line 2: bundle_byte_size must be emitted (Generated && ByteSize > 0 both hold).
+	// Line 2: bundle_bytes must be emitted (Generated && ByteSize > 0 both hold).
 	var e2 map[string]any
 	if err := json.Unmarshal([]byte(lines[2]), &e2); err != nil {
 		t.Fatalf("parse line 2: %v", err)
 	}
-	if e2["metric_name"] != "bundle_byte_size" {
-		t.Errorf("line 2 metric_name = %v, want bundle_byte_size", e2["metric_name"])
+	if e2["metric_name"] != "bundle_bytes" {
+		t.Errorf("line 2 metric_name = %v, want bundle_bytes", e2["metric_name"])
 	}
 }
 
 // TestEmitBundleResultMetrics_NoopWithByteSize_GatesByteSize locks in that the
-// bundle_byte_size gate requires BOTH Generated=true AND ByteSize>0. A result
+// bundle_bytes gate requires BOTH Generated=true AND ByteSize>0. A result
 // with ByteSize>0 but Generated=false (invalid by construction in production)
-// must NOT emit bundle_byte_size.
+// must NOT emit bundle_bytes.
 func TestEmitBundleResultMetrics_NoopWithByteSize_GatesByteSize(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
@@ -293,10 +293,10 @@ func TestEmitBundleResultMetrics_NoopWithByteSize_GatesByteSize(t *testing.T) {
 		t.Errorf("outcome = %v, want noop", e0["outcome"])
 	}
 
-	// bundle_byte_size must NOT appear: Generated=false gates the emission even
+	// bundle_bytes must NOT appear: Generated=false gates the emission even
 	// when ByteSize is non-zero.
-	if strings.Contains(buf.String(), "bundle_byte_size") {
-		t.Errorf("bundle_byte_size should not be emitted when Generated=false, got: %s", buf.String())
+	if strings.Contains(buf.String(), "bundle_bytes") {
+		t.Errorf("bundle_bytes should not be emitted when Generated=false, got: %s", buf.String())
 	}
 }
 

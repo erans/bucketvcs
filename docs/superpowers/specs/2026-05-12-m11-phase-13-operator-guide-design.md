@@ -93,8 +93,8 @@ The guide's §8 is the canonical operator-facing description of the M11 observab
 
 | Metric | Labels | Semantics + rate-amplification |
 |--------|--------|-------------------------------|
-| `bundle_advertised_total` | `repo_id`, `freshness` ∈ {`disabled`, `no_bundle`, `no_ref`, `current`, `warm`, `stale`, `retired`} | Count of `command=bundle-uri` dispatches per repo. Includes encode-error path (counts dispatch attempts, not successful encodes). **Rate-amplification:** rogue clients can pump this at unbounded rate — alert on `freshness=current/warm/stale` rates for legitimate advertise traffic, not on the raw total. |
-| `bundle_uri_advertised_total` | `repo_id`, `via` ∈ {`proxied`, `direct`} | Only emitted when the bundle-uri response actually contains URLs. |
+| `bundle_advertised_total` | `repo_id`, `freshness` ∈ {`disabled`, `no_bundle`, `no_ref`, `current`, `warm`, `stale`} | Count of `command=bundle-uri` dispatches per repo. Includes encode-error path (counts dispatch attempts, not successful encodes). **Rate-amplification:** rogue clients can pump this at unbounded rate — alert on `freshness=current/warm/stale` rates for legitimate advertise traffic, not on the raw total. The internal state machine has a 7th value `retired`, but the gateway always routes those code paths through `outcome.Reason = no_bundle` or `no_ref`, so the literal label value `retired` is reserved for future use and not currently emitted. |
+| `bundle_uri_advertised_total` | `repo_id`, `via` ∈ {`proxied`, `direct`} | Only emitted when the bundle-uri response actually contains URLs. Per Phase 13 Task 13.1 verification, only `freshness ∈ {current, warm}` produce URLs; `stale` is dispatch-counted but does not advertise. |
 | `bundle_uri_served_total` | `via` | Per successful proxied bundle serve. **Counts truncated serves too** — io.Copy mid-stream errors still emit. |
 | `bundle_uri_served_bytes` | `via` | Actual bytes written via `countingWriter` (may be less than Content-Length on client disconnect). |
 | `pack_uri_advertised_total` | `repo_id`, `via` | Emitted when the `packfile-uris` stanza fires. |

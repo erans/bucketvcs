@@ -294,7 +294,21 @@ Retention values below 1 hour should only appear in automated testing scenarios
 where you have full control over the store and there are no concurrent sessions.
 Never run sub-1h retention against a production store.
 
-### 3.4 Force-push workflows
+### 3.4 M11 TTL ≤ retention/24 rule
+
+If you operate M11 bundle-uri or packfile-uri acceleration, the URL TTLs
+configured on `bucketvcs serve` (`--proxied-url-bundle-ttl`,
+`--proxied-url-pack-ttl`) must satisfy `TTL ≤ retention / 24`.
+This is an operational rule, not a CLI-enforced check — `bucketvcs serve`
+will accept violating configurations, but the operator may receive bundle
+or pack URLs that reference GC-swept blobs (404 in direct mode, 500 in
+proxied mode). If you tighten `--retention` below the default 168h, lower
+the M11 TTL flags proportionally. See
+[M11 §5 TTL vs M8 Retention](m11-bundles-operator-guide.md#5-ttl-vs-m8-retention).
+
+---
+
+### 3.5 Force-push workflows
 
 A force-push that drops pack X, followed later by a push that revives pack X
 (same content, same content-addressed key), creates a window in which X is

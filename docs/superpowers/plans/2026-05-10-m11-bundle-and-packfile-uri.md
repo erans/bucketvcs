@@ -5593,8 +5593,8 @@ func TestEmitBundleMetrics_GeneratedAndDuration(t *testing.T) {
     if !rec.HasMetric("bundle_generation_duration_seconds") {
         t.Errorf("missing bundle_generation_duration_seconds")
     }
-    if !rec.HasMetric("bundle_byte_size") {
-        t.Errorf("missing bundle_byte_size")
+    if !rec.HasMetric("bundle_bytes") {
+        t.Errorf("missing bundle_bytes")
     }
 }
 ```
@@ -5622,7 +5622,7 @@ func emitBundleResultMetrics(ctx context.Context, logger *slog.Logger, repoID st
     emitMetric(ctx, logger, "bundle_generated_total", 1, "outcome", outcome, "repo_id", repoID, "trigger_reason", br.TriggerReason)
     emitMetric(ctx, logger, "bundle_generation_duration_seconds", br.DurationMS/1000, "repo_id", repoID)
     if br.Generated && br.ByteSize > 0 {
-        emitMetric(ctx, logger, "bundle_byte_size", br.ByteSize, "repo_id", repoID)
+        emitMetric(ctx, logger, "bundle_bytes", br.ByteSize, "repo_id", repoID)
     }
 }
 ```

@@ -338,6 +338,15 @@ M10 adds three thresholds (`--reachability-delta-commits`, `--reachability-delta
 `.bvom` and `.bvcg` without producing a new pack. See `docs/m10-reachability-operator-guide.md`
 for tuning guidance and the cold-fetch SLO contract.
 
+### Bundle thresholds (M11)
+
+Maintenance also generates default-branch bundles when M11 is enabled. The
+bundle-specific flags (`--bundle-warm-commits`, `--bundle-warm-age`, the
+freshness state machine that decides when a bundle counts as `current` /
+`warm` / `stale` / `retired`) are documented separately. See
+[M11 Bundles Operator Guide](m11-bundles-operator-guide.md), particularly
+§2 Bundle Freshness Model for the tuning detail.
+
 ---
 
 ## 5. What Changes After a Successful Run

@@ -41,7 +41,7 @@
 - Multi-tenant `ProxiedKeyResolver` impl + per-served-object `repo_id` label (carried from Phase 8).
 - Histograms / percentile latency metrics (Prometheus migration question for M12).
 - `bundle.retired` with `reason=gc_swept` audit — blocked on the full bundle GC pipeline wiring deferred from Phase 9.
-- Renaming `bundle_byte_size` from Phase 12 to `bundle_bytes` for convention alignment (Phase 13 documentation-time decision).
+- ~~Renaming `bundle_byte_size` from Phase 12 to `bundle_bytes` for convention alignment.~~ Closed by Phase 13 spec `docs/superpowers/specs/2026-05-12-m11-phase-13-operator-guide-design.md` §4 Task 13.0; renamed in code under the same squash.
 
 **Why `repo_id` is omitted from served-* metrics:** The proxied URL endpoint at `internal/gateway/proxied_routes.go:60-247` resolves objects by hash alone via `ProxiedKeyResolver` (interface declared at line 16-32). The single-repo deployment assumption documented at lines 18-23 means the gateway instance is implicitly bound to one (tenant, repo), but that binding isn't reflected back to the handler at request time. Adding `repo_id` here requires either a `ProxiedKeyResolver` interface change or extracting tenant/repo from the URL path — both out of scope. The advertise-time metrics (`bundle_advertised_total`, `bundle_uri_advertised_total`, `pack_uri_advertised_total`) DO carry `repo_id` because their emission sites in `serveBundleURI` / `serveFetch` know the tenant/repo from the routed request (engine.EngineRequest carries that context).
 
