@@ -5785,6 +5785,20 @@ git commit -m "docs: M11 bundles operator guide + cross-references"
 
 ## Phase 14 — End-to-end smoke against MinIO and localfs
 
+> **Phase 14 implementation note (added 2026-05-13):** This section as
+> originally written predates discovery that `cmd/bucketvcs/serve.go`
+> does not mount `/_bundle/` or `/_pack/` inbound HTTP routes (Phase 8
+> deferred work). The localfs smoke (Task 14.1 below) would mint URLs
+> the gateway cannot serve. **Phase 14 as implemented ships only the
+> MinIO smoke** (renumbered to Task 14.1) and the final verification
+> gate (renumbered to Task 14.2). The localfs smoke is deferred until
+> proxied route mounting lands in `cmd/bucketvcs/serve.go`. The shipped
+> Phase 14 plan with corrected flag names (transfer.bundleURI, not
+> fetch.bundleURI), positional CLI args for init/import, env-var-based
+> S3 endpoint config, and strong markers (X-Amz-Signature positive,
+> --keep=fetch-pack negative) is at
+> `docs/superpowers/plans/2026-05-13-m11-phase-14-smoke.md`.
+
 ### Task 14.1: Localfs smoke
 
 **Files:**
