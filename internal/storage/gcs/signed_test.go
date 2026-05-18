@@ -30,3 +30,24 @@ func TestSignedGetURL_ExpectedHash_DoesNotBreakValidation(t *testing.T) {
 		t.Fatalf("want ErrInvalidArgument with ExpectedHash set, got %v", err)
 	}
 }
+
+func TestSignedGetURLRejectsUnknownMethod(t *testing.T) {
+	g := &GCS{}
+	_, err := g.SignedGetURL(context.Background(), "k", bvstorage.SignedURLOptions{
+		Method: "DELETE",
+	})
+	if err == nil || !errors.Is(err, bvstorage.ErrInvalidArgument) {
+		t.Fatalf("want ErrInvalidArgument, got %v", err)
+	}
+}
+
+func TestSignedGetURLRejectsBadKey_PUT(t *testing.T) {
+	// PUT path must still reject invalid keys before signing is attempted.
+	g := &GCS{}
+	_, err := g.SignedGetURL(context.Background(), "/leading", bvstorage.SignedURLOptions{
+		Method: "PUT",
+	})
+	if err == nil || !errors.Is(err, bvstorage.ErrInvalidArgument) {
+		t.Fatalf("want ErrInvalidArgument, got %v", err)
+	}
+}

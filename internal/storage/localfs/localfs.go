@@ -557,6 +557,13 @@ func (l *Localfs) collectKeys(prefix string) ([]string, error) {
 }
 
 func (l *Localfs) SignedGetURL(ctx context.Context, key string, opts storage.SignedURLOptions) (string, error) {
+	method := strings.ToUpper(strings.TrimSpace(opts.Method))
+	if method == "" {
+		method = "GET"
+	}
+	if method != "GET" && method != "PUT" {
+		return "", fmt.Errorf("localfs: signed-URL method %q: %w", opts.Method, storage.ErrInvalidArgument)
+	}
 	return "", storage.ErrNotSupported
 }
 

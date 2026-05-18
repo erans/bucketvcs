@@ -68,7 +68,8 @@ type ObjectStore interface {
 	// otherwise.
 	CompleteMultipartIfAbsent(ctx context.Context, upload MultipartUpload, parts []MultipartPart) (ObjectVersion, error)
 
-	// SignedGetURL returns a short-lived URL granting read access.
-	// Adapters without signed-URL support return ErrNotSupported.
+	// SignedGetURL returns a short-lived URL granting access to the named
+	// key. The URL's HTTP method is determined by opts.Method ("GET" or
+	// "PUT"). Adapters without signed-URL support return ErrNotSupported.
 	SignedGetURL(ctx context.Context, key string, opts SignedURLOptions) (string, error)
 }

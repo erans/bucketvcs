@@ -463,3 +463,31 @@ func TestVersionEqualityIsFullStruct(t *testing.T) {
 		t.Errorf("DeleteIfVersionMatches(wrongKind) = %v, want ErrVersionMismatch", err)
 	}
 }
+
+func TestLocalfs_SignedGetURL_PUT_NotSupported(t *testing.T) {
+	dir := t.TempDir()
+	l, err := localfs.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	_, err = l.SignedGetURL(context.Background(), "k", storage.SignedURLOptions{Method: "PUT"})
+	if !errors.Is(err, storage.ErrNotSupported) {
+		t.Fatalf("err = %v, want ErrNotSupported", err)
+	}
+}
+
+func TestLocalfs_SignedGetURL_RejectsUnknownMethod(t *testing.T) {
+	dir := t.TempDir()
+	l, err := localfs.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	_, err = l.SignedGetURL(context.Background(), "k", storage.SignedURLOptions{Method: "DELETE"})
+	if !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Fatalf("err = %v, want ErrInvalidArgument", err)
+	}
+}

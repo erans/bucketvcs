@@ -93,9 +93,17 @@ type MultipartOptions struct {
 }
 
 // SignedURLOptions controls SignedGetURL.
+//
+// Method selects the HTTP method the returned URL grants. Supported
+// values: "GET" (read access; the default if empty) and "PUT" (write
+// access). Adapters that do not support PUT signing return
+// ErrNotSupported when Method == "PUT" even if Capabilities reports
+// SignedURLs == true; callers should consult the per-adapter docs.
 type SignedURLOptions struct {
 	Expires time.Duration
-	Method  string // typically "GET"
+
+	// Method is "GET" (default) or "PUT".
+	Method string
 
 	// ExpectedHash, if non-empty, asks the adapter to bind the signed
 	// URL to integrity metadata so a downstream verifier can detect a

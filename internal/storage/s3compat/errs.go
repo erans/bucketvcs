@@ -28,6 +28,7 @@ const (
 	opUploadPart              // UploadPart
 	opCompleteIfAbsent        // CompleteMultipartUpload with If-None-Match: *
 	opAbortMultipart          // AbortMultipartUpload
+	opPresignPut              // presigned PUT URL minting (M13 LFS direct upload)
 )
 
 // classify maps an SDK error to a storage sentinel. The original error

@@ -3,6 +3,7 @@ package s3compat
 import (
 	"context"
 	"errors"
+	"net/http"
 	"net/url"
 	"strings"
 	"testing"
@@ -120,5 +121,57 @@ func TestSignedGetURL_NoExpectedHash_NoChecksumMode(t *testing.T) {
 	}
 	if mode := u.Query().Get("X-Amz-Checksum-Mode"); mode != "" {
 		t.Errorf("did not expect X-Amz-Checksum-Mode without ExpectedHash; got %q", mode)
+	}
+}
+
+func TestSignedURL_PUT_HasSignature(t *testing.T) {
+	s, _ := newMockBackend(t)
+	got, err := s.SignedGetURL(context.Background(), "k", storage.SignedURLOptions{
+		Method:  "PUT",
+		Expires: 5 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("SignedGetURL(PUT): %v", err)
+	}
+	if !strings.Contains(got, "X-Amz-Signature=") {
+		t.Fatalf("expected X-Amz-Signature in presigned URL; got %q", got)
+	}
+}
+
+func TestSignedURL_PUT_PutObjectRoundTrip(t *testing.T) {
+	s, _ := newMockBackend(t)
+	url, err := s.SignedGetURL(context.Background(), "k-put", storage.SignedURLOptions{
+		Method:  "PUT",
+		Expires: 5 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("SignedGetURL(PUT): %v", err)
+	}
+	req, _ := http.NewRequest(http.MethodPut, url, strings.NewReader("hello"))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		t.Fatalf("PUT status: %d", resp.StatusCode)
+	}
+	meta, err := s.Head(context.Background(), "k-put")
+	if err != nil {
+		t.Fatalf("Head: %v", err)
+	}
+	if meta.Size != 5 {
+		t.Fatalf("Head size = %d, want 5", meta.Size)
+	}
+}
+
+func TestSignedURL_RejectsUnknownMethod(t *testing.T) {
+	s, _ := newMockBackend(t)
+	_, err := s.SignedGetURL(context.Background(), "k", storage.SignedURLOptions{
+		Method:  "DELETE",
+		Expires: 5 * time.Minute,
+	})
+	if !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Fatalf("err = %v, want ErrInvalidArgument", err)
 	}
 }

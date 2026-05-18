@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -39,6 +40,9 @@ var conformanceHTTPClient = &http.Client{Timeout: 30 * time.Second}
 //     and the GET completes (with status 2xx if the adapter ignores the
 //     field, 4xx if the adapter binds). Per-adapter tests assert the
 //     stronger guarantee where applicable.
+//   - signed_url_put_round_trip: a PUT URL minted via SignedGetURL with
+//     Method="PUT" accepts an HTTP PUT, and a subsequent Head reports
+//     the matching size.
 func RunCapabilitySigning(t *testing.T, f Factory) {
 	t.Helper()
 	body := []byte("hello world")
@@ -235,6 +239,45 @@ func RunCapabilitySigning(t *testing.T, f Factory) {
 			t.Fatalf("wrong-hash URL produced unexpected status %d (expected 2xx or 4xx)", status)
 		}
 	})
+
+	t.Run("signed_url_put_round_trip", func(t *testing.T) {
+		// Verify PUT signing: mint a PUT URL, upload bytes via HTTP, then
+		// Head the key and confirm size. The key includes "-put-" to avoid
+		// colliding with the GET-side fixture above.
+		s, cleanup := f(t)
+		defer cleanup()
+		putKey := "rk/m13-signing-put-" + hex.EncodeToString(bodyHash[:8])
+		payload := []byte("lfs-conformance")
+		raw, err := s.SignedGetURL(context.Background(), putKey, storage.SignedURLOptions{
+			Expires: 30 * time.Second, Method: "PUT",
+		})
+		if errors.Is(err, storage.ErrNotSupported) {
+			t.Skipf("adapter does not support PUT signing: %v", err)
+		}
+		if err != nil {
+			t.Fatalf("SignedGetURL(PUT): %v", err)
+		}
+		status := httpPutStatus(t, raw, payload)
+		if status < 200 || status >= 300 {
+			t.Fatalf("PUT status = %d, want 2xx", status)
+		}
+		meta, err := s.Head(context.Background(), putKey)
+		if err != nil {
+			t.Fatalf("Head: %v", err)
+		}
+		if meta.Size != int64(len(payload)) {
+			t.Fatalf("Head size = %d, want %d", meta.Size, len(payload))
+		}
+		// Clean up the object we just wrote, but tolerate adapters that
+		// don't expose a stable version for this code path. The factory
+		// cleanup at function exit will catch any straggler.
+		if err := s.DeleteIfVersionMatches(context.Background(), putKey, meta.Version); err != nil {
+			// Some adapters return ErrVersionMismatch if the metadata Version
+			// field is empty for newly-uploaded objects via SignedURL. Just
+			// log; the bucket cleanup handles it.
+			t.Logf("DeleteIfVersionMatches (best-effort): %v", err)
+		}
+	})
 }
 
 func mustHTTPGet(t *testing.T, url string) []byte {
@@ -262,5 +305,23 @@ func httpGetStatus(t *testing.T, url string) int {
 		return -1
 	}
 	defer resp.Body.Close()
+	return resp.StatusCode
+}
+
+// httpPutStatus performs an HTTP PUT with the given body and returns
+// the status code (or -1 if the request could not be issued). Used by
+// the signed_url_put_round_trip subtest.
+func httpPutStatus(t *testing.T, url string, body []byte) int {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPut, url, bytes.NewReader(body))
+	if err != nil {
+		return -1
+	}
+	resp, err := conformanceHTTPClient.Do(req)
+	if err != nil {
+		return -1
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
 	return resp.StatusCode
 }
