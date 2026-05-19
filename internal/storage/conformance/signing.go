@@ -80,7 +80,7 @@ func RunCapabilitySigning(t *testing.T, f Factory) {
 	t.Run("byte_identical_fetch", func(t *testing.T) {
 		s, cleanup := put(t)
 		defer cleanup()
-		raw, err := s.SignedGetURL(context.Background(), key, storage.SignedURLOptions{
+		raw, _, err := s.SignedGetURL(context.Background(), key, storage.SignedURLOptions{
 			Expires: 30 * time.Second, Method: "GET",
 		})
 		if err != nil {
@@ -95,7 +95,7 @@ func RunCapabilitySigning(t *testing.T, f Factory) {
 	t.Run("expired_signature_rejected", func(t *testing.T) {
 		s, cleanup := put(t)
 		defer cleanup()
-		raw, err := s.SignedGetURL(context.Background(), key, storage.SignedURLOptions{
+		raw, _, err := s.SignedGetURL(context.Background(), key, storage.SignedURLOptions{
 			Expires: 2 * time.Second, Method: "GET",
 		})
 		if err != nil {
@@ -117,7 +117,7 @@ func RunCapabilitySigning(t *testing.T, f Factory) {
 	t.Run("tampered_query_rejected", func(t *testing.T) {
 		s, cleanup := put(t)
 		defer cleanup()
-		raw, err := s.SignedGetURL(context.Background(), key, storage.SignedURLOptions{
+		raw, _, err := s.SignedGetURL(context.Background(), key, storage.SignedURLOptions{
 			Expires: 30 * time.Second, Method: "GET",
 		})
 		if err != nil {
@@ -177,7 +177,7 @@ func RunCapabilitySigning(t *testing.T, f Factory) {
 	t.Run("long_ttl_does_not_break_minting", func(t *testing.T) {
 		s, cleanup := put(t)
 		defer cleanup()
-		raw, err := s.SignedGetURL(context.Background(), key, storage.SignedURLOptions{
+		raw, _, err := s.SignedGetURL(context.Background(), key, storage.SignedURLOptions{
 			Expires: 365 * 24 * time.Hour, Method: "GET",
 		})
 		if err != nil {
@@ -206,7 +206,7 @@ func RunCapabilitySigning(t *testing.T, f Factory) {
 		// correct-hash assertion here. If such a strategy is ever
 		// added, the per-adapter test must mint and fetch with the
 		// matching client, not via RunCapabilitySigning.
-		urlOK, err := s.SignedGetURL(context.Background(), key, storage.SignedURLOptions{
+		urlOK, _, err := s.SignedGetURL(context.Background(), key, storage.SignedURLOptions{
 			Expires: 30 * time.Second, Method: "GET", ExpectedHash: correctHash,
 		})
 		if err != nil {
@@ -215,7 +215,7 @@ func RunCapabilitySigning(t *testing.T, f Factory) {
 		if status := httpGetStatus(t, urlOK); status < 200 || status >= 300 {
 			t.Fatalf("URL with correct ExpectedHash returned %d (want 2xx)", status)
 		}
-		urlBad, err := s.SignedGetURL(context.Background(), key, storage.SignedURLOptions{
+		urlBad, _, err := s.SignedGetURL(context.Background(), key, storage.SignedURLOptions{
 			Expires: 30 * time.Second, Method: "GET", ExpectedHash: wrongHash,
 		})
 		if err != nil {
@@ -248,7 +248,7 @@ func RunCapabilitySigning(t *testing.T, f Factory) {
 		defer cleanup()
 		putKey := "rk/m13-signing-put-" + hex.EncodeToString(bodyHash[:8])
 		payload := []byte("lfs-conformance")
-		raw, err := s.SignedGetURL(context.Background(), putKey, storage.SignedURLOptions{
+		raw, putHdrs, err := s.SignedGetURL(context.Background(), putKey, storage.SignedURLOptions{
 			Expires: 30 * time.Second, Method: "PUT",
 		})
 		if errors.Is(err, storage.ErrNotSupported) {
@@ -257,7 +257,7 @@ func RunCapabilitySigning(t *testing.T, f Factory) {
 		if err != nil {
 			t.Fatalf("SignedGetURL(PUT): %v", err)
 		}
-		status := httpPutStatus(t, raw, payload)
+		status := httpPutStatus(t, raw, payload, putHdrs)
 		if status < 200 || status >= 300 {
 			t.Fatalf("PUT status = %d, want 2xx", status)
 		}
@@ -310,12 +310,19 @@ func httpGetStatus(t *testing.T, url string) int {
 
 // httpPutStatus performs an HTTP PUT with the given body and returns
 // the status code (or -1 if the request could not be issued). Used by
-// the signed_url_put_round_trip subtest.
-func httpPutStatus(t *testing.T, url string, body []byte) int {
+// the signed_url_put_round_trip subtest. extraHdrs are merged into the
+// outgoing request — backends like Azure require x-ms-blob-type:BlockBlob
+// on PUT and surface that via the SignedGetURL header return.
+func httpPutStatus(t *testing.T, url string, body []byte, extraHdrs http.Header) int {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPut, url, bytes.NewReader(body))
 	if err != nil {
 		return -1
+	}
+	for k, vs := range extraHdrs {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
 	}
 	resp, err := conformanceHTTPClient.Do(req)
 	if err != nil {

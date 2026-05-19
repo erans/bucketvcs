@@ -3,6 +3,7 @@ package azureblob
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -27,19 +28,27 @@ import (
 //     integrity is enforced by a post-upload verify step (see
 //     internal/lfs in M13).
 //   - any other value: returns ErrInvalidArgument.
-func (a *AzureBlob) SignedGetURL(ctx context.Context, key string, opts bvstorage.SignedURLOptions) (string, error) {
+//
+// On PUT, the returned header set carries `x-ms-blob-type: BlockBlob`
+// — Azure's Put Blob API rejects requests without it (HTTP 400),
+// because the type is part of the blob's create-time metadata and
+// cannot be inferred from the body. SAS parameters do not bind
+// request headers, so the caller MUST forward this header on the PUT.
+// internal/lfs.Store.PresignPut merges this with its own
+// Content-Type: application/octet-stream.
+func (a *AzureBlob) SignedGetURL(ctx context.Context, key string, opts bvstorage.SignedURLOptions) (string, http.Header, error) {
 	if err := validateKey(key); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	method := strings.ToUpper(strings.TrimSpace(opts.Method))
 	if method == "" {
 		method = "GET"
 	}
 	if method != "GET" && method != "PUT" {
-		return "", fmt.Errorf("azureblob: signed-URL method %q: %w", opts.Method, bvstorage.ErrInvalidArgument)
+		return "", nil, fmt.Errorf("azureblob: signed-URL method %q: %w", opts.Method, bvstorage.ErrInvalidArgument)
 	}
 	if a.cfg.AccountKey == "" && a.cfg.ConnectionString == "" {
-		return "", wrap(bvstorage.ErrNotSupported, nil)
+		return "", nil, wrap(bvstorage.ErrNotSupported, nil)
 	}
 	ttl := opts.Expires
 	if ttl <= 0 {
@@ -60,7 +69,12 @@ func (a *AzureBlob) SignedGetURL(ctx context.Context, key string, opts bvstorage
 		nil,
 	)
 	if err != nil {
-		return "", wrap(bvstorage.ErrNotSupported, err)
+		return "", nil, wrap(bvstorage.ErrNotSupported, err)
 	}
-	return url, nil
+	var hdr http.Header
+	if method == "PUT" {
+		hdr = http.Header{}
+		hdr.Set("x-ms-blob-type", "BlockBlob")
+	}
+	return url, hdr, nil
 }

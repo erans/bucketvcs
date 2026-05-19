@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"io"
+	"net/http"
 )
 
 // ObjectStore is the provider-neutral storage contract. Every bucketvcs
@@ -70,6 +71,19 @@ type ObjectStore interface {
 
 	// SignedGetURL returns a short-lived URL granting access to the named
 	// key. The URL's HTTP method is determined by opts.Method ("GET" or
-	// "PUT"). Adapters without signed-URL support return ErrNotSupported.
-	SignedGetURL(ctx context.Context, key string, opts SignedURLOptions) (string, error)
+	// "PUT"). The returned header set carries headers the caller MUST
+	// include on the request that uses the signed URL — Azure Blob, for
+	// example, requires `x-ms-blob-type: BlockBlob` on a PUT. The header
+	// is nil/empty when the backend imposes no such requirement (S3,
+	// GCS, localfs). Adapters without signed-URL support return
+	// ErrNotSupported.
+	//
+	// On error (including ErrNotSupported and ErrInvalidArgument) the
+	// returned URL is "" and the returned http.Header is nil. Callers
+	// can assume an empty URL implies a nil header.
+	//
+	// Callers that overlay their own headers (e.g. internal/lfs.Store
+	// adds Content-Type: application/octet-stream) should merge with the
+	// backend's returned header rather than overwriting it.
+	SignedGetURL(ctx context.Context, key string, opts SignedURLOptions) (string, http.Header, error)
 }

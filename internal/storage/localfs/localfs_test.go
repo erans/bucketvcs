@@ -472,7 +472,7 @@ func TestLocalfs_SignedGetURL_PUT_NotSupported(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = l.Close() })
 
-	_, err = l.SignedGetURL(context.Background(), "k", storage.SignedURLOptions{Method: "PUT"})
+	_, _, err = l.SignedGetURL(context.Background(), "k", storage.SignedURLOptions{Method: "PUT"})
 	if !errors.Is(err, storage.ErrNotSupported) {
 		t.Fatalf("err = %v, want ErrNotSupported", err)
 	}
@@ -486,7 +486,7 @@ func TestLocalfs_SignedGetURL_RejectsUnknownMethod(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = l.Close() })
 
-	_, err = l.SignedGetURL(context.Background(), "k", storage.SignedURLOptions{Method: "DELETE"})
+	_, _, err = l.SignedGetURL(context.Background(), "k", storage.SignedURLOptions{Method: "DELETE"})
 	if !errors.Is(err, storage.ErrInvalidArgument) {
 		t.Fatalf("err = %v, want ErrInvalidArgument", err)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 
 	"github.com/bucketvcs/bucketvcs/internal/storage"
@@ -111,8 +112,8 @@ func (s *localFilePackStore) CompleteMultipartIfAbsent(ctx context.Context, uplo
 	return storage.ObjectVersion{}, fmt.Errorf("localFilePackStore: multipart not supported")
 }
 
-func (s *localFilePackStore) SignedGetURL(ctx context.Context, key string, opts storage.SignedURLOptions) (string, error) {
-	return "", fmt.Errorf("localFilePackStore: signed URLs not supported")
+func (s *localFilePackStore) SignedGetURL(ctx context.Context, key string, opts storage.SignedURLOptions) (string, http.Header, error) {
+	return "", nil, fmt.Errorf("localFilePackStore: signed URLs not supported")
 }
 
 type lengthReader struct {

@@ -46,9 +46,26 @@ func (b *URLBuilder) buildURL(ctx context.Context, kind, hash, storageKey, expec
 		return "", "", fmt.Errorf("gateway: URI mode is off")
 	}
 	if b.Mode == URIModeDirect || b.Mode == URIModeAuto {
-		signedURL, err := b.Store.SignedGetURL(ctx, storageKey, storage.SignedURLOptions{
+		signedURL, hdr, err := b.Store.SignedGetURL(ctx, storageKey, storage.SignedURLOptions{
 			Expires: ttl, Method: "GET", ExpectedHash: expectedHash,
 		})
+		// Bundle/pack URLs are advertised to git via the v2 bundle-uri and
+		// packfile-uri caps. Git does not let the server pin extra request
+		// headers on those fetches, so any backend-required headers (hdr)
+		// would be unenforceable here. Today no adapter returns a non-nil
+		// hdr on GET (S3/GCS/Azure/localfs all return nil — Azure only
+		// uses the header channel for PUT). If a future backend starts
+		// returning GET headers, the direct path becomes unsafe: a fetch
+		// from git would 400 silently. Treat a non-empty hdr as
+		// "backend incompatible with bundle-uri direct mode" — in Auto
+		// mode we fall through to proxied; in Direct mode we surface a
+		// clear error rather than emitting an unusable URL.
+		if err == nil && len(hdr) > 0 {
+			// Wrap as ErrNotSupported so URIModeAuto falls through to
+			// proxied (the safe path) while URIModeDirect surfaces the
+			// reason via the same channel as a hard capability failure.
+			err = fmt.Errorf("gateway: backend requires request headers on GET (%d) which v2 bundle-uri/packfile-uri cannot pin; backend not usable for direct-mode advertisement: %w", len(hdr), storage.ErrNotSupported)
+		}
 		if err == nil {
 			return signedURL, "direct", nil
 		}

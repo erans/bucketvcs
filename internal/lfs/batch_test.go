@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 	"net/url"
 	"strings"
 	"testing"
@@ -99,8 +100,9 @@ func (f *fakeBatchStore) CreateMultipart(context.Context, string, *storage.Multi
 func (f *fakeBatchStore) CompleteMultipartIfAbsent(context.Context, storage.MultipartUpload, []storage.MultipartPart) (storage.ObjectVersion, error) {
 	return storage.ObjectVersion{}, errors.New("not used")
 }
-func (f *fakeBatchStore) SignedGetURL(ctx context.Context, key string, opts storage.SignedURLOptions) (string, error) {
-	return f.signFn(ctx, key, opts)
+func (f *fakeBatchStore) SignedGetURL(ctx context.Context, key string, opts storage.SignedURLOptions) (string, http.Header, error) {
+	url, err := f.signFn(ctx, key, opts)
+	return url, nil, err
 }
 
 func lastSlash(s string) int {

@@ -526,7 +526,7 @@ func test29_10(t *testing.T, f Factory) {
 	s := newStore(t, f)
 	caps := s.Capabilities()
 	if !caps.SignedURLs {
-		_, err := s.SignedGetURL(ctx(), "rk/29-10", storage.SignedURLOptions{Expires: 0, Method: "GET"})
+		_, _, err := s.SignedGetURL(ctx(), "rk/29-10", storage.SignedURLOptions{Expires: 0, Method: "GET"})
 		if !errors.Is(err, storage.ErrNotSupported) {
 			t.Errorf("Capabilities.SignedURLs=false but SignedGetURL = %v, want ErrNotSupported", err)
 		}

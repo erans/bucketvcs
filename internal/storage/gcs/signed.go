@@ -3,6 +3,7 @@ package gcs
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -37,9 +38,16 @@ import (
 // emulator (e.g. fake-gcs-server) ignores the cryptographic signature
 // but the URL plumbing — host, query layout, expected-method — is
 // validated end-to-end. Production (Endpoint == "") is unchanged.
-func (g *GCS) SignedGetURL(ctx context.Context, key string, opts bvstorage.SignedURLOptions) (string, error) {
+//
+// The returned header set is nil — GCS v4 signing does not require
+// any client-side request headers beyond what the URL already binds
+// (Content-Type and other headers can be added by the client but are
+// not mandatory for the upload to succeed). This is the inverse of
+// Azure Blob's PUT path, which requires `x-ms-blob-type` on the
+// request.
+func (g *GCS) SignedGetURL(ctx context.Context, key string, opts bvstorage.SignedURLOptions) (string, http.Header, error) {
 	if err := validateKey(key); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	ttl := opts.Expires
 	if ttl <= 0 {
@@ -50,7 +58,7 @@ func (g *GCS) SignedGetURL(ctx context.Context, key string, opts bvstorage.Signe
 		method = "GET"
 	}
 	if method != "GET" && method != "PUT" {
-		return "", fmt.Errorf("gcs: signed-URL method %q: %w", opts.Method, bvstorage.ErrInvalidArgument)
+		return "", nil, fmt.Errorf("gcs: signed-URL method %q: %w", opts.Method, bvstorage.ErrInvalidArgument)
 	}
 	sopts := &gstorage.SignedURLOptions{
 		Method:  method,
@@ -77,9 +85,9 @@ func (g *GCS) SignedGetURL(ctx context.Context, key string, opts bvstorage.Signe
 		// conformance suite probes correctly. Network/auth failures
 		// against real GCS will still propagate via the suite as a
 		// hard error.
-		return "", wrap(bvstorage.ErrNotSupported, err)
+		return "", nil, wrap(bvstorage.ErrNotSupported, err)
 	}
-	return url, nil
+	return url, nil, nil
 }
 
 // emulatorHostAndScheme extracts a host + insecure flag from a

@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"net/http"
 	"net/url"
 	"strings"
 	"testing"
@@ -17,8 +18,8 @@ type fakeStoreNoSign struct{ storage.ObjectStore }
 func (f fakeStoreNoSign) Capabilities() storage.Capabilities {
 	return storage.Capabilities{SignedURLs: false}
 }
-func (f fakeStoreNoSign) SignedGetURL(ctx context.Context, key string, opts storage.SignedURLOptions) (string, error) {
-	return "", storage.ErrNotSupported
+func (f fakeStoreNoSign) SignedGetURL(ctx context.Context, key string, opts storage.SignedURLOptions) (string, http.Header, error) {
+	return "", nil, storage.ErrNotSupported
 }
 
 type fakeStoreWithSign struct {
@@ -30,11 +31,11 @@ type fakeStoreWithSign struct {
 func (f *fakeStoreWithSign) Capabilities() storage.Capabilities {
 	return storage.Capabilities{SignedURLs: true}
 }
-func (f *fakeStoreWithSign) SignedGetURL(ctx context.Context, key string, opts storage.SignedURLOptions) (string, error) {
+func (f *fakeStoreWithSign) SignedGetURL(ctx context.Context, key string, opts storage.SignedURLOptions) (string, http.Header, error) {
 	if f.err != nil {
-		return "", f.err
+		return "", nil, f.err
 	}
-	return f.minted, nil
+	return f.minted, nil, nil
 }
 
 func TestBuildBundleURL_Auto_DirectFirst(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 	neturl "net/url"
 	"strings"
 	"testing"
@@ -17,6 +18,10 @@ import (
 type fakeStore struct {
 	headFn func(context.Context, string) (*storage.ObjectMetadata, error)
 	signFn func(context.Context, string, storage.SignedURLOptions) (string, error)
+	// signHdr lets tests inject the backend-returned http.Header so the
+	// PresignPut merge in store.go can be exercised without standing up
+	// a real Azure SAS path.
+	signHdr http.Header
 }
 
 func (f *fakeStore) Capabilities() storage.Capabilities { return storage.Capabilities{SignedURLs: true} }
@@ -47,8 +52,9 @@ func (f *fakeStore) CreateMultipart(context.Context, string, *storage.MultipartO
 func (f *fakeStore) CompleteMultipartIfAbsent(context.Context, storage.MultipartUpload, []storage.MultipartPart) (storage.ObjectVersion, error) {
 	return storage.ObjectVersion{}, errors.New("nope")
 }
-func (f *fakeStore) SignedGetURL(ctx context.Context, key string, opts storage.SignedURLOptions) (string, error) {
-	return f.signFn(ctx, key, opts)
+func (f *fakeStore) SignedGetURL(ctx context.Context, key string, opts storage.SignedURLOptions) (string, http.Header, error) {
+	url, err := f.signFn(ctx, key, opts)
+	return url, f.signHdr, err
 }
 
 func TestStore_Key(t *testing.T) {
@@ -133,6 +139,77 @@ func TestStore_PresignPut(t *testing.T) {
 	}
 	if hdr == nil || hdr.Get("Content-Type") != "application/octet-stream" {
 		t.Errorf("Content-Type=%q want application/octet-stream", hdr.Get("Content-Type"))
+	}
+}
+
+// TestStore_PresignPut_ForwardsBackendHeader exercises the merge at
+// store.go:81-85: backend-required headers (e.g., Azure's x-ms-blob-type)
+// must travel through Store.PresignPut alongside the LFS-supplied
+// Content-Type. The Azure smoke covers this end-to-end against Azurite;
+// this unit test gives fast feedback if the merge regresses.
+func TestStore_PresignPut_ForwardsBackendHeader(t *testing.T) {
+	fake := &fakeStore{
+		signFn: func(_ context.Context, _ string, _ storage.SignedURLOptions) (string, error) {
+			return "https://signed/PUT", nil
+		},
+		signHdr: http.Header{"X-Ms-Blob-Type": []string{"BlockBlob"}},
+	}
+	s := NewStore(fake, "p/")
+	_, hdr, err := s.PresignPut(context.Background(), "abc", 1, time.Minute)
+	if err != nil {
+		t.Fatalf("PresignPut: %v", err)
+	}
+	if got := hdr.Get("x-ms-blob-type"); got != "BlockBlob" {
+		t.Errorf("x-ms-blob-type=%q want BlockBlob", got)
+	}
+	if got := hdr.Get("Content-Type"); got != "application/octet-stream" {
+		t.Errorf("Content-Type=%q want application/octet-stream", got)
+	}
+}
+
+// TestStore_PresignPut_BackendContentTypeWins exercises the
+// collision policy documented at store.go:PresignPut: if the backend
+// returns its own Content-Type, the LFS default is replaced (not
+// appended-behind-it). No adapter does this today, but the policy
+// guards against a silent-drop hazard if a future one starts to.
+func TestStore_PresignPut_BackendContentTypeWins(t *testing.T) {
+	fake := &fakeStore{
+		signFn: func(_ context.Context, _ string, _ storage.SignedURLOptions) (string, error) {
+			return "https://signed/PUT", nil
+		},
+		signHdr: http.Header{"Content-Type": []string{"application/x-custom"}},
+	}
+	s := NewStore(fake, "p/")
+	_, hdr, err := s.PresignPut(context.Background(), "abc", 1, time.Minute)
+	if err != nil {
+		t.Fatalf("PresignPut: %v", err)
+	}
+	if got := hdr.Get("Content-Type"); got != "application/x-custom" {
+		t.Errorf("Content-Type=%q want backend value application/x-custom", got)
+	}
+	if vs := hdr.Values("Content-Type"); len(vs) != 1 {
+		t.Errorf("Content-Type values = %v, want exactly one", vs)
+	}
+}
+
+// TestStore_PresignGet_ForwardsBackendHeader mirrors the PUT-side
+// merge test for the GET path. No backend currently sets GET headers,
+// but PresignGet has been a verbatim pass-through since M13.2 — this
+// guards against an accidental nil-return regression.
+func TestStore_PresignGet_ForwardsBackendHeader(t *testing.T) {
+	fake := &fakeStore{
+		signFn: func(_ context.Context, _ string, _ storage.SignedURLOptions) (string, error) {
+			return "https://signed/GET", nil
+		},
+		signHdr: http.Header{"X-Custom": []string{"forwarded"}},
+	}
+	s := NewStore(fake, "p/")
+	_, hdr, err := s.PresignGet(context.Background(), "abc", time.Minute)
+	if err != nil {
+		t.Fatalf("PresignGet: %v", err)
+	}
+	if got := hdr.Get("X-Custom"); got != "forwarded" {
+		t.Errorf("X-Custom=%q want forwarded", got)
 	}
 }
 

@@ -14,7 +14,7 @@ import (
 
 func TestSignedGetURLForm(t *testing.T) {
 	s, _ := newMockBackend(t)
-	got, err := s.SignedGetURL(context.Background(), "k", storage.SignedURLOptions{
+	got, _, err := s.SignedGetURL(context.Background(), "k", storage.SignedURLOptions{
 		Expires: 5 * time.Minute,
 		Method:  "GET",
 	})
@@ -39,7 +39,7 @@ func TestSignedGetURLForm(t *testing.T) {
 
 func TestSignedGetURLDefaultsTTL(t *testing.T) {
 	s, _ := newMockBackend(t)
-	got, err := s.SignedGetURL(context.Background(), "k", storage.SignedURLOptions{Method: "GET"})
+	got, _, err := s.SignedGetURL(context.Background(), "k", storage.SignedURLOptions{Method: "GET"})
 	if err != nil {
 		t.Fatalf("SignedGetURL: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestSignedGetURLRejectsInvalidKey(t *testing.T) {
 	bad := []string{"", "/foo", "foo/", "foo\x00bar"}
 	for _, k := range bad {
 		t.Run(k, func(t *testing.T) {
-			_, err := s.SignedGetURL(context.Background(), k, storage.SignedURLOptions{Method: "GET"})
+			_, _, err := s.SignedGetURL(context.Background(), k, storage.SignedURLOptions{Method: "GET"})
 			if !errors.Is(err, storage.ErrInvalidArgument) {
 				t.Fatalf("SignedGetURL(%q) err = %v, want ErrInvalidArgument", k, err)
 			}
@@ -67,7 +67,7 @@ func TestSignedGetURLAppliesPrefix(t *testing.T) {
 	// Verify configured prefix is prepended to the wire key in the URL.
 	s, _, srv := newMockBackendWithPrefix(t, "acme/")
 	_ = srv
-	got, err := s.SignedGetURL(context.Background(), "foo", storage.SignedURLOptions{Method: "GET"})
+	got, _, err := s.SignedGetURL(context.Background(), "foo", storage.SignedURLOptions{Method: "GET"})
 	if err != nil {
 		t.Fatalf("SignedGetURL: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestSignedGetURL_ExpectedHash_AddsChecksumMode(t *testing.T) {
 	// in signed.go is the sole source of the header — this test genuinely guards
 	// that code path.
 	s, _ := newMockBackendStrictChecksum(t)
-	raw, err := s.SignedGetURL(context.Background(), "k", storage.SignedURLOptions{
+	raw, _, err := s.SignedGetURL(context.Background(), "k", storage.SignedURLOptions{
 		Expires:      30 * time.Second,
 		Method:       "GET",
 		ExpectedHash: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -108,7 +108,7 @@ func TestSignedGetURL_NoExpectedHash_NoChecksumMode(t *testing.T) {
 	// newMockBackendStrictChecksum sets ResponseChecksumValidation=WhenRequired,
 	// disabling the AWS SDK default that would otherwise add the header anyway.
 	s, _ := newMockBackendStrictChecksum(t)
-	raw, err := s.SignedGetURL(context.Background(), "k", storage.SignedURLOptions{
+	raw, _, err := s.SignedGetURL(context.Background(), "k", storage.SignedURLOptions{
 		Expires: 30 * time.Second,
 		Method:  "GET",
 	})
@@ -126,7 +126,7 @@ func TestSignedGetURL_NoExpectedHash_NoChecksumMode(t *testing.T) {
 
 func TestSignedURL_PUT_HasSignature(t *testing.T) {
 	s, _ := newMockBackend(t)
-	got, err := s.SignedGetURL(context.Background(), "k", storage.SignedURLOptions{
+	got, _, err := s.SignedGetURL(context.Background(), "k", storage.SignedURLOptions{
 		Method:  "PUT",
 		Expires: 5 * time.Minute,
 	})
@@ -140,7 +140,7 @@ func TestSignedURL_PUT_HasSignature(t *testing.T) {
 
 func TestSignedURL_PUT_PutObjectRoundTrip(t *testing.T) {
 	s, _ := newMockBackend(t)
-	url, err := s.SignedGetURL(context.Background(), "k-put", storage.SignedURLOptions{
+	url, _, err := s.SignedGetURL(context.Background(), "k-put", storage.SignedURLOptions{
 		Method:  "PUT",
 		Expires: 5 * time.Minute,
 	})
@@ -167,7 +167,7 @@ func TestSignedURL_PUT_PutObjectRoundTrip(t *testing.T) {
 
 func TestSignedURL_RejectsUnknownMethod(t *testing.T) {
 	s, _ := newMockBackend(t)
-	_, err := s.SignedGetURL(context.Background(), "k", storage.SignedURLOptions{
+	_, _, err := s.SignedGetURL(context.Background(), "k", storage.SignedURLOptions{
 		Method:  "DELETE",
 		Expires: 5 * time.Minute,
 	})

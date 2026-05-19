@@ -61,13 +61,22 @@ func (s *Store) Head(ctx context.Context, oid string) (size int64, exists bool, 
 // adapters that support it. Returns ErrNotSupported when the backend
 // has no native presign (use ProxiedPutURL in that case).
 //
-// The returned header includes Content-Type: application/octet-stream
-// as advisory only; backends do not bind Content-Type into the signed
-// URL today. A client that ignores this header still produces a
-// working upload; the binding is informational.
+// The returned header carries Content-Type: application/octet-stream
+// (advisory; backends do not bind Content-Type into the signed URL
+// today) PLUS any backend-required headers — Azure Blob, for example,
+// adds `x-ms-blob-type: BlockBlob`, without which the PUT would 400.
+// Callers MUST forward every header in the returned set when invoking
+// the URL.
+//
+// Content-Type collision policy: backend wins. If the backend returns
+// its own Content-Type (no adapter does today, but future ones may),
+// the LFS default is replaced rather than appended-behind-it. This
+// avoids the silent-drop hazard where downstream first-value emitters
+// would discard whichever value lost the race. Adapters that have an
+// opinion about Content-Type get to express it.
 func (s *Store) PresignPut(ctx context.Context, oid string, size int64, ttl time.Duration) (string, http.Header, error) {
 	_ = size
-	url, err := s.backend.SignedGetURL(ctx, s.Key(oid), storage.SignedURLOptions{
+	url, backendHdr, err := s.backend.SignedGetURL(ctx, s.Key(oid), storage.SignedURLOptions{
 		Method:  "PUT",
 		Expires: ttl,
 	})
@@ -75,22 +84,33 @@ func (s *Store) PresignPut(ctx context.Context, oid string, size int64, ttl time
 		return "", nil, err
 	}
 	hdr := http.Header{}
-	hdr.Set("Content-Type", "application/octet-stream")
+	// Copy backend headers first, then set the LFS default Content-Type
+	// only if the backend did not supply one.
+	for k, vs := range backendHdr {
+		for _, v := range vs {
+			hdr.Add(k, v)
+		}
+	}
+	if hdr.Get("Content-Type") == "" {
+		hdr.Set("Content-Type", "application/octet-stream")
+	}
 	return url, hdr, nil
 }
 
 // PresignGet returns a signed URL the client can use to GET one LFS
 // object. Returns ErrNotSupported when the backend has no native
-// presign.
+// presign. The returned header is whatever the backend reports (most
+// backends return nil here; Azure Blob does not require headers on
+// GET).
 func (s *Store) PresignGet(ctx context.Context, oid string, ttl time.Duration) (string, http.Header, error) {
-	url, err := s.backend.SignedGetURL(ctx, s.Key(oid), storage.SignedURLOptions{
+	url, backendHdr, err := s.backend.SignedGetURL(ctx, s.Key(oid), storage.SignedURLOptions{
 		Method:  "GET",
 		Expires: ttl,
 	})
 	if err != nil {
 		return "", nil, err
 	}
-	return url, nil, nil
+	return url, backendHdr, nil
 }
 
 // WithProxied configures the Store to mint proxied transfer URLs in

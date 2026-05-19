@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -507,8 +508,8 @@ func (s *localFileStore) CompleteMultipartIfAbsent(_ context.Context, _ storage.
 	return storage.ObjectVersion{}, fmt.Errorf("localFileStore: multipart not supported")
 }
 
-func (s *localFileStore) SignedGetURL(_ context.Context, _ string, _ storage.SignedURLOptions) (string, error) {
-	return "", fmt.Errorf("localFileStore: signed URLs not supported")
+func (s *localFileStore) SignedGetURL(_ context.Context, _ string, _ storage.SignedURLOptions) (string, http.Header, error) {
+	return "", nil, fmt.Errorf("localFileStore: signed URLs not supported")
 }
 
 type lengthReader struct {

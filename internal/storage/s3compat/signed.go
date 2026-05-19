@@ -3,6 +3,7 @@ package s3compat
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -28,9 +29,14 @@ import (
 //     end-to-end integrity is enforced by a post-upload verify step
 //     (see internal/lfs in M13).
 //   - any other value: returns storage.ErrInvalidArgument.
-func (s *S3Compat) SignedGetURL(ctx context.Context, key string, opts storage.SignedURLOptions) (string, error) {
+//
+// The returned header set is nil — S3 v4 presigned URLs bind all
+// required state into the URL itself. Clients may add Content-Type
+// or other headers on PUT, but none are required for the upload to
+// succeed.
+func (s *S3Compat) SignedGetURL(ctx context.Context, key string, opts storage.SignedURLOptions) (string, http.Header, error) {
 	if err := validateKey(key); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	ttl := opts.Expires
 	if ttl <= 0 {
@@ -50,9 +56,9 @@ func (s *S3Compat) SignedGetURL(ctx context.Context, key string, opts storage.Si
 			po.Expires = ttl
 		})
 		if err != nil {
-			return "", classify(opGet, err)
+			return "", nil, classify(opGet, err)
 		}
-		return out.URL, nil
+		return out.URL, nil, nil
 	case "PUT":
 		in := &s3.PutObjectInput{
 			Bucket: aws.String(s.cfg.Bucket),
@@ -62,10 +68,10 @@ func (s *S3Compat) SignedGetURL(ctx context.Context, key string, opts storage.Si
 			po.Expires = ttl
 		})
 		if err != nil {
-			return "", classify(opPresignPut, err)
+			return "", nil, classify(opPresignPut, err)
 		}
-		return out.URL, nil
+		return out.URL, nil, nil
 	default:
-		return "", fmt.Errorf("s3compat: signed-URL method %q: %w", opts.Method, storage.ErrInvalidArgument)
+		return "", nil, fmt.Errorf("s3compat: signed-URL method %q: %w", opts.Method, storage.ErrInvalidArgument)
 	}
 }
