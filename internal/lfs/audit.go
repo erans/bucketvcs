@@ -68,3 +68,31 @@ func emitLFSVerify(ctx context.Context, logger *slog.Logger, repo, user, oid str
 		slog.String("result", result),
 	)
 }
+
+// EmitLFSSSHAuthenticate records a "lfs.ssh_authenticate" audit event
+// after a git-lfs-authenticate exec request completes. Matches the M11
+// audit flat-attrs shape used by the other lfs.* events.
+//
+// repo is "<tenant>/<repo>". user is the actor name or "" for anonymous
+// / deploy-key paths (which always fail with result=anon). op is
+// "upload" or "download". ttlSeconds is 0 on the disabled/forbidden/anon
+// paths (no token was minted); the configured TTL otherwise. result is
+// one of: "ok", "forbidden", "disabled", "anon", "error",
+// "client_disconnected".
+//
+// Exported because internal/sshd's session dispatcher emits this audit
+// event when handling git-lfs-authenticate. No unexported variant
+// exists; in-package callers may use this exported function directly.
+func EmitLFSSSHAuthenticate(ctx context.Context, logger *slog.Logger, repo, user, op string, ttlSeconds int64, result string) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.LogAttrs(ctx, slog.LevelInfo, "lfs.ssh_authenticate",
+		slog.String("event", "lfs.ssh_authenticate"),
+		slog.String("repo", repo),
+		slog.String("user", user),
+		slog.String("op", op),
+		slog.Int64("ttl_seconds", ttlSeconds),
+		slog.String("result", result),
+	)
+}

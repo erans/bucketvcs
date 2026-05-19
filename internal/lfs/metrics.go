@@ -84,6 +84,20 @@ func emitVerifyRequestMetric(ctx context.Context, logger *slog.Logger, result st
 	)
 }
 
+// EmitSSHAuthenticateMetric increments lfs_ssh_authenticate_total{op,result}.
+// op is "upload" or "download". result is one of: "ok", "forbidden",
+// "disabled", "anon", "error", "client_disconnected".
+//
+// Exported because internal/sshd's session dispatcher emits this metric
+// when handling git-lfs-authenticate. No unexported variant exists;
+// in-package callers may use this exported function directly.
+func EmitSSHAuthenticateMetric(ctx context.Context, logger *slog.Logger, op, result string) {
+	emitMetric(ctx, logger, "lfs_ssh_authenticate_total", 1,
+		"op", op,
+		"result", result,
+	)
+}
+
 // TODO(P5): emitPresignSeconds histogram is in the M13 spec §7 metric
 // list. Adding it requires plumbing a Logger + backend label through
 // Store.PresignPut/PresignGet, which is more wiring than fits in P2's

@@ -13,6 +13,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
+	"github.com/bucketvcs/bucketvcs/internal/lfs"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
@@ -54,6 +55,21 @@ type Options struct {
 	// when PackURIEnabled is true.
 	PackURIEnabled  bool
 	PackURIBuildURL func(ctx context.Context, hash, storageKey, expectedHash string) (string, error)
+
+	// LFSTokenIssuer mints short-TTL HTTP bearers for the
+	// git-lfs-authenticate command. When nil, the command is rejected
+	// with "lfs not enabled".
+	LFSTokenIssuer lfs.TokenIssuer
+
+	// LFSBaseURL is the external base URL of the HTTPS gateway, used
+	// to construct the Href in the LFS SSH-authenticate response
+	// (e.g. "https://gw.example"). Required when LFSTokenIssuer is set.
+	LFSBaseURL string
+
+	// LFSSSHTokenTTL is the lifetime of bearers issued via SSH
+	// git-lfs-authenticate. Zero falls back to 15 minutes (applied
+	// in NewServer); negative values are rejected at NewServer time.
+	LFSSSHTokenTTL time.Duration
 }
 
 // Server is the bucketvcs SSH listener. Construct via NewServer.
@@ -102,6 +118,24 @@ func NewServer(opts Options) (*Server, error) {
 	}
 	if opts.PackURIEnabled && opts.PackURIBuildURL == nil {
 		return nil, errors.New("sshd: Options.PackURIBuildURL is required when PackURIEnabled is true")
+	}
+	// LFS SSH-authenticate: when the operator wires an issuer they must
+	// also supply the external base URL; the TTL has a sane default but
+	// negative values are a misconfiguration. Symmetric check: setting
+	// any LFS field without LFSTokenIssuer is a configuration footgun
+	// (the SSH path will silently land on "lfs not enabled"), reject.
+	if opts.LFSTokenIssuer != nil {
+		if opts.LFSBaseURL == "" {
+			return nil, errors.New("sshd: Options.LFSBaseURL is required when LFSTokenIssuer is set")
+		}
+		if opts.LFSSSHTokenTTL < 0 {
+			return nil, errors.New("sshd: Options.LFSSSHTokenTTL must be >= 0 (0 means use the default)")
+		}
+		if opts.LFSSSHTokenTTL == 0 {
+			opts.LFSSSHTokenTTL = 15 * time.Minute
+		}
+	} else if opts.LFSBaseURL != "" || opts.LFSSSHTokenTTL != 0 {
+		return nil, errors.New("sshd: Options.LFSBaseURL/LFSSSHTokenTTL set without LFSTokenIssuer")
 	}
 
 	signer, err := LoadOrGenerateHostKey(opts.HostKeyPath, opts.Logger)

@@ -4,17 +4,20 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/gitproto/receivepack"
 	"github.com/bucketvcs/bucketvcs/internal/gitproto/uploadpack"
+	"github.com/bucketvcs/bucketvcs/internal/lfs"
 )
 
 // handleConn upgrades a raw TCP connection to an SSH server connection,
@@ -142,11 +145,16 @@ run:
 		perm = p
 	}
 
-	ok, _ := auth.Decide(actor, perm, cmd.Op.RequiredAction(), flags)
-	if !ok {
-		sendStderrLine(ch, "bucketvcs: insufficient permissions")
-		sendExitStatus(ch, 128)
-		return
+	// OpLFSAuthenticate owns its own auth.Decide inside the handler
+	// because it refines the action by LFSOp (upload=Write, download=Read).
+	// Other ops use the static RequiredAction here.
+	if cmd.Op != OpLFSAuthenticate {
+		ok, _ := auth.Decide(actor, perm, cmd.Op.RequiredAction(), flags)
+		if !ok {
+			sendStderrLine(ch, "bucketvcs: insufficient permissions")
+			sendExitStatus(ch, 128)
+			return
+		}
 	}
 
 	pv := 0
@@ -210,6 +218,22 @@ run:
 			AgentVersion:    s.opts.AgentVersion,
 		}
 		serveErr = receivepack.Serve(req)
+	case OpLFSAuthenticate:
+		// handleLFSAuthenticate owns its own exit code (0 on success,
+		// 1 on disabled/error, 128 on forbidden/anon). Returning here
+		// avoids the trailing sendExitStatus(ch, 0) that would otherwise
+		// overwrite the bespoke status.
+		err := s.handleLFSAuthenticate(ctx, cmd, actor, ch, perm, flags)
+		if keyID != "" {
+			go func() {
+				_ = s.opts.Store.TouchSSHKeyUsage(context.Background(), keyID)
+			}()
+		}
+		if err != nil {
+			s.opts.Logger.Warn("ssh engine error",
+				"tenant", cmd.Tenant, "repo", cmd.Repo, "op", cmd.Op, "err", err)
+		}
+		return
 	}
 
 	// Best-effort touch of last_used_at; don't block.
@@ -226,6 +250,95 @@ run:
 		return
 	}
 	sendExitStatus(ch, 0)
+}
+
+// handleLFSAuthenticate dispatches the git-lfs-authenticate exec command:
+// mints a short-TTL HTTP bearer via lfs.IssueSSHToken and writes the JSON
+// response (href, header, expires_at) to stdout. Errors and policy denials
+// go to stderr with bespoke exit codes (1 disabled/error, 128 forbidden/anon).
+// Each terminal path emits a paired lfs_ssh_authenticate_total metric and
+// lfs.ssh_authenticate audit event via lfs.EmitSSHAuthenticateMetric /
+// lfs.EmitLFSSSHAuthenticate.
+func (s *Server) handleLFSAuthenticate(ctx context.Context, cmd *ExecCommand, actor *auth.Actor, ch ssh.Channel, perm auth.Perm, flags auth.RepoFlags) error {
+	logger := s.opts.Logger
+	repoFQN := cmd.Tenant + "/" + cmd.Repo
+	user := ""
+	if actor != nil {
+		user = actor.Name
+	}
+
+	// Authorize FIRST so a fully unauthorized actor sees "forbidden"
+	// regardless of LFS toggle state — avoids leaking the LFS-enabled
+	// bit through error messages. auth.Decide is cheap (in-memory perm
+	// lookup was already resolved by handleSession before dispatch).
+	required := auth.ActionWrite
+	if cmd.LFSOp == "download" {
+		required = auth.ActionRead
+	}
+	ok, _ := auth.Decide(actor, perm, required, flags)
+	if !ok {
+		lfs.EmitSSHAuthenticateMetric(ctx, logger, cmd.LFSOp, "forbidden")
+		lfs.EmitLFSSSHAuthenticate(ctx, logger, repoFQN, user, cmd.LFSOp, 0, "forbidden")
+		sendStderrLine(ch, "bucketvcs: insufficient permissions")
+		sendExitStatus(ch, 128)
+		return nil
+	}
+
+	if s.opts.LFSTokenIssuer == nil || s.opts.LFSBaseURL == "" {
+		lfs.EmitSSHAuthenticateMetric(ctx, logger, cmd.LFSOp, "disabled")
+		lfs.EmitLFSSSHAuthenticate(ctx, logger, repoFQN, user, cmd.LFSOp, 0, "disabled")
+		sendStderrLine(ch, "bucketvcs: lfs not enabled on this gateway")
+		sendExitStatus(ch, 1)
+		return nil
+	}
+
+	// Anonymous actors and deploy-key actors cannot mint tokens
+	// (deploy-key UserIDs aren't real users.id FK values).
+	if actor == nil || actor.UserID == "" || strings.HasPrefix(actor.UserID, "deploy:") {
+		lfs.EmitSSHAuthenticateMetric(ctx, logger, cmd.LFSOp, "anon")
+		lfs.EmitLFSSSHAuthenticate(ctx, logger, repoFQN, user, cmd.LFSOp, 0, "anon")
+		sendStderrLine(ch, "bucketvcs: anonymous and deploy keys cannot mint LFS bearers")
+		sendExitStatus(ch, 128)
+		return nil
+	}
+
+	// LFSSSHTokenTTL was defaulted + validated in NewServer.
+	ttl := s.opts.LFSSSHTokenTTL
+	resp, err := lfs.IssueSSHToken(ctx, s.opts.LFSTokenIssuer, actor.UserID, actor.Name, cmd.Tenant, cmd.Repo, cmd.LFSOp, s.opts.LFSBaseURL, ttl)
+	if err != nil {
+		logger.Warn("lfs IssueSSHToken failed", "err", err)
+		lfs.EmitSSHAuthenticateMetric(ctx, logger, cmd.LFSOp, "error")
+		lfs.EmitLFSSSHAuthenticate(ctx, logger, repoFQN, user, cmd.LFSOp, int64(ttl/time.Second), "error")
+		sendStderrLine(ch, "bucketvcs: failed to issue lfs token")
+		sendExitStatus(ch, 1)
+		return nil
+	}
+
+	body, err := json.Marshal(resp)
+	if err != nil {
+		lfs.EmitSSHAuthenticateMetric(ctx, logger, cmd.LFSOp, "error")
+		lfs.EmitLFSSSHAuthenticate(ctx, logger, repoFQN, user, cmd.LFSOp, int64(ttl/time.Second), "error")
+		sendStderrLine(ch, "bucketvcs: marshal failed")
+		sendExitStatus(ch, 1)
+		return nil
+	}
+	if _, err := ch.Write(append(body, '\n')); err != nil {
+		// Token was minted and persisted but the client never saw it;
+		// it will expire on its TTL (default 15m), which is preferable
+		// to coupling lfs.TokenIssuer with a Delete API for this rare
+		// path. Emit an explicit terminal outcome so the operator can
+		// correlate the dangling row with the disconnect.
+		lfs.EmitSSHAuthenticateMetric(ctx, logger, cmd.LFSOp, "client_disconnected")
+		lfs.EmitLFSSSHAuthenticate(ctx, logger, repoFQN, user, cmd.LFSOp, int64(ttl/time.Second), "client_disconnected")
+		// Best-effort exit status to match the marshal-failure branch
+		// above; channel is broken so this may fail silently.
+		sendExitStatus(ch, 1)
+		return err
+	}
+	lfs.EmitSSHAuthenticateMetric(ctx, logger, cmd.LFSOp, "ok")
+	lfs.EmitLFSSSHAuthenticate(ctx, logger, repoFQN, user, cmd.LFSOp, int64(ttl/time.Second), "ok")
+	sendExitStatus(ch, 0)
+	return nil
 }
 
 // discardRemainingRequests drains a request channel after exec was accepted.

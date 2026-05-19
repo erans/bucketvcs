@@ -72,3 +72,37 @@ func TestEmitLFSVerify_Shape(t *testing.T) {
 		}
 	}
 }
+
+func TestEmitLFSSSHAuthenticate_Shape(t *testing.T) {
+	var buf bytes.Buffer
+	EmitLFSSSHAuthenticate(context.Background(), captureLogger(&buf), "acme/foo", "alice", "upload", 900, "ok")
+	line := buf.String()
+	for _, want := range []string{
+		`"msg":"lfs.ssh_authenticate"`,
+		`"event":"lfs.ssh_authenticate"`,
+		`"repo":"acme/foo"`,
+		`"user":"alice"`,
+		`"op":"upload"`,
+		`"ttl_seconds":900`,
+		`"result":"ok"`,
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("missing %q in %s", want, line)
+		}
+	}
+}
+
+func TestEmitLFSSSHAuthenticate_AnonZeroTTL(t *testing.T) {
+	var buf bytes.Buffer
+	EmitLFSSSHAuthenticate(context.Background(), captureLogger(&buf), "acme/foo", "", "download", 0, "anon")
+	line := buf.String()
+	for _, want := range []string{
+		`"user":""`,
+		`"ttl_seconds":0`,
+		`"result":"anon"`,
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("missing %q in %s", want, line)
+		}
+	}
+}

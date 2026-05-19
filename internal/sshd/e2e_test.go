@@ -19,6 +19,8 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"log/slog"
@@ -36,6 +38,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
 	"github.com/bucketvcs/bucketvcs/internal/importer"
+	"github.com/bucketvcs/bucketvcs/internal/lfs"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 )
@@ -305,6 +308,33 @@ func seedAliceWithKey(t *testing.T, env *sshE2EEnv, pub ssh.PublicKey) (userID, 
 		t.Fatalf("AddSSHKey: %v", err)
 	}
 	return uid, keyID
+}
+
+// seedDeployKey inserts the given public key as a deploy key scoped to
+// (tenant, repo, perm). Deploy keys have no associated user — their
+// actor.UserID is a "deploy:" sentinel, which handleLFSAuthenticate
+// must reject.
+func seedDeployKey(t *testing.T, env *sshE2EEnv, pub ssh.PublicKey, tenant, repo string, perm auth.Perm) string {
+	t.Helper()
+	ctx := context.Background()
+	keyID, err := auth.GenerateSSHKeyID()
+	if err != nil {
+		t.Fatalf("GenerateSSHKeyID: %v", err)
+	}
+	fp := SHA256Fingerprint(pub)
+	if err := env.store.AddSSHKey(ctx, auth.SSHKey{
+		ID:          keyID,
+		Fingerprint: fp,
+		PublicKey:   pub.Marshal(),
+		KeyType:     pub.Type(),
+		Label:       "deploy-test",
+		ScopeTenant: tenant,
+		ScopeRepo:   repo,
+		ScopePerm:   perm,
+	}); err != nil {
+		t.Fatalf("AddSSHKey (deploy): %v", err)
+	}
+	return keyID
 }
 
 // loadPrivKeyForKnownHosts reads the PEM-encoded private key at path and
@@ -632,4 +662,317 @@ func TestE2E_SSHEndToEnd(t *testing.T) {
 			t.Fatalf("force-push failed: %v\n%s", err, out)
 		}
 	})
+}
+// skipIfNoOpenSSH skips a test when no `ssh` client is on PATH. Used by
+// LFS git-lfs-authenticate tests, which invoke ssh directly instead of
+// going through `git`.
+func skipIfNoOpenSSH(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("ssh"); err != nil {
+		t.Skip("ssh binary not available")
+	}
+}
+
+// newSSHE2ELFS mirrors newSSHE2E but also wires the LFS SSH-authenticate
+// Options fields (TokenIssuer + BaseURL + TTL). The baseURL is embedded
+// in the issued response's Href; the test does not actually HTTP-fetch
+// it, so any well-formed URL works.
+//
+// Implemented as a sibling rather than extending newSSHE2E so the 30+
+// existing newSSHE2E call sites stay untouched.
+func newSSHE2ELFS(t *testing.T, tenant, repoID, baseURL string) *sshE2EEnv {
+	t.Helper()
+
+	storeDir := t.TempDir()
+	makeRepoForSSH(t, storeDir, tenant, repoID)
+	objStore, err := localfs.Open(storeDir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = objStore.Close() })
+
+	authStore, err := sqlitestore.Open(filepath.Join(t.TempDir(), "auth.db"))
+	if err != nil {
+		t.Fatalf("sqlitestore.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = authStore.Close() })
+	if err := authStore.RegisterRepo(context.Background(), tenant, repoID); err != nil {
+		t.Fatalf("RegisterRepo: %v", err)
+	}
+
+	mirrorDir := t.TempDir()
+	mgr, err := mirror.NewManager(mirrorDir, objStore)
+	if err != nil {
+		t.Fatalf("mirror.NewManager: %v", err)
+	}
+	t.Cleanup(func() { _ = mgr.Close() })
+
+	hostKeyPath := filepath.Join(t.TempDir(), "host_key")
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	srv, err := NewServer(Options{
+		Addr:           "127.0.0.1:0",
+		HostKeyPath:    hostKeyPath,
+		Grace:          0,
+		Store:          authStore,
+		BVStore:        objStore,
+		Mirror:         mgr,
+		Logger:         logger,
+		AgentVersion:   "e2e-test",
+		LFSTokenIssuer: authStore, // sqlitestore.Store satisfies lfs.TokenIssuer
+		LFSBaseURL:     baseURL,
+		LFSSSHTokenTTL: 15 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	if err := srv.Listen(); err != nil {
+		t.Fatalf("srv.Listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		_ = srv.Close()
+	})
+	go srv.Serve(ctx) //nolint:errcheck
+
+	hostPriv, err := loadPrivKeyForKnownHosts(hostKeyPath)
+	if err != nil {
+		t.Fatalf("load host key for known_hosts: %v", err)
+	}
+	sshAddr := srv.Addr().(*net.TCPAddr)
+	hostEntry := buildKnownHostsEntry(sshAddr, hostPriv.PublicKey())
+
+	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(khPath, []byte(hostEntry+"\n"), 0o600); err != nil {
+		t.Fatalf("write known_hosts: %v", err)
+	}
+
+	_, clientPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	clientSigner, err := ssh.NewSignerFromKey(clientPriv)
+	if err != nil {
+		t.Fatalf("NewSignerFromKey: %v", err)
+	}
+	pemBlock, err := ssh.MarshalPrivateKey(clientPriv, "")
+	if err != nil {
+		t.Fatalf("MarshalPrivateKey: %v", err)
+	}
+	clientKeyPath := filepath.Join(t.TempDir(), "alice_key")
+	if err := os.WriteFile(clientKeyPath, pem.EncodeToMemory(pemBlock), 0o600); err != nil {
+		t.Fatalf("write client key: %v", err)
+	}
+
+	return &sshE2EEnv{
+		srv:            srv,
+		store:          authStore,
+		tenant:         tenant,
+		repo:           repoID,
+		sshAddr:        sshAddr.String(),
+		knownHostsPath: khPath,
+		clientKeyPath:  clientKeyPath,
+		clientPubKey:   clientSigner.PublicKey(),
+		mirrorMgr:      mgr,
+	}
+}
+
+// sshExec runs `ssh ... alice@host <remoteCmd>` against the e2e server and
+// returns stdout, stderr, and the remote process's exit code. Used by the
+// git-lfs-authenticate tests, which need to invoke ssh directly (no git
+// wrapper) so they can inspect the JSON-on-stdout response.
+func sshExec(t *testing.T, env *sshE2EEnv, remoteCmd string) (stdout, stderr []byte, exitCode int) {
+	t.Helper()
+	host, port, err := net.SplitHostPort(env.sshAddr)
+	if err != nil {
+		t.Fatalf("SplitHostPort(%q): %v", env.sshAddr, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	t.Cleanup(cancel)
+	cmd := exec.CommandContext(ctx, "ssh",
+		"-i", env.clientKeyPath,
+		"-o", "UserKnownHostsFile="+env.knownHostsPath,
+		"-o", "StrictHostKeyChecking=yes",
+		"-o", "GlobalKnownHostsFile=/dev/null",
+		"-o", "IdentitiesOnly=yes",
+		"-p", port,
+		"git@"+host,
+		remoteCmd,
+	)
+	cmd.Env = append(os.Environ(),
+		"HOME="+t.TempDir(), // hermetic — ignore developer's ~/.ssh/config
+	)
+	var outBuf, errBuf strings.Builder
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	err = cmd.Run()
+	stdout = []byte(outBuf.String())
+	stderr = []byte(errBuf.String())
+	if err == nil {
+		return stdout, stderr, 0
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		return stdout, stderr, exitErr.ExitCode()
+	}
+	t.Fatalf("ssh exec failed (non-ExitError): %v\nstderr=%s", err, stderr)
+	return nil, nil, -1
+}
+
+// ---- LFS SSH-authenticate e2e --------------------------------------------
+
+// TestE2E_LFSAuthenticate_HappyPath_Upload: alice has write, asks for
+// upload → exit 0 + JSON {Header:Basic base64(alice:bvts_...), Href:<base>/t/r.git/info/lfs}.
+func TestE2E_LFSAuthenticate_HappyPath_Upload(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("e2e ssh tests are POSIX-only")
+	}
+	skipIfNoOpenSSH(t)
+
+	const baseURL = "https://gw.example"
+	env := newSSHE2ELFS(t, "acme", "foo", baseURL)
+	seedAliceWithKey(t, env, env.clientPubKey)
+	if err := env.store.Grant(context.Background(), "alice", "acme", "foo", "write"); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+
+	stdout, stderr, code := sshExec(t, env, "git-lfs-authenticate acme/foo upload")
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q stdout=%q", code, stderr, stdout)
+	}
+	var resp lfs.SSHAuthResponse
+	if err := json.Unmarshal(stdout, &resp); err != nil {
+		t.Fatalf("unmarshal: %v\nstdout=%q", err, stdout)
+	}
+	authz := resp.Header["Authorization"]
+	if !strings.HasPrefix(authz, "Basic ") {
+		t.Fatalf("Authorization header = %q, want Basic <...>", authz)
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(authz, "Basic "))
+	if err != nil {
+		t.Fatalf("base64 decode: %v", err)
+	}
+	user, secret, ok := strings.Cut(string(raw), ":")
+	if !ok || user != "alice" || !strings.HasPrefix(secret, "bvts_") {
+		t.Errorf("decoded basic credential: user=%q secret_prefix=%q", user, secret[:min(8, len(secret))])
+	}
+	wantHref := baseURL + "/acme/foo.git/info/lfs"
+	if resp.Href != wantHref {
+		t.Errorf("Href = %q, want %q", resp.Href, wantHref)
+	}
+	if time.Until(resp.ExpiresAt) <= 0 {
+		t.Errorf("ExpiresAt = %v (already past); want a future timestamp", resp.ExpiresAt)
+	}
+}
+
+// TestE2E_LFSAuthenticate_Forbidden_Upload: alice has only read, asks for
+// upload → exit non-zero + stderr "insufficient permissions".
+func TestE2E_LFSAuthenticate_Forbidden_Upload(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("e2e ssh tests are POSIX-only")
+	}
+	skipIfNoOpenSSH(t)
+
+	env := newSSHE2ELFS(t, "acme", "foo", "https://gw.example")
+	seedAliceWithKey(t, env, env.clientPubKey)
+	if err := env.store.Grant(context.Background(), "alice", "acme", "foo", "read"); err != nil {
+		t.Fatalf("Grant read: %v", err)
+	}
+
+	stdout, stderr, code := sshExec(t, env, "git-lfs-authenticate acme/foo upload")
+	if code == 0 {
+		t.Fatalf("expected non-zero exit on forbidden, got 0; stdout=%q stderr=%q", stdout, stderr)
+	}
+	if !strings.Contains(string(stderr), "insufficient permissions") {
+		t.Errorf("stderr = %q, want substring %q", stderr, "insufficient permissions")
+	}
+	if len(stdout) != 0 {
+		t.Errorf("expected empty stdout on forbidden, got %q", stdout)
+	}
+}
+
+// TestE2E_LFSAuthenticate_LFSDisabled: server built without LFS fields
+// (plain newSSHE2E) → command exits non-zero + stderr "lfs not enabled".
+func TestE2E_LFSAuthenticate_LFSDisabled(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("e2e ssh tests are POSIX-only")
+	}
+	skipIfNoOpenSSH(t)
+
+	env := newSSHE2E(t, "acme", "foo")
+	seedAliceWithKey(t, env, env.clientPubKey)
+	if err := env.store.Grant(context.Background(), "alice", "acme", "foo", "write"); err != nil {
+		t.Fatalf("Grant write: %v", err)
+	}
+
+	stdout, stderr, code := sshExec(t, env, "git-lfs-authenticate acme/foo upload")
+	if code == 0 {
+		t.Fatalf("expected non-zero exit when LFS is disabled, got 0; stdout=%q stderr=%q", stdout, stderr)
+	}
+	if !strings.Contains(string(stderr), "lfs not enabled") {
+		t.Errorf("stderr = %q, want substring %q", stderr, "lfs not enabled")
+	}
+	if len(stdout) != 0 {
+		t.Errorf("expected empty stdout when LFS disabled, got %q", stdout)
+	}
+}
+
+// TestE2E_LFSAuthenticate_HappyPath_Download: alice has only read,
+// asks for download → exit 0 + JSON. Exercises the LFSOp→ActionRead
+// refinement at dispatch time (TestParseExecCommand_LFSAuthenticate_*
+// only covers the parser).
+func TestE2E_LFSAuthenticate_HappyPath_Download(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("e2e ssh tests are POSIX-only")
+	}
+	skipIfNoOpenSSH(t)
+
+	const baseURL = "https://gw.example"
+	env := newSSHE2ELFS(t, "acme", "foo", baseURL)
+	seedAliceWithKey(t, env, env.clientPubKey)
+	if err := env.store.Grant(context.Background(), "alice", "acme", "foo", "read"); err != nil {
+		t.Fatalf("Grant read: %v", err)
+	}
+
+	stdout, stderr, code := sshExec(t, env, "git-lfs-authenticate acme/foo download")
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q stdout=%q", code, stderr, stdout)
+	}
+	var resp lfs.SSHAuthResponse
+	if err := json.Unmarshal(stdout, &resp); err != nil {
+		t.Fatalf("unmarshal: %v\nstdout=%q", err, stdout)
+	}
+	if !strings.HasPrefix(resp.Header["Authorization"], "Basic ") {
+		t.Errorf("Authorization header = %q, want Basic <...>", resp.Header["Authorization"])
+	}
+	if resp.Href != baseURL+"/acme/foo.git/info/lfs" {
+		t.Errorf("Href = %q", resp.Href)
+	}
+}
+
+// TestE2E_LFSAuthenticate_DeployKey_Rejected: a deploy key with write
+// scope on (acme, foo) attempts git-lfs-authenticate. Deploy-key actors
+// have a "deploy:" UserID prefix and cannot mint tokens (the user_id
+// FK in tokens would be invalid). handleLFSAuthenticate must reject
+// with exit 128 and stderr "anonymous and deploy keys cannot mint LFS
+// bearers". Guards against regressions in the prefix sentinel check.
+func TestE2E_LFSAuthenticate_DeployKey_Rejected(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("e2e ssh tests are POSIX-only")
+	}
+	skipIfNoOpenSSH(t)
+
+	env := newSSHE2ELFS(t, "acme", "foo", "https://gw.example")
+	seedDeployKey(t, env, env.clientPubKey, "acme", "foo", auth.PermWrite)
+
+	stdout, stderr, code := sshExec(t, env, "git-lfs-authenticate acme/foo upload")
+	if code != 128 {
+		t.Fatalf("expected exit 128 for deploy key, got %d; stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if !strings.Contains(string(stderr), "anonymous and deploy keys cannot mint LFS bearers") {
+		t.Errorf("stderr = %q, want deploy-key rejection message", stderr)
+	}
+	if len(stdout) != 0 {
+		t.Errorf("expected empty stdout, got %q", stdout)
+	}
 }

@@ -91,3 +91,24 @@ func TestEmitVerifyRequestMetric_AllOutcomes(t *testing.T) {
 		}
 	}
 }
+
+func TestEmitSSHAuthenticateMetric_AllOutcomes(t *testing.T) {
+	cases := []string{"ok", "forbidden", "disabled", "anon", "error", "client_disconnected"}
+	for _, op := range []string{"upload", "download"} {
+		for _, result := range cases {
+			var buf bytes.Buffer
+			EmitSSHAuthenticateMetric(context.Background(), captureLogger(&buf), op, result)
+			line := buf.String()
+			for _, want := range []string{
+				`"metric_name":"lfs_ssh_authenticate_total"`,
+				`"value":1`,
+				`"op":"` + op + `"`,
+				`"result":"` + result + `"`,
+			} {
+				if !strings.Contains(line, want) {
+					t.Errorf("[%s/%s] missing %q in %s", op, result, want, line)
+				}
+			}
+		}
+	}
+}

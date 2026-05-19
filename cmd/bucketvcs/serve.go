@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/gateway"
+	"github.com/bucketvcs/bucketvcs/internal/lfs"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/sshd"
 )
@@ -69,6 +70,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	// LFS (M13). Default enabled; flip with --lfs=false.
 	lfsEnabled := fs.Bool("lfs", true, "Enable the LFS Batch API (M13)")
 	lfsPresignTTL := fs.Duration("lfs-presign-ttl", 15*time.Minute, "TTL for LFS upload/download presigned URLs")
+	lfsSSHTokenTTL := fs.Duration("lfs-ssh-token-ttl", 15*time.Minute, "TTL for bearers issued via SSH git-lfs-authenticate")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -270,6 +272,24 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 		}
 		defer sshMirror.Close()
 
+		// SSH-side LFS: git-lfs-authenticate mints a bearer + Href back to
+		// this gateway. The Href needs an external base URL (the SSH
+		// session has no inbound Host header to fall back to). When
+		// --lfs=true but --proxied-url-base is unset, the SSH command is
+		// disabled (warn but do not fail-start; HTTPS LFS continues to
+		// work via the inbound request host).
+		if *lfsEnabled && *proxiedBaseURL == "" {
+			fmt.Fprintln(stderr, "serve: --lfs is enabled but --proxied-url-base is unset; the SSH git-lfs-authenticate command will be disabled. HTTPS LFS continues to work via the inbound request host.")
+		}
+		var lfsIssuer lfs.TokenIssuer
+		var lfsBaseURL string
+		var lfsSSHTTL time.Duration
+		if *lfsEnabled && *proxiedBaseURL != "" {
+			lfsIssuer = authS
+			lfsBaseURL = *proxiedBaseURL
+			lfsSSHTTL = *lfsSSHTokenTTL
+		}
+
 		sshSrv, err = sshd.NewServer(sshd.Options{
 			Addr:              *sshAddr,
 			HostKeyPath:       hostKeyPath,
@@ -285,6 +305,9 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			BundleWarmAge:     *warmAge,
 			PackURIEnabled:    packBuildURL != nil,
 			PackURIBuildURL:   packBuildURL,
+			LFSTokenIssuer:    lfsIssuer,
+			LFSBaseURL:        lfsBaseURL,
+			LFSSSHTokenTTL:    lfsSSHTTL,
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "serve: ssh new server: %v\n", err)

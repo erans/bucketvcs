@@ -77,3 +77,91 @@ func TestParseExecCommand_RequiredAction(t *testing.T) {
 		t.Fatalf("receive-pack: got %v, want ActionWrite (%v)", cmd.Op.RequiredAction(), auth.ActionWrite)
 	}
 }
+
+func TestParseExecCommand_LFSAuthenticate_Upload(t *testing.T) {
+	cmd, err := ParseExecCommand("git-lfs-authenticate acme/foo upload")
+	if err != nil {
+		t.Fatalf("ParseExecCommand: %v", err)
+	}
+	if cmd.Op != OpLFSAuthenticate {
+		t.Errorf("Op: got %v want OpLFSAuthenticate", cmd.Op)
+	}
+	if cmd.Tenant != "acme" || cmd.Repo != "foo" || cmd.LFSOp != "upload" {
+		t.Errorf("parsed: %+v", cmd)
+	}
+}
+
+func TestParseExecCommand_LFSAuthenticate_Download(t *testing.T) {
+	cmd, err := ParseExecCommand("git-lfs-authenticate acme/foo download")
+	if err != nil {
+		t.Fatalf("ParseExecCommand: %v", err)
+	}
+	if cmd.LFSOp != "download" {
+		t.Errorf("LFSOp: got %q", cmd.LFSOp)
+	}
+}
+
+func TestParseExecCommand_LFSAuthenticate_AcceptsDotGitSuffix(t *testing.T) {
+	cmd, err := ParseExecCommand("git-lfs-authenticate acme/foo.git upload")
+	if err != nil {
+		t.Fatalf("ParseExecCommand: %v", err)
+	}
+	if cmd.Tenant != "acme" || cmd.Repo != "foo" {
+		t.Errorf("parsed: %+v", cmd)
+	}
+}
+
+func TestParseExecCommand_LFSAuthenticate_RejectsBadOp(t *testing.T) {
+	_, err := ParseExecCommand("git-lfs-authenticate acme/foo delete")
+	if err == nil {
+		t.Fatal("expected error for bad lfs op")
+	}
+}
+
+func TestParseExecCommand_LFSAuthenticate_RejectsMissingOp(t *testing.T) {
+	_, err := ParseExecCommand("git-lfs-authenticate acme/foo")
+	if err == nil {
+		t.Fatal("expected error for missing lfs op")
+	}
+}
+
+func TestParseExecCommand_LFSAuthenticate_RejectsExtraArg(t *testing.T) {
+	_, err := ParseExecCommand("git-lfs-authenticate acme/foo upload extra")
+	if err == nil {
+		t.Fatal("expected error for extra arg")
+	}
+}
+
+func TestParseExecCommand_LFSAuthenticate_RejectsQuotedPath(t *testing.T) {
+	if _, err := ParseExecCommand(`git-lfs-authenticate "acme/foo" upload`); err == nil {
+		t.Fatal(`expected error for double-quoted path`)
+	}
+	if _, err := ParseExecCommand(`git-lfs-authenticate 'acme/foo' upload`); err == nil {
+		t.Fatal(`expected error for single-quoted path`)
+	}
+}
+
+func TestParseExecCommand_LFSAuthenticate_RequiredAction_Upload(t *testing.T) {
+	cmd, err := ParseExecCommand("git-lfs-authenticate acme/foo upload")
+	if err != nil {
+		t.Fatalf("ParseExecCommand: %v", err)
+	}
+	if cmd.Op.RequiredAction() != auth.ActionWrite {
+		t.Errorf("upload op should require ActionWrite, got %v", cmd.Op.RequiredAction())
+	}
+}
+
+func TestParseExecCommand_LFSAuthenticate_RequiredAction_Download(t *testing.T) {
+	cmd, err := ParseExecCommand("git-lfs-authenticate acme/foo download")
+	if err != nil {
+		t.Fatalf("ParseExecCommand: %v", err)
+	}
+	// Download requires Read; we encode this via cmd.LFSOp NOT cmd.Op
+	// (since OpLFSAuthenticate is one op covering both). The session
+	// dispatcher does the LFSOp→Action mapping. RequiredAction() on the
+	// op alone is conservative-write so unconfigured deployments fail
+	// closed.
+	if cmd.Op.RequiredAction() != auth.ActionWrite {
+		t.Errorf("OpLFSAuthenticate.RequiredAction must default to Write (fail-closed); got %v", cmd.Op.RequiredAction())
+	}
+}
