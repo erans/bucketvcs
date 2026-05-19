@@ -214,6 +214,54 @@ func TestPackObjectsAll_ProducesPackAndReturnsID(t *testing.T) {
 	}
 }
 
+func TestPackObjectsAllWithBitmap_ProducesBitmap(t *testing.T) {
+	skipIfNoGit(t)
+	bare := makeRepoWithOneCommit(t)
+	outDir := t.TempDir()
+	prefix := filepath.Join(outDir, "pack")
+	id, err := PackObjectsAllWithBitmap(context.Background(), bare, prefix)
+	if err != nil {
+		t.Fatalf("PackObjectsAllWithBitmap: %v", err)
+	}
+	if len(id) != 40 {
+		t.Fatalf("pack_id length: got %d, want 40 (%q)", len(id), id)
+	}
+	for _, ext := range []string{".pack", ".idx", ".bitmap"} {
+		p := prefix + "-" + id + ext
+		st, err := os.Stat(p)
+		if err != nil {
+			t.Errorf("missing %s: %v", ext, err)
+			continue
+		}
+		if st.Size() == 0 {
+			t.Errorf("%s is empty", ext)
+		}
+	}
+}
+
+func TestPackObjectsAllWithBitmap_EmptyRepoSucceedsWithEmptyHash(t *testing.T) {
+	// Matches PackObjectsAll behavior: pack-objects on an empty repo
+	// produces the well-known empty-pack hash (029d088...) and exits
+	// cleanly. The bitmap variant inherits this — bitmap generation
+	// on an empty pack is a no-op (no .bitmap file is written, but
+	// the call still succeeds). Documenting the actual behavior here
+	// so a future reader doesn't add an erroneous "must fail on empty"
+	// assertion based on intuition.
+	skipIfNoGit(t)
+	dir := t.TempDir()
+	if err := InitBare(context.Background(), dir); err != nil {
+		t.Fatalf("InitBare: %v", err)
+	}
+	prefix := filepath.Join(t.TempDir(), "pack")
+	id, err := PackObjectsAllWithBitmap(context.Background(), dir, prefix)
+	if err != nil {
+		t.Fatalf("PackObjectsAllWithBitmap on empty repo: %v", err)
+	}
+	if len(id) != 40 {
+		t.Errorf("expected 40-char empty-pack hash, got %q", id)
+	}
+}
+
 func TestIndexPack_ReindexesExistingPack(t *testing.T) {
 	skipIfNoGit(t)
 	bare := makeRepoWithOneCommit(t)

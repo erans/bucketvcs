@@ -2,6 +2,7 @@ package gc_test
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/bucketvcs/bucketvcs/internal/gc"
@@ -135,5 +136,56 @@ func TestBuildLiveSet_EmptyBodyJustHasHeaderKeys(t *testing.T) {
 	}
 	if _, ok := live[k.TxRecordKey("tx_01HZ")]; !ok {
 		t.Error("live-set must contain latest_tx record key")
+	}
+}
+
+func TestBuildLiveSet_IncludesBitmapKey(t *testing.T) {
+	k, _ := keys.NewRepo("acme", "site")
+	body := manifest.Body{
+		DefaultBranch: "refs/heads/main",
+		Refs:          map[string]string{},
+		Packs: []manifest.PackEntry{
+			{
+				PackID:    "abc",
+				PackKey:   "tenants/acme/repos/site/packs/canonical/abc.pack",
+				IdxKey:    "tenants/acme/repos/site/packs/canonical/abc.idx",
+				BitmapKey: "tenants/acme/repos/site/packs/canonical/abc.bitmap",
+			},
+		},
+	}
+	bodyJSON, _ := json.Marshal(body)
+	header := manifest.RootHeader{LatestTx: "tx_01HZ"}
+
+	live, err := gc.BuildLiveSet(k, header, bodyJSON)
+	if err != nil {
+		t.Fatalf("BuildLiveSet: %v", err)
+	}
+	want := "tenants/acme/repos/site/packs/canonical/abc.bitmap"
+	if _, ok := live[want]; !ok {
+		t.Errorf("live-set missing bitmap key %q", want)
+	}
+}
+
+func TestBuildLiveSet_EmptyBitmapKeyNotInLiveSet(t *testing.T) {
+	k, _ := keys.NewRepo("acme", "site")
+	body := manifest.Body{
+		DefaultBranch: "refs/heads/main",
+		Refs:          map[string]string{},
+		Packs: []manifest.PackEntry{
+			{
+				PackID:  "abc",
+				PackKey: "tenants/acme/repos/site/packs/canonical/abc.pack",
+				IdxKey:  "tenants/acme/repos/site/packs/canonical/abc.idx",
+				// BitmapKey intentionally empty
+			},
+		},
+	}
+	bodyJSON, _ := json.Marshal(body)
+	header := manifest.RootHeader{LatestTx: "tx_01HZ"}
+	live, _ := gc.BuildLiveSet(k, header, bodyJSON)
+	for key := range live {
+		if strings.HasSuffix(key, ".bitmap") {
+			t.Errorf("live-set should not contain a bitmap entry when BitmapKey is empty; got %q", key)
+		}
 	}
 }

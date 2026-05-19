@@ -11,12 +11,11 @@ import (
 )
 
 // DiscoverCanonicalPacks lists all objects under packs/canonical/ for the
-// repo and returns the keys NOT in live.
-//
-// TODO(M2-bitmap): when manifest.PackEntry adds a BitmapKey field, update
-// BuildLiveSet to add it to the live-set. This function already lists
-// .bitmap files alongside .pack/.idx; any .bitmap key absent from the
-// live-set will be classified as an orphan and swept after retention.
+// repo and returns the keys NOT in live. The listing includes .bitmap
+// sidecars; M9.5+ maintenance records each .bitmap on the corresponding
+// PackEntry so BuildLiveSet includes them, and a .bitmap whose pack has
+// been repacked away will be classified as orphan and swept after
+// retention.
 func DiscoverCanonicalPacks(ctx context.Context, s storage.ObjectStore, k *keys.Repo, live LiveSet) ([]string, error) {
 	prefix := k.Prefix() + "packs/canonical/"
 	return listExcludingLive(ctx, s, prefix, live)

@@ -48,10 +48,9 @@ func BuildLiveSet(k *keys.Repo, header manifest.RootHeader, bodyJSON []byte) (Li
 		if p.IdxKey != "" {
 			live[p.IdxKey] = struct{}{}
 		}
-		// TODO(M2-bitmap): when manifest.PackEntry adds a BitmapKey field, add
-		// it to the live-set inside this loop. DiscoverCanonicalPacks lists
-		// .bitmap files alongside .pack/.idx, so a bitmap without a live-set
-		// entry will be classified as orphan after retention.
+		if p.BitmapKey != "" {
+			live[p.BitmapKey] = struct{}{}
+		}
 	}
 	if body.Indexes.ObjectMap != nil && body.Indexes.ObjectMap.Key != "" {
 		live[body.Indexes.ObjectMap.Key] = struct{}{}

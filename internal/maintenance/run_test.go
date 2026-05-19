@@ -7,8 +7,11 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/bucketvcs/bucketvcs/internal/exporter"
 	"github.com/bucketvcs/bucketvcs/internal/maintenance"
 	"github.com/bucketvcs/bucketvcs/internal/maintenance/mtest"
 	"github.com/bucketvcs/bucketvcs/internal/pack"
@@ -68,6 +71,33 @@ func TestRun_HappyPathProducesOnePackWithFreshIndexes(t *testing.T) {
 	if body.Indexes.ObjectMap == nil || body.Indexes.CommitGraph == nil {
 		t.Errorf("post-Run manifest missing indexes")
 	}
+
+	// M9.5: the new canonical pack carries a BitmapKey AND the bitmap
+	// blob is reachable in storage.
+	if got := body.Packs[0].BitmapKey; got == "" {
+		t.Errorf("post-Run PackEntry.BitmapKey is empty; want non-empty (M9.5 emits .bitmap on every repack)")
+	} else {
+		if _, err := s.Head(ctx, got); err != nil {
+			t.Errorf("bitmap blob not present at %s: %v", got, err)
+		}
+	}
+
+	// M9.5 end-to-end: after maintenance has uploaded the .bitmap,
+	// exporting the repo onto disk MUST land the .bitmap sidecar in
+	// objects/pack/ so real git upload-pack picks it up. This closes
+	// the upload→consume chain that motivates M9.5.
+	dst := filepath.Join(t.TempDir(), "export")
+	if _, err := exporter.Export(ctx, s, exporter.Options{
+		Tenant: "acme", Repo: "site", DestDir: dst, SkipFsck: true,
+	}); err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	bitmapOnDisk := filepath.Join(dst, "objects", "pack", "pack-"+body.Packs[0].PackID+".bitmap")
+	if st, err := os.Stat(bitmapOnDisk); err != nil {
+		t.Errorf("exported .bitmap missing at %s: %v", bitmapOnDisk, err)
+	} else if st.Size() == 0 {
+		t.Errorf("exported .bitmap is empty")
+	}
 }
 
 func TestRun_NoOpWhenThresholdsNotTriggered(t *testing.T) {
@@ -84,7 +114,15 @@ func TestRun_NoOpWhenThresholdsNotTriggered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	opts := maintenance.RunOptions{} // no Force, default thresholds; 1-pack repo won't trigger anything
+	// Default thresholds in M9.5+ include BitmapCoveragePct=100, which
+	// would fire on a freshly-seeded repo with no bitmaps. Use
+	// DefaultThresholds() and disable just the bitmap trigger so this
+	// test exercises the original "no other trigger fires → noop"
+	// invariant — and so any future Threshold field added with a
+	// non-zero default automatically inherits its real default.
+	thr := maintenance.DefaultThresholds()
+	thr.BitmapCoveragePct = 0
+	opts := maintenance.RunOptions{Thresholds: thr}
 	report, err := maintenance.Run(ctx, s, r, k, opts)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -269,9 +307,13 @@ func TestRun_CompactOnly_NoPackRepack(t *testing.T) {
 		t.Fatalf("inject deltas: %v", injErr)
 	}
 
-	// Use default thresholds — pack thresholds won't fire (1 pack), but
-	// reachability pushes (150 > 100) should fire the compact-only path.
-	opts := maintenance.RunOptions{}
+	// Default thresholds — pack thresholds won't fire (1 pack), but
+	// reachability pushes (150 > 100) should fire the compact-only
+	// path. Disable BitmapCoveragePct so the M9.5 default doesn't
+	// fire a repack on the bitmap-less seed repo first.
+	thr := maintenance.DefaultThresholds()
+	thr.BitmapCoveragePct = 0
+	opts := maintenance.RunOptions{Thresholds: thr}
 	report, err := maintenance.Run(ctx, s, r, k, opts)
 	if err != nil {
 		t.Fatalf("Run: %v", err)

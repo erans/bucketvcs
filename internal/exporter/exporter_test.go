@@ -1,7 +1,10 @@
 package exporter
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -344,5 +347,98 @@ func TestExport_RejectsInvalidDefaultBranch(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("expected rejection of invalid default_branch")
+	}
+}
+
+func TestDownloadBitmapSidecar_LandsAtPackBitmapPath(t *testing.T) {
+	// Focused unit test for the M9.5 bitmap-download path: when
+	// PackEntry.BitmapKey is non-empty, downloadBitmapSidecar fetches
+	// the blob and writes it as pack-<id>.bitmap alongside .pack/.idx.
+	s := newTestStore(t)
+	const bitmapKey = "tenants/acme/repos/x/packs/canonical/abcd.bitmap"
+	const packID = "0123456789012345678901234567890123456789"
+	bitmapBytes := []byte("fake-bitmap-bytes\n")
+	if _, err := s.PutIfAbsent(context.Background(), bitmapKey, bytes.NewReader(bitmapBytes), nil); err != nil {
+		t.Fatalf("PutIfAbsent bitmap: %v", err)
+	}
+	packDir := t.TempDir()
+	if err := downloadBitmapSidecar(context.Background(), s, bitmapKey, packDir, packID); err != nil {
+		t.Fatalf("downloadBitmapSidecar: %v", err)
+	}
+	dst := filepath.Join(packDir, "pack-"+packID+".bitmap")
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read bitmap: %v", err)
+	}
+	if string(got) != string(bitmapBytes) {
+		t.Errorf("bitmap bytes mismatch:\ngot=%q\nwant=%q", got, bitmapBytes)
+	}
+}
+
+func TestDownloadBitmapSidecar_NotFoundIsReportedToCaller(t *testing.T) {
+	// downloadBitmapSidecar surfaces the error; the exporter caller
+	// is the one that treats ErrNotFound as benign. Verify the error
+	// is the right type so that gating works.
+	s := newTestStore(t)
+	packDir := t.TempDir()
+	err := downloadBitmapSidecar(context.Background(), s, "missing/key", packDir, "0123456789012345678901234567890123456789")
+	if err == nil {
+		t.Fatal("expected error on missing key")
+	}
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("expected wrapped ErrNotFound, got %v", err)
+	}
+}
+
+func TestDownloadAndIndexPack_MissingBitmapIsBenign(t *testing.T) {
+	// Pins the contract that the exporter must treat a missing .bitmap
+	// blob as a non-fatal skip: the pack download + index-pack succeed,
+	// and the bitmap-download ErrNotFound is swallowed. A future
+	// refactor that loses the errors.Is gate would break this test.
+	store, _ := makeAndImport(t)
+	ctx := context.Background()
+
+	// Read the imported manifest to get a real PackEntry, then mutate
+	// it to point BitmapKey at a key that does not exist in storage.
+	r, err := repo.Open(ctx, store, "acme", "x")
+	if err != nil {
+		t.Fatalf("repo.Open: %v", err)
+	}
+	view, err := r.ReadRoot(ctx)
+	if err != nil {
+		t.Fatalf("ReadRoot: %v", err)
+	}
+	var body manifest.Body
+	if err := json.Unmarshal(view.Body, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(body.Packs) == 0 {
+		t.Fatal("no packs in imported manifest")
+	}
+	p := body.Packs[0]
+	p.BitmapKey = "tenants/acme/repos/x/packs/canonical/never-existed.bitmap"
+
+	dst := t.TempDir()
+	// Bare layout: <dst>/objects/pack/ is what downloadAndIndexPack
+	// writes into; we need the parent to exist.
+	if err := os.MkdirAll(filepath.Join(dst, "objects"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	objCount, err := downloadAndIndexPack(ctx, store, p, dst)
+	if err != nil {
+		t.Fatalf("downloadAndIndexPack should treat missing bitmap as benign; got %v", err)
+	}
+	if objCount != p.ObjectCount {
+		t.Errorf("ObjectCount: got %d, want %d", objCount, p.ObjectCount)
+	}
+	// .pack and .idx must have landed; .bitmap must NOT have landed.
+	for _, ext := range []string{".pack", ".idx"} {
+		if _, err := os.Stat(filepath.Join(dst, "objects", "pack", "pack-"+p.PackID+ext)); err != nil {
+			t.Errorf("missing %s: %v", ext, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dst, "objects", "pack", "pack-"+p.PackID+".bitmap")); err == nil {
+		t.Error("unexpected .bitmap landed despite missing storage key")
 	}
 }

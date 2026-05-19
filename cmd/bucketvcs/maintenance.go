@@ -77,6 +77,7 @@ Flags:
   --bundle-commits=N                    Default 100; regenerate bundle when default-branch moved >= N commits (0 disables)
   --bundle-age=DURATION                 Default 24h; regenerate bundle when older than this (0 disables)
   --bundle-default-branch=REF           Override default-branch detection (e.g. refs/heads/main)
+  --bitmap-coverage-pct=N               Default 100; force-repack when fewer than N% of canonical packs carry a .bitmap (0 disables, M9.5)
   --help                                Show this help
 
 Exit codes:
@@ -113,6 +114,8 @@ func runMaintenance(ctx context.Context, args []string, stdout, stderr io.Writer
 	bundleCommits := fs.Int("bundle-commits", 100, "Regenerate bundle when default-branch tip moved by >= N commits since last bundle (0 disables)")
 	bundleAge := fs.Duration("bundle-age", 24*time.Hour, "Regenerate bundle when older than this (0 disables)")
 	bundleDefaultBranch := fs.String("bundle-default-branch", "", "Override default-branch detection for bundle generation (e.g. refs/heads/main)")
+
+	bitmapCoveragePct := fs.Int("bitmap-coverage-pct", 100, "Minimum percent of canonical packs that must carry a .bitmap before maintenance considers the repo bitmap-healthy. Below this triggers a force-repack. 0 disables.")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -183,6 +186,7 @@ func runMaintenance(ctx context.Context, args []string, stdout, stderr io.Writer
 			ReachabilityDeltaBytes:   deltaBytes,
 			BundleCommits:            *bundleCommits,
 			BundleAge:                *bundleAge,
+			BitmapCoveragePct:        *bitmapCoveragePct,
 		},
 		RecentWindow:        *recentWindow,
 		CASRetry:            *casRetry,

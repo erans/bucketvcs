@@ -17,6 +17,8 @@ type uploadInput struct {
 	PackPath         string // optional; when set, streamed from disk
 	IdxBytes         []byte
 	IdxPath          string
+	BitmapBytes      []byte // optional (M9.5+); ignored when BitmapPath is set
+	BitmapPath       string // optional; when set, streamed from disk; "" + nil bytes = no bitmap this run
 	ObjectMapHash    string
 	ObjectMapBytes   []byte
 	CommitGraphHash  string
@@ -26,6 +28,8 @@ type uploadInput struct {
 type uploadResult struct {
 	PackKey        string
 	IdxKey         string
+	BitmapKey      string // populated when input carried a bitmap AND upload succeeded; empty otherwise
+	BitmapErr      error  // non-nil when the bitmap upload was attempted and failed (non-ErrAlreadyExists). The pipeline surfaces this so an operator can distinguish "pack-objects produced no bitmap" (BitmapKey=="" && BitmapErr==nil) from "tried to upload, transient failure" (BitmapKey=="" && BitmapErr!=nil). The maintenance run itself is NOT aborted by a bitmap upload failure (bitmaps are a clone accelerator, not a correctness primitive).
 	ObjectMapKey   string
 	CommitGraphKey string
 }
@@ -78,6 +82,37 @@ func uploadArtifacts(ctx context.Context, s storage.ObjectStore, k *keys.Repo, i
 	}
 	if err := putIfAbsentBytesOrFile(ctx, s, res.IdxKey, in.IdxBytes, in.IdxPath); err != nil && !errors.Is(err, storage.ErrAlreadyExists) {
 		return res, fmt.Errorf("upload: idx: %w", err)
+	}
+	// Bitmap (M9.5+) is optional. Skip the PUT entirely when neither
+	// bytes nor path is set — the caller is signaling "no bitmap this
+	// run". When a bitmap IS present, a non-ErrAlreadyExists PUT
+	// failure is DOWN-GRADED to "no bitmap this run" (clear
+	// res.BitmapKey, continue) rather than aborting the maintenance
+	// pipeline: bitmaps are a clone accelerator, not a correctness
+	// primitive. The pack and .idx have already succeeded by this
+	// point. Dropping the bitmap means the lazy mirror's git upload-
+	// pack falls back to per-object reachability walks until the next
+	// maintenance run retries.
+	//
+	// TODO(observability): the silent downgrade has no log signal
+	// today (upload.go is logger-free). Plumb a logger so operators
+	// see the warning, mirroring the exporter.downloadBitmapSidecar
+	// TODO. Until then, persistent bitmap-coverage trigger firings
+	// across runs are the operator's signal that uploads are failing.
+	if len(in.BitmapBytes) > 0 || in.BitmapPath != "" {
+		bitmapKey := k.PackBitmapKey(in.PackID)
+		err := putIfAbsentBytesOrFile(ctx, s, bitmapKey, in.BitmapBytes, in.BitmapPath)
+		switch {
+		case err == nil || errors.Is(err, storage.ErrAlreadyExists):
+			res.BitmapKey = bitmapKey
+		default:
+			// Transient or otherwise — degrade to "no bitmap this run".
+			// res.BitmapKey stays "" so the CAS-merge records empty;
+			// res.BitmapErr carries the diagnostic so the pipeline can
+			// surface it in the run summary even before a logger is
+			// plumbed through.
+			res.BitmapErr = err
+		}
 	}
 	if err := putIfAbsentBytes(ctx, s, res.ObjectMapKey, in.ObjectMapBytes); err != nil && !errors.Is(err, storage.ErrAlreadyExists) {
 		return res, fmt.Errorf("upload: bvom: %w", err)

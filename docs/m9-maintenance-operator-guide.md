@@ -21,9 +21,20 @@ After a successful run:
 - `manifest.Packs` collapses from N entries to exactly 1 (the new full-repack pack),
   plus any packs that arrived via concurrent pushes during the run.
 - `manifest.Indexes.ObjectMap` and `.CommitGraph` are fresh, covering the new pack.
-- The old canonical packs and their old indexes become unreachable from the manifest.
+- The new canonical pack carries a `.bitmap` sidecar at
+  `packs/canonical/<pack-id>.bitmap`, recorded as `PackEntry.BitmapKey` on the
+  manifest (M9.5+). The lazy mirror's real `git upload-pack` reads it on clone to
+  short-circuit the per-object reachability walk. `receive-pack`-written packs do
+  NOT carry bitmaps — they are small, recent, and replaced by the next repack.
+  Note: the first maintenance run after upgrading from M9 → M9.5 produces a new
+  pack-id for every repo, even on identical input — M9.5 invokes
+  `pack-objects --revs --all` directly while M9 piped through `rev-list`, and
+  the two paths choose different delta encodings. Downstream tooling that pins
+  pack-ids across milestones should refresh after upgrade.
+- The old canonical packs and their old indexes (and any orphaned `.bitmap` files
+  from earlier maintenance runs) become unreachable from the manifest.
 - `bucketvcs gc`, on its next scheduled run after the retention window elapses, sweeps
-  the unreachable packs and indexes.
+  the unreachable packs, indexes, and bitmaps.
 
 `bucketvcs maintenance` does not delete any objects and does not modify ref state. It
 only restructures pack layout. Object-level reclamation remains `bucketvcs gc`'s job.
@@ -240,16 +251,22 @@ missed run accumulates pack fragmentation, not correctness risk.
 
 ## 4. Threshold Tuning
 
-### 4.1 The three triggers
+### 4.1 The four Phase-0 repack triggers
 
-Maintenance evaluates three threshold triggers at the start of each run (Phase 0).
-If none fires and `--force` is not set, the run exits as a no-op with `outcome=noop`.
+Maintenance evaluates four cheap-first threshold triggers at the start of each run (Phase 0).
+The reachability-compaction triggers documented in §15 and the bundle-regeneration triggers
+in §11 are evaluated separately — they fire the compact-only path or the bundle-refresh
+phase respectively, not the full repack path.
+
+If none of the four repack triggers fire and `--force` is not set, the run exits as a no-op
+with `outcome=noop`.
 
 | Flag | Default | What it measures | When it fires |
 |------|---------|-----------------|---------------|
 | `--recent-pack-threshold` | 1000 | Count of canonical packs created within `--recent-window` (default 24h) | More than N packs arrived in the last 24 hours |
 | `--total-pack-threshold` | 10000 | Total count of canonical packs in the manifest | Manifest has more than N packs total |
 | `--manifest-pack-bytes-threshold` | 8388608 (8 MiB) | JSON byte size of `manifest.Packs` | Pack metadata alone exceeds 8 MiB |
+| `--bitmap-coverage-pct` (M9.5+) | 100 | Percent of canonical packs carrying a `.bitmap` sidecar | Fewer than N% of packs have a bitmap |
 
 The first trigger that fires is reported in the text and JSON output as the `trigger`
 reason. Triggers are evaluated cheap-first: `total_pack_count` and `manifest_pack_bytes`
@@ -258,8 +275,13 @@ HEAD per pack and is only computed when the cheaper triggers haven't already fir
 `--recent-pack-threshold > 0`. The JSON `trigger_eval.recent_pack_count` field will
 therefore report `0` whenever a cheaper trigger fired or the recent-pack trigger was
 disabled — that's not the actual count of recent packs, just the substrate the
-short-circuit returned. The other two fields (`total_pack_count`, `manifest_pack_bytes`)
-are always populated.
+short-circuit returned. The other two pack-count fields (`total_pack_count`,
+`manifest_pack_bytes`) are always populated.
+
+`bitmap_coverage_pct` is also always populated for observability (it's a cheap O(N) scan
+of `manifest.Packs`), but it sets `triggered`/`reason` only when no higher-priority
+trigger has already fired. The reason string is `bitmap_coverage(<pct>%<<threshold>%)`,
+e.g. `bitmap_coverage(0%<100%)` for a pre-M9.5 manifest with the default threshold.
 
 Setting any threshold to `0` disables that specific trigger. Setting all three to `0`
 makes every run a no-op unless `--force` is also set — this is a valid configuration
@@ -346,6 +368,75 @@ freshness state machine that decides when a bundle counts as `current` /
 `warm` / `stale` / `retired`) are documented separately. See
 [M11 Bundles Operator Guide](m11-bundles-operator-guide.md), particularly
 §2 Bundle Freshness Model for the tuning detail.
+
+### Bitmap-coverage threshold (M9.5)
+
+M9.5 adds `--bitmap-coverage-pct` (default 100). The trigger fires when fewer
+than N% of canonical packs carry a `.bitmap` sidecar — i.e. when
+`PackEntry.BitmapKey` is empty on more packs than the threshold tolerates.
+
+| Coverage % | Default behavior | When to dial down |
+|---|---|---|
+| `100` | Strictest. Suitable for production. Pre-M9.5 manifests drain to fully-bitmapped on the next maintenance run. | Default; do not change without a reason. |
+| `50-99` | Tolerant of one or two bitmap-less packs. | A repo where `pack-objects` occasionally declines to emit a bitmap (rare; usually indicates a degenerate ref set). |
+| `0` | Disabled. No coverage check. | Repos where bitmap coverage should NOT drive repack scheduling — e.g. testing the other triggers in isolation, or during a controlled rollout of M9.5 across a fleet where you want to enable per-cluster after observing the metric. |
+
+Operationally, bitmaps are produced by `git pack-objects --write-bitmap-index` during
+the repack phase and uploaded alongside `.pack`/`.idx` to
+`packs/canonical/<id>.bitmap`. The lazy mirror's real `git upload-pack` consumes them
+on clone to short-circuit the per-object reachability walk; this is upstream-tooling
+acceleration only — the pure-Go upload-pack negotiator (M10) does not read `.bitmap`.
+
+`pack-objects` can decline to emit a bitmap in degenerate cases (empty pack, `--all`
+resolving to no refs). The repack phase tolerates a missing `.bitmap` file and records
+an empty `PackEntry.BitmapKey` rather than failing — the next maintenance cycle will
+retry. A persistently empty bitmap field across multiple runs indicates an unusual
+ref-graph shape and should prompt investigation — `trigger_eval.bitmap_coverage_pct`
+stays below threshold and fires the trigger on every run, which gives operators a
+clean signal
+in the JSON output.
+
+`receive-pack`-written packs never carry bitmaps (small, recent, replaced by the next
+repack) and are expected to show `BitmapKey: ""` until the next maintenance run rolls
+them into the consolidated canonical pack.
+
+#### Operational hazard: trigger fires after any push at default 100%
+
+`computeBitmapCoverage` uses integer arithmetic: `(packsWithBitmap * 100) / totalPacks`.
+At `--bitmap-coverage-pct=100`, the trigger therefore fires whenever ANY canonical
+pack lacks a bitmap — which is true immediately after every `receive-pack`-written
+push, because those packs never carry bitmaps. In practice this means at the default
+threshold, maintenance will repack on every run that follows a push. That is exactly
+the design intent (drain `receive-pack` packs into the bitmapped consolidated pack
+quickly), but operators wanting less aggressive repack cadence — for example, sites
+that run maintenance hourly on a push-heavy repo and would rather defer repack to
+when the other triggers fire — should set `--bitmap-coverage-pct` to a value like
+`50` (force repack only when half or more of packs lack bitmaps) or `0` (disable the
+trigger entirely; rely on `--recent-pack-threshold` for cadence).
+
+#### Operational hazard: persistent bitmap upload failures cause repack churn
+
+If the bitmap PUT to the object store persistently fails (auth scope misconfiguration,
+key length, backend rejecting the content type), the manifest records `BitmapKey: ""`
+for the new pack — and the next maintenance run sees coverage below 100% and forces
+another full repack, which retries the bitmap upload, which fails again, and so on.
+Bitmap is meant to be a cheap accelerator; a stuck upload turns into expensive repack
+churn.
+
+The signal in the run report is `bitmap_upload_error` (set on the JSON report when
+the upload was attempted and a non-`ErrAlreadyExists` error came back). The signal
+in the trigger eval is `trigger_eval.reason = "bitmap_coverage(N%<100%)"` on two
+consecutive runs.
+
+Runbook:
+1. Read `bitmap_upload_error` from the last two maintenance reports — if both are
+   non-empty with similar error text, the upload is stuck.
+2. Mitigate by setting `--bitmap-coverage-pct=0` on subsequent runs while
+   diagnosing the underlying storage error. This stops the repack churn without
+   disabling maintenance.
+3. Once the root cause is fixed (auth, capacity, content-type policy on the
+   backend), re-enable `--bitmap-coverage-pct=100`. The next maintenance run repacks
+   once, uploads the bitmap successfully, and steady state resumes.
 
 ---
 

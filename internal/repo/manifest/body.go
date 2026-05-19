@@ -74,6 +74,15 @@ type PackEntry struct {
 	// pack trailer at advertise time. Empty for legacy (pre-M11) packs;
 	// M11 maintenance backfills lazily.
 	PackChecksum string `json:"pack_checksum,omitempty"`
+
+	// BitmapKey is the object-store key of the .bitmap sidecar for
+	// this pack (under packs/canonical/<id>.bitmap). Set when M9.5+
+	// maintenance produced a bitmap; empty for packs written by
+	// receive-pack (which never emits bitmaps) or pre-M9.5 maintenance
+	// runs. A repo can have a mix of bitmapped and non-bitmapped
+	// canonical packs; the §15.3 coverage trigger drives them toward
+	// uniformity over time.
+	BitmapKey string `json:"bitmap_key,omitempty"`
 }
 
 // Indexes carries pointers to reachability index objects. ObjectMap

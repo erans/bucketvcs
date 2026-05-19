@@ -132,7 +132,16 @@ func runSoloCompaction(t *testing.T, s storage.ObjectStore) {
 	// repo is well below TotalPackCount=10000 and ManifestPackBytes limits).
 	// The ReachabilityDeltaPushes threshold (150 > 100) fires the compact-
 	// only path, which rebuilds bvom+bvcg from scratch and drops all deltas.
-	report, err := maintenance.Run(ctx, s, r, k, maintenance.RunOptions{})
+	//
+	// BitmapCoveragePct is explicitly set to 0 (disabled) — the M9.5
+	// default is 100, which would fire on this fresh seed (1 pack with
+	// no .bitmap yet) and force a repack instead of the compact-only
+	// path under test. Use DefaultThresholds + zero-out just the
+	// bitmap trigger so future threshold defaults are inherited
+	// automatically.
+	thr := maintenance.DefaultThresholds()
+	thr.BitmapCoveragePct = 0
+	report, err := maintenance.Run(ctx, s, r, k, maintenance.RunOptions{Thresholds: thr})
 	if err != nil {
 		t.Fatalf("maintenance.Run: %v", err)
 	}

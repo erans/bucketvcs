@@ -153,7 +153,11 @@ func requireEmptyDir(p string) error {
 }
 
 // downloadAndIndexPack copies the .pack from store into dest's objects/pack/
-// and runs git index-pack to (re)build the .idx.
+// and runs git index-pack to (re)build the .idx. When the manifest carries
+// a non-empty BitmapKey for this pack (M9.5+), the .bitmap sidecar is also
+// downloaded into objects/pack/ so real git upload-pack picks it up on
+// clone. git index-pack does NOT regenerate a bitmap, so the .bitmap must
+// come from storage — there is no local fallback.
 func downloadAndIndexPack(ctx context.Context, store storage.ObjectStore, p manifest.PackEntry, destDir string) (int, error) {
 	if !validOID(p.PackID) {
 		return 0, fmt.Errorf("exporter: invalid PackID %q (want 40-char lowercase hex)", p.PackID)
@@ -196,7 +200,54 @@ func downloadAndIndexPack(ctx context.Context, store storage.ObjectStore, p mani
 	if err := gitcli.IndexPack(ctx, destDir, absPack); err != nil {
 		return 0, fmt.Errorf("exporter: index-pack: %w", err)
 	}
+
+	// M9.5: download the .bitmap sidecar when the manifest carries one.
+	// Bitmaps are a clone accelerator, not a correctness primitive,
+	// so failures here are non-fatal — but they ARE distinguishable:
+	// ErrNotFound (bitmap raced GC; pack still valid) is silently
+	// skipped, while any other error (transient backend hiccup, auth
+	// failure, corrupted blob) is propagated. The pre-M9.5 case
+	// (empty BitmapKey) is simply skipped.
+	//
+	// TODO(observability): the ErrNotFound branch has no log signal
+	// today (no logger plumbed into downloadAndIndexPack). An
+	// operator investigating "why don't clones use bitmaps?" sees no
+	// signal that the download was attempted and skipped. Plumb a
+	// logger so this matches Report.BitmapUploadError on the upload
+	// side.
+	if p.BitmapKey != "" {
+		if err := downloadBitmapSidecar(ctx, store, p.BitmapKey, packDir, p.PackID); err != nil {
+			if !errors.Is(err, storage.ErrNotFound) {
+				return 0, fmt.Errorf("exporter: bitmap download: %w", err)
+			}
+		}
+	}
 	return p.ObjectCount, nil
+}
+
+// downloadBitmapSidecar fetches the .bitmap blob from storage and writes
+// it as pack-<id>.bitmap next to the corresponding .pack/.idx. Path
+// containment is verified the same way the pack path is.
+func downloadBitmapSidecar(ctx context.Context, store storage.ObjectStore, bitmapKey, packDir, packID string) error {
+	dstBitmap := filepath.Join(packDir, "pack-"+packID+".bitmap")
+	cleaned := filepath.Clean(dstBitmap)
+	if !strings.HasPrefix(cleaned, filepath.Clean(packDir)+string(filepath.Separator)) {
+		return fmt.Errorf("exporter: bitmap path escapes packDir: %s", cleaned)
+	}
+	obj, err := store.Get(ctx, bitmapKey, nil)
+	if err != nil {
+		return err
+	}
+	defer obj.Body.Close()
+	out, err := os.Create(dstBitmap)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, obj.Body); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 const nullOID = "0000000000000000000000000000000000000000"

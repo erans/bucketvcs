@@ -14,8 +14,8 @@ const (
 
 // Thresholds are the §15.3 force-repack triggers. A zero value disables
 // that specific trigger; setting all to zero with !Force makes Run a
-// no-op. Bitmap-coverage and lookup-latency triggers are intentionally
-// omitted from M9 — they ship in their successor milestones.
+// no-op. The lookup-latency trigger is omitted from M9.5 — it ships
+// in a successor milestone.
 type Thresholds struct {
 	// RecentPackCount triggers when the count of canonical packs whose
 	// object-store creation_time is within RecentWindow exceeds this.
@@ -40,6 +40,14 @@ type Thresholds struct {
 	// 24h.
 	BundleCommits int
 	BundleAge     time.Duration
+
+	// §15.3 #5 — bitmap-coverage trigger (M9.5). Fires when fewer than
+	// this percent of canonical packs (by count, not bytes) carry a
+	// non-empty PackEntry.BitmapKey. Range [0, 100]; 0 disables
+	// (matches the M9/M10 convention). M9.5 default is 100 — any
+	// missing bitmap forces a repack — which drains pre-M9.5 manifests
+	// organically on the next maintenance run.
+	BitmapCoveragePct int
 }
 
 // DefaultThresholds returns the spec §15.3 recommended values.
@@ -55,6 +63,8 @@ func DefaultThresholds() Thresholds {
 
 		BundleCommits: 100,
 		BundleAge:     24 * time.Hour,
+
+		BitmapCoveragePct: 100,
 	}
 }
 
@@ -202,6 +212,8 @@ type Report struct {
 	NewPackBytes      int64         `json:"new_pack_bytes,omitempty"`
 	NewObjectMapKey   string        `json:"new_object_map_key,omitempty"`
 	NewCommitGraphKey string        `json:"new_commit_graph_key,omitempty"`
+	NewBitmapKey      string        `json:"new_bitmap_key,omitempty"`        // M9.5; empty when pack-objects did not emit a bitmap OR the upload failed
+	BitmapUploadError string        `json:"bitmap_upload_error,omitempty"`   // M9.5; populated only when pipeline attempted the upload and it failed (non-fatal — pack/idx still committed). Operators reading the report can distinguish "no bitmap produced" (both empty) from "bitmap upload failed" (this set).
 	RepackedPackKeys  []string      `json:"repacked_pack_keys"`
 	CASAttempts       int           `json:"cas_attempts"`
 	DurationMS        int64         `json:"duration_ms"`
@@ -220,6 +232,7 @@ type TriggerReport struct {
 	RecentPackCount   int        `json:"recent_pack_count"`
 	TotalPackCount    int        `json:"total_pack_count"`
 	ManifestPackBytes int64      `json:"manifest_pack_bytes"`
+	BitmapCoveragePct int        `json:"bitmap_coverage_pct"` // M9.5; computed on every run regardless of outcome
 	Thresholds        Thresholds `json:"thresholds"`
 
 	// M10 reachability compaction trigger (separate from repack).

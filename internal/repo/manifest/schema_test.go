@@ -1,7 +1,9 @@
 package manifest_test
 
 import (
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/bucketvcs/bucketvcs/internal/repo"
@@ -39,5 +41,44 @@ func TestSchemaGate_RejectsZeroSchemaVersion(t *testing.T) {
 	h := manifest.RootHeader{SchemaVersion: 0, MinReaderVersion: "0.1.0"}
 	if err := manifest.SchemaGate(h); !errors.Is(err, repo.ErrUnsupportedSchema) {
 		t.Errorf("want ErrUnsupportedSchema, got %v", err)
+	}
+}
+
+func TestPackEntry_BitmapKey_RoundTrip(t *testing.T) {
+	body := manifest.Body{
+		Packs: []manifest.PackEntry{
+			{
+				PackID:    "0123abcd",
+				PackKey:   "tenants/t/repos/r/packs/canonical/0123abcd.pack",
+				IdxKey:    "tenants/t/repos/r/packs/canonical/0123abcd.idx",
+				BitmapKey: "tenants/t/repos/r/packs/canonical/0123abcd.bitmap",
+			},
+		},
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(raw), `"bitmap_key":"tenants/t/repos/r/packs/canonical/0123abcd.bitmap"`) {
+		t.Errorf("expected bitmap_key in JSON; got %s", raw)
+	}
+	var got manifest.Body
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Packs[0].BitmapKey != body.Packs[0].BitmapKey {
+		t.Errorf("BitmapKey round-trip mismatch: got %q, want %q", got.Packs[0].BitmapKey, body.Packs[0].BitmapKey)
+	}
+}
+
+func TestPackEntry_BitmapKey_OmittedWhenEmpty(t *testing.T) {
+	body := manifest.Body{
+		Packs: []manifest.PackEntry{
+			{PackID: "0123abcd", PackKey: "p", IdxKey: "i"},
+		},
+	}
+	raw, _ := json.Marshal(body)
+	if strings.Contains(string(raw), "bitmap_key") {
+		t.Errorf("bitmap_key should be omitted when empty; got %s", raw)
 	}
 }

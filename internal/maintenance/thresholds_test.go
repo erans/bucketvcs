@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -169,4 +170,81 @@ func TestEvaluate_ReachabilityBytesNotTriggeredWhenPackTriggers(t *testing.T) {
 	}
 	// Reachability may or may not be set; the important thing is the pack trigger wins.
 	_ = rep.CompactReachability
+}
+
+func TestEvaluatePure_BitmapCoverageTrigger(t *testing.T) {
+	mkBody := func(withBitmaps, total int) manifest.Body {
+		packs := make([]manifest.PackEntry, total)
+		for i := range packs {
+			packs[i] = manifest.PackEntry{
+				PackKey: fmt.Sprintf("p%d", i),
+				IdxKey:  fmt.Sprintf("i%d", i),
+			}
+			if i < withBitmaps {
+				packs[i].BitmapKey = fmt.Sprintf("b%d", i)
+			}
+		}
+		return manifest.Body{Packs: packs}
+	}
+	cases := []struct {
+		name          string
+		body          manifest.Body
+		threshold     int
+		wantTriggered bool
+		wantCoverage  int
+		wantReasonSub string // substring expected in Reason when Triggered
+	}{
+		{"100pct coverage, threshold 100", mkBody(5, 5), 100, false, 100, ""},
+		{"80pct coverage, threshold 100", mkBody(4, 5), 100, true, 80, "bitmap_coverage(80%<100%)"},
+		{"0pct coverage, threshold 100 (legacy)", mkBody(0, 3), 100, true, 0, "bitmap_coverage(0%<100%)"},
+		{"50pct coverage, threshold 50", mkBody(5, 10), 50, false, 50, ""},
+		{"40pct coverage, threshold 50", mkBody(4, 10), 50, true, 40, "bitmap_coverage(40%<50%)"},
+		{"threshold 0 disables trigger", mkBody(0, 3), 0, false, 0, ""},
+		{"zero packs, threshold 100", mkBody(0, 0), 100, false, 0, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rep, err := evaluatePure(c.body, nil, Thresholds{BitmapCoveragePct: c.threshold})
+			if err != nil {
+				t.Fatalf("evaluatePure: %v", err)
+			}
+			if rep.Triggered != c.wantTriggered {
+				t.Errorf("Triggered=%v want %v (reason=%q)", rep.Triggered, c.wantTriggered, rep.Reason)
+			}
+			if rep.BitmapCoveragePct != c.wantCoverage {
+				t.Errorf("BitmapCoveragePct=%d want %d", rep.BitmapCoveragePct, c.wantCoverage)
+			}
+			if c.wantReasonSub != "" && !strings.Contains(rep.Reason, c.wantReasonSub) {
+				t.Errorf("Reason=%q want substring %q", rep.Reason, c.wantReasonSub)
+			}
+		})
+	}
+}
+
+func TestEvaluatePure_HigherPriorityTriggerWinsOverBitmap(t *testing.T) {
+	// Body with all triggers eligible: bitmap coverage low, total pack
+	// count high. TotalPackCount fires first; Reason MUST be the
+	// total-pack one, not the bitmap one.
+	packs := make([]manifest.PackEntry, 6)
+	for i := range packs {
+		packs[i] = manifest.PackEntry{PackKey: fmt.Sprintf("p%d", i)}
+		// no BitmapKey on any -> 0% coverage
+	}
+	rep, err := evaluatePure(manifest.Body{Packs: packs}, nil, Thresholds{
+		TotalPackCount:    5,
+		BitmapCoveragePct: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.Triggered {
+		t.Fatal("expected Triggered")
+	}
+	if !strings.HasPrefix(rep.Reason, "total_pack_count") {
+		t.Errorf("Reason=%q want total_pack_count prefix (higher priority than bitmap)", rep.Reason)
+	}
+	// Bitmap coverage is still recorded.
+	if rep.BitmapCoveragePct != 0 {
+		t.Errorf("BitmapCoveragePct=%d want 0", rep.BitmapCoveragePct)
+	}
 }

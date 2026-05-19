@@ -36,6 +36,7 @@ func Evaluate(ctx context.Context, s storage.ObjectStore, body manifest.Body, th
 		ManifestPackBytes: int64(len(pb)),
 		Thresholds:        thresh,
 	}
+	computeBitmapCoverage(body, &rep)
 	if thresh.TotalPackCount > 0 && rep.TotalPackCount > thresh.TotalPackCount {
 		rep.Triggered = true
 		rep.Reason = fmt.Sprintf("total_pack_count(%d>%d)", rep.TotalPackCount, thresh.TotalPackCount)
@@ -51,6 +52,9 @@ func Evaluate(ctx context.Context, s storage.ObjectStore, body manifest.Body, th
 	evaluateReachabilityPure(body, thresh, &rep)
 
 	if thresh.RecentPackCount <= 0 {
+		// No recent-pack IO needed. Bitmap coverage is the lowest-
+		// priority repack trigger; check before returning.
+		maybeFireBitmapCoverage(thresh, &rep)
 		return rep, nil
 	}
 
@@ -72,13 +76,34 @@ func Evaluate(ctx context.Context, s storage.ObjectStore, body manifest.Body, th
 		}
 	}
 	rep.RecentPackCount = recent
+	maybeFireBitmapCoverage(thresh, &rep)
 	return rep, nil
+}
+
+// maybeFireBitmapCoverage sets Triggered/Reason from bitmap coverage,
+// but only when no higher-priority trigger already fired. The coverage
+// percentage was already computed by computeBitmapCoverage.
+//
+// The early-return on TotalPackCount==0 captures "no canonical packs
+// means no missing bitmaps to worry about" — a freshly-created repo
+// (no pushes yet) MUST NOT trip the bitmap trigger. This is the
+// load-bearing semantic; the field-equality form is just how
+// TriggerReport carries the count.
+func maybeFireBitmapCoverage(thresh Thresholds, rep *TriggerReport) {
+	if thresh.BitmapCoveragePct <= 0 || rep.TotalPackCount == 0 {
+		return
+	}
+	if rep.BitmapCoveragePct < thresh.BitmapCoveragePct && !rep.Triggered {
+		rep.Triggered = true
+		rep.Reason = fmt.Sprintf("bitmap_coverage(%d%%<%d%%)", rep.BitmapCoveragePct, thresh.BitmapCoveragePct)
+	}
 }
 
 // evaluatePure is the substrate that pure unit tests exercise. Pass
 // recentOverride non-nil to inject a recent-pack count without a
 // real object store. Trigger priority matches Evaluate (cheap first):
-// total_pack_count, manifest_pack_bytes, recent_pack_count.
+// total_pack_count, manifest_pack_bytes, recent_pack_count, then
+// (lowest priority) bitmap_coverage.
 func evaluatePure(body manifest.Body, recentOverride *int, thresh Thresholds) (TriggerReport, error) {
 	pb, err := json.Marshal(body.Packs)
 	if err != nil {
@@ -92,6 +117,7 @@ func evaluatePure(body manifest.Body, recentOverride *int, thresh Thresholds) (T
 	if recentOverride != nil {
 		rep.RecentPackCount = *recentOverride
 	}
+	computeBitmapCoverage(body, &rep)
 	switch {
 	case thresh.TotalPackCount > 0 && rep.TotalPackCount > thresh.TotalPackCount:
 		rep.Triggered = true
@@ -108,7 +134,28 @@ func evaluatePure(body manifest.Body, recentOverride *int, thresh Thresholds) (T
 	if !rep.Triggered {
 		evaluateReachabilityPure(body, thresh, &rep)
 	}
+
+	// Bitmap coverage — lowest-priority repack trigger. Shared with
+	// the storage-backed Evaluate path so the reason format and the
+	// "first trigger wins" semantics are defined in one place.
+	maybeFireBitmapCoverage(thresh, &rep)
 	return rep, nil
+}
+
+// computeBitmapCoverage populates rep.BitmapCoveragePct from body.Packs.
+// Coverage is by count (not bytes); 0 packs → 0% (no packs to bitmap).
+func computeBitmapCoverage(body manifest.Body, rep *TriggerReport) {
+	if len(body.Packs) == 0 {
+		rep.BitmapCoveragePct = 0
+		return
+	}
+	with := 0
+	for _, p := range body.Packs {
+		if p.BitmapKey != "" {
+			with++
+		}
+	}
+	rep.BitmapCoveragePct = (with * 100) / len(body.Packs)
 }
 
 // evaluateReachabilityPure applies the cheap (bytes + pushes) reachability

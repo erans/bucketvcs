@@ -312,11 +312,12 @@ func runPipeline(ctx context.Context, s storage.ObjectStore, r *repo.Repo, k *ke
 		// the compact-only path runs: upload indexes only, then CAS-merge
 		// that keeps Packs unchanged and trims consumed deltas.
 		if trigReport.Triggered || opts.Force {
-			// ---- Repack path (M9 behaviour, unchanged) ----
+			// ---- Repack path (M9 behaviour, M9.5 adds bitmap) ----
 			uploaded, err := uploadArtifacts(ctx, s, k, uploadInput{
 				PackID:           repackOut.PackID,
 				PackPath:         repackOut.PackPath,
 				IdxPath:          repackOut.IdxPath,
+				BitmapPath:       repackOut.BitmapPath,
 				ObjectMapHash:    idx.ObjectMapHash,
 				ObjectMapBytes:   idx.ObjectMapBytes,
 				CommitGraphHash:  idx.CommitGraphHash,
@@ -339,6 +340,10 @@ func runPipeline(ctx context.Context, s storage.ObjectStore, r *repo.Repo, k *ke
 			report.NewPackKey = uploaded.PackKey
 			report.NewObjectMapKey = uploaded.ObjectMapKey
 			report.NewCommitGraphKey = uploaded.CommitGraphKey
+			report.NewBitmapKey = uploaded.BitmapKey
+			if uploaded.BitmapErr != nil {
+				report.BitmapUploadError = uploaded.BitmapErr.Error()
+			}
 			report.NewPackBytes = repackOut.SizeBytes
 			report.NewPackObjects = idx.ObjectCount
 			report.RepackedPackKeys = p0Keys
@@ -349,6 +354,7 @@ func runPipeline(ctx context.Context, s storage.ObjectStore, r *repo.Repo, k *ke
 					PackID:       repackOut.PackID,
 					PackKey:      uploaded.PackKey,
 					IdxKey:       uploaded.IdxKey,
+					BitmapKey:    uploaded.BitmapKey,
 					SizeBytes:    repackOut.SizeBytes,
 					ObjectCount:  idx.ObjectCount,
 					PackChecksum: repackOut.PackChecksum,

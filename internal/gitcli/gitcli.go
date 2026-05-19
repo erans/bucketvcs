@@ -319,6 +319,64 @@ func PackObjectsAll(ctx context.Context, dir, outPrefix string) (string, error) 
 	return id, nil
 }
 
+// PackObjectsAllWithBitmap is similar to PackObjectsAll but additionally
+// writes a `.bitmap` sidecar via --write-bitmap-index. Produces three
+// output files: <outPrefix>-<id>.pack, .idx, and .bitmap. Returns the
+// pack ID.
+//
+// Implementation note: --write-bitmap-index is only valid when
+// pack-objects walks reachability itself (--all / --revs / etc.), NOT
+// when the object set comes from stdin via rev-list. So this variant
+// invokes `pack-objects --revs --all --write-bitmap-index` directly
+// without the rev-list pipeline. The resulting pack covers the same
+// object set as PackObjectsAll on the same repo, but the encoding
+// (delta selection, ordering) and therefore the pack ID / pack-checksum
+// trailer WILL differ between the two functions — pack-objects'
+// internal walker chooses deltas differently than feeding it a flat
+// rev-list --all --objects stream. Callers that compare maintenance
+// outputs across milestones, or any reproducibility harness, MUST
+// account for this: pack IDs are not stable across the switch from
+// PackObjectsAll to PackObjectsAllWithBitmap.
+//
+// Empty-repo behavior also differs from PackObjectsAll: this variant
+// produces the well-known empty-pack hash (029d088…) and exits
+// cleanly, with NO .bitmap sidecar. PackObjectsAll on the same input
+// also returns 40-char output via stdin piping. Callers MUST tolerate
+// a missing .bitmap file regardless.
+func PackObjectsAllWithBitmap(ctx context.Context, dir, outPrefix string) (string, error) {
+	// Empty-repo portability note: on the git versions bucketvcs is
+	// tested against (>= 2.41), `pack-objects --revs --all` on a bare
+	// repo with zero refs prints the well-known empty-pack hash and
+	// exits 0. A future git version that instead emits no stdout
+	// would trip the `len(id) != 40` branch below — surfacing as a
+	// hard error to the caller. This is a theoretical concern today
+	// because maintenance never materializes an empty bare (the
+	// manifest always carries at least one ref before reaching the
+	// Repack phase); we accept the empty-pack-hash path because it
+	// matches PackObjectsAll's behavior on the same input.
+	bin, err := resolveBinary()
+	if err != nil {
+		return "", err
+	}
+	pack := exec.CommandContext(ctx, bin,
+		"-C", dir, "--no-replace-objects",
+		"pack-objects", "--quiet", "--revs", "--all", "--write-bitmap-index", outPrefix)
+	pack.Env = scrubGitRepoEnv(os.Environ())
+	var packStdout, packStderr bytes.Buffer
+	pack.Stdout = &packStdout
+	pack.Stderr = &packStderr
+	if err := pack.Run(); err != nil {
+		return "", fmt.Errorf("gitcli: PackObjectsAllWithBitmap: pack-objects: %w: stderr=%q",
+			err, redactCreds(packStderr.String()))
+	}
+	id := strings.TrimSpace(packStdout.String())
+	if len(id) != 40 {
+		return "", fmt.Errorf("gitcli: PackObjectsAllWithBitmap: unexpected pack-objects stdout %q",
+			packStdout.String())
+	}
+	return id, nil
+}
+
 // IndexPack runs `git index-pack` against an existing .pack file,
 // producing the corresponding .idx alongside it.
 func IndexPack(ctx context.Context, dir, packPath string) error {
