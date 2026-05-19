@@ -25,3 +25,23 @@ func emitLFSBatch(ctx context.Context, logger *slog.Logger, repo, user, op strin
 		slog.String("result", result),
 	)
 }
+
+// emitLFSObjectServed records a "lfs.object.served" audit event after
+// a /_lfs/ PUT or GET completes. Matches the M11 proxied.url.served
+// audit shape.
+//
+// hash is the token's hash field (<tenant>/<repo>/<oid>); bytes is
+// the response body byte count (PUT: input bytes; GET: output bytes);
+// status is the HTTP status returned.
+func emitLFSObjectServed(ctx context.Context, logger *slog.Logger, op, hash string, bytes int64, status int) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.LogAttrs(ctx, slog.LevelInfo, "lfs.object.served",
+		slog.String("event", "lfs.object.served"),
+		slog.String("op", op),
+		slog.String("hash", hash),
+		slog.Int64("bytes", bytes),
+		slog.Int("status", status),
+	)
+}

@@ -17,14 +17,15 @@ type Token struct {
 }
 
 // Mint constructs a base64url-encoded token bound to (kind, hash, exp).
-// kind must be "bundle" or "pack". hash is the URL-path hash (sha256-...
-// for bundles, 40-hex sha1 for packs). The signing key MUST be at least
+// kind must be "bundle", "pack", "lfs-put", or "lfs-get". hash is the
+// URL-path hash (sha256-... for bundles, 40-hex sha1 for packs, or
+// <tenant>/<repo>/<oid> for LFS). The signing key MUST be at least
 // 16 bytes; 32 bytes is recommended.
 func Mint(key []byte, kind, hash string, exp time.Time) (string, error) {
 	if len(key) < 16 {
 		return "", fmt.Errorf("proxiedurl: signing key too short (%d bytes); need >= 16", len(key))
 	}
-	if kind != "bundle" && kind != "pack" {
+	if kind != "bundle" && kind != "pack" && kind != "lfs-put" && kind != "lfs-get" {
 		return "", fmt.Errorf("proxiedurl: invalid kind %q", kind)
 	}
 	if hash == "" {
@@ -93,13 +94,13 @@ func Verify(key []byte, token, expectKind, expectHash string, now time.Time) (To
 
 // payload layout: [kind(1B)] [exp_unix(8B BE)] [hash(rest)]
 //
-//	kind: 1 = bundle, 2 = pack
+//	kind: 1 = bundle, 2 = pack, 3 = lfs-put, 4 = lfs-get
 //
 // Compact, fixed-size for the prefix so we can reject malformed tokens
 // before the HMAC compare without leaking timing.
 //
 // encodePayload panics on an unknown kind. Mint's public contract already
-// rejects non-bundle/pack kinds, so a panic here would only fire if a
+// rejects non-bundle/pack/lfs-put/lfs-get kinds, so a panic here would only fire if a
 // future caller bypassed Mint — a programmer error, not a runtime input
 // failure. Panic loud rather than emit a token with a zero kind byte
 // that decodePayload would later reject with a generic "unknown kind".
@@ -110,6 +111,10 @@ func encodePayload(kind, hash string, exp time.Time) []byte {
 		k = 1
 	case "pack":
 		k = 2
+	case "lfs-put":
+		k = 3
+	case "lfs-get":
+		k = 4
 	default:
 		panic(fmt.Sprintf("proxiedurl.encodePayload: invalid kind %q (caller must validate)", kind))
 	}
@@ -130,6 +135,10 @@ func decodePayload(p []byte) (Token, error) {
 		kind = "bundle"
 	case 2:
 		kind = "pack"
+	case 3:
+		kind = "lfs-put"
+	case 4:
+		kind = "lfs-get"
 	default:
 		return Token{}, fmt.Errorf("unknown kind byte %d", p[0])
 	}

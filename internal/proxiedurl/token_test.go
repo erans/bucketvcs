@@ -1,7 +1,9 @@
 package proxiedurl
 
 import (
+	"bytes"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -77,5 +79,62 @@ func TestVerify_DifferentKey_Rejected(t *testing.T) {
 	_, err := Verify(other, tok, "bundle", "sha256-abc", time.Now())
 	if !errors.Is(err, ErrTokenInvalid) {
 		t.Fatalf("err = %v, want ErrTokenInvalid", err)
+	}
+}
+
+func TestMintVerify_LFSPut(t *testing.T) {
+	key := bytes.Repeat([]byte{0xab}, 32)
+	hash := "acme/foo/" + strings.Repeat("a", 64)
+	tok, err := Mint(key, "lfs-put", hash, time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatalf("Mint(lfs-put): %v", err)
+	}
+	decoded, err := Verify(key, tok, "lfs-put", hash, time.Now())
+	if err != nil {
+		t.Fatalf("Verify(lfs-put): %v", err)
+	}
+	if decoded.Kind != "lfs-put" {
+		t.Errorf("Kind=%q", decoded.Kind)
+	}
+}
+
+func TestMintVerify_LFSGet(t *testing.T) {
+	key := bytes.Repeat([]byte{0xab}, 32)
+	hash := "acme/foo/" + strings.Repeat("a", 64)
+	tok, err := Mint(key, "lfs-get", hash, time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatalf("Mint(lfs-get): %v", err)
+	}
+	decoded, err := Verify(key, tok, "lfs-get", hash, time.Now())
+	if err != nil {
+		t.Fatalf("Verify(lfs-get): %v", err)
+	}
+	if decoded.Kind != "lfs-get" {
+		t.Errorf("Kind=%q", decoded.Kind)
+	}
+}
+
+func TestVerify_LFSKindMismatch(t *testing.T) {
+	key := bytes.Repeat([]byte{0xab}, 32)
+	hash := "acme/foo/" + strings.Repeat("a", 64)
+	tok, err := Mint(key, "lfs-put", hash, time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	// Token minted as lfs-put cannot be used as lfs-get.
+	if _, err := Verify(key, tok, "lfs-get", hash, time.Now()); !errors.Is(err, ErrKindMismatch) {
+		t.Fatalf("expected ErrKindMismatch; got %v", err)
+	}
+	// Or as bundle.
+	if _, err := Verify(key, tok, "bundle", hash, time.Now()); !errors.Is(err, ErrKindMismatch) {
+		t.Fatalf("expected ErrKindMismatch; got %v", err)
+	}
+}
+
+func TestMint_RejectsUnknownKind(t *testing.T) {
+	key := bytes.Repeat([]byte{0xab}, 32)
+	_, err := Mint(key, "frobnicate", "hash", time.Now().Add(time.Minute))
+	if err == nil {
+		t.Fatal("expected error for unknown kind")
 	}
 }

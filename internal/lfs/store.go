@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/bucketvcs/bucketvcs/internal/proxiedurl"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
 
@@ -16,6 +18,14 @@ import (
 type Store struct {
 	backend storage.ObjectStore
 	prefix  string
+
+	// Proxied-URL config; zero values disable the ProxiedPutURL/
+	// ProxiedGetURL minting (they fall back to returning "", nil — the
+	// P1 stub behavior — which Build then surfaces as a per-object 503).
+	proxiedKey     []byte
+	proxiedBaseURL string
+	proxiedTenant  string
+	proxiedRepo    string
 }
 
 // NewStore returns a Store that prepends prefix to each OID. prefix is
@@ -83,14 +93,76 @@ func (s *Store) PresignGet(ctx context.Context, oid string, ttl time.Duration) (
 	return url, nil, nil
 }
 
-// ProxiedPutURL is a placeholder for the M13 P2 localfs fallback. It
-// returns an empty URL today so P1 callers compile. P2 wires this to
-// internal/proxiedurl with size encoded in the token payload.
-func (s *Store) ProxiedPutURL(oid string, size int64, ttl time.Duration) (string, http.Header) {
-	return "", nil
+// WithProxied configures the Store to mint proxied transfer URLs in
+// ProxiedPutURL / ProxiedGetURL. Pass an HMAC signing key (>= 16
+// bytes), the external base URL of the gateway, and the (tenant,
+// repo) pair the Store is scoped to.
+//
+// Returns the same Store so the call can be chained:
+//
+//     lfs.NewStore(backend, prefix).WithProxied(key, baseURL, t, r)
+//
+// If signingKey is empty (zero-length), proxied methods continue to
+// return empty URLs — useful for tests that exercise only the presign
+// path.
+func (s *Store) WithProxied(signingKey []byte, baseURL, tenant, repo string) *Store {
+	if len(signingKey) > 0 && len(signingKey) < 16 {
+		panic("lfs.Store.WithProxied: signing key must be >= 16 bytes (got " + strconv.Itoa(len(signingKey)) + ")")
+	}
+	s.proxiedKey = signingKey
+	s.proxiedBaseURL = baseURL
+	s.proxiedTenant = tenant
+	s.proxiedRepo = repo
+	return s
 }
 
-// ProxiedGetURL is a placeholder for the M13 P2 localfs fallback.
+// ProxiedPutURL mints a gateway-proxied URL the LFS client uses to PUT
+// the object. The returned URL is HMAC-signed via internal/proxiedurl
+// and expires after ttl. Returns ("", nil) if WithProxied was not
+// called (preserving the P1 stub behavior).
+//
+// Size is currently informational — passed in so the proxied handler
+// can enforce an upper bound at PUT time, but not encoded in the token
+// today. The 5 GiB hard cap is applied by the proxied handler via
+// http.MaxBytesReader regardless of the size argument.
+func (s *Store) ProxiedPutURL(oid string, size int64, ttl time.Duration) (string, http.Header) {
+	_ = size // reserved for future Content-Length-bound signing
+	if len(s.proxiedKey) == 0 || s.proxiedBaseURL == "" {
+		return "", nil
+	}
+	hash := s.proxiedTenant + "/" + s.proxiedRepo + "/" + oid
+	tok, err := proxiedurl.Mint(s.proxiedKey, "lfs-put", hash, time.Now().Add(ttl))
+	// TODO: if Mint fails, we return ("", nil) which the Batch handler
+	// surfaces as per-object 503 without diagnostic context. Plumbing a
+	// logger through Store is heavier than P2 scope warrants for this
+	// extremely rare path; revisit if operators see unexplained 503s.
+	if err != nil {
+		return "", nil
+	}
+	u := s.proxiedBaseURL + "/_lfs/" + s.proxiedTenant + "/" + s.proxiedRepo + "/" + oid + "?token=" + tok
+	hdr := http.Header{}
+	hdr.Set("Content-Type", "application/octet-stream")
+	return u, hdr
+}
+
+// ProxiedGetURL mints a gateway-proxied URL the LFS client uses to GET
+// the object. The returned URL is HMAC-signed via internal/proxiedurl
+// and expires after ttl. Returns ("", nil) if WithProxied was not
+// called (preserving the pre-P2 stub behavior so the Batch handler
+// surfaces a per-object 503 when proxied transfer is not configured).
 func (s *Store) ProxiedGetURL(oid string, ttl time.Duration) (string, http.Header) {
-	return "", nil
+	if len(s.proxiedKey) == 0 || s.proxiedBaseURL == "" {
+		return "", nil
+	}
+	hash := s.proxiedTenant + "/" + s.proxiedRepo + "/" + oid
+	tok, err := proxiedurl.Mint(s.proxiedKey, "lfs-get", hash, time.Now().Add(ttl))
+	// TODO: if Mint fails, we return ("", nil) which the Batch handler
+	// surfaces as per-object 503 without diagnostic context. Plumbing a
+	// logger through Store is heavier than P2 scope warrants for this
+	// extremely rare path; revisit if operators see unexplained 503s.
+	if err != nil {
+		return "", nil
+	}
+	u := s.proxiedBaseURL + "/_lfs/" + s.proxiedTenant + "/" + s.proxiedRepo + "/" + oid + "?token=" + tok
+	return u, nil
 }

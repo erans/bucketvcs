@@ -135,6 +135,7 @@ type Server struct {
 	packURLBuilder    *URLBuilder
 	packURIBuildURL   func(ctx context.Context, hash, storageKey, expectedHash string) (string, error)
 	lfsHandler        http.Handler
+	lfsObjectHandler  http.Handler
 }
 
 // NewServer constructs a Server. The mirror manager acquires a process flock
@@ -304,15 +305,40 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 		if ttl <= 0 {
 			ttl = 15 * time.Minute
 		}
+		// Wire WithProxied so localfs (or any backend lacking native
+		// SignedURLs) gets a real proxied URL minted by lfs.Store.
+		// Cloud backends with SignedURLs return real signed URLs via
+		// Store.PresignPut/PresignGet and never reach the proxied path.
+		proxiedKey := opts.ProxiedURLSigningKey
+		proxiedBase := opts.ProxiedBaseURL
 		s.lfsHandler = lfs.NewHTTPHandler(lfs.Deps{
 			AuthStore:        opts.AuthStore,
 			ActorFromContext: ActorFromContext,
 			NewStore: func(tenant, repo string) *lfs.Store {
-				return lfs.NewStore(store, repoLFSPrefix(tenant, repo))
+				ls := lfs.NewStore(store, lfs.RepoLFSPrefix(tenant, repo))
+				if len(proxiedKey) >= 16 && proxiedBase != "" {
+					ls = ls.WithProxied(proxiedKey, proxiedBase, tenant, repo)
+				}
+				return ls
 			},
 			PresignTTL: ttl,
 			Logger:     opts.Logger,
 		})
+
+		// Mount the proxied object handler at /_lfs/ when proxied URL
+		// signing is configured. Without a signing key we cannot verify
+		// tokens, so the handler is omitted and ProxiedPutURL/GetURL above
+		// returns empty URLs (which Build then surfaces as per-object 503).
+		if len(proxiedKey) >= 16 {
+			s.lfsObjectHandler = lfs.NewProxiedObjectHandler(lfs.ProxiedDeps{
+				Store:  store,
+				Key:    proxiedKey,
+				Logger: opts.Logger,
+			})
+		}
+	}
+	if s.lfsObjectHandler != nil {
+		s.mux.Handle("/_lfs/", s.lfsObjectHandler)
 	}
 	s.mux.HandleFunc("/", s.routeRoot)
 	return s, nil
@@ -338,10 +364,4 @@ func (s *Server) routeRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.routeRepo(w, r)
-}
-
-// repoLFSPrefix returns the object-store key prefix for a repo's LFS
-// area: tenants/<tenant>/repos/<repo>/lfs/objects/. M13 spec §4.
-func repoLFSPrefix(tenant, repo string) string {
-	return "tenants/" + tenant + "/repos/" + repo + "/lfs/objects/"
 }

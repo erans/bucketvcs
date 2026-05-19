@@ -1,12 +1,16 @@
 package lfs
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	neturl "net/url"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/bucketvcs/bucketvcs/internal/proxiedurl"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
 
@@ -174,5 +178,94 @@ func TestStore_ProxiedGetURL_Stub(t *testing.T) {
 	url, hdr := s.ProxiedGetURL("abc", time.Minute)
 	if url != "" || hdr != nil {
 		t.Errorf("stub should return empty URL and nil header; got %q %v", url, hdr)
+	}
+}
+
+func TestStore_WithProxied_PUT_URL(t *testing.T) {
+	key := bytes.Repeat([]byte{0xab}, 32)
+	s := NewStore(&fakeStore{}, "tenants/acme/repos/foo/lfs/objects/").
+		WithProxied(key, "https://gw.example", "acme", "foo")
+	oid := strings.Repeat("a", 64)
+	url, hdr := s.ProxiedPutURL(oid, 100, time.Minute)
+	if url == "" {
+		t.Fatal("expected non-empty proxied URL")
+	}
+	if !strings.HasPrefix(url, "https://gw.example/_lfs/acme/foo/"+oid+"?token=") {
+		t.Errorf("URL prefix wrong: %s", url)
+	}
+	if hdr == nil || hdr.Get("Content-Type") != "application/octet-stream" {
+		t.Errorf("missing/wrong Content-Type header")
+	}
+}
+
+func TestStore_WithProxied_GET_URL(t *testing.T) {
+	key := bytes.Repeat([]byte{0xab}, 32)
+	s := NewStore(&fakeStore{}, "p/").
+		WithProxied(key, "https://gw.example", "acme", "foo")
+	oid := strings.Repeat("a", 64)
+	url, hdr := s.ProxiedGetURL(oid, time.Minute)
+	if !strings.HasPrefix(url, "https://gw.example/_lfs/acme/foo/"+oid+"?token=") {
+		t.Errorf("URL prefix wrong: %s", url)
+	}
+	if hdr != nil {
+		t.Errorf("expected nil header on GET; got %+v", hdr)
+	}
+}
+
+func TestStore_NoProxiedConfig_ReturnsEmpty(t *testing.T) {
+	// Without WithProxied, the methods are stubs (preserve P0/P1 behavior).
+	s := NewStore(&fakeStore{}, "p/")
+	oid := strings.Repeat("a", 64)
+	if url, _ := s.ProxiedPutURL(oid, 100, time.Minute); url != "" {
+		t.Errorf("expected empty URL without WithProxied; got %q", url)
+	}
+	if url, _ := s.ProxiedGetURL(oid, time.Minute); url != "" {
+		t.Errorf("expected empty URL without WithProxied; got %q", url)
+	}
+}
+
+func TestStore_WithProxied_TokenIsVerifiable(t *testing.T) {
+	key := bytes.Repeat([]byte{0xab}, 32)
+	s := NewStore(&fakeStore{}, "p/").
+		WithProxied(key, "https://gw.example", "acme", "foo")
+	oid := strings.Repeat("a", 64)
+	url, _ := s.ProxiedPutURL(oid, 100, time.Minute)
+	u, err := neturl.Parse(url)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	tok := u.Query().Get("token")
+	if tok == "" {
+		t.Fatal("token missing")
+	}
+	expectedHash := "acme/foo/" + oid
+	decoded, err := proxiedurl.Verify(key, tok, "lfs-put", expectedHash, time.Now())
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if decoded.Kind != "lfs-put" || decoded.Hash != expectedHash {
+		t.Errorf("decoded=%+v", decoded)
+	}
+}
+
+func TestStore_WithProxied_PanicsOnShortKey(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic on short signing key")
+		}
+	}()
+	NewStore(&fakeStore{}, "p/").WithProxied([]byte{0x01}, "https://gw", "acme", "foo")
+}
+
+func TestStore_WithProxied_AcceptsEmptyKey(t *testing.T) {
+	// An empty key is the "not configured" signal and must NOT panic.
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("unexpected panic: %v", r)
+		}
+	}()
+	s := NewStore(&fakeStore{}, "p/").WithProxied(nil, "", "", "")
+	if url, _ := s.ProxiedPutURL("oid", 1, time.Minute); url != "" {
+		t.Errorf("expected empty URL with nil key; got %q", url)
 	}
 }

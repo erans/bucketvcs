@@ -34,3 +34,21 @@ func TestEmitLFSBatch_AnonymousUser(t *testing.T) {
 		t.Errorf("expected empty user for anonymous; got %s", buf.String())
 	}
 }
+
+func TestEmitLFSObjectServed_Shape(t *testing.T) {
+	var buf bytes.Buffer
+	emitLFSObjectServed(context.Background(), captureLogger(&buf), "upload", "acme/foo/oid", 1024, 200)
+	line := buf.String()
+	for _, want := range []string{
+		`"msg":"lfs.object.served"`,
+		`"event":"lfs.object.served"`,
+		`"op":"upload"`,
+		`"hash":"acme/foo/oid"`,
+		`"bytes":1024`,
+		`"status":200`,
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("missing %q in %s", want, line)
+		}
+	}
+}

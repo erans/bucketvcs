@@ -207,6 +207,7 @@ func TestRunServe_BundleURIMode_Off_NoSigningKeyNeeded(t *testing.T) {
 		"--mirror-dir", t.TempDir(),
 		"--bundle-uri-mode", "off",
 		"--pack-uri-mode", "off",
+		"--lfs=false",
 		"--shutdown-timeout", "10ms",
 	}, &stdout, &stderr)
 	if rc != 0 {
@@ -214,6 +215,37 @@ func TestRunServe_BundleURIMode_Off_NoSigningKeyNeeded(t *testing.T) {
 	}
 	if strings.Contains(stderr.String(), "signing-key") {
 		t.Fatalf("stderr should not mention signing-key when modes are off: %q", stderr.String())
+	}
+}
+
+// TestRunServe_LFSWithoutProxiedConfig_Warns asserts that the P2
+// warning fires when --lfs is on (the default) but
+// --proxied-url-signing-key / --proxied-url-base are not set. The
+// warning tells operators LFS will return per-object 503 on backends
+// without native SignedURLs (e.g. localfs).
+func TestRunServe_LFSWithoutProxiedConfig_Warns(t *testing.T) {
+	_ = userCmdEnv(t)
+	var stdout, stderr bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	rc := runServe(ctx, []string{
+		"--addr", "127.0.0.1:0",
+		"--store", "localfs:" + t.TempDir(),
+		"--mirror-dir", t.TempDir(),
+		"--bundle-uri-mode", "off",
+		"--pack-uri-mode", "off",
+		// --lfs defaults to true; do not disable.
+		"--shutdown-timeout", "10ms",
+	}, &stdout, &stderr)
+	if rc != 0 {
+		t.Fatalf("rc = %d; want 0 (stderr=%q)", rc, stderr.String())
+	}
+	want := "--proxied-url-signing-key"
+	if !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr missing %q; got %s", want, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "503") {
+		t.Errorf("stderr should mention 503 fallback; got %s", stderr.String())
 	}
 }
 

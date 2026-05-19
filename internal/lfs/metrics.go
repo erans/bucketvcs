@@ -60,3 +60,24 @@ func emitBatchObjectMetric(ctx context.Context, logger *slog.Logger, op, result 
 		"result", result,
 	)
 }
+
+// emitObjectServedMetric increments lfs_object_served_total{op,result}.
+// Emitted once per /_lfs/ PUT or GET request. op is "upload" or
+// "download". result is one of: "ok", "exists", "missing", "too_large",
+// "hash_mismatch", "error".
+//
+// hash_mismatch fires on the PUT path when SHA256(body) does not match
+// the OID component of the URL — operators should alert on it.
+func emitObjectServedMetric(ctx context.Context, logger *slog.Logger, op, result string) {
+	emitMetric(ctx, logger, "lfs_object_served_total", 1,
+		"op", op,
+		"result", result,
+	)
+}
+
+// TODO(P5): emitPresignSeconds histogram is in the M13 spec §7 metric
+// list. Adding it requires plumbing a Logger + backend label through
+// Store.PresignPut/PresignGet, which is more wiring than fits in P2's
+// scope (the metric would also be redundant with the cloud backends'
+// own latency dashboards). Revisit when the operator guide ships in
+// P5; if operators don't ask for it, drop from the spec.

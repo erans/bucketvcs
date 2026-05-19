@@ -58,3 +58,18 @@ func TestEmitBatchObjectMetric_AllOutcomes(t *testing.T) {
 		}
 	}
 }
+
+func TestEmitObjectServedMetric_OK(t *testing.T) {
+	var buf bytes.Buffer
+	emitObjectServedMetric(context.Background(), captureLogger(&buf), "upload", "ok")
+	line := buf.String()
+	for _, want := range []string{
+		`"metric_name":"lfs_object_served_total"`,
+		`"op":"upload"`,
+		`"result":"ok"`,
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("missing %q in %s", want, line)
+		}
+	}
+}
