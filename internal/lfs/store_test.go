@@ -222,6 +222,53 @@ func TestStore_NoProxiedConfig_ReturnsEmpty(t *testing.T) {
 	if url, _ := s.ProxiedGetURL(oid, time.Minute); url != "" {
 		t.Errorf("expected empty URL without WithProxied; got %q", url)
 	}
+	if url, _ := s.ProxiedVerifyURL(oid, time.Minute); url != "" {
+		t.Errorf("expected empty URL without WithProxied; got %q", url)
+	}
+}
+
+func TestStore_WithProxied_VERIFY_URL(t *testing.T) {
+	key := bytes.Repeat([]byte{0xab}, 32)
+	s := NewStore(&fakeStore{}, "p/").
+		WithProxied(key, "https://gw.example", "acme", "foo")
+	oid := strings.Repeat("a", 64)
+	url, hdr := s.ProxiedVerifyURL(oid, time.Minute)
+	if !strings.HasPrefix(url, "https://gw.example/_lfs/acme/foo/"+oid+"?token=") {
+		t.Errorf("URL prefix wrong: %s", url)
+	}
+	authz := hdr.Get("Authorization")
+	if !strings.HasPrefix(authz, "Bearer bvtv_") {
+		t.Errorf("Authorization=%q, want Bearer bvtv_<...>", authz)
+	}
+}
+
+func TestStore_ProxiedVerifyURL_Stub(t *testing.T) {
+	s := NewStore(&fakeStore{}, "p/")
+	url, hdr := s.ProxiedVerifyURL("abc", time.Minute)
+	if url != "" || hdr != nil {
+		t.Errorf("stub should return empty URL and nil header; got %q %v", url, hdr)
+	}
+}
+
+func TestStore_ProxiedVerifyURL_TokenIsVerifiable(t *testing.T) {
+	key := bytes.Repeat([]byte{0xab}, 32)
+	s := NewStore(&fakeStore{}, "p/").
+		WithProxied(key, "https://gw.example", "acme", "foo")
+	oid := strings.Repeat("a", 64)
+	rawURL, _ := s.ProxiedVerifyURL(oid, time.Minute)
+	// Extract ?token=... and Verify with kind=lfs-verify, hash=acme/foo/<oid>.
+	idx := strings.Index(rawURL, "?token=")
+	if idx < 0 {
+		t.Fatal("missing ?token= in URL")
+	}
+	tok := rawURL[idx+len("?token="):]
+	got, err := proxiedurl.Verify(key, tok, "lfs-verify", "acme/foo/"+oid, time.Now())
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if got.Kind != "lfs-verify" {
+		t.Errorf("kind=%q", got.Kind)
+	}
 }
 
 func TestStore_WithProxied_TokenIsVerifiable(t *testing.T) {

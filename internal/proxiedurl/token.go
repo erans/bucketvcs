@@ -25,7 +25,7 @@ func Mint(key []byte, kind, hash string, exp time.Time) (string, error) {
 	if len(key) < 16 {
 		return "", fmt.Errorf("proxiedurl: signing key too short (%d bytes); need >= 16", len(key))
 	}
-	if kind != "bundle" && kind != "pack" && kind != "lfs-put" && kind != "lfs-get" {
+	if kind != "bundle" && kind != "pack" && kind != "lfs-put" && kind != "lfs-get" && kind != "lfs-verify" {
 		return "", fmt.Errorf("proxiedurl: invalid kind %q", kind)
 	}
 	if hash == "" {
@@ -100,7 +100,7 @@ func Verify(key []byte, token, expectKind, expectHash string, now time.Time) (To
 // before the HMAC compare without leaking timing.
 //
 // encodePayload panics on an unknown kind. Mint's public contract already
-// rejects non-bundle/pack/lfs-put/lfs-get kinds, so a panic here would only fire if a
+// rejects non-bundle/pack/lfs-put/lfs-get/lfs-verify kinds, so a panic here would only fire if a
 // future caller bypassed Mint — a programmer error, not a runtime input
 // failure. Panic loud rather than emit a token with a zero kind byte
 // that decodePayload would later reject with a generic "unknown kind".
@@ -115,6 +115,8 @@ func encodePayload(kind, hash string, exp time.Time) []byte {
 		k = 3
 	case "lfs-get":
 		k = 4
+	case "lfs-verify":
+		k = 5
 	default:
 		panic(fmt.Sprintf("proxiedurl.encodePayload: invalid kind %q (caller must validate)", kind))
 	}
@@ -139,6 +141,8 @@ func decodePayload(p []byte) (Token, error) {
 		kind = "lfs-put"
 	case 4:
 		kind = "lfs-get"
+	case 5:
+		kind = "lfs-verify"
 	default:
 		return Token{}, fmt.Errorf("unknown kind byte %d", p[0])
 	}

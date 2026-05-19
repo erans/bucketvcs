@@ -138,3 +138,26 @@ func TestMint_RejectsUnknownKind(t *testing.T) {
 		t.Fatal("expected error for unknown kind")
 	}
 }
+
+func TestMint_Verify_LFSVerifyRoundtrip(t *testing.T) {
+	tok, err := Mint(testKey, "lfs-verify", "acme/foo/abc123", time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	got, err := Verify(testKey, tok, "lfs-verify", "acme/foo/abc123", time.Now())
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if got.Kind != "lfs-verify" || got.Hash != "acme/foo/abc123" {
+		t.Errorf("got %+v", got)
+	}
+}
+
+func TestVerify_LFSVerifyRejectsCrossKind(t *testing.T) {
+	// A kind=3 lfs-put token must NOT verify as kind=5 lfs-verify.
+	tok, _ := Mint(testKey, "lfs-put", "acme/foo/abc", time.Now().Add(time.Minute))
+	_, err := Verify(testKey, tok, "lfs-verify", "acme/foo/abc", time.Now())
+	if err == nil {
+		t.Fatal("expected kind-mismatch error")
+	}
+}

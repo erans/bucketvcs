@@ -26,8 +26,9 @@ unchanged against a bucketvcs gateway over both HTTPS and SSH.
 | LFS-aware bandwidth metering | ❌ deferred | Get byte usage from S3 access logs / GCS audit logs / Azure storage analytics |
 | LFS-specific token scopes | ❌ deferred | Today every M4 write token can push LFS; every M4 read token can pull LFS |
 
-The five deferred items are tracked in §8 with the trigger condition each
-operator should watch for.
+The four deferred items are tracked in §8 with the trigger condition each
+operator should watch for. The verify-token mechanism listed as deferred
+in earlier M13 docs shipped in M13.1 — see §5.4.
 
 ---
 
@@ -103,7 +104,7 @@ The five M13-relevant `bucketvcs serve` flags:
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--lfs` | `true` | Enable the LFS Batch API. LFS routes (`/info/lfs/objects/batch`, `/info/lfs/objects/<oid>/verify`, `/lfs/objects/<oid>` proxied transfer) are mounted only when this is true. Set to `false` to make the gateway return 404 on every LFS route — see §7.2. |
+| `--lfs` | `true` | Enable the LFS Batch API. LFS routes (`/info/lfs/objects/batch` for Batch; `/_lfs/<tenant>/<repo>/<oid>` for proxied PUT/GET/POST, where POST is the M13.1 verify endpoint) are mounted only when this is true. Hard-requires `--proxied-url-signing-key` + `--proxied-url-base`; set to `false` to make the gateway return 404 on every LFS route — see §7.2. |
 | `--lfs-presign-ttl` | `15m` | TTL for LFS upload/download presigned URLs (direct mode) and HMAC-signed proxied URLs (localfs). The Batch response's `expires_at` field is set from `now + this`. Clients refresh by re-running Batch. |
 | `--lfs-ssh-token-ttl` | `15m` | TTL for the bearer token issued via SSH `git-lfs-authenticate`. The client uses that bearer to drive the HTTPS Batch API and signed-URL transfers — once it expires, the client re-runs the SSH authenticate command. |
 | `--proxied-url-signing-key` | (empty) | Path to a file holding an HMAC key (≥ 16 bytes) used to sign proxied `/_lfs/` URLs. Required when the store is localfs and `--lfs=true`. Shared with M11 bundle/pack proxied URLs. |
@@ -144,13 +145,18 @@ bucketvcs serve \
   --addr :443 \
   --store "s3://my-bucket?endpoint=https://account.r2.cloudflarestorage.com&region=auto" \
   --lfs \
-  --lfs-presign-ttl 15m
+  --lfs-presign-ttl 15m \
+  --proxied-url-signing-key /etc/bucketvcs/proxied.key \
+  --proxied-url-base "https://gw.example.com"
 ```
 
-Cloud backend means direct presign. No `--proxied-url-signing-key` /
-`--proxied-url-base` needed because the gateway is not minting any proxied
-URLs. SSH is not started; clients use HTTPS Basic auth (M4 tokens) for the
-Batch API.
+As of M13.1, `--proxied-url-signing-key` and `--proxied-url-base` are
+**required** whenever `--lfs=true`, even on cloud backends, because the
+verify action mints an HMAC-signed kind=5 token regardless of which
+backend serves the upload (see §5.4). Upload/download URLs remain
+direct-presigned by S3/R2; only the verify URL is gateway-proxied.
+Starting `bucketvcs serve` with `--lfs=true` and either flag missing
+exits with code 2 and a diagnostic.
 
 #### (b) S3 / R2 production + SSH
 
@@ -163,14 +169,15 @@ bucketvcs serve \
   --lfs \
   --lfs-presign-ttl 15m \
   --lfs-ssh-token-ttl 15m \
+  --proxied-url-signing-key /etc/bucketvcs/proxied.key \
   --proxied-url-base "https://gw.example.com"
 ```
 
-`--proxied-url-base` is required for SSH `git-lfs-authenticate` — the SSH
-session has no inbound HTTP request to derive the gateway URL from, so the
-operator must supply it. The signing-key file is still not needed: the SSH
-authenticate flow issues a real M4 bearer, not an HMAC-signed proxied URL,
-and the LFS transfer URLs are S3-presigned (direct mode).
+Both `--proxied-url-signing-key` and `--proxied-url-base` are required:
+the signing key signs M13.1 verify tokens (kind=5) and M11
+bundle/pack-URI tokens (kind=1/2); the base URL is the external gateway
+host used as the verify URL prefix and as the SSH `git-lfs-authenticate`
+Href. LFS upload/download URLs remain S3-presigned (direct mode).
 
 #### (c) Localfs development
 
@@ -282,30 +289,37 @@ constraint between LFS and bundle/pack.
 
 ### 5.1 The verify endpoint shape
 
-After every successful LFS upload PUT, the stock `git-lfs` client POSTs to:
+After every successful LFS upload PUT, the stock `git-lfs` client POSTs
+to the verify URL returned in the Batch response's `verify` action:
 
 ```
-POST /<tenant>/<repo>.git/info/lfs/objects/<oid>/verify
+POST /_lfs/<tenant>/<repo>/<oid>?token=<base64url-kind5-token>
 Content-Type: application/vnd.git-lfs+json
-Authorization: <whatever the Batch response's verify.header carried>
+Authorization: Bearer bvtv_<token>
 
 {"oid": "<sha256>", "size": <bytes>}
 ```
 
-The handler decodes the body (cap: 64 KiB), confirms the body's `oid` matches
-the URL's `<oid>` (422 on mismatch), and calls `Verify(store, oid, size)`,
-which `Head`s the LFS object in storage:
+The URL is identical to the upload PUT / download GET URL — the HTTP
+method selects the verify branch on the proxied handler. The handler
+validates the `?token=` query parameter (HMAC-signed kind=5
+`lfs-verify`, bound to `<tenant>/<repo>/<oid>`, TTL =
+`--lfs-presign-ttl`), decodes the body (cap: 64 KiB), confirms the
+body's `oid` matches the URL's `<oid>` (422 on mismatch), and calls
+`Verify(store, oid, size)`, which `Head`s the LFS object in storage:
 
 | HTTP status | Trigger | Audit `result` | Metric `result` |
 |---|---|---|---|
 | `200 OK` | Object exists at the claimed size | `ok` | `ok` |
+| `403 Forbidden` | Token missing / invalid / expired / wrong kind / hash mismatch | — (no `lfs.verify` event) | — (counted on `lfs_object_token_invalid_total{reason}`) |
 | `404 Not Found` | Object is absent from storage (`ErrVerifyNotFound`) | `missing` | `missing` |
 | `422 Unprocessable Entity` | Object present, size differs (`ErrVerifySizeMismatch`); or malformed body / oid mismatch | `size_mismatch` (size mismatch) or `error` (decode / oid mismatch) | same |
 | `500 Internal Server Error` | Backend `Head` returned a non-not-found error | `error` | `error` |
 
-The route's `RequiredAction = ActionWrite` is enforced by `gateway.RunAuth`
-upstream; the handler does not re-Decide for write inside `handleVerify`.
-Source: `internal/lfs/handler.go` `handleVerify` and
+Authentication is by the HMAC token alone — there is no inbound
+`Authorization` check on the verify POST. The kind=5 token authorizes
+exactly verify on exactly one (tenant, repo, oid).
+Source: `internal/lfs/proxied.go` `serveVerify` and
 `internal/lfs/verify.go` `Verify`.
 
 ### 5.2 What a verify failure means
@@ -389,52 +403,50 @@ URL that expired before the PUT completed.
   outage, CORS, expired bucket creds). Drop `--lfs=false` per §7.2 until
   the upstream is restored.
 
-### 5.4 The Authorization-echo SECURITY note
+### 5.4 The verify-token mechanism (M13.1)
 
-The verify request authenticates by echoing the inbound Batch request's
-`Authorization` header back into the Batch response, where the
-`git-lfs` client picks it up and replays it on the verify POST. The
-canonical wording is in `internal/lfs/handler.go` in the SECURITY
-comment block above the `bearerForVerify := r.Header.Get("Authorization")`
-line inside `handleBatch`. Two live operational concerns:
+As of M13.1, the verify action carries an HMAC-signed short-TTL token
+of kind=5 (`lfs-verify`) — not an echo of the inbound Batch request's
+`Authorization` header. The token is bound to (tenant, repo, oid) and
+expires after `--lfs-presign-ttl` (default 15m). The token is not
+consume-on-use: within its TTL a client may replay it against the same
+OID (each replay re-runs the backend `Head` and re-emits the audit
+event), but it cannot be repurposed for upload, download, Batch, or
+verify on a different OID/repo/tenant. The Batch response's verify
+action carries the token in both the URL `?token=` query parameter and
+an `Authorization: Bearer bvtv_<token>` header; the `git-lfs` client
+replays both on the verify POST, and the gateway validates the URL
+token (the header is decorative — the `bvtv_` prefix distinguishes
+verify tokens from M4 session tokens `bvts_` in forensics).
 
-1. **Client-side persistence.** `git-lfs` caches the verify action's
-   `Authorization` value on disk. Under HTTP Basic auth this is
-   `base64(user:password)` in plaintext — recoverable from any backup of
-   the client machine.
-2. **Response-body log exposure.** The `Authorization` header lands inside
-   the Batch JSON response body. Any access log / reverse proxy / WAF /
-   APM agent that captures response bodies will persist user credentials
-   in the log store.
+This closes the response-body credential leak the pre-M13.1 echo
+mechanism exposed:
 
-Operator mitigation set (in order of preference):
+- **Client-side persistence.** `git-lfs` caches the verify action's
+  `Authorization` value on disk. Under M13.1 the cached value is a
+  15-minute kind=5 token scoped to one OID, not a long-lived user
+  credential.
+- **Response-body log exposure.** Any access log / reverse proxy / WAF
+  that captures Batch response bodies now sees only a short-TTL
+  per-OID verify token, not a replayable user credential. The kind=5
+  token is single-purpose: it authorizes verify on exactly one (tenant,
+  repo, oid) and cannot be used for upload, download, or Batch.
 
-- **Issue short-TTL `bvts_` tokens as the Basic-auth password.** The
-  M4 gateway only parses Basic credentials inbound (see §9.3), so the
-  credential leaking through the response-echo path is still going to
-  be Basic — but if the *password* portion is a short-TTL `bvts_…`
-  token rather than a long-lived plaintext, the blast radius shrinks
-  to the TTL window. `bucketvcs token create <user> --expires <duration>`
-  mints such a token; clients use it as the password in their
-  `Authorization: Basic base64(user:bvts_...)` header. Inbound Bearer
-  auth is NOT currently supported.
-- **Disable upstream response-body logging.** On any reverse proxy /
-  WAF / APM agent between the gateway and the public internet, turn off
-  response-body capture for `/info/lfs/objects/batch`. The request-body
-  side is safe (the Batch request body contains no credentials).
-- **Run `--lfs=false` until the verify-token mechanism lands.** Tracked
-  for a later M13 phase: the verify call will be authenticated by a
-  single-use HMAC token bound to (oid, repo, actor, expiry) rather than
-  the echoed bearer. Until then, operators who cannot satisfy either of
-  the two mitigations above should disable LFS at the gateway and run
-  large-binary storage out-of-band.
+**Residual risk to be aware of.** A token recovered from a captured
+response body remains replayable against the same OID for the rest of
+its TTL (up to `--lfs-presign-ttl`). Each replay triggers one backend
+`Head` and one `lfs.verify` audit event, but does NOT leak object
+bytes — verify never reads object contents. Operators who cannot
+disable response-body logging on the path between the gateway and the
+public internet should still treat the Batch response as
+moderately-sensitive (short-TTL, narrow-scope), even though the prior
+long-lived-credential exposure is gone.
 
-`bucketvcs serve --lfs=true` emits a warning line to stderr at startup
-documenting this caveat (see `cmd/bucketvcs/serve.go` in the `*lfsEnabled`
-branch of `runServeWithListener`) —
-the warning's wording is intentionally identical to the SECURITY block in
-handler.go so on-call operators see the same text whether they read the
-code or watch the boot log.
+No operator action is required to enable this — the mechanism is on
+whenever `--lfs=true`, which now also hard-requires
+`--proxied-url-signing-key` and `--proxied-url-base` (see §3.3 recipe
+(a)). Starting `bucketvcs serve --lfs=true` with either flag missing
+exits with code 2.
 
 ---
 
@@ -499,11 +511,12 @@ Site: `internal/lfs/proxied.go` `servePut` and `serveGet`.
 #### `lfs_object_token_invalid_total{reason}`
 
 One record per `/_lfs/` request rejected because the proxied URL token
-was missing or invalid. Localfs-only.
+was missing or invalid. Fires on PUT (upload), GET (download), and
+POST (verify) — the token-validation prologue is shared.
 - `reason`: `missing` (no `?token=…` query parameter), `invalid` (token
   decode / HMAC verify failed), `expired` (token past its expiry), or
-  `kind_mismatch` (token minted for `lfs-get` used on a PUT, or vice
-  versa).
+  `kind_mismatch` (token minted for `lfs-get` used on a PUT, or a
+  non-`lfs-verify` token used on POST, etc.).
 
 Site: `internal/lfs/proxied.go` request prologue. Alert on sustained
 non-zero `expired` or `kind_mismatch` — they indicate clients holding
@@ -515,7 +528,17 @@ One record per verify request. No `op` label — verify is operation-less.
 - `result`: `ok`, `missing`, `size_mismatch`, `error`. See §5.2 for
   operational meaning of each label.
 
-Site: `internal/lfs/handler.go` `handleVerify`.
+Token-validation failures (missing / expired / wrong kind / hash
+mismatch) are NOT counted here — they are counted on
+`lfs_object_token_invalid_total{reason}` together with the equivalent
+PUT/GET failures, because the token-validation prologue is shared.
+`lfs_object_token_invalid_total` carries a `reason` label but no `op`
+label, so verify token failures cannot be isolated from upload/download
+token failures at the metric level today. Operators should treat the
+counter as an aggregate proxied-LFS token-health signal; a per-`op`
+breakdown is tracked as future work.
+
+Site: `internal/lfs/proxied.go` `serveVerify`.
 
 #### `lfs_ssh_authenticate_total{op,result}`
 
@@ -578,13 +601,13 @@ Site: `internal/lfs/audit.go` `emitLFSObjectServed`, called from
 
 Emitted at the end of every verify request, regardless of outcome.
 
-Attrs: `repo=<tenant>/<repo>`, `user=<actor>`, `oid=<sha256>`,
-`size=<claimed size>`, `result=ok|missing|size_mismatch|error`. The
-`user` attr is never empty in practice today because verify is
-ActionWrite-only — anonymous callers never reach the handler.
+Attrs: `repo=<tenant>/<repo>`, `user=""` (always empty under M13.1 —
+verify is authenticated by the kind=5 HMAC token bound to (tenant,
+repo, oid), not a session, so there is no actor to record), `oid=<sha256>`,
+`size=<claimed size>`, `result=ok|missing|size_mismatch|error`.
 
 Site: `internal/lfs/audit.go` `emitLFSVerify`, called from
-`handleVerify`.
+`internal/lfs/proxied.go` `serveVerify` (POST branch).
 
 #### `event=lfs.ssh_authenticate`
 
@@ -678,7 +701,6 @@ plan rotations for low-traffic windows.
 ### 7.2 Disabling LFS in an emergency
 
 Cases warranting an emergency disable:
-- The §5.4 SECURITY caveat is being actively exploited.
 - The backend presign primitive is broken and Batch is 5xx-ing across
   the board.
 - A storage cost runaway from misbehaving clients.
@@ -692,11 +714,11 @@ Procedure:
    systemctl restart bucketvcs-serve
    ```
 2. The gateway now returns 404 on every LFS route:
-   `/info/lfs/objects/batch`, `/info/lfs/objects/<oid>/verify`, and
-   `/_lfs/...`. The SSH `git-lfs-authenticate` exec command emits
-   `result=disabled` on its audit event and returns a non-zero exit
-   status; stock `git-lfs` clients surface this as a clear "LFS not
-   available on the server" error.
+   `/info/lfs/objects/batch` and `/_lfs/<tenant>/<repo>/<oid>` (PUT
+   upload, GET download, POST verify). The SSH `git-lfs-authenticate`
+   exec command emits `result=disabled` on its audit event and returns
+   a non-zero exit status; stock `git-lfs` clients surface this as a
+   clear "LFS not available on the server" error.
 
 What happens to:
 - **Existing LFS objects in storage:** preserved. `--lfs=false` only
@@ -761,11 +783,14 @@ indefinitely.
 
 ## 8. Deferred work
 
-Five items are tracked deliberately outside M13. Each subsection below
+Four items are tracked deliberately outside M13. Each subsection below
 records why the item is deferred, the operational trigger condition that
 should prompt operators to escalate, and the workaround available today.
 The production-readiness table in the preamble cross-references each
 item by section number.
+
+> **The verify-token mechanism originally tracked here as deferred
+> shipped in M13.1 — see §5.4.**
 
 ### 8.1 LFS Locking API
 
@@ -911,31 +936,6 @@ These backend-side controls have no concept of "tenant" — operators
 who run a single bucket per tenant get clean accounting; operators who
 multiplex tenants into one bucket need a separate counter outside the
 gateway.
-
-### 8.5 Verify-token mechanism
-
-**Status.** Not implemented. The verify endpoint still authenticates by
-echoing the inbound Batch request's Authorization header back into the
-verify action of the Batch response — see §5.4 for the full SECURITY
-note, the operator mitigation set, and the boot-time stderr warning.
-
-**Why deferred.** A verify-token replacement (single-use HMAC token
-bound to oid, repo, actor, expiry) requires its own signing-key
-rotation story alongside the M11/M13 proxied-URL signing key, and its
-own minting / validation surface in the handler. It is non-trivial
-work and is tracked for a follow-on phase; until then the operator
-mitigation set in §5.4 is the supported path.
-
-**Trigger condition.** Any deployment where neither of §5.4's two
-mitigations (Bearer-token rollout, or disabling upstream response-body
-logging for `/info/lfs/objects/batch`) can be satisfied. Such operators
-should run `--lfs=false` until the verify-token mechanism lands.
-
-**Workaround today.** §5.4's mitigation set (use Bearer; or disable
-response-body capture; or `--lfs=false`). The gateway's boot-time
-stderr warning is intentionally worded identically to the SECURITY
-block in `internal/lfs/handler.go` so on-call operators see the same
-text whether they read the code or watch the boot log.
 
 ---
 

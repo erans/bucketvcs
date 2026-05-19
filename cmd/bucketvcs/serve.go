@@ -77,10 +77,9 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	}
 
 	if *lfsEnabled {
-		fmt.Fprintln(stderr, "serve: --lfs is enabled. The verify endpoint (M13 P3) authenticates by echoing the inbound Authorization header into the verify action of the Batch response. Under Basic auth, the user's base64(user:password) lands in the response body and may be persisted by response-body logging upstream proxies or by the git-lfs client's on-disk cache. Recommend Bearer-token deployments or disabling LFS with --lfs=false until the verify-token mechanism lands in a later M13 phase.")
-
 		if *proxiedKeyFile == "" || *proxiedBaseURL == "" {
-			fmt.Fprintln(stderr, "serve: --lfs is enabled but --proxied-url-signing-key or --proxied-url-base is not set. LFS will return per-object 503 errors on backends without native SignedURLs (e.g. localfs). Configure these flags or disable LFS with --lfs=false.")
+			fmt.Fprintln(stderr, "serve: --lfs=true requires both --proxied-url-signing-key and --proxied-url-base. The LFS verify action mints HMAC tokens regardless of which backend serves the upload, so the proxied-URL config is mandatory whenever LFS is enabled. Set both flags or pass --lfs=false.")
+			return 2
 		}
 	}
 

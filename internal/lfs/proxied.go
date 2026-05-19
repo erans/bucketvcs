@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -73,9 +75,9 @@ func (h *proxiedObjectHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	// Method gate first so unsupported methods take a uniform 405 path
 	// regardless of path content.
 	switch r.Method {
-	case http.MethodPut, http.MethodGet, http.MethodHead:
+	case http.MethodPut, http.MethodGet, http.MethodHead, http.MethodPost:
 	default:
-		w.Header().Set("Allow", "GET, PUT, HEAD")
+		w.Header().Set("Allow", "GET, HEAD, POST, PUT")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -102,11 +104,15 @@ func (h *proxiedObjectHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Determine operation and setup the expected kind and hash for verification.
-	expectedKind := "lfs-get"
-	op := "download"
-	if r.Method == http.MethodPut {
-		expectedKind = "lfs-put"
-		op = "upload"
+	// POST is the verify endpoint (M13.1); PUT is upload; GET/HEAD is download.
+	var expectedKind, op string
+	switch r.Method {
+	case http.MethodPut:
+		expectedKind, op = "lfs-put", "upload"
+	case http.MethodPost:
+		expectedKind, op = "lfs-verify", "verify"
+	default: // GET, HEAD
+		expectedKind, op = "lfs-get", "download"
 	}
 	expectedHash := tenant + "/" + repo + "/" + oid
 
@@ -132,6 +138,10 @@ func (h *proxiedObjectHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	storageKey := RepoLFSPrefix(tenant, repo) + oid
 	hash := tenant + "/" + repo + "/" + oid
 
+	if r.Method == http.MethodPost {
+		h.serveVerify(ctx, w, r, tenant, repo, oid)
+		return
+	}
 	if r.Method == http.MethodPut {
 		h.servePut(ctx, w, r, op, hash, oid, storageKey)
 		return
@@ -275,6 +285,73 @@ func (h *proxiedObjectHandler) serveGet(ctx context.Context, w http.ResponseWrit
 	}
 	emitObjectServedMetric(ctx, h.logger, op, "ok")
 	emitLFSObjectServed(ctx, h.logger, op, hash, cw.n, http.StatusOK)
+}
+
+// serveVerify handles POST /_lfs/<tenant>/<repo>/<oid>. The body is a
+// VerifyRequest carrying {oid, size}. Behavior mirrors handler.go's
+// handleVerify exactly for storage-side outcomes — the only difference
+// vs. the route-based verify endpoint is the auth mechanism (kind=5
+// HMAC token instead of a route-mounted RunAuth check).
+//
+// The token has already been verified by ServeHTTP before this method
+// is called; serveVerify is only responsible for body validation and
+// the Verify(store, oid, size) dispatch.
+//
+// Auth note: token-authenticated, no actor in context. The audit event's
+// user attribute is empty string — operators correlate via the repo and
+// oid fields.
+func (h *proxiedObjectHandler) serveVerify(ctx context.Context, w http.ResponseWriter, r *http.Request, tenant, repo, oid string) {
+	repoFQN := tenant + "/" + repo
+
+	// LFS spec uses application/vnd.git-lfs+json. Mirror handler.go's
+	// tolerate-empty / reject-mismatched policy.
+	if ct := r.Header.Get("Content-Type"); ct != "" {
+		mt, _, perr := mime.ParseMediaType(ct)
+		if perr != nil || mt != ContentType {
+			WriteError(w, http.StatusUnsupportedMediaType, "expected Content-Type: "+ContentType)
+			emitVerifyRequestMetric(ctx, h.logger, "error")
+			emitLFSVerify(ctx, h.logger, repoFQN, "", oid, 0, "error")
+			return
+		}
+	}
+
+	// Body is small (just {oid, size}); cap at 64 KiB.
+	body := http.MaxBytesReader(w, r.Body, 64*1024)
+	var vreq VerifyRequest
+	if err := json.NewDecoder(body).Decode(&vreq); err != nil {
+		WriteError(w, http.StatusUnprocessableEntity, "unprocessable: "+err.Error())
+		emitVerifyRequestMetric(ctx, h.logger, "error")
+		emitLFSVerify(ctx, h.logger, repoFQN, "", oid, 0, "error")
+		return
+	}
+	if vreq.OID != oid {
+		WriteError(w, http.StatusUnprocessableEntity, "body oid does not match URL oid")
+		emitVerifyRequestMetric(ctx, h.logger, "error")
+		emitLFSVerify(ctx, h.logger, repoFQN, "", oid, vreq.Size, "error")
+		return
+	}
+
+	store := NewStore(h.store, RepoLFSPrefix(tenant, repo))
+	err := Verify(ctx, store, oid, vreq.Size)
+	switch {
+	case err == nil:
+		w.Header().Set("Content-Type", ContentType)
+		w.WriteHeader(http.StatusOK)
+		emitVerifyRequestMetric(ctx, h.logger, "ok")
+		emitLFSVerify(ctx, h.logger, repoFQN, "", oid, vreq.Size, "ok")
+	case errors.Is(err, ErrVerifyNotFound):
+		WriteError(w, http.StatusNotFound, "object not uploaded")
+		emitVerifyRequestMetric(ctx, h.logger, "missing")
+		emitLFSVerify(ctx, h.logger, repoFQN, "", oid, vreq.Size, "missing")
+	case errors.Is(err, ErrVerifySizeMismatch):
+		WriteError(w, http.StatusUnprocessableEntity, err.Error())
+		emitVerifyRequestMetric(ctx, h.logger, "size_mismatch")
+		emitLFSVerify(ctx, h.logger, repoFQN, "", oid, vreq.Size, "size_mismatch")
+	default:
+		WriteError(w, http.StatusInternalServerError, "internal error")
+		emitVerifyRequestMetric(ctx, h.logger, "error")
+		emitLFSVerify(ctx, h.logger, repoFQN, "", oid, vreq.Size, "error")
+	}
 }
 
 // countingReader wraps an io.Reader and counts bytes read through it.

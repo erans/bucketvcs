@@ -57,18 +57,21 @@ type lfsRoute int
 const (
 	lfsRouteNone lfsRoute = iota
 	lfsRouteBatch
-	lfsRouteVerify
 )
 
 // NewHTTPHandler returns the http.Handler that serves the LFS Batch
-// and Verify endpoints. The handler trusts upstream middleware
-// (typically gateway.RunAuth) for credential verification and repo
-// existence — the actor is recovered from context via
-// deps.ActorFromContext. For Batch, the handler performs a secondary
-// write check when the body's operation is "upload"; for Verify, the
-// route's RequiredAction=ActionWrite has already been enforced
-// upstream and no in-handler re-check is performed. The handler emits
-// per-route audit events (lfs.batch / lfs.verify) plus metrics.
+// endpoint. The handler trusts upstream middleware (typically
+// gateway.RunAuth) for credential verification and repo existence —
+// the actor is recovered from context via deps.ActorFromContext. For
+// Batch, the handler performs a secondary write check when the body's
+// operation is "upload". The handler emits a per-route audit event
+// (lfs.batch) plus metrics.
+//
+// Note: the LFS verify endpoint is NOT served by this handler. As of
+// M13.1 verify is owned by the proxied handler (internal/lfs/proxied.go),
+// which authenticates verify POSTs via a kind=5 HMAC token minted by
+// Store.ProxiedVerifyURL and embedded in the Batch upload-action URL.
+// The gateway route dispatcher only forwards OpLFSBatch here.
 //
 // The handler is intentionally constructed with a closure over deps so
 // the gateway can mount it via mux.Handle without further wiring.
@@ -97,7 +100,7 @@ func NewHTTPHandler(deps Deps) http.Handler {
 			logger = slog.Default()
 		}
 
-		tenant, repo, oid, route := parseLFSPath(r.URL.Path)
+		tenant, repo, route := parseLFSPath(r.URL.Path)
 		if route == lfsRouteNone || r.Method != http.MethodPost {
 			http.NotFound(w, r)
 			return
@@ -115,8 +118,6 @@ func NewHTTPHandler(deps Deps) http.Handler {
 		switch route {
 		case lfsRouteBatch:
 			handleBatch(ctx, w, r, deps, tenant, repo, actor, logger)
-		case lfsRouteVerify:
-			handleVerify(ctx, w, r, deps, tenant, repo, oid, actor, logger)
 		}
 	})
 }
@@ -230,29 +231,11 @@ func handleBatch(ctx context.Context, w http.ResponseWriter, r *http.Request, de
 		}
 	}
 
-	// Build the response.
+	// Build the response. The verify action's URL and Authorization
+	// header are minted from Store.ProxiedVerifyURL (kind=5 HMAC token);
+	// no inbound bearer is echoed into the response.
 	store := deps.NewStore(tenant, repo)
-	verifyBaseURL := requestBaseURL(r) + "/" + tenant + "/" + repo + ".git/info/lfs/objects"
-	// SECURITY: Authorization echo. P3 ships the verify ENDPOINT but
-	// not yet the verify-TOKEN mechanism, so the verify call is still
-	// authenticated by echoing the inbound Authorization header from
-	// the Batch request into the Batch response. Two live concerns:
-	//
-	//   1. Client-side persistence — git-lfs caches the verify action's
-	//      Authorization header on disk. For Basic auth this stores
-	//      base64(user:password) in plaintext.
-	//
-	//   2. Response-body log exposure — the Authorization header lands
-	//      inside the Batch JSON response. Any access-log capture, reverse
-	//      proxy body capture, or telemetry that records response bodies
-	//      will persist user credentials.
-	//
-	// To be replaced by a single-use HMAC-signed token bound to
-	// (oid, repo, actor, expiry) — tracked for a later M13 phase.
-	// Operators who cannot disable response-body logging should run
-	// Bearer-token deployments or keep --lfs=false until that lands.
-	bearerForVerify := r.Header.Get("Authorization")
-	resp, berr := Build(ctx, req, store, verifyBaseURL, bearerForVerify, deps.PresignTTL)
+	resp, berr := Build(ctx, req, store, deps.PresignTTL)
 	if berr != nil {
 		WriteError(w, http.StatusUnprocessableEntity, berr.Error())
 		emitBatchRequestMetric(ctx, logger, req.Operation, "error")
@@ -274,74 +257,12 @@ func handleBatch(ctx context.Context, w http.ResponseWriter, r *http.Request, de
 	emitLFSBatch(ctx, logger, tenant+"/"+repo, actorName(actor), req.Operation, len(resp.Objects), "ok")
 }
 
-// handleVerify processes POST /<tenant>/<repo>.git/info/lfs/objects/<oid>/verify.
-// The body is a VerifyRequest carrying {oid, size}. The handler:
-//
-//  1. Decodes the small JSON body (capped at 64 KiB).
-//  2. Confirms body.OID matches the URL OID (422 on mismatch).
-//  3. Calls Verify(store, oid, size) and maps the result:
-//     nil -> 200; ErrVerifyNotFound -> 404; ErrVerifySizeMismatch -> 422;
-//     other -> 500.
-//  4. Emits lfs_verify_requests_total{result} and the lfs.verify audit
-//     event regardless of outcome.
-//
-// The route's ActionWrite has already been enforced by upstream
-// gateway.RunAuth; no secondary in-handler permission check.
-func handleVerify(ctx context.Context, w http.ResponseWriter, r *http.Request, deps Deps, tenant, repo, oid string, actor *auth.Actor, logger *slog.Logger) {
-	user := actorName(actor)
-	repoFQN := tenant + "/" + repo
-
-	// LFS spec uses application/vnd.git-lfs+json for verify as well as
-	// batch. Mirror handleBatch's tolerate-empty / reject-mismatched
-	// policy so the two endpoints behave consistently for clients.
-	if ct := r.Header.Get("Content-Type"); ct != "" {
-		mt, _, perr := mime.ParseMediaType(ct)
-		if perr != nil || mt != ContentType {
-			WriteError(w, http.StatusUnsupportedMediaType, "expected Content-Type: "+ContentType)
-			emitVerifyRequestMetric(ctx, logger, "error")
-			emitLFSVerify(ctx, logger, repoFQN, user, oid, 0, "error")
-			return
-		}
-	}
-
-	// Body is small (just {oid, size}); cap at 64 KiB.
-	body := http.MaxBytesReader(w, r.Body, 64*1024)
-	var vreq VerifyRequest
-	if err := json.NewDecoder(body).Decode(&vreq); err != nil {
-		WriteError(w, http.StatusUnprocessableEntity, "unprocessable: "+err.Error())
-		emitVerifyRequestMetric(ctx, logger, "error")
-		emitLFSVerify(ctx, logger, repoFQN, user, oid, 0, "error")
-		return
-	}
-	if vreq.OID != oid {
-		WriteError(w, http.StatusUnprocessableEntity, "body oid does not match URL oid")
-		emitVerifyRequestMetric(ctx, logger, "error")
-		emitLFSVerify(ctx, logger, repoFQN, user, oid, vreq.Size, "error")
-		return
-	}
-
-	store := deps.NewStore(tenant, repo)
-	err := Verify(ctx, store, oid, vreq.Size)
-	switch {
-	case err == nil:
-		w.Header().Set("Content-Type", ContentType)
-		w.WriteHeader(http.StatusOK)
-		emitVerifyRequestMetric(ctx, logger, "ok")
-		emitLFSVerify(ctx, logger, repoFQN, user, oid, vreq.Size, "ok")
-	case errors.Is(err, ErrVerifyNotFound):
-		WriteError(w, http.StatusNotFound, "object not uploaded")
-		emitVerifyRequestMetric(ctx, logger, "missing")
-		emitLFSVerify(ctx, logger, repoFQN, user, oid, vreq.Size, "missing")
-	case errors.Is(err, ErrVerifySizeMismatch):
-		WriteError(w, http.StatusUnprocessableEntity, err.Error())
-		emitVerifyRequestMetric(ctx, logger, "size_mismatch")
-		emitLFSVerify(ctx, logger, repoFQN, user, oid, vreq.Size, "size_mismatch")
-	default:
-		WriteError(w, http.StatusInternalServerError, "internal error")
-		emitVerifyRequestMetric(ctx, logger, "error")
-		emitLFSVerify(ctx, logger, repoFQN, user, oid, vreq.Size, "error")
-	}
-}
+// handleVerify lived here in M13 P3 and processed the OLD route
+// POST /<tenant>/<repo>.git/info/lfs/objects/<oid>/verify. As of M13.1
+// it has been removed: verify is now served by the proxied handler
+// (internal/lfs/proxied.go) gated on a kind=5 HMAC token, and the
+// Batch response embeds the new proxied verify URL + Authorization
+// header. The route-based path is no longer dispatched.
 
 // actorName returns a's Name, or "" if a is nil. Used in audit emit
 // calls where we want to pass through the actor identity (or empty
@@ -353,46 +274,35 @@ func actorName(a *auth.Actor) string {
 	return a.Name
 }
 
-// parseLFSPath parses /<tenant>/<repo>.git/info/lfs/objects/<rest>
-// and returns the sub-route plus extracted components.
-//
-//   - rest == "batch"               -> lfsRouteBatch, oid = ""
-//   - rest == "<oid>/verify"        -> lfsRouteVerify, oid = <oid> (validated)
-//   - anything else                 -> lfsRouteNone
-//
-// Tenant and repo are validated via validRouteName; OID via validOID.
-func parseLFSPath(p string) (tenant, repo, oid string, route lfsRoute) {
+// parseLFSPath parses /<tenant>/<repo>.git/info/lfs/objects/batch and
+// returns (tenant, repo, lfsRouteBatch) on a match, or zero values
+// with lfsRouteNone otherwise. Tenant and repo are validated via
+// validRouteName.
+func parseLFSPath(p string) (tenant, repo string, route lfsRoute) {
 	if p != path.Clean(p) {
-		return "", "", "", lfsRouteNone
+		return "", "", lfsRouteNone
 	}
 	parts := strings.SplitN(strings.TrimPrefix(p, "/"), "/", 3)
 	if len(parts) < 3 {
-		return "", "", "", lfsRouteNone
+		return "", "", lfsRouteNone
 	}
 	tenant = parts[0]
 	repoSeg := parts[1]
 	rest := parts[2]
 	if !strings.HasSuffix(repoSeg, ".git") || repoSeg == ".git" {
-		return "", "", "", lfsRouteNone
+		return "", "", lfsRouteNone
 	}
 	repo = strings.TrimSuffix(repoSeg, ".git")
 	if tenant == "" || repo == "" {
-		return "", "", "", lfsRouteNone
+		return "", "", lfsRouteNone
 	}
 	if !validRouteName(tenant) || !validRouteName(repo) {
-		return "", "", "", lfsRouteNone
+		return "", "", lfsRouteNone
 	}
-	switch {
-	case rest == "info/lfs/objects/batch":
-		return tenant, repo, "", lfsRouteBatch
-	case strings.HasPrefix(rest, "info/lfs/objects/") && strings.HasSuffix(rest, "/verify"):
-		oid = strings.TrimSuffix(strings.TrimPrefix(rest, "info/lfs/objects/"), "/verify")
-		if !validOID.MatchString(oid) {
-			return "", "", "", lfsRouteNone
-		}
-		return tenant, repo, oid, lfsRouteVerify
+	if rest == "info/lfs/objects/batch" {
+		return tenant, repo, lfsRouteBatch
 	}
-	return "", "", "", lfsRouteNone
+	return "", "", lfsRouteNone
 }
 
 // validRouteName mirrors the gateway's path-segment validator so the
@@ -402,29 +312,6 @@ func parseLFSPath(p string) (tenant, repo, oid string, route lfsRoute) {
 // depends on both).
 func validRouteName(s string) bool {
 	return routenames.ValidateName(s)
-}
-
-// requestBaseURL reconstructs "<scheme>://<host>" from the inbound
-// request. For requests reaching us behind a TLS-terminating proxy,
-// callers SHOULD set X-Forwarded-Proto and X-Forwarded-Host; we honor
-// X-Forwarded-Proto when set.
-//
-// Hardening note: the verify route now ships (P3) and carries echoed
-// user bearers in the Batch response body. A hostile X-Forwarded-Proto
-// or Host header could direct the client to a verify URL of the
-// attacker's choosing, exfiltrating the bearer to that host. Mitigation
-// (tracked for a later M13 phase): prefer an operator-configured
-// external base URL (similar to gateway.Options.LFSProxiedBaseURL) over
-// the unverified r.Host.
-func requestBaseURL(r *http.Request) string {
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	if xfp := r.Header.Get("X-Forwarded-Proto"); xfp == "http" || xfp == "https" {
-		scheme = xfp
-	}
-	return scheme + "://" + r.Host
 }
 
 // perObjectResult returns the metric label for one ObjectAction. The

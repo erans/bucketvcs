@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,22 @@ const (
 	oidMismatch = "4444444444444444444444444444444444444444444444444444444444444444"
 	oidPresent  = "5555555555555555555555555555555555555555555555555555555555555555"
 	oidPresign  = "6666666666666666666666666666666666666666666666666666666666666666"
+)
+
+// testProxiedKey is a fixed 32-byte HMAC signing key used by every
+// test that needs a WithProxied-configured Store. The verify branch of
+// Build now requires the Store to be proxied-configured (it mints a
+// kind=5 token via ProxiedVerifyURL); tests that exercise the upload
+// happy path therefore use newProxiedBatchStore, which calls
+// WithProxied(testProxiedKey, ...). Tests that specifically exercise
+// the "no proxied config → per-object 503" branch use the plain
+// newBatchStore helper which does NOT configure proxied URLs.
+var testProxiedKey = []byte("0123456789abcdef0123456789abcdef")
+
+const (
+	testProxiedBaseURL = "https://gw.example"
+	testProxiedTenant  = "acme"
+	testProxiedRepo    = "foo"
 )
 
 // fakeBatchStore is reused across batch tests. It exposes per-OID
@@ -95,8 +112,22 @@ func lastSlash(s string) int {
 	return -1
 }
 
+// newBatchStore returns a Store WITHOUT WithProxied configured. It is
+// used by tests exercising the "no proxied config" branches (e.g. the
+// verify-URL 503 path) and by download tests where verify is never
+// minted.
 func newBatchStore(objects map[string]int64, signFn func(context.Context, string, storage.SignedURLOptions) (string, error)) *Store {
 	return NewStore(&fakeBatchStore{objects: objects, signFn: signFn}, "p/lfs/objects/")
+}
+
+// newProxiedBatchStore returns a Store WithProxied-configured with a
+// fixed test key. Upload tests use this helper because Build's verify
+// branch now requires the Store to be able to mint a kind=5 token —
+// without WithProxied, ProxiedVerifyURL returns "" and the upload
+// branch records a per-object 503.
+func newProxiedBatchStore(objects map[string]int64, signFn func(context.Context, string, storage.SignedURLOptions) (string, error)) *Store {
+	return NewStore(&fakeBatchStore{objects: objects, signFn: signFn}, "p/lfs/objects/").
+		WithProxied(testProxiedKey, testProxiedBaseURL, testProxiedTenant, testProxiedRepo)
 }
 
 // signedFn returns a sign function that returns a synthetic URL containing
@@ -116,21 +147,44 @@ func notSupportedFn() func(context.Context, string, storage.SignedURLOptions) (s
 	}
 }
 
+// assertVerifyAction asserts the shape of the verify action minted by
+// Build: the Authorization header carries a "Bearer bvtv_" token, and
+// the Href points at /_lfs/... with a ?token= query parameter. The
+// helper is used by every upload-happy-path test so the assertions
+// stay in lockstep when the wire format evolves.
+func assertVerifyAction(t *testing.T, vf Action) {
+	t.Helper()
+	authz := vf.Header["Authorization"]
+	if !strings.HasPrefix(authz, "Bearer bvtv_") {
+		t.Errorf("verify Authorization=%q, want Bearer bvtv_<token>", authz)
+	}
+	hrefURL, err := url.Parse(vf.Href)
+	if err != nil {
+		t.Fatalf("verify Href parse: %v", err)
+	}
+	if !strings.HasPrefix(hrefURL.Path, "/_lfs/") {
+		t.Errorf("verify Href path=%q, want /_lfs/...", hrefURL.Path)
+	}
+	if hrefURL.Query().Get("token") == "" {
+		t.Errorf("verify Href missing ?token= query param: %q", vf.Href)
+	}
+}
+
 func TestBuild_RejectsUnsupportedOperation(t *testing.T) {
-	s := newBatchStore(nil, signedFn())
-	_, err := Build(context.Background(), BatchRequest{Operation: "verify"}, s, "https://gw/verify", "Bearer x", time.Minute)
+	s := newProxiedBatchStore(nil, signedFn())
+	_, err := Build(context.Background(), BatchRequest{Operation: "verify"}, s, time.Minute)
 	if err == nil {
 		t.Fatal("expected error for unsupported operation")
 	}
 }
 
 func TestBuild_RejectsMissingBasicTransfer(t *testing.T) {
-	s := newBatchStore(nil, signedFn())
+	s := newProxiedBatchStore(nil, signedFn())
 	_, err := Build(context.Background(), BatchRequest{
 		Operation: "upload",
 		Transfers: []string{"lfs-standalone-file"}, // not "basic"
 		Objects:   []ObjectRef{{OID: oidNew, Size: 1}},
-	}, s, "https://gw/verify", "Bearer x", time.Minute)
+	}, s, time.Minute)
 	if err == nil {
 		t.Fatal("expected error when basic transfer absent")
 	}
@@ -138,11 +192,11 @@ func TestBuild_RejectsMissingBasicTransfer(t *testing.T) {
 
 func TestBuild_AcceptsImplicitBasicTransfer(t *testing.T) {
 	// Per the LFS spec, omitting Transfers entirely is equivalent to ["basic"].
-	s := newBatchStore(nil, signedFn())
+	s := newProxiedBatchStore(nil, signedFn())
 	resp, err := Build(context.Background(), BatchRequest{
 		Operation: "upload",
 		Objects:   []ObjectRef{{OID: oidNew, Size: 1}},
-	}, s, "https://gw/verify", "Bearer x", time.Minute)
+	}, s, time.Minute)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -152,12 +206,12 @@ func TestBuild_AcceptsImplicitBasicTransfer(t *testing.T) {
 }
 
 func TestBuild_Upload_NewObject(t *testing.T) {
-	s := newBatchStore(nil, signedFn())
+	s := newProxiedBatchStore(nil, signedFn())
 	resp, err := Build(context.Background(), BatchRequest{
 		Operation: "upload",
 		Transfers: []string{"basic"},
 		Objects:   []ObjectRef{{OID: oidNew, Size: 100}},
-	}, s, "https://gw/info/lfs/objects", "Bearer abc", time.Minute)
+	}, s, time.Minute)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -182,21 +236,16 @@ func TestBuild_Upload_NewObject(t *testing.T) {
 	if !ok {
 		t.Fatal("verify action missing")
 	}
-	if vf.Href != "https://gw/info/lfs/objects/"+oidNew+"/verify" {
-		t.Errorf("verify Href=%q", vf.Href)
-	}
-	if vf.Header["Authorization"] != "Bearer abc" {
-		t.Errorf("verify Authorization=%q", vf.Header["Authorization"])
-	}
+	assertVerifyAction(t, vf)
 }
 
 func TestBuild_Upload_ObjectAlreadyPresentAndSizeMatches(t *testing.T) {
-	s := newBatchStore(map[string]int64{oidExists: 100}, signedFn())
+	s := newProxiedBatchStore(map[string]int64{oidExists: 100}, signedFn())
 	resp, err := Build(context.Background(), BatchRequest{
 		Operation: "upload",
 		Transfers: []string{"basic"},
 		Objects:   []ObjectRef{{OID: oidExists, Size: 100}},
-	}, s, "https://gw/verify", "Bearer abc", time.Minute)
+	}, s, time.Minute)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -210,12 +259,12 @@ func TestBuild_Upload_ObjectAlreadyPresentAndSizeMatches(t *testing.T) {
 }
 
 func TestBuild_Upload_ObjectPresentButSizeMismatch(t *testing.T) {
-	s := newBatchStore(map[string]int64{oidMismatch: 50}, signedFn())
+	s := newProxiedBatchStore(map[string]int64{oidMismatch: 50}, signedFn())
 	resp, err := Build(context.Background(), BatchRequest{
 		Operation: "upload",
 		Transfers: []string{"basic"},
 		Objects:   []ObjectRef{{OID: oidMismatch, Size: 100}},
-	}, s, "https://gw/verify", "Bearer abc", time.Minute)
+	}, s, time.Minute)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -229,12 +278,14 @@ func TestBuild_Upload_ObjectPresentButSizeMismatch(t *testing.T) {
 }
 
 func TestBuild_Download_ObjectFound(t *testing.T) {
+	// Download path never mints a verify action, so the plain (non-proxied)
+	// store is sufficient.
 	s := newBatchStore(map[string]int64{oidExists: 200}, signedFn())
 	resp, err := Build(context.Background(), BatchRequest{
 		Operation: "download",
 		Transfers: []string{"basic"},
 		Objects:   []ObjectRef{{OID: oidExists, Size: 200}},
-	}, s, "https://gw/verify", "Bearer abc", time.Minute)
+	}, s, time.Minute)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -263,7 +314,7 @@ func TestBuild_Download_ObjectMissing(t *testing.T) {
 		Operation: "download",
 		Transfers: []string{"basic"},
 		Objects:   []ObjectRef{{OID: oidMissing, Size: 100}},
-	}, s, "https://gw/verify", "Bearer abc", time.Minute)
+	}, s, time.Minute)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -280,14 +331,14 @@ func TestBuild_PresignErrorBecomesPerObjectError(t *testing.T) {
 	// PresignPut on a backend returning a real error (not ErrNotSupported)
 	// must surface as a per-object error, not a top-level error: one bad
 	// object should not poison the whole batch response.
-	s := newBatchStore(nil, func(_ context.Context, _ string, _ storage.SignedURLOptions) (string, error) {
+	s := newProxiedBatchStore(nil, func(_ context.Context, _ string, _ storage.SignedURLOptions) (string, error) {
 		return "", errors.New("presign failed")
 	})
 	resp, err := Build(context.Background(), BatchRequest{
 		Operation: "upload",
 		Transfers: []string{"basic"},
 		Objects:   []ObjectRef{{OID: oidPresign, Size: 1}},
-	}, s, "https://gw/verify", "Bearer abc", time.Minute)
+	}, s, time.Minute)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -300,13 +351,16 @@ func TestBuild_PresignErrorBecomesPerObjectError(t *testing.T) {
 func TestBuild_ProxiedFallbackEmptyURLBecomesPerObject503(t *testing.T) {
 	// When PresignPut returns ErrNotSupported AND ProxiedPutURL stub
 	// returns "", Build must surface a per-object 503 so the LFS
-	// client sees a clear failure instead of an empty Href.
+	// client sees a clear failure instead of an empty Href. This test
+	// uses the non-proxied store so both the presign fallback AND the
+	// verify URL return "" — Build records the 503 on the upload-URL
+	// branch (which runs before verify-URL).
 	s := newBatchStore(nil, notSupportedFn())
 	resp, err := Build(context.Background(), BatchRequest{
 		Operation: "upload",
 		Transfers: []string{"basic"},
 		Objects:   []ObjectRef{{OID: oidPresign, Size: 1}},
-	}, s, "https://gw/verify", "Bearer abc", time.Minute)
+	}, s, time.Minute)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -316,10 +370,46 @@ func TestBuild_ProxiedFallbackEmptyURLBecomesPerObject503(t *testing.T) {
 	}
 }
 
+// TestBuild_VerifyURL_RequiresProxiedConfig covers the new branch
+// where the upload-URL was successfully presigned (native S3 path) but
+// the Store was not configured with WithProxied — so ProxiedVerifyURL
+// returns "" and Build surfaces a per-object 503 with the operator-
+// facing message telling them to set --proxied-url-signing-key /
+// --proxied-url-base.
+func TestBuild_VerifyURL_RequiresProxiedConfig(t *testing.T) {
+	// Plain newBatchStore: presign succeeds (signedFn), but verify URL
+	// minting fails because WithProxied was not called.
+	s := newBatchStore(nil, signedFn())
+	resp, err := Build(context.Background(), BatchRequest{
+		Operation: "upload",
+		Transfers: []string{"basic"},
+		Objects:   []ObjectRef{{OID: oidNew, Size: 1}},
+	}, s, time.Minute)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	o := resp.Objects[0]
+	if o.Error == nil || o.Error.Code != 503 {
+		t.Fatalf("expected per-object 503; got %+v", o.Error)
+	}
+	if !strings.Contains(o.Error.Message, "verify URL unavailable") {
+		t.Errorf("error message=%q, want contains 'verify URL unavailable'", o.Error.Message)
+	}
+	if !strings.Contains(o.Error.Message, "--proxied-url-signing-key") {
+		t.Errorf("error message=%q, want contains '--proxied-url-signing-key'", o.Error.Message)
+	}
+	if !strings.Contains(o.Error.Message, "--proxied-url-base") {
+		t.Errorf("error message=%q, want contains '--proxied-url-base'", o.Error.Message)
+	}
+	if len(o.Actions) != 0 {
+		t.Errorf("expected no actions on 503; got %+v", o.Actions)
+	}
+}
+
 func TestBuild_PerObjectIndependence(t *testing.T) {
 	// Two objects: one exists with matching size (empty actions), one is
 	// missing (upload+verify actions). Build must process them independently.
-	s := newBatchStore(map[string]int64{oidPresent: 10}, signedFn())
+	s := newProxiedBatchStore(map[string]int64{oidPresent: 10}, signedFn())
 	resp, err := Build(context.Background(), BatchRequest{
 		Operation: "upload",
 		Transfers: []string{"basic"},
@@ -327,7 +417,7 @@ func TestBuild_PerObjectIndependence(t *testing.T) {
 			{OID: oidPresent, Size: 10},
 			{OID: oidMissing, Size: 20},
 		},
-	}, s, "https://gw/verify", "Bearer abc", time.Minute)
+	}, s, time.Minute)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -340,16 +430,21 @@ func TestBuild_PerObjectIndependence(t *testing.T) {
 	if _, ok := resp.Objects[1].Actions["upload"]; !ok {
 		t.Error("missing object should have upload action")
 	}
+	if vf, ok := resp.Objects[1].Actions["verify"]; !ok {
+		t.Error("missing object should have verify action")
+	} else {
+		assertVerifyAction(t, vf)
+	}
 }
 
 func TestBuild_Upload_RejectsNonPositiveSize(t *testing.T) {
-	s := newBatchStore(nil, signedFn())
+	s := newProxiedBatchStore(nil, signedFn())
 	for _, size := range []int64{0, -1} {
 		resp, err := Build(context.Background(), BatchRequest{
 			Operation: "upload",
 			Transfers: []string{"basic"},
 			Objects:   []ObjectRef{{OID: oidNew, Size: size}},
-		}, s, "https://gw/verify", "Bearer abc", time.Minute)
+		}, s, time.Minute)
 		if err != nil {
 			t.Fatalf("Build(size=%d): %v", size, err)
 		}
@@ -366,7 +461,7 @@ func TestBuild_Download_RejectsNegativeSize(t *testing.T) {
 		Operation: "download",
 		Transfers: []string{"basic"},
 		Objects:   []ObjectRef{{OID: oidPresent, Size: -1}},
-	}, s, "https://gw/verify", "Bearer abc", time.Minute)
+	}, s, time.Minute)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -376,46 +471,27 @@ func TestBuild_Download_RejectsNegativeSize(t *testing.T) {
 	}
 }
 
-func TestBuild_Upload_OmitsEmptyVerifyAuthorization(t *testing.T) {
-	s := newBatchStore(nil, signedFn())
-	resp, err := Build(context.Background(), BatchRequest{
-		Operation: "upload",
-		Transfers: []string{"basic"},
-		Objects:   []ObjectRef{{OID: oidNew, Size: 1}},
-	}, s, "https://gw/verify", "", time.Minute) // empty bearer
-	if err != nil {
-		t.Fatalf("Build: %v", err)
-	}
-	vf, ok := resp.Objects[0].Actions["verify"]
-	if !ok {
-		t.Fatal("verify action missing")
-	}
-	if _, hasAuth := vf.Header["Authorization"]; hasAuth {
-		t.Errorf("verify Header should omit Authorization when bearer is empty; got %+v", vf.Header)
-	}
-}
-
 // TestBuild_RejectsInvalidOID covers the validOID guard in buildOne.
 // Without this guard, a crafted OID like "../../other-tenant/file"
 // would be concatenated into the storage key, escaping the per-repo
 // prefix on localfs. Each case below should surface as a per-object
 // 422 — the rest of the batch must remain processable.
 func TestBuild_RejectsInvalidOID(t *testing.T) {
-	s := newBatchStore(nil, signedFn())
+	s := newProxiedBatchStore(nil, signedFn())
 	cases := []string{
-		"",                            // empty
-		"abc",                         // too short
+		"",                                 // empty
+		"abc",                              // too short
 		"ABCDEF" + strings.Repeat("0", 58), // uppercase
-		"../escape",                   // path traversal
-		strings.Repeat("1", 64) + "X", // too long
-		strings.Repeat("1", 62) + "g1", // non-hex char in valid-length string
+		"../escape",                        // path traversal
+		strings.Repeat("1", 64) + "X",      // too long
+		strings.Repeat("1", 62) + "g1",     // non-hex char in valid-length string
 	}
 	for _, oid := range cases {
 		resp, err := Build(context.Background(), BatchRequest{
 			Operation: "upload",
 			Transfers: []string{"basic"},
 			Objects:   []ObjectRef{{OID: oid, Size: 1}},
-		}, s, "https://gw/verify", "Bearer abc", time.Minute)
+		}, s, time.Minute)
 		if err != nil {
 			t.Fatalf("Build(oid=%q): %v", oid, err)
 		}

@@ -34,6 +34,9 @@ func TestServeCommand_StartsAndStops(t *testing.T) {
 		"--store", "localfs:" + storeDir,
 		"--mirror-dir", mirrorDir,
 		"--shutdown-timeout", "1s",
+		// M13.1: --lfs requires --proxied-url-* flags; disable for this
+		// startup-smoke test which doesn't exercise LFS.
+		"--lfs=false",
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -139,9 +142,10 @@ func TestServe_RequiresAtLeastOneListener(t *testing.T) {
 	storeDir := t.TempDir()
 	var stdout, stderr bytes.Buffer
 	// Pass --store so we reach the at-least-one-listener check; pass neither
-	// --addr nor --ssh-addr.
+	// --addr nor --ssh-addr. --lfs=false avoids the M13.1 proxied-flag check
+	// firing before the listener check.
 	code := runServe(context.Background(),
-		[]string{"--store", "localfs:" + storeDir, "--mirror-dir", t.TempDir()},
+		[]string{"--store", "localfs:" + storeDir, "--mirror-dir", t.TempDir(), "--lfs=false"},
 		&stdout, &stderr)
 	if code != 2 {
 		t.Fatalf("expected exit code 2 when neither --addr nor --ssh-addr given, got %d (stderr=%q)", code, stderr.String())
@@ -218,12 +222,13 @@ func TestRunServe_BundleURIMode_Off_NoSigningKeyNeeded(t *testing.T) {
 	}
 }
 
-// TestRunServe_LFSWithoutProxiedConfig_Warns asserts that the P2
-// warning fires when --lfs is on (the default) but
-// --proxied-url-signing-key / --proxied-url-base are not set. The
-// warning tells operators LFS will return per-object 503 on backends
-// without native SignedURLs (e.g. localfs).
-func TestRunServe_LFSWithoutProxiedConfig_Warns(t *testing.T) {
+// TestRunServe_LFSWithoutProxiedConfig_FailsFast asserts that with
+// M13.1 the gateway refuses to start when --lfs=true (the default) but
+// --proxied-url-signing-key or --proxied-url-base is missing. The
+// verify action mints HMAC tokens regardless of upload backend, so
+// these flags became mandatory in M13.1 (previously this was a
+// non-fatal warning).
+func TestRunServe_LFSWithoutProxiedConfig_FailsFast(t *testing.T) {
 	_ = userCmdEnv(t)
 	var stdout, stderr bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -237,15 +242,13 @@ func TestRunServe_LFSWithoutProxiedConfig_Warns(t *testing.T) {
 		// --lfs defaults to true; do not disable.
 		"--shutdown-timeout", "10ms",
 	}, &stdout, &stderr)
-	if rc != 0 {
-		t.Fatalf("rc = %d; want 0 (stderr=%q)", rc, stderr.String())
+	if rc != 2 {
+		t.Fatalf("rc = %d; want 2 (stderr=%q)", rc, stderr.String())
 	}
-	want := "--proxied-url-signing-key"
-	if !strings.Contains(stderr.String(), want) {
-		t.Errorf("stderr missing %q; got %s", want, stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "503") {
-		t.Errorf("stderr should mention 503 fallback; got %s", stderr.String())
+	for _, want := range []string{"--proxied-url-signing-key", "--proxied-url-base", "--lfs=true"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr missing %q; got %s", want, stderr.String())
+		}
 	}
 }
 
@@ -256,6 +259,7 @@ func TestRunServe_BundleURIMode_InvalidValue(t *testing.T) {
 		"--addr", "127.0.0.1:0",
 		"--store", "localfs:" + t.TempDir(),
 		"--bundle-uri-mode", "garbage",
+		"--lfs=false",
 	}, &stdout, &stderr)
 	if rc != 2 {
 		t.Fatalf("rc = %d; want 2 (stderr=%q)", rc, stderr.String())
@@ -272,6 +276,7 @@ func TestRunServe_PackURIMode_InvalidValue(t *testing.T) {
 		"--addr", "127.0.0.1:0",
 		"--store", "localfs:" + t.TempDir(),
 		"--pack-uri-mode", "garbage",
+		"--lfs=false",
 	}, &stdout, &stderr)
 	if rc != 2 {
 		t.Fatalf("rc = %d; want 2 (stderr=%q)", rc, stderr.String())

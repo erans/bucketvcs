@@ -21,7 +21,6 @@ const (
 	OpUploadPack
 	OpReceivePack
 	OpLFSBatch
-	OpLFSVerify
 )
 
 // RoutedRequest is the parsed shape of a Git-protocol request.
@@ -79,15 +78,6 @@ func ParseRoute(method, urlPath, rawQuery string) (*RoutedRequest, error) {
 		// RequiredAction is read; the LFS handler performs a secondary
 		// write check after parsing the body's operation field.
 		return &RoutedRequest{tenant, repoID, OpLFSBatch, auth.ActionRead}, nil
-	case method == http.MethodPost && strings.HasPrefix(rest, "info/lfs/objects/") && strings.HasSuffix(rest, "/verify"):
-		// Coarse pattern match. Paths with malformed OIDs (or empty
-		// segments like `objects//verify`) still match here and reach
-		// RunAuth before parseLFSPath rejects them with 404 in the
-		// handler. The trade-off is acceptable: keeping ParseRoute free
-		// of OID-format coupling, and the audit cost of a write-action
-		// auth decision on garbage paths is bounded by client behavior
-		// — real LFS clients always submit a valid 64-hex OID.
-		return &RoutedRequest{tenant, repoID, OpLFSVerify, auth.ActionWrite}, nil
 	default:
 		return nil, ErrRouteNoMatch
 	}
@@ -110,7 +100,7 @@ func (s *Server) routeRepo(w http.ResponseWriter, r *http.Request) {
 		s.handleUploadPack(w, r, rr.Tenant, rr.Repo)
 	case OpReceivePack:
 		s.handleReceivePack(w, r, rr.Tenant, rr.Repo)
-	case OpLFSBatch, OpLFSVerify:
+	case OpLFSBatch:
 		if s.lfsHandler == nil {
 			http.NotFound(w, r)
 			return

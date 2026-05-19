@@ -101,7 +101,7 @@ func newHandlerForTest(t *testing.T, store *Store, authStore *fakeAuth, actor *a
 }
 
 func TestHandler_Batch_UploadHappyPath(t *testing.T) {
-	store := newBatchStore(nil, signedFn())
+	store := newProxiedBatchStore(nil, signedFn())
 	authStore := &fakeAuth{
 		repoPerm: map[string]auth.Perm{"acme/foo": auth.PermWrite},
 		actors:   map[string]*auth.Actor{"pw": {Name: "alice"}},
@@ -224,12 +224,14 @@ func TestHandler_Batch_Unprocessable_MalformedBody(t *testing.T) {
 	}
 }
 
-func TestHandler_Batch_VerifyActionUsesInboundAuthHeader(t *testing.T) {
-	// The verify action's Authorization header should mirror whatever
-	// the inbound request carried. Since the handler no longer
-	// Basic-auths internally, we set a synthetic Authorization header
-	// directly and assert verify echoes that exact string.
-	store := newBatchStore(nil, signedFn())
+func TestHandler_Batch_VerifyActionCarriesProxiedToken(t *testing.T) {
+	// The verify action's Authorization header now carries a freshly
+	// minted "Bearer bvtv_<kind=5-token>" — independent of any inbound
+	// Authorization header. The verify Href is the proxied /_lfs/...
+	// URL with the same token as a ?token= query parameter. This test
+	// asserts both at the HTTP boundary; the wire-format details are
+	// further exercised by TestBuild_Upload_NewObject at the unit level.
+	store := newProxiedBatchStore(nil, signedFn())
 	authStore := &fakeAuth{
 		repoPerm: map[string]auth.Perm{"acme/foo": auth.PermWrite},
 		actors:   map[string]*auth.Actor{"pw": {Name: "alice"}},
@@ -245,7 +247,9 @@ func TestHandler_Batch_VerifyActionUsesInboundAuthHeader(t *testing.T) {
 	})
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/acme/foo.git/info/lfs/objects/batch", bytes.NewReader(body))
 	req.Header.Set("Content-Type", ContentType)
-	req.Header.Set("Authorization", "Bearer test-bearer")
+	// Setting an inbound Authorization header must NOT affect the
+	// verify action — the echo plumbing is gone.
+	req.Header.Set("Authorization", "Bearer inbound-should-not-leak")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
@@ -257,8 +261,9 @@ func TestHandler_Batch_VerifyActionUsesInboundAuthHeader(t *testing.T) {
 	var got BatchResponse
 	_ = json.NewDecoder(resp.Body).Decode(&got)
 	vf := got.Objects[0].Actions["verify"]
-	if vf.Header["Authorization"] != "Bearer test-bearer" {
-		t.Errorf("verify Authorization=%q want %q", vf.Header["Authorization"], "Bearer test-bearer")
+	assertVerifyAction(t, vf)
+	if vf.Header["Authorization"] == "Bearer inbound-should-not-leak" {
+		t.Error("verify Authorization echoed the inbound bearer; echo plumbing must be gone")
 	}
 }
 
@@ -362,7 +367,7 @@ func TestParseLFSPath_RejectsAdversarialNames(t *testing.T) {
 		{"/acme/foo/../bar.git/info/lfs/objects/batch", lfsRouteNone, "path not clean: foo/../bar is traversal"},
 	}
 	for _, c := range cases {
-		_, _, _, got := parseLFSPath(c.path)
+		_, _, got := parseLFSPath(c.path)
 		if got != c.wantRoute {
 			t.Errorf("%q (%s): route=%v want %v", c.path, c.reason, got, c.wantRoute)
 		}
@@ -396,89 +401,11 @@ func TestHandler_Batch_RejectsExcessiveObjectCount(t *testing.T) {
 	}
 }
 
-func TestHandler_Verify_OK(t *testing.T) {
-	oid := strings.Repeat("a", 64)
-	store := newBatchStore(map[string]int64{oid: 100}, signedFn())
-	authStore := &fakeAuth{repoPerm: map[string]auth.Perm{"acme/foo": auth.PermWrite}}
-	srv := newHandlerForTest(t, store, authStore, &auth.Actor{Name: "alice"})
-	defer srv.Close()
-
-	body, _ := json.Marshal(VerifyRequest{OID: oid, Size: 100})
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/acme/foo.git/info/lfs/objects/"+oid+"/verify", bytes.NewReader(body))
-	req.Header.Set("Content-Type", ContentType)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("status=%d", resp.StatusCode)
-	}
-}
-
-func TestHandler_Verify_SizeMismatch(t *testing.T) {
-	oid := strings.Repeat("a", 64)
-	store := newBatchStore(map[string]int64{oid: 100}, signedFn())
-	authStore := &fakeAuth{repoPerm: map[string]auth.Perm{"acme/foo": auth.PermWrite}}
-	srv := newHandlerForTest(t, store, authStore, &auth.Actor{Name: "alice"})
-	defer srv.Close()
-
-	body, _ := json.Marshal(VerifyRequest{OID: oid, Size: 999})
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/acme/foo.git/info/lfs/objects/"+oid+"/verify", bytes.NewReader(body))
-	req.Header.Set("Content-Type", ContentType)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 422 {
-		t.Fatalf("status=%d, want 422", resp.StatusCode)
-	}
-}
-
-func TestHandler_Verify_NotFound(t *testing.T) {
-	oid := strings.Repeat("a", 64)
-	store := newBatchStore(nil, signedFn())
-	authStore := &fakeAuth{repoPerm: map[string]auth.Perm{"acme/foo": auth.PermWrite}}
-	srv := newHandlerForTest(t, store, authStore, &auth.Actor{Name: "alice"})
-	defer srv.Close()
-
-	body, _ := json.Marshal(VerifyRequest{OID: oid, Size: 100})
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/acme/foo.git/info/lfs/objects/"+oid+"/verify", bytes.NewReader(body))
-	req.Header.Set("Content-Type", ContentType)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 404 {
-		t.Fatalf("status=%d, want 404", resp.StatusCode)
-	}
-}
-
-func TestHandler_Verify_BodyOIDMismatch(t *testing.T) {
-	urlOID := strings.Repeat("a", 64)
-	bodyOID := strings.Repeat("b", 64)
-	store := newBatchStore(map[string]int64{urlOID: 100}, signedFn())
-	authStore := &fakeAuth{repoPerm: map[string]auth.Perm{"acme/foo": auth.PermWrite}}
-	srv := newHandlerForTest(t, store, authStore, &auth.Actor{Name: "alice"})
-	defer srv.Close()
-
-	body, _ := json.Marshal(VerifyRequest{OID: bodyOID, Size: 100})
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/acme/foo.git/info/lfs/objects/"+urlOID+"/verify", bytes.NewReader(body))
-	req.Header.Set("Content-Type", ContentType)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 422 {
-		t.Fatalf("status=%d, want 422", resp.StatusCode)
-	}
-}
-
 func TestHandler_Verify_GET_Returns404(t *testing.T) {
-	// GET on /verify is not a recognized route.
+	// GET on /verify is not a recognized route. The route is no longer
+	// dispatched by the LFS handler as of M13.1 (verify moved to the
+	// proxied handler), but the handler still safely 404s on any path
+	// shape other than /info/lfs/objects/batch.
 	oid := strings.Repeat("a", 64)
 	store := newBatchStore(nil, signedFn())
 	authStore := &fakeAuth{repoPerm: map[string]auth.Perm{"acme/foo": auth.PermWrite}}
@@ -492,26 +419,5 @@ func TestHandler_Verify_GET_Returns404(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != 404 {
 		t.Fatalf("status=%d, want 404", resp.StatusCode)
-	}
-}
-
-func TestHandler_Verify_RejectsMismatchedContentType(t *testing.T) {
-	// LFS spec mandates application/vnd.git-lfs+json; reject text/plain.
-	oid := strings.Repeat("a", 64)
-	store := newBatchStore(map[string]int64{oid: 100}, signedFn())
-	authStore := &fakeAuth{repoPerm: map[string]auth.Perm{"acme/foo": auth.PermWrite}}
-	srv := newHandlerForTest(t, store, authStore, &auth.Actor{Name: "alice"})
-	defer srv.Close()
-
-	body, _ := json.Marshal(VerifyRequest{OID: oid, Size: 100})
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/acme/foo.git/info/lfs/objects/"+oid+"/verify", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "text/plain")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnsupportedMediaType {
-		t.Fatalf("status=%d, want 415", resp.StatusCode)
 	}
 }

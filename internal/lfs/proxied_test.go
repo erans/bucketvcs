@@ -5,6 +5,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/proxiedurl"
+	"github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 )
 
@@ -174,12 +177,14 @@ func TestProxiedObjectHandler_RejectsBadTenantRepo(t *testing.T) {
 	}
 }
 
-func TestProxiedObjectHandler_RejectsPostAndDelete(t *testing.T) {
+func TestProxiedObjectHandler_RejectsDeleteAndPatch(t *testing.T) {
+	// POST is the verify method (added in M13.1 T4); it is no longer 405.
+	// DELETE and PATCH remain unsupported.
 	key := bytes.Repeat([]byte{0xab}, 32)
 	srv, _ := newProxiedHandlerForTest(t, key)
 	defer srv.Close()
 
-	for _, m := range []string{http.MethodPost, http.MethodDelete, http.MethodPatch} {
+	for _, m := range []string{http.MethodDelete, http.MethodPatch} {
 		req, _ := http.NewRequest(m, srv.URL+"/_lfs/acme/foo/"+goodOID+"?token=fake", nil)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -403,5 +408,306 @@ func TestProxiedObjectHandler_DuplicateMismatchIsRejected(t *testing.T) {
 	resp2.Body.Close()
 	if resp2.StatusCode != http.StatusUnprocessableEntity {
 		t.Fatalf("second PUT (wrong bytes, same OID) status=%d, want 422", resp2.StatusCode)
+	}
+}
+
+// --- M13.1 T4: POST /_lfs/<tenant>/<repo>/<oid> = verify ---
+
+// postVerifyJSON is a small helper that POSTs a VerifyRequest body and
+// returns the response + buffered body for inspection.
+func postVerifyJSON(t *testing.T, url string, vreq VerifyRequest) *http.Response {
+	t.Helper()
+	body, err := json.Marshal(vreq)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	req.Header.Set("Content-Type", ContentType)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	return resp
+}
+
+// putForVerifyTest seeds an object via the proxied PUT path so a
+// subsequent verify can succeed. Returns (oid, size).
+func putForVerifyTest(t *testing.T, srvURL string, key []byte, tenant, repo string, payload []byte) (string, int64) {
+	t.Helper()
+	sum := sha256.Sum256(payload)
+	oid := hex.EncodeToString(sum[:])
+	putTok := mintLFSToken(t, key, "lfs-put", tenant, repo, oid)
+	req, _ := http.NewRequest(http.MethodPut, srvURL+"/_lfs/"+tenant+"/"+repo+"/"+oid+"?token="+putTok, bytes.NewReader(payload))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("seed PUT: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("seed PUT status=%d", resp.StatusCode)
+	}
+	return oid, int64(len(payload))
+}
+
+func TestProxied_Verify_OK(t *testing.T) {
+	key := bytes.Repeat([]byte{0xab}, 32)
+	var buf bytes.Buffer
+	h := NewProxiedObjectHandler(ProxiedDeps{
+		Store:  newTestLocalfs(t),
+		Key:    key,
+		Logger: captureLogger(&buf),
+	})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	oid, size := putForVerifyTest(t, srv.URL, key, "acme", "foo", []byte("verify-ok"))
+	verTok := mintLFSToken(t, key, "lfs-verify", "acme", "foo", oid)
+	resp := postVerifyJSON(t, srv.URL+"/_lfs/acme/foo/"+oid+"?token="+verTok, VerifyRequest{OID: oid, Size: size})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d want 200", resp.StatusCode)
+	}
+	if !strings.Contains(buf.String(), `"metric_name":"lfs_verify_requests_total"`) ||
+		!strings.Contains(buf.String(), `"result":"ok"`) {
+		t.Errorf("expected lfs_verify_requests_total{result=ok}; got %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), `"event":"lfs.verify"`) {
+		t.Errorf("expected lfs.verify audit event; got %s", buf.String())
+	}
+}
+
+func TestProxied_Verify_TokenMissing(t *testing.T) {
+	key := bytes.Repeat([]byte{0xab}, 32)
+	var buf bytes.Buffer
+	h := NewProxiedObjectHandler(ProxiedDeps{
+		Store:  newTestLocalfs(t),
+		Key:    key,
+		Logger: captureLogger(&buf),
+	})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	resp := postVerifyJSON(t, srv.URL+"/_lfs/acme/foo/"+goodOID, VerifyRequest{OID: goodOID, Size: 1})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status=%d want 403", resp.StatusCode)
+	}
+	if !strings.Contains(buf.String(), `"metric_name":"lfs_object_token_invalid_total"`) ||
+		!strings.Contains(buf.String(), `"reason":"missing"`) {
+		t.Errorf("expected lfs_object_token_invalid_total{reason=missing}; got %s", buf.String())
+	}
+}
+
+func TestProxied_Verify_TokenWrongKind(t *testing.T) {
+	key := bytes.Repeat([]byte{0xab}, 32)
+	var buf bytes.Buffer
+	h := NewProxiedObjectHandler(ProxiedDeps{
+		Store:  newTestLocalfs(t),
+		Key:    key,
+		Logger: captureLogger(&buf),
+	})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	// POST with a kind=3 (lfs-put) token — verify endpoint expects kind=5.
+	putTok := mintLFSToken(t, key, "lfs-put", "acme", "foo", goodOID)
+	resp := postVerifyJSON(t, srv.URL+"/_lfs/acme/foo/"+goodOID+"?token="+putTok, VerifyRequest{OID: goodOID, Size: 1})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status=%d want 403", resp.StatusCode)
+	}
+	if !strings.Contains(buf.String(), `"reason":"kind_mismatch"`) {
+		t.Errorf("expected reason=kind_mismatch; got %s", buf.String())
+	}
+}
+
+func TestProxied_Verify_TokenExpired(t *testing.T) {
+	key := bytes.Repeat([]byte{0xab}, 32)
+	var buf bytes.Buffer
+	h := NewProxiedObjectHandler(ProxiedDeps{
+		Store:  newTestLocalfs(t),
+		Key:    key,
+		Logger: captureLogger(&buf),
+	})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	tok, err := proxiedurl.Mint(key, "lfs-verify", "acme/foo/"+goodOID, time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	resp := postVerifyJSON(t, srv.URL+"/_lfs/acme/foo/"+goodOID+"?token="+tok, VerifyRequest{OID: goodOID, Size: 1})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status=%d want 403", resp.StatusCode)
+	}
+	if !strings.Contains(buf.String(), `"reason":"expired"`) {
+		t.Errorf("expected reason=expired; got %s", buf.String())
+	}
+}
+
+func TestProxied_Verify_TokenHashMismatch(t *testing.T) {
+	key := bytes.Repeat([]byte{0xab}, 32)
+	var buf bytes.Buffer
+	h := NewProxiedObjectHandler(ProxiedDeps{
+		Store:  newTestLocalfs(t),
+		Key:    key,
+		Logger: captureLogger(&buf),
+	})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	// Token is minted for a different OID — hash mismatch surfaces as
+	// reason=invalid (proxiedurl.Verify returns a non-typed mismatch err).
+	otherOID := strings.Repeat("b", 64)
+	tok := mintLFSToken(t, key, "lfs-verify", "acme", "foo", otherOID)
+	resp := postVerifyJSON(t, srv.URL+"/_lfs/acme/foo/"+goodOID+"?token="+tok, VerifyRequest{OID: goodOID, Size: 1})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status=%d want 403", resp.StatusCode)
+	}
+	if !strings.Contains(buf.String(), `"reason":"invalid"`) {
+		t.Errorf("expected reason=invalid; got %s", buf.String())
+	}
+}
+
+func TestProxied_Verify_BodyOIDMismatch(t *testing.T) {
+	key := bytes.Repeat([]byte{0xab}, 32)
+	var buf bytes.Buffer
+	h := NewProxiedObjectHandler(ProxiedDeps{
+		Store:  newTestLocalfs(t),
+		Key:    key,
+		Logger: captureLogger(&buf),
+	})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	urlOID, _ := putForVerifyTest(t, srv.URL, key, "acme", "foo", []byte("body-oid-mismatch"))
+	bodyOID := strings.Repeat("d", 64)
+	verTok := mintLFSToken(t, key, "lfs-verify", "acme", "foo", urlOID)
+	resp := postVerifyJSON(t, srv.URL+"/_lfs/acme/foo/"+urlOID+"?token="+verTok, VerifyRequest{OID: bodyOID, Size: 1})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d want 422", resp.StatusCode)
+	}
+	if !strings.Contains(buf.String(), `"metric_name":"lfs_verify_requests_total"`) ||
+		!strings.Contains(buf.String(), `"result":"error"`) {
+		t.Errorf("expected lfs_verify_requests_total{result=error}; got %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), `"event":"lfs.verify"`) {
+		t.Errorf("expected lfs.verify audit event; got %s", buf.String())
+	}
+}
+
+func TestProxied_Verify_SizeMismatch(t *testing.T) {
+	key := bytes.Repeat([]byte{0xab}, 32)
+	var buf bytes.Buffer
+	h := NewProxiedObjectHandler(ProxiedDeps{
+		Store:  newTestLocalfs(t),
+		Key:    key,
+		Logger: captureLogger(&buf),
+	})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	oid, size := putForVerifyTest(t, srv.URL, key, "acme", "foo", []byte("size-check"))
+	verTok := mintLFSToken(t, key, "lfs-verify", "acme", "foo", oid)
+	resp := postVerifyJSON(t, srv.URL+"/_lfs/acme/foo/"+oid+"?token="+verTok, VerifyRequest{OID: oid, Size: size + 1})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d want 422", resp.StatusCode)
+	}
+	if !strings.Contains(buf.String(), `"result":"size_mismatch"`) {
+		t.Errorf("expected result=size_mismatch; got %s", buf.String())
+	}
+}
+
+func TestProxied_Verify_Missing(t *testing.T) {
+	key := bytes.Repeat([]byte{0xab}, 32)
+	var buf bytes.Buffer
+	h := NewProxiedObjectHandler(ProxiedDeps{
+		Store:  newTestLocalfs(t),
+		Key:    key,
+		Logger: captureLogger(&buf),
+	})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	// No PUT first — object is missing.
+	verTok := mintLFSToken(t, key, "lfs-verify", "acme", "foo", goodOID)
+	resp := postVerifyJSON(t, srv.URL+"/_lfs/acme/foo/"+goodOID+"?token="+verTok, VerifyRequest{OID: goodOID, Size: 100})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status=%d want 404", resp.StatusCode)
+	}
+	if !strings.Contains(buf.String(), `"result":"missing"`) {
+		t.Errorf("expected result=missing; got %s", buf.String())
+	}
+}
+
+// errHeadStore wraps a real ObjectStore for everything except Head,
+// which always returns a synthetic backend error. Used to exercise the
+// 500 result=error branch of serveVerify.
+type errHeadStore struct {
+	storage.ObjectStore
+	err error
+}
+
+func (e *errHeadStore) Head(context.Context, string) (*storage.ObjectMetadata, error) {
+	return nil, e.err
+}
+
+func TestProxied_Verify_BackendError(t *testing.T) {
+	key := bytes.Repeat([]byte{0xab}, 32)
+	var buf bytes.Buffer
+	backend := &errHeadStore{ObjectStore: newTestLocalfs(t), err: errors.New("boom")}
+	h := NewProxiedObjectHandler(ProxiedDeps{
+		Store:  backend,
+		Key:    key,
+		Logger: captureLogger(&buf),
+	})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	verTok := mintLFSToken(t, key, "lfs-verify", "acme", "foo", goodOID)
+	resp := postVerifyJSON(t, srv.URL+"/_lfs/acme/foo/"+goodOID+"?token="+verTok, VerifyRequest{OID: goodOID, Size: 1})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status=%d want 500", resp.StatusCode)
+	}
+	if !strings.Contains(buf.String(), `"result":"error"`) {
+		t.Errorf("expected result=error; got %s", buf.String())
+	}
+}
+
+// TestProxied_Verify_RejectsMismatchedContentType covers the 415 branch
+// in serveVerify: a verify POST with a non-LFS Content-Type is rejected
+// before the body is parsed. Empty Content-Type is tolerated (mirrors
+// the handler.go policy) and is covered by the other Verify_OK tests.
+func TestProxied_Verify_RejectsMismatchedContentType(t *testing.T) {
+	key := bytes.Repeat([]byte{0xab}, 32)
+	var buf bytes.Buffer
+	h := NewProxiedObjectHandler(ProxiedDeps{
+		Store:  newTestLocalfs(t),
+		Key:    key,
+		Logger: captureLogger(&buf),
+	})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	verTok := mintLFSToken(t, key, "lfs-verify", "acme", "foo", goodOID)
+	body, _ := json.Marshal(VerifyRequest{OID: goodOID, Size: 1})
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/_lfs/acme/foo/"+goodOID+"?token="+verTok, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnsupportedMediaType {
+		t.Fatalf("status=%d want 415", resp.StatusCode)
+	}
+	if !strings.Contains(buf.String(), `"result":"error"`) {
+		t.Errorf("expected verify metric/audit result=error; got %s", buf.String())
 	}
 }

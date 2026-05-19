@@ -45,7 +45,18 @@ var validOID = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // URL (the current P1 stub behavior), Build records a per-object 503
 // so the LFS client sees a clear failure rather than an Action with
 // an empty Href.
-func Build(ctx context.Context, req BatchRequest, store *Store, verifyBaseURL, bearerForVerify string, presignTTL time.Duration) (BatchResponse, error) {
+//
+// For upload operations, Build also mints a verify action via
+// Store.ProxiedVerifyURL (kind=5 HMAC token). When the Store was not
+// configured with WithProxied — i.e. the operator has not provided
+// --proxied-url-signing-key and --proxied-url-base — the verify URL is
+// empty and Build records a per-object 503. The verify mechanism is no
+// longer an Authorization-echo of the inbound bearer; the verify
+// action carries a short-TTL token bound to (kind=lfs-verify, tenant,
+// repo, oid) — not consume-on-use, so it can be replayed against the
+// same OID within its TTL but cannot be repurposed for upload, download,
+// or another object.
+func Build(ctx context.Context, req BatchRequest, store *Store, presignTTL time.Duration) (BatchResponse, error) {
 	if req.Operation != "upload" && req.Operation != "download" {
 		return BatchResponse{}, fmt.Errorf("lfs: unsupported operation %q", req.Operation)
 	}
@@ -64,12 +75,12 @@ func Build(ctx context.Context, req BatchRequest, store *Store, verifyBaseURL, b
 	}
 	resp := BatchResponse{Transfer: "basic", Objects: make([]ObjectAction, 0, len(req.Objects))}
 	for _, ref := range req.Objects {
-		resp.Objects = append(resp.Objects, buildOne(ctx, ref, req.Operation, store, verifyBaseURL, bearerForVerify, presignTTL))
+		resp.Objects = append(resp.Objects, buildOne(ctx, ref, req.Operation, store, presignTTL))
 	}
 	return resp, nil
 }
 
-func buildOne(ctx context.Context, ref ObjectRef, op string, store *Store, verifyBaseURL, bearer string, ttl time.Duration) ObjectAction {
+func buildOne(ctx context.Context, ref ObjectRef, op string, store *Store, ttl time.Duration) ObjectAction {
 	out := ObjectAction{OID: ref.OID, Size: ref.Size}
 	// Validate OID FIRST. The OID is concatenated into storage keys
 	// downstream; an unvalidated OID like "../../other-tenant/file"
@@ -123,16 +134,17 @@ func buildOne(ctx context.Context, ref ObjectRef, op string, store *Store, verif
 			}
 			return out
 		}
-		verifyHeader := map[string]string{}
-		if bearer != "" {
-			verifyHeader["Authorization"] = bearer
+		verifyURL, verifyHdr := store.ProxiedVerifyURL(ref.OID, ttl)
+		if verifyURL == "" {
+			out.Error = &ObjectError{
+				Code:    503,
+				Message: "verify URL unavailable; --proxied-url-signing-key and --proxied-url-base required when --lfs is enabled",
+			}
+			return out
 		}
 		out.Actions = map[string]Action{
 			"upload": {Href: url, Header: headerMap(hdr)},
-			"verify": {
-				Href:   verifyBaseURL + "/" + ref.OID + "/verify",
-				Header: verifyHeader,
-			},
+			"verify": {Href: verifyURL, Header: headerMap(verifyHdr)},
 		}
 	case "download":
 		if !exists {

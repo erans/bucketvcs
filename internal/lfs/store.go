@@ -166,3 +166,33 @@ func (s *Store) ProxiedGetURL(oid string, ttl time.Duration) (string, http.Heade
 	u := s.proxiedBaseURL + "/_lfs/" + s.proxiedTenant + "/" + s.proxiedRepo + "/" + oid + "?token=" + tok
 	return u, nil
 }
+
+// ProxiedVerifyURL mints a gateway-proxied URL the LFS client POSTs to
+// verify an uploaded object (M13.1). The URL is the same as the
+// proxied PUT/GET URL — the HTTP method (POST) selects the verify
+// branch in the proxied handler. The returned header carries
+// "Authorization: Bearer bvtv_<token>" with the same token encoded in
+// the URL ?token= parameter; the gateway reads the URL token, the
+// header is LFS-protocol-convention and lets forensics distinguish
+// verify tokens (bvtv_) from M4 session tokens (bvts_).
+//
+// Returns ("", nil) if WithProxied was not called (stub preserved for
+// tests that exercise only the presign path).
+func (s *Store) ProxiedVerifyURL(oid string, ttl time.Duration) (string, http.Header) {
+	if len(s.proxiedKey) == 0 || s.proxiedBaseURL == "" {
+		return "", nil
+	}
+	hash := s.proxiedTenant + "/" + s.proxiedRepo + "/" + oid
+	tok, err := proxiedurl.Mint(s.proxiedKey, "lfs-verify", hash, time.Now().Add(ttl))
+	if err != nil {
+		return "", nil
+	}
+	u := s.proxiedBaseURL + "/_lfs/" + s.proxiedTenant + "/" + s.proxiedRepo + "/" + oid + "?token=" + tok
+	hdr := http.Header{}
+	// The bvtv_ prefix is FORENSIC-ONLY — the gateway validates the
+	// URL `?token=` parameter, not this header. Log-grep tools spot a
+	// kind=5 verify token by the bvtv_ prefix (vs. M4 bvts_ session
+	// tokens); changing this prefix breaks forensic grep, not auth.
+	hdr.Set("Authorization", "Bearer bvtv_"+tok)
+	return u, hdr
+}

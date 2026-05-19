@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"errors"
-	"strings"
 	"testing"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
@@ -98,31 +97,6 @@ func TestParseRoute_LFSBatch_RejectsGET(t *testing.T) {
 	_, err := ParseRoute("GET", "/acme/foo.git/info/lfs/objects/batch", "")
 	if !errors.Is(err, ErrRouteNoMatch) {
 		t.Fatalf("err=%v, want ErrRouteNoMatch", err)
-	}
-}
-
-func TestParseRoute_LFSVerify(t *testing.T) {
-	oid := strings.Repeat("a", 64)
-	rr, err := ParseRoute("POST", "/acme/foo.git/info/lfs/objects/"+oid+"/verify", "")
-	if err != nil {
-		t.Fatalf("ParseRoute: %v", err)
-	}
-	if rr.Op != OpLFSVerify {
-		t.Fatalf("Op=%v, want OpLFSVerify", rr.Op)
-	}
-	if rr.Tenant != "acme" || rr.Repo != "foo" {
-		t.Fatalf("Tenant=%q Repo=%q", rr.Tenant, rr.Repo)
-	}
-	if rr.RequiredAction != auth.ActionWrite {
-		t.Fatalf("RequiredAction=%v want ActionWrite", rr.RequiredAction)
-	}
-}
-
-func TestParseRoute_LFSVerify_RejectsGET(t *testing.T) {
-	oid := strings.Repeat("a", 64)
-	_, err := ParseRoute("GET", "/acme/foo.git/info/lfs/objects/"+oid+"/verify", "")
-	if !errors.Is(err, ErrRouteNoMatch) {
-		t.Fatalf("err=%v want ErrRouteNoMatch", err)
 	}
 }
 
