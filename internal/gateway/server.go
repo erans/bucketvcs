@@ -116,6 +116,18 @@ type Options struct {
 	// PresignPut/PresignGet calls. Zero -> 15 minutes.
 	LFSPresignTTL time.Duration
 
+	// LFSProxiedURLSigningKey, when non-empty (>= 16 bytes), enables the
+	// gateway-proxied LFS transfer path for backends without native
+	// presigned URLs (e.g. localfs). The same key signs and verifies
+	// /_lfs/ tokens. Independent from ProxiedURLSigningKey (which gates
+	// /_bundle/ + /_pack/); operators may set one without the other.
+	LFSProxiedURLSigningKey []byte
+
+	// LFSProxiedBaseURL is the external base URL of this gateway used
+	// when minting /_lfs/ URLs. Required when LFSProxiedURLSigningKey is
+	// set.
+	LFSProxiedBaseURL string
+
 	// Logger is used for structured metric + audit emission. When nil, the
 	// gateway falls back to slog.Default(). M11 Phase 12.5 adds this for
 	// gateway-side observability; before that the gateway only used slog.Default()
@@ -161,6 +173,14 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 		}
 		if opts.ProxiedKeyResolver == nil {
 			return nil, fmt.Errorf("gateway: ProxiedKeyResolver required when ProxiedURLSigningKey is set")
+		}
+	}
+	if len(opts.LFSProxiedURLSigningKey) > 0 {
+		if len(opts.LFSProxiedURLSigningKey) < 16 {
+			return nil, fmt.Errorf("gateway: LFSProxiedURLSigningKey too short (%d bytes); need >= 16", len(opts.LFSProxiedURLSigningKey))
+		}
+		if opts.LFSProxiedBaseURL == "" {
+			return nil, fmt.Errorf("gateway: LFSProxiedBaseURL required when LFSProxiedURLSigningKey is set")
 		}
 	}
 	mgr, err := mirror.NewManager(opts.MirrorDir, store)
@@ -309,8 +329,12 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 		// SignedURLs) gets a real proxied URL minted by lfs.Store.
 		// Cloud backends with SignedURLs return real signed URLs via
 		// Store.PresignPut/PresignGet and never reach the proxied path.
-		proxiedKey := opts.ProxiedURLSigningKey
-		proxiedBase := opts.ProxiedBaseURL
+		// LFSProxied* are independent from the gateway-wide
+		// ProxiedURLSigningKey/ProxiedBaseURL (which gate /_bundle/ +
+		// /_pack/). Operators must set the LFS pair explicitly when
+		// they want proxied LFS transfer; the CLI does this.
+		proxiedKey := opts.LFSProxiedURLSigningKey
+		proxiedBase := opts.LFSProxiedBaseURL
 		s.lfsHandler = lfs.NewHTTPHandler(lfs.Deps{
 			AuthStore:        opts.AuthStore,
 			ActorFromContext: ActorFromContext,

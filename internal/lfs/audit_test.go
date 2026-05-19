@@ -52,3 +52,23 @@ func TestEmitLFSObjectServed_Shape(t *testing.T) {
 		}
 	}
 }
+
+func TestEmitLFSVerify_Shape(t *testing.T) {
+	var buf bytes.Buffer
+	oid := strings.Repeat("a", 64)
+	emitLFSVerify(context.Background(), captureLogger(&buf), "acme/foo", "alice", oid, 1024, "ok")
+	line := buf.String()
+	for _, want := range []string{
+		`"msg":"lfs.verify"`,
+		`"event":"lfs.verify"`,
+		`"repo":"acme/foo"`,
+		`"user":"alice"`,
+		`"oid":"` + oid + `"`,
+		`"size":1024`,
+		`"result":"ok"`,
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("missing %q in %s", want, line)
+		}
+	}
+}

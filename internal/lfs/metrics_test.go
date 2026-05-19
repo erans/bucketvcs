@@ -73,3 +73,21 @@ func TestEmitObjectServedMetric_OK(t *testing.T) {
 		}
 	}
 }
+
+func TestEmitVerifyRequestMetric_AllOutcomes(t *testing.T) {
+	cases := []string{"ok", "missing", "size_mismatch", "error"}
+	for _, result := range cases {
+		var buf bytes.Buffer
+		emitVerifyRequestMetric(context.Background(), captureLogger(&buf), result)
+		line := buf.String()
+		for _, want := range []string{
+			`"metric_name":"lfs_verify_requests_total"`,
+			`"value":1`,
+			`"result":"` + result + `"`,
+		} {
+			if !strings.Contains(line, want) {
+				t.Errorf("[%s] missing %q in %s", result, want, line)
+			}
+		}
+	}
+}

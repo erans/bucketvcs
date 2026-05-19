@@ -45,3 +45,26 @@ func emitLFSObjectServed(ctx context.Context, logger *slog.Logger, op, hash stri
 		slog.Int("status", status),
 	)
 }
+
+// emitLFSVerify records a "lfs.verify" audit event after a verify
+// request completes. Matches the M11 audit flat-attrs shape.
+//
+// repo is "<tenant>/<repo>". user is the actor name or "" for
+// anonymous (impossible today since verify is ActionWrite-only, but
+// the param keeps the function shape consistent with emitLFSBatch).
+// oid is the verified object's hex SHA-256. size is the claimed size
+// (the body's reported size — may differ from stored size on the
+// size_mismatch path).
+func emitLFSVerify(ctx context.Context, logger *slog.Logger, repo, user, oid string, size int64, result string) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.LogAttrs(ctx, slog.LevelInfo, "lfs.verify",
+		slog.String("event", "lfs.verify"),
+		slog.String("repo", repo),
+		slog.String("user", user),
+		slog.String("oid", oid),
+		slog.Int64("size", size),
+		slog.String("result", result),
+	)
+}

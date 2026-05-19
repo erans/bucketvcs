@@ -44,16 +44,6 @@ func (f *fakeAuthE2E) TouchSSHKeyUsage(context.Context, string) error           
 func (f *fakeAuthE2E) GetUserByName(context.Context, string) (*auth.User, error)  { return nil, nil }
 func (f *fakeAuthE2E) Close() error                                               { return nil }
 
-// nilProxiedKeyResolver satisfies gateway.ProxiedKeyResolver for the
-// LFS-only e2e test. The proxied bundle/pack routes are not exercised
-// here; only LFS uses /_lfs/, which is gated by its own HMAC token.
-// gateway.NewServer requires a non-nil resolver whenever a signing key
-// is configured, so this stub exists purely to satisfy that contract.
-type nilProxiedKeyResolver struct{}
-
-func (nilProxiedKeyResolver) BundleKey(string) (string, bool) { return "", false }
-func (nilProxiedKeyResolver) PackKey(string) (string, bool)   { return "", false }
-
 func TestE2E_LFS_LocalfsProxiedTransfer(t *testing.T) {
 	dir := t.TempDir()
 	l, err := localfs.Open(dir)
@@ -70,13 +60,12 @@ func TestE2E_LFS_LocalfsProxiedTransfer(t *testing.T) {
 	baseURL := srv.URL
 
 	gw, err := gateway.NewServer(l, gateway.Options{
-		MirrorDir:            t.TempDir(),
-		AuthStore:            &fakeAuthE2E{},
-		LFSEnabled:           true,
-		LFSPresignTTL:        time.Minute,
-		ProxiedURLSigningKey: key,
-		ProxiedBaseURL:       baseURL,
-		ProxiedKeyResolver:   nilProxiedKeyResolver{},
+		MirrorDir:               t.TempDir(),
+		AuthStore:               &fakeAuthE2E{},
+		LFSEnabled:              true,
+		LFSPresignTTL:           time.Minute,
+		LFSProxiedURLSigningKey: key,
+		LFSProxiedBaseURL:       baseURL,
 	})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)

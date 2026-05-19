@@ -75,7 +75,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	}
 
 	if *lfsEnabled {
-		fmt.Fprintln(stderr, "serve: --lfs is enabled. M13 P1 echoes the inbound Authorization header into the verify action of the Batch response. Under Basic auth, the user's base64(user:password) lands in the response body and may be persisted by response-body logging upstream proxies or by the git-lfs client's on-disk cache. Recommend Bearer-token deployments or disabling LFS until M13 P3 ships the verify-token mechanism.")
+		fmt.Fprintln(stderr, "serve: --lfs is enabled. The verify endpoint (M13 P3) authenticates by echoing the inbound Authorization header into the verify action of the Batch response. Under Basic auth, the user's base64(user:password) lands in the response body and may be persisted by response-body logging upstream proxies or by the git-lfs client's on-disk cache. Recommend Bearer-token deployments or disabling LFS with --lfs=false until the verify-token mechanism lands in a later M13 phase.")
 
 		if *proxiedKeyFile == "" || *proxiedBaseURL == "" {
 			fmt.Fprintln(stderr, "serve: --lfs is enabled but --proxied-url-signing-key or --proxied-url-base is not set. LFS will return per-object 503 errors on backends without native SignedURLs (e.g. localfs). Configure these flags or disable LFS with --lfs=false.")
@@ -94,6 +94,12 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	}
 	needsKey := bMode == gateway.URIModeAuto || bMode == gateway.URIModeProxied ||
 		pMode == gateway.URIModeAuto || pMode == gateway.URIModeProxied
+	// LFS on a non-presigning backend (e.g. localfs) also needs the
+	// proxied-URL key: WithProxied falls back to /_lfs/ URLs minted with
+	// this key. Without it, Batch returns per-object 503.
+	if *lfsEnabled && *proxiedKeyFile != "" && *proxiedBaseURL != "" {
+		needsKey = true
+	}
 	var signingKey []byte
 	if needsKey {
 		if *proxiedKeyFile == "" {
@@ -205,18 +211,20 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	httpErrCh := make(chan error, 1)
 	if *addr != "" || ln != nil {
 		srv, err := gateway.NewServer(store, gateway.Options{
-			MirrorDir:         *mirrorDir,
-			Version:           buildVersion,
-			AuthStore:         authS,
-			MaxBodyBytes:      *maxBody,
-			BundleURIEnabled:  bundleBuildURL != nil,
-			BundleURIBuildURL: bundleBuildURL,
-			BundleWarmCommits: *warmCommits,
-			BundleWarmAge:     *warmAge,
-			PackURIEnabled:    packBuildURL != nil,
-			PackURIBuildURL:   packBuildURL,
-			LFSEnabled:        *lfsEnabled,
-			LFSPresignTTL:     *lfsPresignTTL,
+			MirrorDir:               *mirrorDir,
+			Version:                 buildVersion,
+			AuthStore:               authS,
+			MaxBodyBytes:            *maxBody,
+			BundleURIEnabled:        bundleBuildURL != nil,
+			BundleURIBuildURL:       bundleBuildURL,
+			BundleWarmCommits:       *warmCommits,
+			BundleWarmAge:           *warmAge,
+			PackURIEnabled:          packBuildURL != nil,
+			PackURIBuildURL:         packBuildURL,
+			LFSEnabled:              *lfsEnabled,
+			LFSPresignTTL:           *lfsPresignTTL,
+			LFSProxiedURLSigningKey: signingKey,
+			LFSProxiedBaseURL:       *proxiedBaseURL,
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "serve: NewServer: %v\n", err)

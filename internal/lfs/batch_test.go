@@ -34,6 +34,10 @@ type fakeBatchStore struct {
 	// inspects opts.Method to differentiate. Returning ErrNotSupported
 	// exercises the proxied-fallback branch.
 	signFn func(_ context.Context, key string, opts storage.SignedURLOptions) (string, error)
+	// headOverride optionally replaces Head behavior. If set, Head calls
+	// it instead of the default lookup. Used by verify tests to inject
+	// backend errors without building a full storage mock.
+	headOverride func(context.Context, string) (*storage.ObjectMetadata, error)
 }
 
 func (f *fakeBatchStore) Capabilities() storage.Capabilities {
@@ -42,7 +46,10 @@ func (f *fakeBatchStore) Capabilities() storage.Capabilities {
 func (f *fakeBatchStore) Get(context.Context, string, *storage.GetOptions) (*storage.Object, error) {
 	return nil, errors.New("not used")
 }
-func (f *fakeBatchStore) Head(_ context.Context, key string) (*storage.ObjectMetadata, error) {
+func (f *fakeBatchStore) Head(ctx context.Context, key string) (*storage.ObjectMetadata, error) {
+	if f.headOverride != nil {
+		return f.headOverride(ctx, key)
+	}
 	// key is "<prefix>/<oid>"; we look up by suffix after the last slash.
 	oid := key
 	if i := lastSlash(key); i >= 0 {

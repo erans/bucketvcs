@@ -341,30 +341,30 @@ func TestHandler_Batch_RequestBodyTooLarge(t *testing.T) {
 	}
 }
 
-// TestSplitLFSPath_RejectsAdversarialNames covers the validRouteName
-// guard in splitLFSPath: tenant/repo segments must match the canonical
+// TestParseLFSPath_RejectsAdversarialNames covers the validRouteName
+// guard in parseLFSPath: tenant/repo segments must match the canonical
 // routenames.ValidateName character set [A-Za-z0-9._-], which rejects
 // path separators, control chars, and non-ASCII. Leading dots and
 // dot-sequences like ".." are syntactically valid names and are not
 // rejected by the validator — namespace escape would require a Path
 // separator (/), which routenames.ValidateName rejects.
-func TestSplitLFSPath_RejectsAdversarialNames(t *testing.T) {
+func TestParseLFSPath_RejectsAdversarialNames(t *testing.T) {
 	cases := []struct {
-		path   string
-		wantOK bool
-		reason string
+		path     string
+		wantRoute lfsRoute
+		reason   string
 	}{
-		{"/acme/..git/info/lfs/objects/batch", true, "..git is syntactically valid per routenames.ValidateName"},
-		{"/../acme.git/info/lfs/objects/batch", false, "tenant is '..' but path is not clean (/../)"},
-		{"/./acme.git/info/lfs/objects/batch", false, "tenant is '.' but path is not clean (/./)"},
-		{"/acme/.hidden.git/info/lfs/objects/batch", true, ".hidden.git is syntactically valid per routenames.ValidateName"},
-		{"/acme/foo.bar.git/info/lfs/objects/batch", true, "valid sanity-pin"},
-		{"/acme/foo/../bar.git/info/lfs/objects/batch", false, "path not clean: foo/../bar is traversal"},
+		{"/acme/..git/info/lfs/objects/batch", lfsRouteBatch, "..git is syntactically valid per routenames.ValidateName"},
+		{"/../acme.git/info/lfs/objects/batch", lfsRouteNone, "tenant is '..' but path is not clean (/../)"},
+		{"/./acme.git/info/lfs/objects/batch", lfsRouteNone, "tenant is '.' but path is not clean (/./)"},
+		{"/acme/.hidden.git/info/lfs/objects/batch", lfsRouteBatch, ".hidden.git is syntactically valid per routenames.ValidateName"},
+		{"/acme/foo.bar.git/info/lfs/objects/batch", lfsRouteBatch, "valid sanity-pin"},
+		{"/acme/foo/../bar.git/info/lfs/objects/batch", lfsRouteNone, "path not clean: foo/../bar is traversal"},
 	}
 	for _, c := range cases {
-		_, _, _, ok := splitLFSPath(c.path)
-		if ok != c.wantOK {
-			t.Errorf("%q (%s): ok=%v want %v", c.path, c.reason, ok, c.wantOK)
+		_, _, _, got := parseLFSPath(c.path)
+		if got != c.wantRoute {
+			t.Errorf("%q (%s): route=%v want %v", c.path, c.reason, got, c.wantRoute)
 		}
 	}
 }
@@ -393,5 +393,125 @@ func TestHandler_Batch_RejectsExcessiveObjectCount(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnprocessableEntity {
 		t.Fatalf("status=%d, want 422", resp.StatusCode)
+	}
+}
+
+func TestHandler_Verify_OK(t *testing.T) {
+	oid := strings.Repeat("a", 64)
+	store := newBatchStore(map[string]int64{oid: 100}, signedFn())
+	authStore := &fakeAuth{repoPerm: map[string]auth.Perm{"acme/foo": auth.PermWrite}}
+	srv := newHandlerForTest(t, store, authStore, &auth.Actor{Name: "alice"})
+	defer srv.Close()
+
+	body, _ := json.Marshal(VerifyRequest{OID: oid, Size: 100})
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/acme/foo.git/info/lfs/objects/"+oid+"/verify", bytes.NewReader(body))
+	req.Header.Set("Content-Type", ContentType)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+}
+
+func TestHandler_Verify_SizeMismatch(t *testing.T) {
+	oid := strings.Repeat("a", 64)
+	store := newBatchStore(map[string]int64{oid: 100}, signedFn())
+	authStore := &fakeAuth{repoPerm: map[string]auth.Perm{"acme/foo": auth.PermWrite}}
+	srv := newHandlerForTest(t, store, authStore, &auth.Actor{Name: "alice"})
+	defer srv.Close()
+
+	body, _ := json.Marshal(VerifyRequest{OID: oid, Size: 999})
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/acme/foo.git/info/lfs/objects/"+oid+"/verify", bytes.NewReader(body))
+	req.Header.Set("Content-Type", ContentType)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 422 {
+		t.Fatalf("status=%d, want 422", resp.StatusCode)
+	}
+}
+
+func TestHandler_Verify_NotFound(t *testing.T) {
+	oid := strings.Repeat("a", 64)
+	store := newBatchStore(nil, signedFn())
+	authStore := &fakeAuth{repoPerm: map[string]auth.Perm{"acme/foo": auth.PermWrite}}
+	srv := newHandlerForTest(t, store, authStore, &auth.Actor{Name: "alice"})
+	defer srv.Close()
+
+	body, _ := json.Marshal(VerifyRequest{OID: oid, Size: 100})
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/acme/foo.git/info/lfs/objects/"+oid+"/verify", bytes.NewReader(body))
+	req.Header.Set("Content-Type", ContentType)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Fatalf("status=%d, want 404", resp.StatusCode)
+	}
+}
+
+func TestHandler_Verify_BodyOIDMismatch(t *testing.T) {
+	urlOID := strings.Repeat("a", 64)
+	bodyOID := strings.Repeat("b", 64)
+	store := newBatchStore(map[string]int64{urlOID: 100}, signedFn())
+	authStore := &fakeAuth{repoPerm: map[string]auth.Perm{"acme/foo": auth.PermWrite}}
+	srv := newHandlerForTest(t, store, authStore, &auth.Actor{Name: "alice"})
+	defer srv.Close()
+
+	body, _ := json.Marshal(VerifyRequest{OID: bodyOID, Size: 100})
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/acme/foo.git/info/lfs/objects/"+urlOID+"/verify", bytes.NewReader(body))
+	req.Header.Set("Content-Type", ContentType)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 422 {
+		t.Fatalf("status=%d, want 422", resp.StatusCode)
+	}
+}
+
+func TestHandler_Verify_GET_Returns404(t *testing.T) {
+	// GET on /verify is not a recognized route.
+	oid := strings.Repeat("a", 64)
+	store := newBatchStore(nil, signedFn())
+	authStore := &fakeAuth{repoPerm: map[string]auth.Perm{"acme/foo": auth.PermWrite}}
+	srv := newHandlerForTest(t, store, authStore, &auth.Actor{Name: "alice"})
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/acme/foo.git/info/lfs/objects/" + oid + "/verify")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Fatalf("status=%d, want 404", resp.StatusCode)
+	}
+}
+
+func TestHandler_Verify_RejectsMismatchedContentType(t *testing.T) {
+	// LFS spec mandates application/vnd.git-lfs+json; reject text/plain.
+	oid := strings.Repeat("a", 64)
+	store := newBatchStore(map[string]int64{oid: 100}, signedFn())
+	authStore := &fakeAuth{repoPerm: map[string]auth.Perm{"acme/foo": auth.PermWrite}}
+	srv := newHandlerForTest(t, store, authStore, &auth.Actor{Name: "alice"})
+	defer srv.Close()
+
+	body, _ := json.Marshal(VerifyRequest{OID: oid, Size: 100})
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/acme/foo.git/info/lfs/objects/"+oid+"/verify", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "text/plain")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnsupportedMediaType {
+		t.Fatalf("status=%d, want 415", resp.StatusCode)
 	}
 }

@@ -75,6 +75,15 @@ func emitObjectServedMetric(ctx context.Context, logger *slog.Logger, op, result
 	)
 }
 
+// emitVerifyRequestMetric increments lfs_verify_requests_total{result}.
+// Emitted once per verify request. result is one of: "ok", "missing",
+// "size_mismatch", "error".
+func emitVerifyRequestMetric(ctx context.Context, logger *slog.Logger, result string) {
+	emitMetric(ctx, logger, "lfs_verify_requests_total", 1,
+		"result", result,
+	)
+}
+
 // TODO(P5): emitPresignSeconds histogram is in the M13 spec §7 metric
 // list. Adding it requires plumbing a Logger + backend label through
 // Store.PresignPut/PresignGet, which is more wiring than fits in P2's
