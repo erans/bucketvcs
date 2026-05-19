@@ -3,6 +3,7 @@ package gcs
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -29,6 +30,13 @@ import (
 //     upload. ExpectedHash is ignored on PUT; end-to-end integrity is
 //     enforced by a post-upload verify step (see internal/lfs in M13).
 //   - any other value: returns ErrInvalidArgument.
+//
+// Emulator behavior: when cfg.Endpoint is set, the host + scheme of
+// that endpoint are propagated into SignedURLOptions so the minted URL
+// points at the emulator rather than storage.googleapis.com. The
+// emulator (e.g. fake-gcs-server) ignores the cryptographic signature
+// but the URL plumbing — host, query layout, expected-method — is
+// validated end-to-end. Production (Endpoint == "") is unchanged.
 func (g *GCS) SignedGetURL(ctx context.Context, key string, opts bvstorage.SignedURLOptions) (string, error) {
 	if err := validateKey(key); err != nil {
 		return "", err
@@ -44,11 +52,26 @@ func (g *GCS) SignedGetURL(ctx context.Context, key string, opts bvstorage.Signe
 	if method != "GET" && method != "PUT" {
 		return "", fmt.Errorf("gcs: signed-URL method %q: %w", opts.Method, bvstorage.ErrInvalidArgument)
 	}
-	url, err := g.bucket.SignedURL(applyPrefix(g.cfg.Prefix, key), &gstorage.SignedURLOptions{
+	sopts := &gstorage.SignedURLOptions{
 		Method:  method,
 		Expires: time.Now().Add(ttl),
 		Scheme:  gstorage.SigningSchemeV4,
-	})
+	}
+	if host, insecure, ok := emulatorHostAndScheme(g.cfg.Endpoint); ok {
+		sopts.Hostname = host
+		sopts.Insecure = insecure
+	}
+	// Pass cached service-account credentials when present. Required
+	// against fake-gcs-server / STORAGE_EMULATOR_HOST setups: emulator
+	// mode skips the SDK's credential chain, so SignedURL has no way
+	// to auto-detect GoogleAccessID otherwise. On real GCS with ADC
+	// (workload identity / metadata server), both fields are empty
+	// and the SDK signs via the IAM credentials API as before.
+	if g.signGoogleAccessID != "" && len(g.signPrivateKey) > 0 {
+		sopts.GoogleAccessID = g.signGoogleAccessID
+		sopts.PrivateKey = g.signPrivateKey
+	}
+	url, err := g.bucket.SignedURL(applyPrefix(g.cfg.Prefix, key), sopts)
 	if err != nil {
 		// Translate sign-failure into ErrNotSupported so the
 		// conformance suite probes correctly. Network/auth failures
@@ -57,4 +80,24 @@ func (g *GCS) SignedGetURL(ctx context.Context, key string, opts bvstorage.Signe
 		return "", wrap(bvstorage.ErrNotSupported, err)
 	}
 	return url, nil
+}
+
+// emulatorHostAndScheme extracts a host + insecure flag from a
+// configured endpoint URL (cfg.Endpoint). Returns ok=false when
+// endpoint is empty or unparseable — both cases let the SDK fall back
+// to the production default (storage.googleapis.com over HTTPS).
+//
+// The endpoint typically looks like "http://localhost:4443/storage/v1/"
+// (fake-gcs-server). Only the host:port and scheme are taken; the
+// path component is ignored — signed URLs are minted at the bucket
+// root regardless of the API base path.
+func emulatorHostAndScheme(endpoint string) (host string, insecure bool, ok bool) {
+	if endpoint == "" {
+		return "", false, false
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" {
+		return "", false, false
+	}
+	return u.Host, u.Scheme == "http", true
 }

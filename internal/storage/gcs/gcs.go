@@ -10,6 +10,17 @@ type GCS struct {
 	cfg    Config
 	client *storage.Client
 	bucket *storage.BucketHandle
+
+	// Pre-parsed signing credentials. Populated by Open when the
+	// service-account JSON is supplied via cfg.CredentialsJSON or
+	// cfg.CredentialsFile, so SignedURL can pass GoogleAccessID +
+	// PrivateKey explicitly. This matters when the SDK's credential
+	// auto-detect chain is short-circuited — most notably when
+	// STORAGE_EMULATOR_HOST is set, which skips loading the JSON
+	// entirely. Empty when running on workload identity / metadata
+	// server (where the SDK signs via the IAM credentials API).
+	signGoogleAccessID string
+	signPrivateKey     []byte
 }
 
 var _ bvstorage.ObjectStore = (*GCS)(nil)

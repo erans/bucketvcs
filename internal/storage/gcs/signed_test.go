@@ -51,3 +51,31 @@ func TestSignedGetURLRejectsBadKey_PUT(t *testing.T) {
 		t.Fatalf("want ErrInvalidArgument, got %v", err)
 	}
 }
+
+func TestEmulatorHostAndScheme(t *testing.T) {
+	// Production default: empty endpoint means SDK falls back to
+	// storage.googleapis.com over HTTPS — we leave Hostname/Insecure
+	// unset by returning ok=false.
+	cases := []struct {
+		name         string
+		endpoint     string
+		wantHost     string
+		wantInsecure bool
+		wantOK       bool
+	}{
+		{"empty endpoint, production default", "", "", false, false},
+		{"fake-gcs http", "http://localhost:4443/storage/v1/", "localhost:4443", true, true},
+		{"fake-gcs https", "https://emul.example:4443/storage/v1/", "emul.example:4443", false, true},
+		{"host only", "http://127.0.0.1:9000", "127.0.0.1:9000", true, true},
+		{"unparseable", ":::not a url:::", "", false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			host, insecure, ok := emulatorHostAndScheme(c.endpoint)
+			if host != c.wantHost || insecure != c.wantInsecure || ok != c.wantOK {
+				t.Errorf("got (%q, %v, %v); want (%q, %v, %v)",
+					host, insecure, ok, c.wantHost, c.wantInsecure, c.wantOK)
+			}
+		})
+	}
+}
