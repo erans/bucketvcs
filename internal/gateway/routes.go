@@ -20,6 +20,7 @@ const (
 	OpInfoRefsReceive
 	OpUploadPack
 	OpReceivePack
+	OpLFSBatch
 )
 
 // RoutedRequest is the parsed shape of a Git-protocol request.
@@ -73,6 +74,10 @@ func ParseRoute(method, urlPath, rawQuery string) (*RoutedRequest, error) {
 		return &RoutedRequest{tenant, repoID, OpUploadPack, auth.ActionRead}, nil
 	case method == http.MethodPost && rest == "git-receive-pack":
 		return &RoutedRequest{tenant, repoID, OpReceivePack, auth.ActionWrite}, nil
+	case method == http.MethodPost && rest == "info/lfs/objects/batch":
+		// RequiredAction is read; the LFS handler performs a secondary
+		// write check after parsing the body's operation field.
+		return &RoutedRequest{tenant, repoID, OpLFSBatch, auth.ActionRead}, nil
 	default:
 		return nil, ErrRouteNoMatch
 	}
@@ -95,6 +100,12 @@ func (s *Server) routeRepo(w http.ResponseWriter, r *http.Request) {
 		s.handleUploadPack(w, r, rr.Tenant, rr.Repo)
 	case OpReceivePack:
 		s.handleReceivePack(w, r, rr.Tenant, rr.Repo)
+	case OpLFSBatch:
+		if s.lfsHandler == nil {
+			http.NotFound(w, r)
+			return
+		}
+		s.lfsHandler.ServeHTTP(w, r)
 	default:
 		http.NotFound(w, r)
 	}

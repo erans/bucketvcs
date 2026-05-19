@@ -10,6 +10,7 @@ import (
 	"unicode"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
+	"github.com/bucketvcs/bucketvcs/internal/lfs"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
@@ -105,6 +106,16 @@ type Options struct {
 	// provided.
 	PackURITTL time.Duration
 
+	// LFSEnabled enables the M13 Git LFS Batch API. Default-on at the
+	// CLI layer (cmd/bucketvcs/serve.go); zero-value here means
+	// disabled (the CLI flips it explicitly when --lfs=true, which is
+	// the default).
+	LFSEnabled bool
+
+	// LFSPresignTTL is the TTL passed into the LFS Store's
+	// PresignPut/PresignGet calls. Zero -> 15 minutes.
+	LFSPresignTTL time.Duration
+
 	// Logger is used for structured metric + audit emission. When nil, the
 	// gateway falls back to slog.Default(). M11 Phase 12.5 adds this for
 	// gateway-side observability; before that the gateway only used slog.Default()
@@ -123,6 +134,7 @@ type Server struct {
 	bundleURIBuildURL func(ctx context.Context, hash, storageKey, expectedHash string) (string, error)
 	packURLBuilder    *URLBuilder
 	packURIBuildURL   func(ctx context.Context, hash, storageKey, expectedHash string) (string, error)
+	lfsHandler        http.Handler
 }
 
 // NewServer constructs a Server. The mirror manager acquires a process flock
@@ -285,6 +297,23 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 		s.mux.Handle("/_bundle/", proxied)
 		s.mux.Handle("/_pack/", proxied)
 	}
+	// LFS handler wiring (M13 P1). Constructed once at startup; the
+	// route dispatcher in routeRepo calls it for OpLFSBatch.
+	if opts.LFSEnabled {
+		ttl := opts.LFSPresignTTL
+		if ttl <= 0 {
+			ttl = 15 * time.Minute
+		}
+		s.lfsHandler = lfs.NewHTTPHandler(lfs.Deps{
+			AuthStore:        opts.AuthStore,
+			ActorFromContext: ActorFromContext,
+			NewStore: func(tenant, repo string) *lfs.Store {
+				return lfs.NewStore(store, repoLFSPrefix(tenant, repo))
+			},
+			PresignTTL: ttl,
+			Logger:     opts.Logger,
+		})
+	}
 	s.mux.HandleFunc("/", s.routeRoot)
 	return s, nil
 }
@@ -309,4 +338,10 @@ func (s *Server) routeRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.routeRepo(w, r)
+}
+
+// repoLFSPrefix returns the object-store key prefix for a repo's LFS
+// area: tenants/<tenant>/repos/<repo>/lfs/objects/. M13 spec §4.
+func repoLFSPrefix(tenant, repo string) string {
+	return "tenants/" + tenant + "/repos/" + repo + "/lfs/objects/"
 }

@@ -66,8 +66,16 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	warmAge := fs.Duration("bundle-warm-age", 24*time.Hour, "Bundle freshness threshold: warm if generated within D")
 	proxiedBaseURL := fs.String("proxied-url-base", "", "External base URL of this gateway, e.g. https://gw.example (required when modes are auto or proxied)")
 
+	// LFS (M13). Default enabled; flip with --lfs=false.
+	lfsEnabled := fs.Bool("lfs", true, "Enable the LFS Batch API (M13)")
+	lfsPresignTTL := fs.Duration("lfs-presign-ttl", 15*time.Minute, "TTL for LFS upload/download presigned URLs")
+
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+
+	if *lfsEnabled {
+		fmt.Fprintln(stderr, "serve: --lfs is enabled. M13 P1 echoes the inbound Authorization header into the verify action of the Batch response. Under Basic auth, the user's base64(user:password) lands in the response body and may be persisted by response-body logging upstream proxies or by the git-lfs client's on-disk cache. Recommend Bearer-token deployments or disabling LFS until M13 P3 ships the verify-token mechanism.")
 	}
 
 	bMode, ok := gateway.ParseURIMode(*bundleURIMode)
@@ -203,6 +211,8 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			BundleWarmAge:     *warmAge,
 			PackURIEnabled:    packBuildURL != nil,
 			PackURIBuildURL:   packBuildURL,
+			LFSEnabled:        *lfsEnabled,
+			LFSPresignTTL:     *lfsPresignTTL,
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "serve: NewServer: %v\n", err)

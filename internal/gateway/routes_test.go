@@ -73,3 +73,29 @@ func TestParseRoute_NoMatchSentinel(t *testing.T) {
 		t.Fatalf("want ErrRouteNoMatch, got %v", err)
 	}
 }
+
+func TestParseRoute_LFSBatch(t *testing.T) {
+	rr, err := ParseRoute("POST", "/acme/foo.git/info/lfs/objects/batch", "")
+	if err != nil {
+		t.Fatalf("ParseRoute: %v", err)
+	}
+	if rr.Op != OpLFSBatch {
+		t.Fatalf("Op=%v, want OpLFSBatch", rr.Op)
+	}
+	if rr.Tenant != "acme" || rr.Repo != "foo" {
+		t.Fatalf("Tenant=%q Repo=%q", rr.Tenant, rr.Repo)
+	}
+	// RequiredAction is read; the handler upgrades to write inline for
+	// upload op (the body is what determines it, and ParseRoute is
+	// body-free).
+	if rr.RequiredAction != auth.ActionRead {
+		t.Fatalf("RequiredAction=%v want ActionRead", rr.RequiredAction)
+	}
+}
+
+func TestParseRoute_LFSBatch_RejectsGET(t *testing.T) {
+	_, err := ParseRoute("GET", "/acme/foo.git/info/lfs/objects/batch", "")
+	if !errors.Is(err, ErrRouteNoMatch) {
+		t.Fatalf("err=%v, want ErrRouteNoMatch", err)
+	}
+}
