@@ -2,10 +2,15 @@ package v2proto
 
 import (
 	"bytes"
+	"context"
+	"strings"
 	"testing"
 
 	"github.com/bucketvcs/bucketvcs/internal/pktline"
+	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	"github.com/bucketvcs/bucketvcs/internal/repo/manifest/manifesttest"
+	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 )
 
 func tokensFromLines(lines ...string) []pktline.Token {
@@ -37,7 +42,7 @@ func TestLsRefs_BasicAdvertisement(t *testing.T) {
 		"FLUSH",
 	)
 	var buf bytes.Buffer
-	if err := HandleLsRefs(args, body, &buf); err != nil {
+	if err := HandleLsRefs(context.Background(), args, body, &buf); err != nil {
 		t.Fatalf("HandleLsRefs: %v", err)
 	}
 	got := drainPayloads(t, &buf)
@@ -68,7 +73,7 @@ func TestLsRefs_SymrefAndRefPrefix(t *testing.T) {
 		"FLUSH",
 	)
 	var buf bytes.Buffer
-	if err := HandleLsRefs(args, body, &buf); err != nil {
+	if err := HandleLsRefs(context.Background(), args, body, &buf); err != nil {
 		t.Fatalf("HandleLsRefs: %v", err)
 	}
 	got := drainPayloads(t, &buf)
@@ -97,7 +102,7 @@ func TestLsRefs_UnbornHEAD(t *testing.T) {
 		"FLUSH",
 	)
 	var buf bytes.Buffer
-	if err := HandleLsRefs(args, body, &buf); err != nil {
+	if err := HandleLsRefs(context.Background(), args, body, &buf); err != nil {
 		t.Fatalf("HandleLsRefs: %v", err)
 	}
 	got := drainPayloads(t, &buf)
@@ -116,7 +121,7 @@ func TestLsRefs_RejectsRefPrefixWithSpace(t *testing.T) {
 		"FLUSH",
 	)
 	var buf bytes.Buffer
-	if err := HandleLsRefs(args, body, &buf); err == nil {
+	if err := HandleLsRefs(context.Background(), args, body, &buf); err == nil {
 		t.Fatalf("HandleLsRefs: expected error on multi-token ref-prefix")
 	}
 }
@@ -168,7 +173,7 @@ func TestLsRefs_HEADWithSymrefsNoPrefix(t *testing.T) {
 		"FLUSH",
 	)
 	var buf bytes.Buffer
-	if err := HandleLsRefs(args, body, &buf); err != nil {
+	if err := HandleLsRefs(context.Background(), args, body, &buf); err != nil {
 		t.Fatalf("HandleLsRefs: %v", err)
 	}
 	got := drainPayloads(t, &buf)
@@ -192,7 +197,7 @@ func TestLsRefs_EmptyRefsNoUnbornEmitsOnlyFlush(t *testing.T) {
 		"FLUSH",
 	)
 	var buf bytes.Buffer
-	if err := HandleLsRefs(args, body, &buf); err != nil {
+	if err := HandleLsRefs(context.Background(), args, body, &buf); err != nil {
 		t.Fatalf("HandleLsRefs: %v", err)
 	}
 	got := drainPayloads(t, &buf)
@@ -214,7 +219,7 @@ func TestLsRefs_EmptyDefaultBranchUnbornNoSymrefAnnotation(t *testing.T) {
 		"FLUSH",
 	)
 	var buf bytes.Buffer
-	if err := HandleLsRefs(args, body, &buf); err != nil {
+	if err := HandleLsRefs(context.Background(), args, body, &buf); err != nil {
 		t.Fatalf("HandleLsRefs: %v", err)
 	}
 	got := drainPayloads(t, &buf)
@@ -243,7 +248,7 @@ func TestLsRefs_TolerantesPreDelimCapabilityLines(t *testing.T) {
 		"FLUSH",
 	)
 	var buf bytes.Buffer
-	if err := HandleLsRefs(args, body, &buf); err != nil {
+	if err := HandleLsRefs(context.Background(), args, body, &buf); err != nil {
 		t.Fatalf("HandleLsRefs: %v", err)
 	}
 	got := drainPayloads(t, &buf)
@@ -256,8 +261,10 @@ func TestLsRefs_TolerantesPreDelimCapabilityLines(t *testing.T) {
 	}
 }
 
-// A request with no delim (just command + capabilities + flush) carries no
-// command-specific args; the handler should produce a default advertisement.
+// TestLsRefs_NoDelimNoArgs exercises the case where the request stream has
+// command + capabilities + flush but no delim. Per the iterateArgs contract,
+// the handler should treat this as "no command-specific args" and produce a
+// default advertisement (all refs, no symrefs, no filtering).
 func TestLsRefs_NoDelimNoArgs(t *testing.T) {
 	body := &manifest.Body{
 		DefaultBranch: "refs/heads/main",
@@ -271,7 +278,7 @@ func TestLsRefs_NoDelimNoArgs(t *testing.T) {
 		"FLUSH",
 	)
 	var buf bytes.Buffer
-	if err := HandleLsRefs(args, body, &buf); err != nil {
+	if err := HandleLsRefs(context.Background(), args, body, &buf); err != nil {
 		t.Fatalf("HandleLsRefs: %v", err)
 	}
 	got := drainPayloads(t, &buf)
@@ -281,5 +288,43 @@ func TestLsRefs_NoDelimNoArgs(t *testing.T) {
 	}
 	if !equalIgnoreOrder(got, want) {
 		t.Fatalf("output: got %v, want %v", got, want)
+	}
+}
+
+func TestHandleLsRefs_ShardedBody(t *testing.T) {
+	tmp := t.TempDir()
+	store, err := localfs.Open(tmp)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	defer store.Close()
+	k, err := keys.NewRepo("acme", "demo")
+	if err != nil {
+		t.Fatalf("keys.NewRepo: %v", err)
+	}
+	body, err := manifesttest.MakeShardedBody(context.Background(), store, k, "refs/heads/main", map[string]string{
+		"refs/heads/main": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"refs/heads/dev":  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"refs/tags/v1.0":  "cccccccccccccccccccccccccccccccccccccccc",
+	})
+	if err != nil {
+		t.Fatalf("MakeShardedBody: %v", err)
+	}
+
+	// Build the protocol-v2 ls-refs request: empty args (so all refs listed).
+	args := tokensFromLines(
+		"command=ls-refs\n",
+		"DELIM",
+		"FLUSH",
+	)
+	var buf bytes.Buffer
+	if err := HandleLsRefsWithStore(context.Background(), args, &body, store, k, &buf); err != nil {
+		t.Fatalf("HandleLsRefsWithStore: %v", err)
+	}
+	got := buf.String()
+	for _, want := range []string{"refs/heads/main", "refs/heads/dev", "refs/tags/v1.0", "HEAD"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("ls-refs output missing %q\noutput:\n%s", want, got)
+		}
 	}
 }

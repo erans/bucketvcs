@@ -59,6 +59,10 @@ type BundleURIOutcome struct {
 	// FreshnessRetired in State:
 	//   - "no_bundle": manifest has no full_default entry.
 	//   - "no_ref": entry exists but covered ref is missing or empty.
+	//   - "refstore_error": refstore.New or Lookup returned an I/O error
+	//     (e.g. a shard object missing from the bucket). Distinct from
+	//     "no_ref" so operators can differentiate backend errors from the
+	//     ordinary "ref was deleted" case in metrics and audit events.
 	//   - "retired", "stale", "warm", "current": pass-through from
 	//     EvaluateFreshness's State.String() when the state machine ran.
 	//   - "stale" sub-reasons (age_exceeded, walkback_error, etc.) are

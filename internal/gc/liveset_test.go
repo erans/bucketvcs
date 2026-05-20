@@ -189,3 +189,77 @@ func TestBuildLiveSet_EmptyBitmapKeyNotInLiveSet(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildLiveSet_IncludesRefShards(t *testing.T) {
+	k, err := keys.NewRepo("acme", "demo")
+	if err != nil {
+		t.Fatalf("keys.NewRepo: %v", err)
+	}
+	header := manifest.RootHeader{
+		SchemaVersion:   2,
+		RepoID:          "demo",
+		ManifestVersion: 1,
+		LatestTx:        "tx_abc",
+	}
+	body := manifest.Body{
+		DefaultBranch: "refs/heads/main",
+		RefShards: []manifest.RefShard{
+			{Shard: "00", Key: k.RefShardKey("sha256-aa00000000000000000000000000000000000000000000000000000000000000"), Hash: "sha256-aa00000000000000000000000000000000000000000000000000000000000000", RefCount: 1},
+			{Shard: "f3", Key: k.RefShardKey("sha256-bb00000000000000000000000000000000000000000000000000000000000000"), Hash: "sha256-bb00000000000000000000000000000000000000000000000000000000000000", RefCount: 2},
+		},
+		RefSharding: "hash_v1",
+		Packs:       []manifest.PackEntry{},
+		Bundles:     []manifest.BundleEntry{},
+	}
+	bodyJSON, err := manifest.MarshalBody(body)
+	if err != nil {
+		t.Fatalf("MarshalBody: %v", err)
+	}
+	live, err := gc.BuildLiveSet(k, header, bodyJSON)
+	if err != nil {
+		t.Fatalf("BuildLiveSet: %v", err)
+	}
+	for _, s := range body.RefShards {
+		if _, ok := live[s.Key]; !ok {
+			t.Errorf("RefShard.Key %q missing from live set", s.Key)
+		}
+	}
+}
+
+func TestBuildLiveSet_V1BodyHasNoShardKeys(t *testing.T) {
+	// Regression guard: a v1 body must produce the SAME live set as a
+	// body with explicitly-nil RefShards. Comparing sets (instead of
+	// substring-grepping for "ref-shards/") survives any rename of the
+	// keys.RefShardKey path scheme.
+	k, _ := keys.NewRepo("acme", "demo")
+	header := manifest.RootHeader{SchemaVersion: 1, RepoID: "demo", ManifestVersion: 1}
+	body := manifest.Body{
+		DefaultBranch: "refs/heads/main",
+		Refs:          map[string]string{"refs/heads/main": "aa"},
+		Packs:         []manifest.PackEntry{},
+		Bundles:       []manifest.BundleEntry{},
+	}
+	bodyJSON, _ := manifest.MarshalBody(body)
+	live, err := gc.BuildLiveSet(k, header, bodyJSON)
+	if err != nil {
+		t.Fatalf("BuildLiveSet: %v", err)
+	}
+	// Build the SAME body with explicit RefShards=nil and assert the
+	// live sets are equal — any divergence means BuildLiveSet added a
+	// body-derived key it shouldn't have.
+	body2 := body
+	body2.RefShards = nil
+	body2JSON, _ := manifest.MarshalBody(body2)
+	live2, err := gc.BuildLiveSet(k, header, body2JSON)
+	if err != nil {
+		t.Fatalf("BuildLiveSet (control): %v", err)
+	}
+	if len(live) != len(live2) {
+		t.Errorf("v1 BuildLiveSet size=%d, control=%d (a body-derived key may have leaked)", len(live), len(live2))
+	}
+	for key := range live {
+		if _, ok := live2[key]; !ok {
+			t.Errorf("v1 BuildLiveSet has key %q not in control", key)
+		}
+	}
+}

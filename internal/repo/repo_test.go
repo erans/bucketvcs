@@ -132,8 +132,8 @@ func TestCreate_HappyPath(t *testing.T) {
 	if view.Header.RepoID != "my-repo" {
 		t.Errorf("want repo_id=my-repo, got %q", view.Header.RepoID)
 	}
-	if view.Header.SchemaVersion != 1 {
-		t.Errorf("want schema_version=1, got %d", view.Header.SchemaVersion)
+	if view.Header.SchemaVersion != manifest.CurrentSchemaVersion {
+		t.Errorf("want schema_version=%d, got %d", manifest.CurrentSchemaVersion, view.Header.SchemaVersion)
 	}
 	if view.Header.LatestTx == "" {
 		t.Errorf("LatestTx should reference the create tx")

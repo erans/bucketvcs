@@ -17,6 +17,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	"github.com/bucketvcs/bucketvcs/internal/repo/refstore"
 	"github.com/bucketvcs/bucketvcs/internal/repo/repoerrs"
 	"github.com/bucketvcs/bucketvcs/internal/v2proto"
 )
@@ -118,7 +119,13 @@ func serviceImpl(req *EngineRequest) error {
 
 	switch cmdLine {
 	case "command=ls-refs":
-		if err := v2proto.HandleLsRefs(tokens, &body, req.Stdout); err != nil {
+		k, err := keys.NewRepo(req.Tenant, req.Repo)
+		if err != nil {
+			// keys.NewRepo only errors on invalid names; tenant/repo were already
+			// validated by repo.Open above, so this is a defensive fallback.
+			return errBadRequestf("ls-refs: keys: %v", err)
+		}
+		if err := v2proto.HandleLsRefsWithStore(req.Ctx, tokens, &body, req.Store, k, req.Stdout); err != nil {
 			return errBadRequestf("ls-refs: %v", err)
 		}
 		return nil
@@ -353,8 +360,19 @@ func serveFetch(req *EngineRequest, tokens []pktline.Token, body *manifest.Body)
 	// this way.
 	var excludeFromInlinePackID string
 	if req.PackURIEnabled && req.PackURIBuildURL != nil && len(fetchReq.PackfileURIs) > 0 && len(fetchReq.Haves) == 0 {
-		refTips := make([]string, 0, len(body.Refs))
-		for _, oid := range body.Refs {
+		// tenant/repo were validated by repo.Open at serviceImpl entry,
+		// so keys.NewRepo cannot fail here; drop the error.
+		puriKey, _ := keys.NewRepo(req.Tenant, req.Repo)
+		puriRS, puriErr := refstore.New(req.Ctx, req.Store, puriKey, body)
+		if puriErr != nil {
+			return fmt.Errorf("fetch: refstore for packfile-uri gate: %w", puriErr)
+		}
+		puriRefs, puriErr := puriRS.List(req.Ctx)
+		if puriErr != nil {
+			return fmt.Errorf("fetch: list refs for packfile-uri gate: %w", puriErr)
+		}
+		refTips := make([]string, 0, len(puriRefs))
+		for _, oid := range puriRefs {
 			refTips = append(refTips, oid)
 		}
 		full := v2proto.EvaluateFullPackRequested(v2proto.FullPackRequestedInputs{
@@ -560,7 +578,30 @@ func doServeBundleURI(req *EngineRequest, body *manifest.Body) (v2proto.BundleUR
 	// Look up the current tip once. If the ref is missing (deleted) or
 	// empty, HandleBundleURI will return empty too — but bailing here
 	// avoids the reachability.Load storage read for a known-dead ref.
-	currentTip, refPresent := body.Refs[entry.Ref]
+	// tenant/repo were validated by repo.Open at serviceImpl entry, so
+	// keys.NewRepo cannot fail here; drop the error.
+	bundleKey, _ := keys.NewRepo(req.Tenant, req.Repo)
+	bundleRS, bundleRSErr := refstore.New(req.Ctx, req.Store, bundleKey, body)
+	if bundleRSErr != nil {
+		// Distinguish a refstore initialisation failure (e.g. a shard object
+		// missing from the bucket) from the ordinary "ref doesn't exist" case.
+		// Using "no_ref" for both silently suppresses bundle advertisement and
+		// produces misleading metric/audit labels for real backend errors.
+		slog.WarnContext(req.Ctx, "upload-pack: bundle-uri refstore.New failed",
+			slog.String("ref", entry.Ref),
+			slog.String("err", bundleRSErr.Error()))
+		return v2proto.BundleURIOutcome{State: v2proto.FreshnessRetired, Reason: "refstore_error"},
+			v2proto.EncodeBundleURIResponse(req.Stdout, nil)
+	}
+	currentTip, refPresent, bundleRSLookupErr := bundleRS.Lookup(req.Ctx, entry.Ref)
+	if bundleRSLookupErr != nil {
+		// A Lookup I/O error is distinct from "ref not present".
+		slog.WarnContext(req.Ctx, "upload-pack: bundle-uri refstore.Lookup failed",
+			slog.String("ref", entry.Ref),
+			slog.String("err", bundleRSLookupErr.Error()))
+		return v2proto.BundleURIOutcome{State: v2proto.FreshnessRetired, Reason: "refstore_error"},
+			v2proto.EncodeBundleURIResponse(req.Stdout, nil)
+	}
 	if !refPresent || currentTip == "" {
 		return v2proto.BundleURIOutcome{State: v2proto.FreshnessRetired, Reason: "no_ref"},
 			v2proto.EncodeBundleURIResponse(req.Stdout, nil)
@@ -933,4 +974,3 @@ func serveFetchLazyPath(req *EngineRequest, fetchReq v2proto.FetchRequest, body 
 	// knows how to materialise the pack via git pack-objects.
 	return false, nil
 }
-

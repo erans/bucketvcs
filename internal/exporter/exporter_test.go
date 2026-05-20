@@ -12,7 +12,9 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/gitcli"
 	"github.com/bucketvcs/bucketvcs/internal/importer"
 	"github.com/bucketvcs/bucketvcs/internal/repo"
+	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	"github.com/bucketvcs/bucketvcs/internal/repo/manifest/manifesttest"
 	"github.com/bucketvcs/bucketvcs/internal/repo/tx"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
@@ -387,6 +389,101 @@ func TestDownloadBitmapSidecar_NotFoundIsReportedToCaller(t *testing.T) {
 	}
 	if !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("expected wrapped ErrNotFound, got %v", err)
+	}
+}
+
+// TestExport_ShardedBody_RejectsMalformedRefOID mirrors TestExport_RejectsMalformedRefOID
+// but uses a v2 sharded manifest body (via manifesttest.MakeShardedBody) to verify
+// that the exporter reads refs through refstore.List rather than body.Refs directly.
+func TestExport_ShardedBody_RejectsMalformedRefOID(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	r, err := repo.Create(ctx, store, "t", "shard-export", repo.CreateOptions{
+		DefaultBranch: "refs/heads/main",
+		ObjectFormat:  "sha1",
+		Actor:         "test",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	k, err := keys.NewRepo("t", "shard-export")
+	if err != nil {
+		t.Fatalf("keys.NewRepo: %v", err)
+	}
+
+	// Build a sharded body with a malformed OID — export must reject it
+	// the same way it does for an inline body, confirming refs flow through refstore.
+	shardRefs := map[string]string{
+		"refs/heads/main": "not-a-hex-oid",
+	}
+	shardedBody, err := manifesttest.MakeShardedBody(ctx, store, k, "refs/heads/main", shardRefs)
+	if err != nil {
+		t.Fatalf("MakeShardedBody: %v", err)
+	}
+	bodyBytes, err := manifest.MarshalBody(shardedBody)
+	if err != nil {
+		t.Fatalf("MarshalBody: %v", err)
+	}
+	if _, err := r.Commit(ctx, tx.Body{Type: "test", Actor: "test"},
+		func(prev *repo.RootView) ([]byte, error) { return bodyBytes, nil }); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	dst := filepath.Join(t.TempDir(), "out")
+	_, err = Export(ctx, store, Options{
+		Tenant: "t", Repo: "shard-export", DestDir: dst, SkipFsck: true,
+	})
+	if err == nil {
+		t.Fatal("expected rejection of malformed OID in sharded body")
+	}
+}
+
+// TestExport_ShardedBody_DefaultBranchMustExistInRefs mirrors the inline-body
+// default_branch consistency check but drives it through a sharded (v2) body,
+// confirming the refstore path handles this validation correctly.
+func TestExport_ShardedBody_DefaultBranchMustExistInRefs(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	r, err := repo.Create(ctx, store, "t", "shard-export2", repo.CreateOptions{
+		DefaultBranch: "refs/heads/main",
+		ObjectFormat:  "sha1",
+		Actor:         "test",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	k, err := keys.NewRepo("t", "shard-export2")
+	if err != nil {
+		t.Fatalf("keys.NewRepo: %v", err)
+	}
+
+	// Sharded body has refs/heads/dev but DefaultBranch says refs/heads/main.
+	shardRefs := map[string]string{
+		"refs/heads/dev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
+	shardedBody, err := manifesttest.MakeShardedBody(ctx, store, k, "refs/heads/main", shardRefs)
+	if err != nil {
+		t.Fatalf("MakeShardedBody: %v", err)
+	}
+	bodyBytes, err := manifest.MarshalBody(shardedBody)
+	if err != nil {
+		t.Fatalf("MarshalBody: %v", err)
+	}
+	if _, err := r.Commit(ctx, tx.Body{Type: "test", Actor: "test"},
+		func(prev *repo.RootView) ([]byte, error) { return bodyBytes, nil }); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	dst := filepath.Join(t.TempDir(), "out")
+	_, err = Export(ctx, store, Options{
+		Tenant: "t", Repo: "shard-export2", DestDir: dst, SkipFsck: true,
+	})
+	if err == nil {
+		t.Fatal("expected error when default_branch not present in sharded refs")
 	}
 }
 

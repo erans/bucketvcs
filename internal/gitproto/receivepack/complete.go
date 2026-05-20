@@ -2,10 +2,10 @@ package receivepack
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 
 	"github.com/bucketvcs/bucketvcs/internal/gitcli"
@@ -16,6 +16,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	"github.com/bucketvcs/bucketvcs/internal/repo/refstore"
 )
 
 // completeReceivePack runs the validate + commit + IngestPack pipeline.
@@ -27,6 +28,55 @@ import (
 //   - ctx, w, tenant, repoID, store pulled from eng (EngineRequest)
 //   - actor extracted from eng.Actor instead of ActorFromContext(ctx)
 //   - markMirrorStale is the engine-local function (same os.Remove logic)
+
+// precheckUpdates validates the old-OID precondition for each update command
+// against the given refstore. It returns per-update status strings ("" = pass,
+// "ng <ref> <reason>" = fail) and whether all updates passed. It is factored
+// out of completeReceivePack so it can be exercised directly by tests without
+// requiring the full mirror/wire infrastructure.
+//
+// We snapshot the full ref map via rs.List ONCE rather than calling
+// rs.Lookup per update. For sharded mode this is the difference between
+// up to len(updates) shard reads (each Lookup fetches one shard, no
+// intra-instance cache) and one parallel List (each shard fetched at
+// most once). On force-push of many refs across the same handful of
+// shards the difference is significant. Failure-mode parity with
+// pre-M12 inline behavior is preserved: a backend error on the snapshot
+// fails the whole precheck (which matches the pre-M12 behavior where
+// the entire body unmarshal had to succeed first).
+func precheckUpdates(ctx context.Context, rs refstore.RefStore, updates []updateCommand) (statuses []string, allOK bool) {
+	statuses = make([]string, len(updates))
+	allOK = true
+	refs, err := rs.List(ctx)
+	if err != nil {
+		// In sharded mode a transient shard-read failure during the
+		// pre-CAS precheck surfaces here. Log so operators can correlate
+		// the wire-level "backend-error" with the underlying cause.
+		slog.WarnContext(ctx, "receivepack: precheck rs.List failed",
+			slog.Int("updates", len(updates)),
+			slog.String("err", err.Error()))
+		for i, u := range updates {
+			statuses[i] = "ng " + u.Refname + " backend-error"
+		}
+		return statuses, false
+	}
+	for i, u := range updates {
+		cur, exists := refs[u.Refname]
+		if u.OldOID == nullOID {
+			if exists {
+				statuses[i] = "ng " + u.Refname + " ref already exists"
+				allOK = false
+			}
+		} else {
+			if !exists || cur != u.OldOID {
+				statuses[i] = "ng " + u.Refname + " stale info"
+				allOK = false
+			}
+		}
+	}
+	return
+}
+
 func completeReceivePack(eng *EngineRequest, w io.Writer, m *mirror.Mirror, rp *receivePackRequest) {
 	ctx := eng.Ctx
 	tenant := eng.Tenant
@@ -50,30 +100,20 @@ func completeReceivePack(eng *EngineRequest, w io.Writer, m *mirror.Mirror, rp *
 		return
 	}
 	preCommitVersion := view.Header.ManifestVersion
-	var currentBody manifest.Body
-	if err := json.Unmarshal(view.Body, &currentBody); err != nil {
+	body, err := manifest.UnmarshalBody(view.Body)
+	if err != nil {
 		writeReceiveReport(w, "internal-error: "+err.Error(), nil, rp.Caps)
+		return
+	}
+	k, _ := keys.NewRepo(tenant, repoID)
+	rs, err := refstore.New(ctx, eng.Store, k, &body)
+	if err != nil {
+		writeReceiveReport(w, "internal-error: refstore: "+err.Error(), nil, rp.Caps)
 		return
 	}
 
 	// Step 5: validate old-OID for each command.
-	statuses := make([]string, len(rp.Updates)) // "" = ok-so-far, else "ng <ref> <reason>"
-	allOK := true
-	for i, u := range rp.Updates {
-		if u.OldOID == nullOID {
-			// Create: ref must NOT exist.
-			if _, exists := currentBody.Refs[u.Refname]; exists {
-				statuses[i] = "ng " + u.Refname + " ref already exists"
-				allOK = false
-			}
-		} else {
-			cur, ok := currentBody.Refs[u.Refname]
-			if !ok || cur != u.OldOID {
-				statuses[i] = "ng " + u.Refname + " stale info"
-				allOK = false
-			}
-		}
-	}
+	statuses, allOK := precheckUpdates(ctx, rs, rp.Updates)
 
 	// Step 6: atomic batch handling — any failure poisons the whole batch.
 	if rp.IsAtomic && !allOK {
@@ -268,12 +308,15 @@ func completeReceivePack(eng *EngineRequest, w io.Writer, m *mirror.Mirror, rp *
 	// captured preCommitVersion BEFORE old-OID validation; BuildAndCommit
 	// internally re-reads root and uses THAT version as its CAS base.
 	// If a concurrent cross-process push landed BETWEEN our read and
-	// BuildAndCommit's read, BuildAndCommit's mergeRefs would have
+	// BuildAndCommit's read, BuildAndCommit's refstore.Stage would have
 	// overlaid our updates onto the newer body — silently overwriting
-	// any concurrent ref change for the same refname. BuildAndCommit
-	// commits at startVersion+1, so the post-commit version is
-	// preCommitVersion+1 in the no-race case; anything larger means the
-	// race window fired.
+	// any concurrent ref change for the same refname.
+	//
+	// BuildAndCommit commits at startVersion+1 (where startVersion is its
+	// own re-read), so the post-commit version is preCommitVersion+1 in
+	// the no-race case; anything larger means the race window fired.
+	// This detection is mode-agnostic: it fires regardless of inline vs
+	// sharded layout and regardless of which shards were touched.
 	//
 	// We surface this as "ng stale-manifest" so the client sees a clean
 	// failure even though the bucket-side commit succeeded. The mirror

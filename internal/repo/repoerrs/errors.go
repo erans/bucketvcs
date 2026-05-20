@@ -21,6 +21,10 @@ var (
 	ErrCallbackFailed    = errors.New("repo: buildBody callback returned error")
 	ErrInvalidTenantID   = errors.New("repo: tenant_id invalid")
 	ErrInvalidRepoID     = errors.New("repo: repo_id invalid")
+	// ErrInvalidManifest signals a manifest body whose structure violates
+	// an invariant the body schema enforces (hybrid v1/v2 ref state,
+	// unknown ref-sharding strategy, malformed shard hash, etc.). M12+.
+	ErrInvalidManifest = errors.New("repo: manifest body invariant violation")
 )
 
 // CommitGaveUpError is returned by Repo.Commit when the retry budget is

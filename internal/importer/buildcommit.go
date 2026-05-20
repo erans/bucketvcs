@@ -5,8 +5,10 @@
 package importer
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +18,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	"github.com/bucketvcs/bucketvcs/internal/repo/refstore"
 	"github.com/bucketvcs/bucketvcs/internal/repo/tx"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
@@ -102,10 +105,37 @@ func BuildAndCommit(
 	}
 	startVersion := view.Header.ManifestVersion
 
-	// Compute target Refs: merge refUpdates into currentBody.Refs.
-	newRefs, err := mergeRefs(currentBody.Refs, refUpdates)
+	k, err := keys.NewRepo(tenantID, repoID)
 	if err != nil {
-		return nil, fmt.Errorf("importer: BuildAndCommit: merge refs: %w", err)
+		return nil, fmt.Errorf("importer: BuildAndCommit: keys: %w", err)
+	}
+
+	// M12: route the ref update through refstore.Stage. Stage produces
+	// either an inline map (v1 layout) or a list of ShardWrites +
+	// RefShards (v2 layout) depending on the current body shape; the
+	// Mode field discriminates. The Stage's NewShardObjects are written
+	// to the bucket inside the r.Commit buildBody callback below (spec's
+	// "Phase A" pre-CAS shard publish).
+	//
+	// refstore.Stage does NOT enforce ref-name syntax (per its contract),
+	// so we validate here — gateway and importer entry points are the
+	// boundary where untrusted ref names enter; refusing obviously-bad
+	// names is a defense in depth in case a caller forgets to validate.
+	for ref := range refUpdates {
+		if ref == "" {
+			return nil, fmt.Errorf("importer: BuildAndCommit: empty refname in updates")
+		}
+		if !validFullRefName(ref) {
+			return nil, fmt.Errorf("importer: BuildAndCommit: invalid refname in updates: %q", ref)
+		}
+	}
+	rs, err := refstore.New(ctx, store, k, &currentBody)
+	if err != nil {
+		return nil, fmt.Errorf("importer: BuildAndCommit: refstore: %w", err)
+	}
+	stage, err := rs.Stage(ctx, refUpdates)
+	if err != nil {
+		return nil, fmt.Errorf("importer: BuildAndCommit: stage: %w", err)
 	}
 
 	// Refuse to commit a body where DefaultBranch points at a deleted ref.
@@ -113,36 +143,85 @@ func BuildAndCommit(
 	// override flag.
 	//
 	// Only reject when the default branch actually EXISTED before this push
-	// and is absent after the merge. An empty/unborn repo legitimately has
+	// and is absent after the stage. An empty/unborn repo legitimately has
 	// DefaultBranch set (e.g. "refs/heads/main" from Import) without the
 	// ref present, and a first push that creates only a non-default branch
 	// must not be misread as "deleting" the unborn default.
+	//
+	// Lookup routing: rs.Lookup answers the pre-stage state authoritatively
+	// (one shard read for sharded mode, O(1) for inline). stage.Lookup
+	// answers the post-stage state in-memory; in sharded mode it can
+	// return ErrLookupNotInStage if the default branch's shard was not
+	// touched by this stage, in which case the post-stage value equals
+	// the pre-stage value (hadBefore).
 	if currentBody.DefaultBranch != "" {
-		_, hadBefore := currentBody.Refs[currentBody.DefaultBranch]
-		_, hasAfter := newRefs[currentBody.DefaultBranch]
+		_, hadBefore, err := rs.Lookup(ctx, currentBody.DefaultBranch)
+		if err != nil {
+			return nil, fmt.Errorf("importer: lookup default before: %w", err)
+		}
+		_, hasAfter, slErr := stage.Lookup(currentBody.DefaultBranch)
+		if slErr != nil && !errors.Is(slErr, refstore.ErrLookupNotInStage) {
+			return nil, fmt.Errorf("importer: lookup default after (stage): %w", slErr)
+		}
+		if errors.Is(slErr, refstore.ErrLookupNotInStage) {
+			// Default branch's shard is unchanged — its post-stage value
+			// equals the pre-stage value.
+			hasAfter = hadBefore
+		}
 		if hadBefore && !hasAfter {
 			return nil, fmt.Errorf("BuildAndCommit: refuses to delete current default branch %q", currentBody.DefaultBranch)
 		}
 	}
 
-	// Sanity defense: every non-deleted ref OID in newRefs must resolve
-	// in bareDir. The gateway should have validated this pre-call; we
-	// re-check defensively because a missing object now means the .bvom
-	// we are about to upload will not cover the ref's tip.
-	for ref, oid := range newRefs {
+	// Sanity defense: every non-deleted ref OID in the effective post-
+	// stage view must resolve in bareDir. The gateway should have
+	// validated this pre-call; we re-check defensively because a
+	// missing object now means the .bvom we are about to upload will
+	// not cover the ref's tip.
+	//
+	// We compute the effective post-stage flat ref map here (rather
+	// than later) so the same map can be reused for buildIndexesFromPack
+	// below — and so the loop count matches the pre-M12 mergeRefs-based
+	// iteration count, preserving the pack-objects timing characteristics
+	// the tests depend on.
+	//
+	// For sharded mode, hoist the rs.List call here so that the patcher
+	// block (which also needs the pre-push ref set to compute excludes)
+	// can reuse the same listing — at most one rs.List per
+	// BuildAndCommit attempt regardless of whether a patcher is attached.
+	var prePushListedRefs map[string]string
+	if stage.Mode == refstore.ModeSharded {
+		prePushListedRefs, err = rs.List(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("importer: BuildAndCommit: list pre-push refs: %w", err)
+		}
+	}
+	effectiveRefs, err := buildEffectiveRefs(ctx, rs, stage, refUpdates, prePushListedRefs)
+	if err != nil {
+		return nil, fmt.Errorf("importer: BuildAndCommit: effective refs: %w", err)
+	}
+	for ref, oid := range effectiveRefs {
 		if _, kerr := gitcli.RevParseObjectKind(ctx, bareDir, oid); kerr != nil {
 			return nil, fmt.Errorf("importer: BuildAndCommit: ref %s OID %s not in bareDir: %w", ref, oid, kerr)
 		}
 	}
 
-	k, err := keys.NewRepo(tenantID, repoID)
-	if err != nil {
-		return nil, fmt.Errorf("importer: BuildAndCommit: keys: %w", err)
+	// Effective post-stage ref count and pack-objects inputs: differ by
+	// mode. Inline mode hands us the full map; sharded mode hands us
+	// the new shard list (untouched + changed). For repack purposes we
+	// need at least one tip to pack against; gather them in mode-agnostic
+	// form below.
+	emptyTarget := false
+	switch stage.Mode {
+	case refstore.ModeInline:
+		emptyTarget = len(stage.NewInlineRefs) == 0
+	case refstore.ModeSharded:
+		emptyTarget = len(stage.NewRefShards) == 0
 	}
 
 	// Empty target (all refs deleted) — commit a body with no packs/indexes.
-	if len(newRefs) == 0 {
-		return commitEmptyBody(ctx, r, currentBody, startVersion, actor)
+	if emptyTarget {
+		return commitEmptyBody(ctx, r, currentBody, startVersion, actor, stage, store)
 	}
 
 	// Repack bareDir to a single canonical pack covering all reachable
@@ -168,7 +247,10 @@ func BuildAndCommit(
 	canonicalPack := prefix + "-" + packID + ".pack"
 	canonicalIdx := prefix + "-" + packID + ".idx"
 
-	idx, err := buildIndexesFromPack(ctx, canonicalPack, canonicalIdx, packID, newRefs)
+	// effectiveRefs was computed during the sanity defense above.
+	// buildIndexesFromPack needs the (refname → oid) map of all commit
+	// tips reachable in the canonical pack so its .bvcg can list them.
+	idx, err := buildIndexesFromPack(ctx, canonicalPack, canonicalIdx, packID, effectiveRefs)
 	if err != nil {
 		return nil, fmt.Errorf("importer: BuildAndCommit: build indexes: %w", err)
 	}
@@ -212,7 +294,6 @@ func BuildAndCommit(
 
 	body := manifest.Body{
 		DefaultBranch: currentBody.DefaultBranch,
-		Refs:          newRefs,
 		Packs: []manifest.PackEntry{{
 			PackID:      packID,
 			PackKey:     k.CanonicalPackKey(packID),
@@ -227,6 +308,20 @@ func BuildAndCommit(
 		Bundles: currentBody.Bundles,
 	}
 
+	// M12: select inline vs sharded layout based on the staged Mode.
+	// manifest.UnmarshalBody enforces that Refs and RefShards are
+	// mutually exclusive, so the unselected side must be left nil/zero.
+	switch stage.Mode {
+	case refstore.ModeInline:
+		body.Refs = stage.NewInlineRefs
+		body.RefShards = nil
+		body.RefSharding = ""
+	case refstore.ModeSharded:
+		body.Refs = nil
+		body.RefShards = stage.NewRefShards
+		body.RefSharding = "hash_v1"
+	}
+
 	// Optional body-patcher hook (e.g. M10 .bvrd delta production).
 	// Runs after all artifacts are uploaded, before the manifest CAS.
 	// The patcher receives the set of new object OIDs introduced by this
@@ -234,16 +329,28 @@ func BuildAndCommit(
 	if patcher != nil {
 		// Compute "new commits" as: git rev-list <new_tips> --not <all_pre_push_tips>
 		// where new_tips are the incoming ref OIDs and all_pre_push_tips are
-		// ALL pre-push ref OIDs from currentBody.Refs (not just those being
-		// updated). This ensures that a push creating a new branch pointing to
-		// an already-indexed commit produces an empty delta — the commit is
-		// already reachable from an existing ref.
+		// ALL pre-push ref OIDs (not just those being updated). This ensures
+		// that a push creating a new branch pointing to an already-indexed
+		// commit produces an empty delta — the commit is already reachable
+		// from an existing ref.
+		//
+		// Pre-push tips come from the RefStore (mode-agnostic). For inline
+		// repos this is cheap; for sharded repos we reuse the prePushListedRefs
+		// already fetched above (at most one rs.List per BuildAndCommit attempt).
+		prePushRefs := prePushListedRefs
+		if prePushRefs == nil {
+			// Inline mode: prePushListedRefs was not populated above; list now.
+			prePushRefs, err = rs.List(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("importer: BuildAndCommit: list pre-push refs: %w", err)
+			}
+		}
 		var newTipArgs []string
 		// Seed excludes from every existing ref (these are all "haves" relative
 		// to this push). This correctly handles the case where a new ref points
 		// to a commit already reachable from another pre-existing ref.
-		excludeArgs := make([]string, 0, len(currentBody.Refs))
-		for _, oldOID := range currentBody.Refs {
+		excludeArgs := make([]string, 0, len(prePushRefs))
+		for _, oldOID := range prePushRefs {
 			if oldOID == "" || oldOID == nullOIDHex {
 				continue
 			}
@@ -283,6 +390,30 @@ func BuildAndCommit(
 			return nil, fmt.Errorf("importer: BuildAndCommit: stale manifest (started at v%d, now v%d): concurrent push lost the CAS race",
 				startVersion, prev.Header.ManifestVersion)
 		}
+		// M12 Phase A: write every NewShardObject to the bucket BEFORE
+		// returning the new body bytes. PutIfAbsent is content-
+		// addressed (key embeds the SHA-256 of contents) so concurrent
+		// identical writes collapse to a single object; ErrAlreadyExists
+		// is swallowed — the bytes are the same.
+		//
+		// Retry semantics: stage is captured from the outer scope and is
+		// NOT recomputed if r.Commit invokes this callback more than
+		// once. That is safe because the CAS-loser guard above returns
+		// immediately on any version mismatch — productive retries from
+		// within the callback are impossible, so the same stage's
+		// content-addressed PutIfAbsent calls are at worst idempotent
+		// no-ops on a retry. If a concurrent push wins, the caller
+		// re-enters BuildAndCommit from the top, which recomputes the
+		// stage against fresh state.
+		//
+		// A failed CAS leaves the shards in the bucket as orphans;
+		// Phase 7 GC will reclaim them because no manifest references
+		// them.
+		for _, w := range stage.NewShardObjects {
+			if _, perr := store.PutIfAbsent(ctx, w.Key, bytes.NewReader(w.Contents), nil); perr != nil && !errors.Is(perr, storage.ErrAlreadyExists) {
+				return nil, fmt.Errorf("importer: PutIfAbsent shard %s: %w", w.Key, perr)
+			}
+		}
 		return bodyBytes, nil
 	}); err != nil {
 		return nil, fmt.Errorf("importer: BuildAndCommit: commit: %w", err)
@@ -293,7 +424,21 @@ func BuildAndCommit(
 
 // commitEmptyBody handles the all-refs-deleted case: nothing to repack,
 // no pack to upload, body has empty packs/indexes/refs.
-func commitEmptyBody(ctx context.Context, r *repo.Repo, prev manifest.Body, startVersion uint64, actor string) (*manifest.Body, error) {
+//
+// stage is passed so the empty case can still PutIfAbsent any
+// NewShardObjects (a deletion-only stage could in principle produce a
+// non-empty shard write if some shard still has refs after the merge
+// — but for the empty-target branch every shard collapses to "{}" and
+// is dropped, so stage.NewShardObjects is expected empty here. We
+// still loop defensively so future Stage variants don't silently lose
+// writes).
+//
+// An empty-target body always degrades to inline-empty form (Refs={},
+// no RefShards, no RefSharding tag). We don't preserve the v2 layout
+// for empty bodies because there is nothing to shard and the validator
+// rejects RefSharding='hash_v1' with no RefShards. We degrade to
+// inline layout by clearing the tag.
+func commitEmptyBody(ctx context.Context, r *repo.Repo, prev manifest.Body, startVersion uint64, actor string, stage refstore.Stage, store storage.ObjectStore) (*manifest.Body, error) {
 	body := manifest.Body{
 		DefaultBranch: prev.DefaultBranch,
 		Refs:          map[string]string{},
@@ -311,6 +456,14 @@ func commitEmptyBody(ctx context.Context, r *repo.Repo, prev manifest.Body, star
 			return nil, fmt.Errorf("importer: BuildAndCommit: stale manifest (started at v%d, now v%d): concurrent push lost the CAS race",
 				startVersion, prv.Header.ManifestVersion)
 		}
+		// Defensive: write any NewShardObjects produced by Stage. For
+		// an all-empty target every shard collapsed and was dropped, so
+		// this loop is normally a no-op.
+		for _, w := range stage.NewShardObjects {
+			if _, perr := store.PutIfAbsent(ctx, w.Key, bytes.NewReader(w.Contents), nil); perr != nil && !errors.Is(perr, storage.ErrAlreadyExists) {
+				return nil, fmt.Errorf("importer: PutIfAbsent shard %s: %w", w.Key, perr)
+			}
+		}
 		return bodyBytes, nil
 	}); err != nil {
 		return nil, fmt.Errorf("importer: BuildAndCommit: commit: %w", err)
@@ -318,23 +471,55 @@ func commitEmptyBody(ctx context.Context, r *repo.Repo, prev manifest.Body, star
 	return &body, nil
 }
 
-// mergeRefs returns prev+updates with deletes (null OID) applied. prev is
-// not mutated. updates with empty OID are also treated as deletes (some
-// callers normalize away the null hex string). Each update refname is
-// syntactically validated — gateway and importer entry points are the
-// boundary where untrusted ref names enter, so we reject obviously-bad
-// names here as a defense in depth in case a caller forgets to validate.
-func mergeRefs(prev, updates map[string]string) (map[string]string, error) {
-	out := make(map[string]string, len(prev)+len(updates))
-	for k, v := range prev {
+// buildEffectiveRefs produces a flat post-stage (refname → oid) map.
+//
+// For inline-mode stages this is just stage.NewInlineRefs (Stage
+// already merged updates against the pre-stage map).
+//
+// For sharded-mode stages we materialize the flat view by applying
+// refUpdates on top of the pre-stage listing. The pre-stage listing is
+// supplied via preListed (already fetched by BuildAndCommit before this
+// call to avoid a redundant rs.List round-trip). If preListed is nil
+// and the mode is sharded, buildEffectiveRefs falls back to calling
+// rs.List itself — but in practice BuildAndCommit always supplies it
+// for sharded mode.
+//
+// This is required because the .bvcg builder downstream
+// (buildIndexesFromPack → buildTipsFromRefs) needs every tip's OID
+// to enumerate commit-graph tips; the sharded Stage only carries
+// shards' write-side state, not the unchanged-shard contents in
+// memory.
+//
+// refUpdates uses the same delete convention as refstore.Stage: empty
+// OID or 40-zero nullOIDHex means delete; any other 40-hex value is
+// an upsert.
+//
+// Precondition: refUpdates has already been refname-validated by the
+// BuildAndCommit prelude. buildEffectiveRefs does no further validation.
+func buildEffectiveRefs(ctx context.Context, rs refstore.RefStore, stage refstore.Stage, refUpdates map[string]string, preListed map[string]string) (map[string]string, error) {
+	if stage.Mode == refstore.ModeInline {
+		out := make(map[string]string, len(stage.NewInlineRefs))
+		for k, v := range stage.NewInlineRefs {
+			out[k] = v
+		}
+		return out, nil
+	}
+	// Sharded mode: materialize from pre-stage list + apply updates.
+	pre := preListed
+	if pre == nil {
+		var err error
+		pre, err = rs.List(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("importer: list pre-stage refs: %w", err)
+		}
+	}
+	out := make(map[string]string, len(pre)+len(refUpdates))
+	for k, v := range pre {
 		out[k] = v
 	}
-	for ref, oid := range updates {
+	for ref, oid := range refUpdates {
 		if ref == "" {
 			return nil, fmt.Errorf("empty refname in updates")
-		}
-		if !validFullRefName(ref) {
-			return nil, fmt.Errorf("invalid refname in updates: %q", ref)
 		}
 		if oid == "" || oid == nullOIDHex {
 			delete(out, ref)

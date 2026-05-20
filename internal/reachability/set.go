@@ -11,6 +11,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/reachability/deltaindex"
 	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	"github.com/bucketvcs/bucketvcs/internal/repo/refstore"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
 
@@ -18,8 +19,8 @@ import (
 type Set struct {
 	cg         *commitgraph.Reader
 	omap       *objindex.Map
-	deltas     []*deltaindex.Delta // base-first ordering
-	refs       map[string]pack.OID // effective ref tips after deltas applied
+	deltas     []*deltaindex.Delta                   // base-first ordering
+	refs       map[string]pack.OID                   // effective ref tips after deltas applied
 	deltaIndex map[pack.OID]*deltaindex.CommitRecord // O(1) lookups; latest delta wins
 }
 
@@ -57,8 +58,16 @@ func Load(ctx context.Context, store storage.ObjectStore, k *keys.Repo, body man
 		}
 	}
 
-	refs := make(map[string]pack.OID, len(body.Refs))
-	for name, hex := range body.Refs {
+	rs, err := refstore.New(ctx, store, k, &body)
+	if err != nil {
+		return nil, fmt.Errorf("reachability: open refstore: %w", err)
+	}
+	rawRefs, err := rs.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("reachability: list refs: %w", err)
+	}
+	refs := make(map[string]pack.OID, len(rawRefs))
+	for name, hex := range rawRefs {
 		if hex == "" || hex == "0000000000000000000000000000000000000000" {
 			continue
 		}
@@ -181,7 +190,7 @@ type genItem struct {
 
 type genHeap struct{ items []genItem }
 
-func newGenHeap() *genHeap { return &genHeap{} }
+func newGenHeap() *genHeap  { return &genHeap{} }
 func (h *genHeap) len() int { return len(h.items) }
 func (h *genHeap) push(it genItem) {
 	h.items = append(h.items, it)

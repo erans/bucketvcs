@@ -1,15 +1,17 @@
 package uploadpack
 
 import (
-	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"sort"
 	"strings"
 
 	"github.com/bucketvcs/bucketvcs/internal/pktline"
 	"github.com/bucketvcs/bucketvcs/internal/repo"
+	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	"github.com/bucketvcs/bucketvcs/internal/repo/refstore"
 	"github.com/bucketvcs/bucketvcs/internal/repo/repoerrs"
 	"github.com/bucketvcs/bucketvcs/internal/v2proto"
 )
@@ -57,30 +59,42 @@ func Advertise(req *EngineRequest) error {
 		return err
 	}
 
-	var body manifest.Body
-	if err := json.Unmarshal(view.Body, &body); err != nil {
-		return err
+	body, err := manifest.UnmarshalBody(view.Body)
+	if err != nil {
+		return fmt.Errorf("uploadpack: unmarshal body: %w", err)
+	}
+	k, err := keys.NewRepo(r.TenantID(), r.RepoID())
+	if err != nil {
+		return fmt.Errorf("uploadpack: keys: %w", err)
+	}
+	rs, err := refstore.New(req.Ctx, req.Store, k, &body)
+	if err != nil {
+		return fmt.Errorf("uploadpack: refstore: %w", err)
+	}
+	refs, err := rs.List(req.Ctx)
+	if err != nil {
+		return fmt.Errorf("uploadpack: list refs: %w", err)
 	}
 
-	return writeV0Advertisement(req.Stdout, &body, req.AgentVersion)
+	return writeV0Advertisement(req.Stdout, &body, refs, req.AgentVersion)
 }
 
 // writeV0Advertisement writes the v0 "smart" upload-pack advertisement.
 // When body.DefaultBranch resolves to a known ref, HEAD is advertised first
 // with capabilities and a symref=HEAD:<target> attribute so v0 clients can
 // determine the remote default branch.
-func writeV0Advertisement(w io.Writer, body *manifest.Body, version string) error {
+func writeV0Advertisement(w io.Writer, body *manifest.Body, refs map[string]string, version string) error {
 	pw := pktline.NewWriter(w)
 
-	names := make([]string, 0, len(body.Refs))
-	for n := range body.Refs {
+	names := make([]string, 0, len(refs))
+	for n := range refs {
 		names = append(names, n)
 	}
 	sort.Strings(names)
 
 	headOID, hasHead := "", false
 	if body.DefaultBranch != "" {
-		if oid, ok := body.Refs[body.DefaultBranch]; ok {
+		if oid, ok := refs[body.DefaultBranch]; ok {
 			headOID, hasHead = oid, true
 		}
 	}
@@ -98,7 +112,7 @@ func writeV0Advertisement(w io.Writer, body *manifest.Body, version string) erro
 	if hasHead {
 		_ = pw.WriteString(headOID + " HEAD\x00" + capsWithSymref + "\n")
 		for _, n := range names {
-			_ = pw.WriteString(body.Refs[n] + " " + n + "\n")
+			_ = pw.WriteString(refs[n] + " " + n + "\n")
 		}
 		_ = pw.WriteFlush()
 		return nil
@@ -112,7 +126,7 @@ func writeV0Advertisement(w io.Writer, body *manifest.Body, version string) erro
 
 	first := true
 	for _, n := range names {
-		oid := body.Refs[n]
+		oid := refs[n]
 		if first {
 			_ = pw.WriteString(oid + " " + n + "\x00" + capsWithSymref + "\n")
 			first = false

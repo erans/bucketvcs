@@ -1,15 +1,17 @@
 package receivepack
 
 import (
-	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"sort"
 	"strings"
 
 	"github.com/bucketvcs/bucketvcs/internal/pktline"
 	"github.com/bucketvcs/bucketvcs/internal/repo"
+	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	"github.com/bucketvcs/bucketvcs/internal/repo/refstore"
 	"github.com/bucketvcs/bucketvcs/internal/repo/repoerrs"
 	"github.com/bucketvcs/bucketvcs/internal/v2proto"
 )
@@ -41,19 +43,31 @@ func Advertise(req *EngineRequest) error {
 	if err != nil {
 		return err
 	}
-	var body manifest.Body
-	if err := json.Unmarshal(view.Body, &body); err != nil {
-		return err
+	body, err := manifest.UnmarshalBody(view.Body)
+	if err != nil {
+		return fmt.Errorf("receivepack: unmarshal body: %w", err)
 	}
-	return writeV0Advertisement(req.Stdout, &body, req.AgentVersion)
+	k, err := keys.NewRepo(r.TenantID(), r.RepoID())
+	if err != nil {
+		return fmt.Errorf("receivepack: keys: %w", err)
+	}
+	rs, err := refstore.New(req.Ctx, req.Store, k, &body)
+	if err != nil {
+		return fmt.Errorf("receivepack: refstore: %w", err)
+	}
+	refs, err := rs.List(req.Ctx)
+	if err != nil {
+		return fmt.Errorf("receivepack: list refs: %w", err)
+	}
+	return writeV0Advertisement(req.Stdout, refs, req.AgentVersion)
 }
 
 // writeV0Advertisement is a verbatim port of M3's writeV0ReceivePackAdvertisement
 // minus the "# service=git-receive-pack" preamble (which moved to the HTTP adapter).
-func writeV0Advertisement(w io.Writer, body *manifest.Body, version string) error {
+func writeV0Advertisement(w io.Writer, refs map[string]string, version string) error {
 	pw := pktline.NewWriter(w)
-	names := make([]string, 0, len(body.Refs))
-	for n := range body.Refs {
+	names := make([]string, 0, len(refs))
+	for n := range refs {
 		names = append(names, n)
 	}
 	sort.Strings(names)
@@ -68,7 +82,7 @@ func writeV0Advertisement(w io.Writer, body *manifest.Body, version string) erro
 
 	first := true
 	for _, n := range names {
-		oid := body.Refs[n]
+		oid := refs[n]
 		if first {
 			_ = pw.WriteString(oid + " " + n + "\x00" + caps + "\n")
 			first = false

@@ -380,9 +380,7 @@ func TestMarshalShardContent_NoTrailingNewline(t *testing.T) {
 func TestHashShardContent_KnownVector(t *testing.T) {
 	// Determinism: the empty-shard hash must be stable.
 	got := hashShardContent([]byte("{}"))
-	const want = "sha256-44f7f6f9d77ad3f1f44ab9b35c3079ec5d4d3e76c3a8c93fc81d3f0a91f7c10b"
-	// Sanity: the prefix must be sha256-. The exact suffix is sha256("{}")
-	// hex — let's compute it inline rather than hand-coding.
+	const want = "sha256-44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
 	const wantPrefix = "sha256-"
 	if got[:len(wantPrefix)] != wantPrefix {
 		t.Errorf("hash prefix = %q want %q", got[:len(wantPrefix)], wantPrefix)
@@ -391,7 +389,7 @@ func TestHashShardContent_KnownVector(t *testing.T) {
 		t.Errorf("hash length = %d want %d", len(got), len(wantPrefix)+64)
 	}
 	// "{}" hex of sha256 is well-known:
-	// echo -n "{}" | sha256sum → 44f7f6f9d77ad3f1f44ab9b35c3079ec5d4d3e76c3a8c93fc81d3f0a91f7c10b
+	// printf '%s' '{}' | sha256sum → 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a
 	if got != want {
 		t.Errorf("got %s want %s", got, want)
 	}

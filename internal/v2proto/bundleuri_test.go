@@ -19,7 +19,7 @@ func TestHandleBundleURI_Current_Advertises(t *testing.T) {
 			ID: "b1", Kind: "full_default", Ref: "refs/heads/main",
 			TipOID: "tip", CoversManifestVersion: 1,
 			GeneratedAt: time.Now().Add(-time.Minute).Format(time.RFC3339),
-			BundleHash: "sha256-" + validHex, BundleKey: "bk",
+			BundleHash:  "sha256-" + validHex, BundleKey: "bk",
 		}},
 	}
 	var sawExpected string

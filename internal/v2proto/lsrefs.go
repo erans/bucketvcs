@@ -1,19 +1,27 @@
 package v2proto
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"sort"
 	"strings"
 
 	"github.com/bucketvcs/bucketvcs/internal/pktline"
+	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	"github.com/bucketvcs/bucketvcs/internal/repo/refstore"
+	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
 
-// HandleLsRefs implements the protocol-v2 "ls-refs" command. Args is the full
-// pkt-line token stream that was the request body (including the
-// "command=ls-refs" line, the delim, the args, and the trailing flush). The
-// response is written to w as pkt-line frames followed by a flush.
+// HandleLsRefs is the legacy entry point for callers that have a body known
+// to be inline-mode (no shards). Wraps HandleLsRefsWithStore with a nil
+// ObjectStore — works for v1 bodies because the refstore factory routes to
+// InlineRefStore in that case.
+//
+// Sharded bodies will return an error here (refstore.New returns an error when
+// asked to construct a ShardedRefStore over a nil store). Callers that may
+// handle v2 manifests MUST use HandleLsRefsWithStore.
 //
 // Supported argument keywords (each on its own pkt-line frame):
 //
@@ -31,7 +39,17 @@ import (
 // nothing because tag-peeling requires object-store reads (it can be added
 // later by walking commitgraph). Tests for peel are not part of the M3
 // matrix.
-func HandleLsRefs(args []pktline.Token, body *manifest.Body, w io.Writer) error {
+func HandleLsRefs(ctx context.Context, args []pktline.Token, body *manifest.Body, w io.Writer) error {
+	return HandleLsRefsWithStore(ctx, args, body, nil, nil, w)
+}
+
+// HandleLsRefsWithStore is the M12+ ls-refs handler. It opens a RefStore over
+// body (inline or sharded), enumerates refs through it, and emits the
+// wire-format output. The store + keys are only consulted for sharded bodies;
+// inline bodies route to the in-memory InlineRefStore.
+//
+// For inline-mode bodies, store and k may be nil.
+func HandleLsRefsWithStore(ctx context.Context, args []pktline.Token, body *manifest.Body, store storage.ObjectStore, k *keys.Repo, w io.Writer) error {
 	var (
 		wantSymrefs bool
 		wantUnborn  bool
@@ -59,6 +77,15 @@ func HandleLsRefs(args []pktline.Token, body *manifest.Body, w io.Writer) error 
 		return err
 	}
 
+	rs, err := refstore.New(ctx, store, k, body)
+	if err != nil {
+		return fmt.Errorf("ls-refs: refstore: %w", err)
+	}
+	refs, err := rs.List(ctx)
+	if err != nil {
+		return fmt.Errorf("ls-refs: list: %w", err)
+	}
+
 	pw := pktline.NewWriter(w)
 
 	// HEAD line: in v2, HEAD is emitted only if the default branch is in the
@@ -66,7 +93,7 @@ func HandleLsRefs(args []pktline.Token, body *manifest.Body, w io.Writer) error 
 	// body.DefaultBranch is already a fully-qualified ref (e.g. refs/heads/main);
 	// see internal/repo/manifest/body.go and the importer/exporter contract.
 	headTarget := body.DefaultBranch
-	headOID, headExists := body.Refs[headTarget]
+	headOID, headExists := refs[headTarget]
 	if (headExists || wantUnborn) && prefixOK("HEAD", prefixes) {
 		var line string
 		switch {
@@ -84,8 +111,8 @@ func HandleLsRefs(args []pktline.Token, body *manifest.Body, w io.Writer) error 
 	}
 
 	// Other refs.
-	names := make([]string, 0, len(body.Refs))
-	for name := range body.Refs {
+	names := make([]string, 0, len(refs))
+	for name := range refs {
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -93,7 +120,7 @@ func HandleLsRefs(args []pktline.Token, body *manifest.Body, w io.Writer) error 
 		if !prefixOK(name, prefixes) {
 			continue
 		}
-		oid := body.Refs[name]
+		oid := refs[name]
 		if err := pw.WriteString(oid + " " + name + "\n"); err != nil {
 			return err
 		}

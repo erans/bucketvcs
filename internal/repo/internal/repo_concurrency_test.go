@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/repo"
+	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
 	tx "github.com/bucketvcs/bucketvcs/internal/repo/tx"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
@@ -363,7 +364,7 @@ func TestCommit_Scenario_ReadDuringWrite(t *testing.T) {
 				readerErrs.Add(1)
 				return
 			}
-			if v.Header.SchemaVersion != 1 {
+			if v.Header.SchemaVersion != manifest.CurrentSchemaVersion {
 				readerErrs.Add(1)
 				return
 			}

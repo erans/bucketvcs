@@ -4,7 +4,6 @@ package exporter
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,7 +13,9 @@ import (
 
 	"github.com/bucketvcs/bucketvcs/internal/gitcli"
 	"github.com/bucketvcs/bucketvcs/internal/repo"
+	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	"github.com/bucketvcs/bucketvcs/internal/repo/refstore"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
 
@@ -68,9 +69,18 @@ func Export(ctx context.Context, store storage.ObjectStore, opts Options) (*Resu
 	if err != nil {
 		return nil, err
 	}
-	var body manifest.Body
-	if err := json.Unmarshal(view.Body, &body); err != nil {
+	body, err := manifest.UnmarshalBody(view.Body)
+	if err != nil {
 		return nil, fmt.Errorf("exporter: unmarshal body: %w", err)
+	}
+	k, _ := keys.NewRepo(opts.Tenant, opts.Repo)
+	rs, err := refstore.New(ctx, store, k, &body)
+	if err != nil {
+		return nil, fmt.Errorf("exporter: refstore: %w", err)
+	}
+	refs, err := rs.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("exporter: list refs: %w", err)
 	}
 
 	if err := os.MkdirAll(opts.DestDir, 0o755); err != nil {
@@ -89,7 +99,7 @@ func Export(ctx context.Context, store storage.ObjectStore, opts Options) (*Resu
 		objectCount += count
 	}
 
-	for ref, oid := range body.Refs {
+	for ref, oid := range refs {
 		if !validRefName(ref) {
 			return nil, fmt.Errorf("exporter: ref name %q not in refs/* namespace or malformed", ref)
 		}
@@ -111,8 +121,8 @@ func Export(ctx context.Context, store storage.ObjectStore, opts Options) (*Resu
 			return nil, fmt.Errorf("exporter: default_branch %q rejected by git check-ref-format: %w", body.DefaultBranch, err)
 		}
 		// If refs are non-empty, default_branch must point to one of them.
-		if len(body.Refs) > 0 {
-			if _, ok := body.Refs[body.DefaultBranch]; !ok {
+		if len(refs) > 0 {
+			if _, ok := refs[body.DefaultBranch]; !ok {
 				return nil, fmt.Errorf("exporter: default_branch %q not present in refs", body.DefaultBranch)
 			}
 		}

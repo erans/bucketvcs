@@ -8,10 +8,11 @@ import (
 )
 
 const (
-	// CurrentSchemaVersion is the schema_version M1 writers emit and
-	// the highest schema_version M1 readers accept. Per §43.7 the gate
-	// is asymmetric: future versions fail closed.
-	CurrentSchemaVersion = 1
+	// CurrentSchemaVersion is the schema_version this build emits and
+	// the highest schema_version this build accepts. Per §43.7 the gate
+	// is asymmetric: future versions fail closed. M12 bumped 1 → 2 to
+	// introduce sharded refs (Body.RefShards).
+	CurrentSchemaVersion = 2
 
 	// SupportedReaderVersion is the minimum reader version this build
 	// satisfies. Manifests with min_reader_version > this value are

@@ -16,8 +16,9 @@ type LiveSet map[string]struct{}
 // for one repo at the manifest snapshot header+body.
 //
 // The body is parsed as manifest.Body. Unknown fields in the body are
-// ignored. Future-fields recognized but currently emitted as empty
-// (ref-shards for M12) are tolerated. Bundles are fully supported as of M11.
+// ignored. M12 fields (RefShards) are extracted and added to the live
+// set so a GC sweep against a v2 manifest does not delete live
+// ref-shard objects. Bundles are fully supported as of M11.
 //
 // On a JSON parse failure the header-derived keys are returned together
 // with a non-nil error. The caller must treat this error as fatal and
@@ -71,6 +72,11 @@ func BuildLiveSet(k *keys.Repo, header manifest.RootHeader, bodyJSON []byte) (Li
 		}
 		if b.SidecarKey != "" {
 			live[b.SidecarKey] = struct{}{}
+		}
+	}
+	for _, s := range body.RefShards {
+		if s.Key != "" {
+			live[s.Key] = struct{}{}
 		}
 	}
 	return live, nil

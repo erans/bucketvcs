@@ -16,13 +16,13 @@ func TestEvaluateFreshness_Current(t *testing.T) {
 		GeneratedAt:           now.Add(-1 * time.Hour).Format(time.RFC3339),
 	}
 	res := EvaluateFreshness(FreshnessInputs{
-		Bundle:        &bundle,
-		CurrentTip:    "tip-current",
-		IsAncestor:    func(a, d string, max int) bool { return false },
-		WalkBack:      func(from, target string, max int) (int, error) { return 0, nil },
-		WarmCommits:   100,
-		WarmAge:       24 * time.Hour,
-		Now:           now,
+		Bundle:      &bundle,
+		CurrentTip:  "tip-current",
+		IsAncestor:  func(a, d string, max int) bool { return false },
+		WalkBack:    func(from, target string, max int) (int, error) { return 0, nil },
+		WarmCommits: 100,
+		WarmAge:     24 * time.Hour,
+		Now:         now,
 	})
 	if res.State != FreshnessCurrent {
 		t.Errorf("got %s, want current", res.State)
@@ -36,10 +36,10 @@ func TestEvaluateFreshness_Warm(t *testing.T) {
 		GeneratedAt: now.Add(-1 * time.Hour).Format(time.RFC3339),
 	}
 	res := EvaluateFreshness(FreshnessInputs{
-		Bundle:     &bundle,
-		CurrentTip: "new-tip",
-		IsAncestor: func(a, d string, max int) bool { return a == "old-tip" && d == "new-tip" },
-		WalkBack:   func(from, target string, max int) (int, error) { return 5, nil },
+		Bundle:      &bundle,
+		CurrentTip:  "new-tip",
+		IsAncestor:  func(a, d string, max int) bool { return a == "old-tip" && d == "new-tip" },
+		WalkBack:    func(from, target string, max int) (int, error) { return 5, nil },
 		WarmCommits: 100, WarmAge: 24 * time.Hour, Now: now,
 	})
 	if res.State != FreshnessWarm {
@@ -57,10 +57,10 @@ func TestEvaluateFreshness_StaleByAge(t *testing.T) {
 		GeneratedAt: now.Add(-25 * time.Hour).Format(time.RFC3339),
 	}
 	res := EvaluateFreshness(FreshnessInputs{
-		Bundle:     &bundle,
-		CurrentTip: "new-tip",
-		IsAncestor: func(a, d string, max int) bool { return true },
-		WalkBack:   func(from, target string, max int) (int, error) { return 5, nil },
+		Bundle:      &bundle,
+		CurrentTip:  "new-tip",
+		IsAncestor:  func(a, d string, max int) bool { return true },
+		WalkBack:    func(from, target string, max int) (int, error) { return 5, nil },
 		WarmCommits: 100, WarmAge: 24 * time.Hour, Now: now,
 	})
 	if res.State != FreshnessStale {
@@ -75,10 +75,10 @@ func TestEvaluateFreshness_StaleByForcePush(t *testing.T) {
 		GeneratedAt: now.Add(-1 * time.Hour).Format(time.RFC3339),
 	}
 	res := EvaluateFreshness(FreshnessInputs{
-		Bundle:     &bundle,
-		CurrentTip: "divergent-tip",
-		IsAncestor: func(a, d string, max int) bool { return false }, // not an ancestor
-		WalkBack:   func(from, target string, max int) (int, error) { return -1, nil },
+		Bundle:      &bundle,
+		CurrentTip:  "divergent-tip",
+		IsAncestor:  func(a, d string, max int) bool { return false }, // not an ancestor
+		WalkBack:    func(from, target string, max int) (int, error) { return -1, nil },
 		WarmCommits: 100, WarmAge: 24 * time.Hour, Now: now,
 	})
 	if res.State != FreshnessStale {
