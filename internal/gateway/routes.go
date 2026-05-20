@@ -21,6 +21,10 @@ const (
 	OpUploadPack
 	OpReceivePack
 	OpLFSBatch
+	OpLFSLocksCreate
+	OpLFSLocksList
+	OpLFSLocksVerify
+	OpLFSLocksUnlock
 )
 
 // RoutedRequest is the parsed shape of a Git-protocol request.
@@ -78,6 +82,23 @@ func ParseRoute(method, urlPath, rawQuery string) (*RoutedRequest, error) {
 		// RequiredAction is read; the LFS handler performs a secondary
 		// write check after parsing the body's operation field.
 		return &RoutedRequest{tenant, repoID, OpLFSBatch, auth.ActionRead}, nil
+	case method == http.MethodPost && rest == "info/lfs/locks":
+		return &RoutedRequest{tenant, repoID, OpLFSLocksCreate, auth.ActionWrite}, nil
+	case method == http.MethodGet && rest == "info/lfs/locks":
+		return &RoutedRequest{tenant, repoID, OpLFSLocksList, auth.ActionRead}, nil
+	case method == http.MethodPost && rest == "info/lfs/locks/verify":
+		return &RoutedRequest{tenant, repoID, OpLFSLocksVerify, auth.ActionRead}, nil
+	case method == http.MethodPost && strings.HasPrefix(rest, "info/lfs/locks/") && strings.HasSuffix(rest, "/unlock"):
+		// Lock ID is the segment between "info/lfs/locks/" and "/unlock".
+		// We don't extract it here; the LFS handler parses URL.Path.
+		// Reject paths that have no body between the prefix and suffix
+		// (the lock id MUST be non-empty), and paths containing extra
+		// slashes (the id MUST be a single segment).
+		mid := strings.TrimSuffix(strings.TrimPrefix(rest, "info/lfs/locks/"), "/unlock")
+		if mid == "" || strings.Contains(mid, "/") {
+			return nil, ErrRouteNoMatch
+		}
+		return &RoutedRequest{tenant, repoID, OpLFSLocksUnlock, auth.ActionWrite}, nil
 	default:
 		return nil, ErrRouteNoMatch
 	}
@@ -100,7 +121,7 @@ func (s *Server) routeRepo(w http.ResponseWriter, r *http.Request) {
 		s.handleUploadPack(w, r, rr.Tenant, rr.Repo)
 	case OpReceivePack:
 		s.handleReceivePack(w, r, rr.Tenant, rr.Repo)
-	case OpLFSBatch:
+	case OpLFSBatch, OpLFSLocksCreate, OpLFSLocksList, OpLFSLocksVerify, OpLFSLocksUnlock:
 		if s.lfsHandler == nil {
 			http.NotFound(w, r)
 			return

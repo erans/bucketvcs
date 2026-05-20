@@ -19,6 +19,7 @@ import (
 
 	"github.com/bucketvcs/bucketvcs/internal/gateway"
 	"github.com/bucketvcs/bucketvcs/internal/lfs"
+	"github.com/bucketvcs/bucketvcs/internal/lfs/locks"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/sshd"
 )
@@ -211,6 +212,13 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	var httpSrv *http.Server
 	httpErrCh := make(chan error, 1)
 	if *addr != "" || ln != nil {
+		// LFS Locks store (M13.3) shares the authdb sqlite handle. Only
+		// constructed when LFS is enabled — when --lfs=false the locks
+		// routes return 503 (server.go's LocksStore=nil gate).
+		var lfsLocksStore *locks.Store
+		if *lfsEnabled {
+			lfsLocksStore = locks.New(authS)
+		}
 		srv, err := gateway.NewServer(store, gateway.Options{
 			MirrorDir:               *mirrorDir,
 			Version:                 buildVersion,
@@ -226,6 +234,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			LFSPresignTTL:           *lfsPresignTTL,
 			LFSProxiedURLSigningKey: signingKey,
 			LFSProxiedBaseURL:       *proxiedBaseURL,
+			LFSLocksStore:           lfsLocksStore,
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "serve: NewServer: %v\n", err)

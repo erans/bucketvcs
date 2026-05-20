@@ -69,6 +69,65 @@ func emitLFSVerify(ctx context.Context, logger *slog.Logger, repo, user, oid str
 	)
 }
 
+// emitLFSLockCreate records a "lfs.lock.create" audit event after a
+// lock is successfully created (201). repo is "<tenant>/<repo>" form.
+// user is the actor's Name. lockID, path, and refName carry the newly
+// created lock's fields (refName may be "" if the client omitted Ref).
+// ownerUserID is the M4 user ID of the lock creator — provided as an
+// explicit field (in addition to the human-readable user name) so
+// audit consumers can pivot on user IDs without name-joins.
+func emitLFSLockCreate(ctx context.Context, logger *slog.Logger, repo, user, ownerUserID, lockID, path, refName string) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.LogAttrs(ctx, slog.LevelInfo, "lfs.lock.create",
+		slog.String("event", "lfs.lock.create"),
+		slog.String("repo", repo),
+		slog.String("user", user),
+		slog.String("owner_user_id", ownerUserID),
+		slog.String("lock_id", lockID),
+		slog.String("path", path),
+		slog.String("ref_name", refName),
+	)
+}
+
+// emitLFSLockDelete records a "lfs.lock.delete" audit event after a
+// lock is successfully deleted (200). repo is "<tenant>/<repo>" form.
+// user is the caller's Name. force records whether force=true was
+// requested. forceTargetUserID is the lock owner's UserID when the
+// caller is NOT the owner (force-delete path); it is empty ("") when
+// the caller IS the owner.
+func emitLFSLockDelete(ctx context.Context, logger *slog.Logger, repo, user, lockID string, force bool, forceTargetUserID string) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.LogAttrs(ctx, slog.LevelInfo, "lfs.lock.delete",
+		slog.String("event", "lfs.lock.delete"),
+		slog.String("repo", repo),
+		slog.String("user", user),
+		slog.String("lock_id", lockID),
+		slog.Bool("force", force),
+		slog.String("force_target_user_id", forceTargetUserID),
+	)
+}
+
+// emitLFSLockVerify records a "lfs.lock.verify" audit event after a
+// POST /info/lfs/locks/verify completes (200). repo is "<tenant>/<repo>"
+// form. user is the actor's Name. oursCount and theirsCount are the
+// lengths of the partitioned ours/theirs slices returned to the caller.
+func emitLFSLockVerify(ctx context.Context, logger *slog.Logger, repo, user string, oursCount, theirsCount int) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.LogAttrs(ctx, slog.LevelInfo, "lfs.lock.verify",
+		slog.String("event", "lfs.lock.verify"),
+		slog.String("repo", repo),
+		slog.String("user", user),
+		slog.Int("ours_count", oursCount),
+		slog.Int("theirs_count", theirsCount),
+	)
+}
+
 // EmitLFSSSHAuthenticate records a "lfs.ssh_authenticate" audit event
 // after a git-lfs-authenticate exec request completes. Matches the M11
 // audit flat-attrs shape used by the other lfs.* events.

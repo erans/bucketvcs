@@ -112,3 +112,87 @@ func TestEmitSSHAuthenticateMetric_AllOutcomes(t *testing.T) {
 		}
 	}
 }
+
+func TestEmitLockCreateMetric_OK(t *testing.T) {
+	for _, outcome := range []string{"created", "conflict", "error"} {
+		var buf bytes.Buffer
+		emitLockCreateMetric(context.Background(), captureLogger(&buf), outcome)
+		line := buf.String()
+		for _, want := range []string{
+			`"metric_name":"lfs_locks_created_total"`,
+			`"value":1`,
+			`"outcome":"` + outcome + `"`,
+		} {
+			if !strings.Contains(line, want) {
+				t.Errorf("[%s] missing %q in %s", outcome, want, line)
+			}
+		}
+	}
+}
+
+func TestEmitLockListMetric_OK(t *testing.T) {
+	for _, outcome := range []string{"success", "error"} {
+		var buf bytes.Buffer
+		emitLockListMetric(context.Background(), captureLogger(&buf), outcome)
+		line := buf.String()
+		for _, want := range []string{
+			`"metric_name":"lfs_locks_listed_total"`,
+			`"value":1`,
+			`"outcome":"` + outcome + `"`,
+		} {
+			if !strings.Contains(line, want) {
+				t.Errorf("[%s] missing %q in %s", outcome, want, line)
+			}
+		}
+	}
+}
+
+func TestEmitLockVerifyMetric_OK(t *testing.T) {
+	for _, outcome := range []string{"success", "error"} {
+		var buf bytes.Buffer
+		emitLockVerifyMetric(context.Background(), captureLogger(&buf), outcome)
+		line := buf.String()
+		for _, want := range []string{
+			`"metric_name":"lfs_locks_verified_total"`,
+			`"value":1`,
+			`"outcome":"` + outcome + `"`,
+		} {
+			if !strings.Contains(line, want) {
+				t.Errorf("[%s] missing %q in %s", outcome, want, line)
+			}
+		}
+	}
+}
+
+func TestEmitLockDeleteMetric_OK(t *testing.T) {
+	cases := []struct {
+		force   bool
+		outcome string
+	}{
+		{false, "owner"},
+		{false, "denied"},
+		{false, "not_found"},
+		{false, "error"},
+		{true, "forced"},
+		{true, "owner"},
+	}
+	for _, tc := range cases {
+		var buf bytes.Buffer
+		emitLockDeleteMetric(context.Background(), captureLogger(&buf), tc.force, tc.outcome)
+		line := buf.String()
+		forceStr := "false"
+		if tc.force {
+			forceStr = "true"
+		}
+		for _, want := range []string{
+			`"metric_name":"lfs_locks_deleted_total"`,
+			`"value":1`,
+			`"force":"` + forceStr + `"`,
+			`"outcome":"` + tc.outcome + `"`,
+		} {
+			if !strings.Contains(line, want) {
+				t.Errorf("[force=%v/%s] missing %q in %s", tc.force, tc.outcome, want, line)
+			}
+		}
+	}
+}

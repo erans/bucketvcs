@@ -55,6 +55,13 @@ func Open(path string) (*Store, error) {
 // Close closes the underlying database handle.
 func (s *Store) Close() error { return s.db.Close() }
 
+// DB returns the underlying *sql.DB for callers that need to attach
+// additional schema-managed tables to the same handle (e.g., the
+// M13.3 LFS locks store). External writers MUST respect the same
+// concurrency constraints sqlitestore.Open enforces (WAL,
+// foreign_keys, single open conn).
+func (s *Store) DB() *sql.DB { return s.db }
+
 // ErrLastAdmin is returned by DeleteUser when removing the user would
 // leave the system with zero admins.
 var ErrLastAdmin = errors.New("sqlitestore: refusing to delete the last admin")

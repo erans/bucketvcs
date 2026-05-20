@@ -5,7 +5,7 @@ LFS support in production. It covers the LFS production-readiness surface,
 the per-repo storage layout, the M13-relevant `bucketvcs serve` flags, the
 per-backend transfer-mode matrix, three minimum operator setup recipes, the
 signed-URL TTL rule against M8 retention, the verify-failure forensic
-procedure, the complete observability surface (6 metrics + 4 audit events),
+procedure, the complete observability surface (10 metrics + 7 audit events),
 operations runbooks (signing-key rotation, emergency disable, manual
 cleanup), the deferred-work tracker, and an FAQ for the common stock
 `git-lfs` operator questions. Stock `git-lfs ≥ 3.0` clients push and pull
@@ -19,16 +19,17 @@ unchanged against a bucketvcs gateway over both HTTPS and SSH.
 |---|---|---|
 | HTTPS LFS push / pull | ✅ shipped | P0–P3; direct signed URL on S3/R2/GCS/Azure, gateway-proxied URL on localfs |
 | SSH `git-lfs-authenticate` | ✅ shipped | P4; Basic-auth bearer in the response header |
-| Locks API | ❌ deferred | M13.x or later; clients fall back to no-locking transparently |
+| Locks API | ✅ implemented (M13.3) | Stock git-lfs lock/unlock/locks/locks --verify work against this server |
 | Multipart upload | ❌ deferred | Single PUT only; proxied-path cap 5 GiB (5×2³⁰ bytes), direct-path cap is the backend's single-PUT limit (5 GB / 5×10⁹ bytes on S3/R2 — slightly under the proxied cap) |
 | LFS GC | ❌ deferred | LFS objects only sweep when the repo is removed |
 | Per-tenant byte quotas | ❌ deferred | Apply object-store-side quotas / lifecycle rules instead |
 | LFS-aware bandwidth metering | ❌ deferred | Get byte usage from S3 access logs / GCS audit logs / Azure storage analytics |
 | LFS-specific token scopes | ❌ deferred | Today every M4 write token can push LFS; every M4 read token can pull LFS |
 
-The four deferred items are tracked in §8 with the trigger condition each
+The remaining deferred items are tracked in §8 with the trigger condition each
 operator should watch for. The verify-token mechanism listed as deferred
-in earlier M13 docs shipped in M13.1 — see §5.4.
+in earlier M13 docs shipped in M13.1 — see §5.4. The Locks API listed as
+deferred in M13/M13.1/M13.2 shipped in M13.3 — see §8.1.
 
 ---
 
@@ -456,7 +457,8 @@ exits with code 2.
 
 All M13 metrics are emitted as slog text-format `metric` records with
 `metric_name=<name> value=<int>` plus label key/value pairs. Below are
-the six M13 metrics with valid label values and emission sites:
+the ten M13 metrics with valid label values and emission sites (six
+from M13/M13.1/M13.2 plus four added in M13.3 for the Locks API):
 
 #### `lfs_batch_requests_total{op,result}`
 
@@ -560,9 +562,54 @@ One record per SSH `git-lfs-authenticate` exec command.
 
 Site: `internal/sshd/session.go` `handleLFSAuthenticate`.
 
+#### `lfs_locks_created_total{outcome}` (M13.3)
+
+One record per `POST /info/lfs/locks` request.
+- `outcome`:
+  - `created` — 201 lock created successfully.
+  - `conflict` — 409 path already locked by another owner.
+  - `error` — any other failure (401 / 400 / 503 / 500).
+
+Site: `internal/lfs/locks_handler.go` `handleLocksCreate`.
+
+#### `lfs_locks_listed_total{outcome}` (M13.3)
+
+One record per `GET /info/lfs/locks` request.
+- `outcome`:
+  - `success` — 200 list returned normally.
+  - `error` — any failure (401 / 400 / 503 / 500).
+
+Site: `internal/lfs/locks_handler.go` `handleLocksList`.
+
+#### `lfs_locks_verified_total{outcome}` (M13.3)
+
+One record per `POST /info/lfs/locks/verify` request.
+- `outcome`:
+  - `success` — 200 partitioned ours/theirs returned normally.
+  - `error` — any failure (401 / 400 / 503 / 500).
+
+Site: `internal/lfs/locks_handler.go` `handleLocksVerify`.
+
+#### `lfs_locks_deleted_total{force,outcome}` (M13.3)
+
+One record per `POST /info/lfs/locks/<id>/unlock` request.
+- `force`: `true` or `false` — whether the caller set `force=true`.
+- `outcome`:
+  - `owner` — 200 caller is the lock owner.
+  - `forced` — 200 non-owner caller used `force=true`.
+  - `denied` — 403 non-owner caller did not pass `force=true`.
+  - `not_found` — 404 lock ID does not exist.
+  - `error` — any other failure (401 / 400 / 503 / 500).
+
+Operators should alert on a sustained non-zero `forced` rate — that
+indicates non-owner force-unlocks are happening in volume and may
+warrant social escalation. Site: `internal/lfs/locks_handler.go`
+`handleLocksUnlock`.
+
 ### 6.2 Audit events
 
-Four M13 audit events. All use the flat-attribute slog shape established
+Seven M13 audit events (four from M13/M13.1/M13.2, three added in M13.3
+for the Locks API). All use the flat-attribute slog shape established
 by M11 — each event has a top-level `event=<name>` attr plus event-
 specific attrs. The audit stream is the same stdout/stderr stream that
 carries metrics.
@@ -620,6 +667,48 @@ anon|error|client_disconnected`.
 
 Site: `internal/lfs/audit.go` `EmitLFSSSHAuthenticate`, called from
 `internal/sshd/session.go`.
+
+#### `event=lfs.lock.create` (M13.3)
+
+Emitted after a `POST /info/lfs/locks` request creates a lock (201).
+Not emitted on conflict / unauthorized / error.
+
+Attrs: `repo=<tenant>/<repo>`, `user=<actor name>`,
+`owner_user_id=<M4 user ID of the creator>`, `lock_id=<lock_…>`,
+`path=<locked path>`, `ref_name=<ref name or empty>` — `ref_name` is the
+optional repo-ref the lock was scoped to (empty for repo-wide locks).
+The explicit `owner_user_id` field lets audit consumers pivot on user
+IDs without a name-join.
+
+Site: `internal/lfs/audit.go` `emitLFSLockCreate`, called from
+`internal/lfs/locks_handler.go` `handleLocksCreate`.
+
+#### `event=lfs.lock.delete` (M13.3)
+
+Emitted after a `POST /info/lfs/locks/<id>/unlock` request deletes a
+lock (200). Not emitted on 403 / 404 / other-error paths.
+
+Attrs: `repo=<tenant>/<repo>`, `user=<actor name>`, `lock_id=<lock_…>`,
+`force=<true|false>` (whether the caller passed `force=true`),
+`force_target_user_id=<owner user ID when force-deleting another user's
+lock; empty when the caller is the owner>`. Operators looking for
+audit traces of force-unlocks should grep for non-empty
+`force_target_user_id`.
+
+Site: `internal/lfs/audit.go` `emitLFSLockDelete`, called from
+`internal/lfs/locks_handler.go` `handleLocksUnlock`.
+
+#### `event=lfs.lock.verify` (M13.3)
+
+Emitted after a `POST /info/lfs/locks/verify` request completes (200).
+Not emitted on unauthorized / error.
+
+Attrs: `repo=<tenant>/<repo>`, `user=<actor name>`,
+`ours_count=<int>` (locks owned by the caller),
+`theirs_count=<int>` (locks owned by others).
+
+Site: `internal/lfs/audit.go` `emitLFSLockVerify`, called from
+`internal/lfs/locks_handler.go` `handleLocksVerify`.
 
 ### 6.3 Recommended alerts
 
@@ -783,44 +872,76 @@ indefinitely.
 
 ## 8. Deferred work
 
-Four items are tracked deliberately outside M13. Each subsection below
+Items are tracked deliberately outside M13. Each subsection below
 records why the item is deferred, the operational trigger condition that
 should prompt operators to escalate, and the workaround available today.
 The production-readiness table in the preamble cross-references each
 item by section number.
 
 > **The verify-token mechanism originally tracked here as deferred
-> shipped in M13.1 — see §5.4.**
+> shipped in M13.1 — see §5.4. The Locks API originally tracked here
+> as deferred shipped in M13.3 — see §8.1.**
 
 ### 8.1 LFS Locking API
 
-**Status.** Not implemented. The Locks API (`POST /locks`, `GET /locks`,
-`POST /locks/:id/unlock`, `POST /locks/verify`) is part of the LFS
-server protocol but is not served by M13. The `git-lfs` client treats
-absence of the Locks endpoints as "this server does not support
-locking" and falls back to no-locking transparently — `git lfs lock`
-and `git lfs unlock` fail with a clear client-side error, and `git lfs
-push` / `git lfs pull` are unaffected.
+**Status.** Implemented (M13.3, tag m13.3-lfs-locks). The four endpoints
+(`POST /locks`, `GET /locks`, `POST /locks/verify`,
+`POST /locks/:id/unlock`) are served by the gateway under
+`{tenant}/{repo}.git/info/lfs/locks`. Stock `git-lfs` clients
+(`git lfs lock`, `git lfs unlock`, `git lfs locks`, `git lfs locks --verify`)
+work without configuration.
 
-**Why deferred.** Lock state is a separate control-plane data model
-(lock ID, OID or path, owning user, creation time, repo scope). It does
-not fit into the per-repo object-store layout that M13 uses for the
-blob payload itself. The spec §11 lists Locks as M13.x or later
-precisely because the storage model is non-trivial: locks need either a
-separate per-tenant relational store or a per-repo JSON ledger with
-race-safe updates, and either choice deserves its own milestone.
+**Storage.** Lock records live in the `lfs_locks` table on the M4 authdb
+sqlite file (the one `--auth-db` points at). Whatever backs up authdb
+backs up locks too. The schema migration is additive and applied on
+first M13.3+ boot; pre-M13.3 binaries on the same authdb file are
+unaffected (they don't see the new table).
 
-**Trigger condition.** Ops teams asking about a file-level
-"reservation" or "checkout" mechanism for large binary assets — usually
-art / CAD / model-binary workflows where two engineers stepping on the
-same `.psd` or `.fbx` would lose work that LFS dedupe cannot recover.
+**Auth.** Create + Unlock require `ActionWrite` on the repo. List +
+Verify require `ActionRead`. The gateway enforces these via
+`RoutedRequest.RequiredAction` before the handler runs.
 
-**Workaround today.** Either client-side locking conventions
-(out-of-band lock files in a shared system) or none — modern asset
-workflows often skip locks entirely and rely on review / branching
-discipline. The gateway does not advertise Locks support, so clients
-configured to require locks will surface the missing capability on
-their first lock attempt rather than failing silently mid-push.
+**Force unlock.** `POST /locks/<id>/unlock {"force": true}` is allowed
+for any caller with `ActionWrite` on the repo (per LFS spec). The
+`lfs.lock.delete` audit event with non-empty `force_target_user_id`
+flags non-owner forced unlocks so operators can trace those after the
+fact.
+
+**Ref scoping.** Locks with a `ref.name` field set filter into
+verify/list responses when the request's ref matches OR when the lock
+itself was created without a ref (repo-wide). Locks without ref.name
+match every filter.
+
+**Cursor scope.** List and Verify cursors are scoped to the originating
+filter tuple. Clients that change a filter (path / id / refspec) between
+paginated calls receive undefined results.
+
+**Pagination cap.** List and Verify cursors are bounded — the server
+stops emitting cursors past offset 10,000 (10× the maxLimit of 1000).
+A repo with more locks than this can still be fully enumerated by
+narrowing the filter (path/refspec); the server intentionally rejects
+deep-offset enumeration to avoid quadratic scans. In practice no
+realistic LFS workflow approaches this limit (typical repos have
+<1000 locks total).
+
+**Verify pagination.** /locks/verify shares a single NextCursor across
+ours and theirs; callers must iterate until NextCursor is empty even
+if `ours` is empty in a given page — more of the caller's locks may
+exist at a deeper offset.
+
+**Observability.** Four new metrics + three new audit events (see §6
+tables for fields). Verify failures and 503 outcomes show up under
+`outcome="error"` for the relevant `lfs_locks_*_total` counter; the
+detailed error is in the structured log via `slog` at level Error.
+
+**Deferred from M13.3** (tracked in §11):
+- TTL / auto-expiry on stale locks.
+- SSH-native lock transport (today SSH redirects to HTTPS via the existing
+  `lfs.IssueSSHToken` flow).
+- Lock notifications / webhooks.
+- Integration with M11 protected branches (orthogonal: protected
+  branches refuse pushes; locks block specific paths within an
+  otherwise-pushable branch).
 
 ### 8.2 Multipart upload (custom transfer adapter)
 

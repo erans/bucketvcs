@@ -84,6 +84,51 @@ func emitVerifyRequestMetric(ctx context.Context, logger *slog.Logger, result st
 	)
 }
 
+// emitLockCreateMetric increments lfs_locks_created_total{outcome}.
+// Called once per POST /info/lfs/locks request. outcome is one of:
+//
+//   - "created": 201 — lock was created successfully.
+//   - "conflict": 409 — path already locked by another owner.
+//   - "error": any other failure (401, 400, 503, 500).
+func emitLockCreateMetric(ctx context.Context, logger *slog.Logger, outcome string) {
+	emitMetric(ctx, logger, "lfs_locks_created_total", 1, "outcome", outcome)
+}
+
+// emitLockListMetric increments lfs_locks_listed_total{outcome}.
+// Called once per GET /info/lfs/locks request. outcome is one of:
+//
+//   - "success": 200 — list returned normally.
+//   - "error": any failure (401, 400, 503, 500).
+func emitLockListMetric(ctx context.Context, logger *slog.Logger, outcome string) {
+	emitMetric(ctx, logger, "lfs_locks_listed_total", 1, "outcome", outcome)
+}
+
+// emitLockVerifyMetric increments lfs_locks_verified_total{outcome}.
+// Called once per POST /info/lfs/locks/verify request. outcome is one of:
+//
+//   - "success": 200 — partitioned ours/theirs returned normally.
+//   - "error": any failure (401, 400, 503, 500).
+func emitLockVerifyMetric(ctx context.Context, logger *slog.Logger, outcome string) {
+	emitMetric(ctx, logger, "lfs_locks_verified_total", 1, "outcome", outcome)
+}
+
+// emitLockDeleteMetric increments lfs_locks_deleted_total{force,outcome}.
+// Called once per POST /info/lfs/locks/<id>/unlock request. force is
+// whether the caller set force=true. outcome is one of:
+//
+//   - "owner": 200 — caller is the lock owner.
+//   - "forced": 200 — non-owner caller used force=true.
+//   - "denied": 403 — non-owner caller did not pass force=true.
+//   - "not_found": 404 — lock ID does not exist.
+//   - "error": any other failure (401, 400, 503, 500).
+func emitLockDeleteMetric(ctx context.Context, logger *slog.Logger, force bool, outcome string) {
+	forceStr := "false"
+	if force {
+		forceStr = "true"
+	}
+	emitMetric(ctx, logger, "lfs_locks_deleted_total", 1, "force", forceStr, "outcome", outcome)
+}
+
 // EmitSSHAuthenticateMetric increments lfs_ssh_authenticate_total{op,result}.
 // op is "upload" or "download". result is one of: "ok", "forbidden",
 // "disabled", "anon", "error", "client_disconnected".

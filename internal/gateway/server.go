@@ -11,6 +11,7 @@ import (
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/lfs"
+	"github.com/bucketvcs/bucketvcs/internal/lfs/locks"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
@@ -127,6 +128,13 @@ type Options struct {
 	// when minting /_lfs/ URLs. Required when LFSProxiedURLSigningKey is
 	// set.
 	LFSProxiedBaseURL string
+
+	// LFSLocksStore enables the LFS Locks API endpoints (M13.3). When
+	// nil, lock requests return 503. When non-nil, the four lock routes
+	// (POST/GET /info/lfs/locks, POST /info/lfs/locks/verify, POST
+	// /info/lfs/locks/<id>/unlock) are dispatched to the LFS handler
+	// with this store attached. Ignored when LFSEnabled is false.
+	LFSLocksStore *locks.Store
 
 	// Logger is used for structured metric + audit emission. When nil, the
 	// gateway falls back to slog.Default(). M11 Phase 12.5 adds this for
@@ -347,6 +355,7 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 			},
 			PresignTTL: ttl,
 			Logger:     opts.Logger,
+			LocksStore: opts.LFSLocksStore,
 		})
 
 		// Mount the proxied object handler at /_lfs/ when proxied URL

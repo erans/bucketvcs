@@ -367,7 +367,7 @@ func TestParseLFSPath_RejectsAdversarialNames(t *testing.T) {
 		{"/acme/foo/../bar.git/info/lfs/objects/batch", lfsRouteNone, "path not clean: foo/../bar is traversal"},
 	}
 	for _, c := range cases {
-		_, _, got := parseLFSPath(c.path)
+		_, _, got, _ := parseLFSPath(http.MethodPost, c.path)
 		if got != c.wantRoute {
 			t.Errorf("%q (%s): route=%v want %v", c.path, c.reason, got, c.wantRoute)
 		}

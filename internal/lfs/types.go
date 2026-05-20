@@ -54,3 +54,76 @@ type VerifyRequest struct {
 	OID  string `json:"oid"`
 	Size int64  `json:"size"`
 }
+
+// --- LFS Locks API wire format (M13.3) ---
+// Per the LFS Locks spec: https://github.com/git-lfs/git-lfs/blob/main/docs/api/locking.md
+
+// LockOwner is the owner sub-object in lock responses. Per spec, only
+// "name" is sent on the wire (the user ID is server-internal).
+type LockOwner struct {
+	Name string `json:"name"`
+}
+
+// LockWire is the wire-format lock object. Distinct from
+// internal/lfs/locks.Lock which carries server-internal fields.
+type LockWire struct {
+	ID       string    `json:"id"`
+	Path     string    `json:"path"`
+	LockedAt time.Time `json:"locked_at"`
+	Owner    LockOwner `json:"owner"`
+}
+
+// LockRefSpec is the optional ref-scoping nub on a lock request body.
+type LockRefSpec struct {
+	Name string `json:"name"`
+}
+
+// LockRequest is POST /info/lfs/locks.
+type LockRequest struct {
+	Path string       `json:"path"`
+	Ref  *LockRefSpec `json:"ref,omitempty"`
+}
+
+// LockResponse is the 201 body of a successful lock create.
+type LockResponse struct {
+	Lock LockWire `json:"lock"`
+}
+
+// LockConflictResponse is the 409 body when a lock already exists for
+// the requested path.
+type LockConflictResponse struct {
+	Lock    LockWire `json:"lock"`
+	Message string   `json:"message"`
+}
+
+// ListLocksResponse is GET /info/lfs/locks.
+type ListLocksResponse struct {
+	Locks      []LockWire `json:"locks"`
+	NextCursor string     `json:"next_cursor,omitempty"`
+}
+
+// LocksVerifyRequest is POST /info/lfs/locks/verify. Distinct from
+// the batch-flow VerifyRequest above (which carries {oid, size}).
+type LocksVerifyRequest struct {
+	Cursor string       `json:"cursor,omitempty"`
+	Limit  int          `json:"limit,omitempty"`
+	Ref    *LockRefSpec `json:"ref,omitempty"`
+}
+
+// LocksVerifyResponse partitions ours/theirs.
+type LocksVerifyResponse struct {
+	Ours       []LockWire `json:"ours"`
+	Theirs     []LockWire `json:"theirs"`
+	NextCursor string     `json:"next_cursor,omitempty"`
+}
+
+// UnlockRequest is POST /info/lfs/locks/<id>/unlock.
+type UnlockRequest struct {
+	Force bool `json:"force,omitempty"`
+}
+
+// UnlockResponse echoes the deleted lock so the client knows what
+// was removed (useful when force was used).
+type UnlockResponse struct {
+	Lock LockWire `json:"lock"`
+}

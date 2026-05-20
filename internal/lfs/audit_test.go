@@ -106,3 +106,79 @@ func TestEmitLFSSSHAuthenticate_AnonZeroTTL(t *testing.T) {
 		}
 	}
 }
+
+func TestEmitLFSLockCreate_Shape(t *testing.T) {
+	var buf bytes.Buffer
+	emitLFSLockCreate(context.Background(), captureLogger(&buf), "acme/demo", "alice", "u_alice", "lock_001", "art/hero.psd", "refs/heads/main")
+	line := buf.String()
+	for _, want := range []string{
+		`"msg":"lfs.lock.create"`,
+		`"event":"lfs.lock.create"`,
+		`"repo":"acme/demo"`,
+		`"user":"alice"`,
+		`"owner_user_id":"u_alice"`,
+		`"lock_id":"lock_001"`,
+		`"path":"art/hero.psd"`,
+		`"ref_name":"refs/heads/main"`,
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("missing %q in %s", want, line)
+		}
+	}
+}
+
+func TestEmitLFSLockDelete_Shape_Owner(t *testing.T) {
+	var buf bytes.Buffer
+	emitLFSLockDelete(context.Background(), captureLogger(&buf), "acme/demo", "alice", "lock_001", false, "")
+	line := buf.String()
+	for _, want := range []string{
+		`"msg":"lfs.lock.delete"`,
+		`"event":"lfs.lock.delete"`,
+		`"repo":"acme/demo"`,
+		`"user":"alice"`,
+		`"lock_id":"lock_001"`,
+		`"force":false`,
+		`"force_target_user_id":""`,
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("missing %q in %s", want, line)
+		}
+	}
+}
+
+func TestEmitLFSLockDelete_Shape_Force(t *testing.T) {
+	var buf bytes.Buffer
+	emitLFSLockDelete(context.Background(), captureLogger(&buf), "acme/demo", "bob", "lock_001", true, "u_alice")
+	line := buf.String()
+	for _, want := range []string{
+		`"msg":"lfs.lock.delete"`,
+		`"event":"lfs.lock.delete"`,
+		`"repo":"acme/demo"`,
+		`"user":"bob"`,
+		`"lock_id":"lock_001"`,
+		`"force":true`,
+		`"force_target_user_id":"u_alice"`,
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("missing %q in %s", want, line)
+		}
+	}
+}
+
+func TestEmitLFSLockVerify_Shape(t *testing.T) {
+	var buf bytes.Buffer
+	emitLFSLockVerify(context.Background(), captureLogger(&buf), "acme/demo", "alice", 3, 2)
+	line := buf.String()
+	for _, want := range []string{
+		`"msg":"lfs.lock.verify"`,
+		`"event":"lfs.lock.verify"`,
+		`"repo":"acme/demo"`,
+		`"user":"alice"`,
+		`"ours_count":3`,
+		`"theirs_count":2`,
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("missing %q in %s", want, line)
+		}
+	}
+}

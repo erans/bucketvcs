@@ -14,6 +14,7 @@ import (
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/gateway/routenames"
+	"github.com/bucketvcs/bucketvcs/internal/lfs/locks"
 )
 
 const maxBatchObjects = 1000
@@ -49,6 +50,13 @@ type Deps struct {
 	// Logger is used for metric + audit emission. Optional: nil falls
 	// back to slog.Default() (same shape as internal/gateway/log.go).
 	Logger *slog.Logger
+
+	// LocksStore is OPTIONAL. When non-nil, the four LFS Locks API
+	// endpoints (POST/GET /info/lfs/locks, POST /info/lfs/locks/verify,
+	// POST /info/lfs/locks/<id>/unlock) are served. When nil, lock
+	// requests return 503 with "locks API not configured". Construct
+	// via internal/lfs/locks.New(authdb).
+	LocksStore *locks.Store
 }
 
 // lfsRoute enumerates the LFS sub-routes the handler dispatches.
@@ -57,6 +65,10 @@ type lfsRoute int
 const (
 	lfsRouteNone lfsRoute = iota
 	lfsRouteBatch
+	lfsRouteLocksCreate
+	lfsRouteLocksList
+	lfsRouteLocksVerify
+	lfsRouteLocksUnlock
 )
 
 // NewHTTPHandler returns the http.Handler that serves the LFS Batch
@@ -100,8 +112,8 @@ func NewHTTPHandler(deps Deps) http.Handler {
 			logger = slog.Default()
 		}
 
-		tenant, repo, route := parseLFSPath(r.URL.Path)
-		if route == lfsRouteNone || r.Method != http.MethodPost {
+		tenant, repo, route, lockID := parseLFSPath(r.Method, r.URL.Path)
+		if route == lfsRouteNone {
 			http.NotFound(w, r)
 			return
 		}
@@ -118,6 +130,14 @@ func NewHTTPHandler(deps Deps) http.Handler {
 		switch route {
 		case lfsRouteBatch:
 			handleBatch(ctx, w, r, deps, tenant, repo, actor, logger)
+		case lfsRouteLocksCreate:
+			handleLocksCreate(w, r, &deps, tenant, repo, actor, logger)
+		case lfsRouteLocksList:
+			handleLocksList(w, r, &deps, tenant, repo, actor, logger)
+		case lfsRouteLocksVerify:
+			handleLocksVerify(w, r, &deps, tenant, repo, actor, logger)
+		case lfsRouteLocksUnlock:
+			handleLocksUnlock(w, r, &deps, tenant, repo, lockID, actor, logger)
 		}
 	})
 }
@@ -274,35 +294,57 @@ func actorName(a *auth.Actor) string {
 	return a.Name
 }
 
-// parseLFSPath parses /<tenant>/<repo>.git/info/lfs/objects/batch and
-// returns (tenant, repo, lfsRouteBatch) on a match, or zero values
-// with lfsRouteNone otherwise. Tenant and repo are validated via
+// parseLFSPath parses /<tenant>/<repo>.git/info/lfs/... paths and
+// returns the matched route. Tenant and repo are validated via
 // validRouteName.
-func parseLFSPath(p string) (tenant, repo string, route lfsRoute) {
+//
+// Method-aware: locks endpoints differ by HTTP method (GET /locks =
+// list, POST /locks = create), and methods other than the documented
+// ones for each route return lfsRouteNone (the caller emits 404).
+//
+// lockID is non-empty only when route == lfsRouteLocksUnlock; it
+// carries the lock ID segment already validated to be non-empty and
+// single-segment so the dispatch site can pass it directly to
+// handleLocksUnlock without a second parse.
+func parseLFSPath(method, p string) (tenant, repo string, route lfsRoute, lockID string) {
 	if p != path.Clean(p) {
-		return "", "", lfsRouteNone
+		return "", "", lfsRouteNone, ""
 	}
 	parts := strings.SplitN(strings.TrimPrefix(p, "/"), "/", 3)
 	if len(parts) < 3 {
-		return "", "", lfsRouteNone
+		return "", "", lfsRouteNone, ""
 	}
 	tenant = parts[0]
 	repoSeg := parts[1]
 	rest := parts[2]
 	if !strings.HasSuffix(repoSeg, ".git") || repoSeg == ".git" {
-		return "", "", lfsRouteNone
+		return "", "", lfsRouteNone, ""
 	}
 	repo = strings.TrimSuffix(repoSeg, ".git")
 	if tenant == "" || repo == "" {
-		return "", "", lfsRouteNone
+		return "", "", lfsRouteNone, ""
 	}
 	if !validRouteName(tenant) || !validRouteName(repo) {
-		return "", "", lfsRouteNone
+		return "", "", lfsRouteNone, ""
 	}
-	if rest == "info/lfs/objects/batch" {
-		return tenant, repo, lfsRouteBatch
+	switch {
+	case method == http.MethodPost && rest == "info/lfs/objects/batch":
+		return tenant, repo, lfsRouteBatch, ""
+	case method == http.MethodPost && rest == "info/lfs/locks":
+		return tenant, repo, lfsRouteLocksCreate, ""
+	case method == http.MethodGet && rest == "info/lfs/locks":
+		return tenant, repo, lfsRouteLocksList, ""
+	case method == http.MethodPost && rest == "info/lfs/locks/verify":
+		return tenant, repo, lfsRouteLocksVerify, ""
+	case method == http.MethodPost && strings.HasPrefix(rest, "info/lfs/locks/") && strings.HasSuffix(rest, "/unlock"):
+		// Validate that the id segment is non-empty and single-segment.
+		mid := strings.TrimSuffix(strings.TrimPrefix(rest, "info/lfs/locks/"), "/unlock")
+		if mid == "" || strings.Contains(mid, "/") {
+			return "", "", lfsRouteNone, ""
+		}
+		return tenant, repo, lfsRouteLocksUnlock, mid
 	}
-	return "", "", lfsRouteNone
+	return "", "", lfsRouteNone, ""
 }
 
 // validRouteName mirrors the gateway's path-segment validator so the

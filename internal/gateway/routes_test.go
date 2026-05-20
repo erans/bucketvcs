@@ -100,3 +100,52 @@ func TestParseRoute_LFSBatch_RejectsGET(t *testing.T) {
 	}
 }
 
+func TestParseRoute_LFSLocks(t *testing.T) {
+	cases := []struct {
+		method, path string
+		wantOp       Op
+		wantAction   auth.Action
+	}{
+		{"POST", "/acme/foo.git/info/lfs/locks", OpLFSLocksCreate, auth.ActionWrite},
+		{"GET", "/acme/foo.git/info/lfs/locks", OpLFSLocksList, auth.ActionRead},
+		{"POST", "/acme/foo.git/info/lfs/locks/verify", OpLFSLocksVerify, auth.ActionRead},
+		{"POST", "/acme/foo.git/info/lfs/locks/lock_abc/unlock", OpLFSLocksUnlock, auth.ActionWrite},
+	}
+	for _, c := range cases {
+		t.Run(c.method+" "+c.path, func(t *testing.T) {
+			rr, err := ParseRoute(c.method, c.path, "")
+			if err != nil {
+				t.Fatalf("ParseRoute: %v", err)
+			}
+			if rr.Op != c.wantOp {
+				t.Errorf("Op=%v want %v", rr.Op, c.wantOp)
+			}
+			if rr.RequiredAction != c.wantAction {
+				t.Errorf("RequiredAction=%v want %v", rr.RequiredAction, c.wantAction)
+			}
+			if rr.Tenant != "acme" || rr.Repo != "foo" {
+				t.Errorf("tenant/repo=%q/%q want acme/foo", rr.Tenant, rr.Repo)
+			}
+		})
+	}
+}
+
+func TestParseRoute_LFSLocks_NegativeCases(t *testing.T) {
+	cases := []struct {
+		name, method, path string
+	}{
+		{"locks list via PUT", "PUT", "/acme/foo.git/info/lfs/locks"},
+		{"verify via GET", "GET", "/acme/foo.git/info/lfs/locks/verify"},
+		{"unlock empty id", "POST", "/acme/foo.git/info/lfs/locks//unlock"},
+		{"unlock with extra slashes in id", "POST", "/acme/foo.git/info/lfs/locks/a/b/unlock"},
+		{"unlock without /unlock suffix", "POST", "/acme/foo.git/info/lfs/locks/lock_abc"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := ParseRoute(c.method, c.path, "")
+			if !errors.Is(err, ErrRouteNoMatch) {
+				t.Fatalf("err=%v want ErrRouteNoMatch", err)
+			}
+		})
+	}
+}

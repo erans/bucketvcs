@@ -65,6 +65,36 @@ func TestRunMigrations_AppliesV2_SSHKeys(t *testing.T) {
 	}
 }
 
+func TestRunMigrations_AppliesV3_LFSLocks(t *testing.T) {
+	db := newTestDB(t)
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	// Assert the lfs_locks table exists with the expected columns.
+	rows, err := db.Query(`SELECT name FROM pragma_table_info('lfs_locks') ORDER BY cid`)
+	if err != nil {
+		t.Fatalf("pragma_table_info: %v", err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		got = append(got, n)
+	}
+	want := []string{"id", "tenant", "repo", "path", "ref_name", "owner_user_id", "locked_at"}
+	if len(got) != len(want) {
+		t.Fatalf("columns=%v want %v", got, want)
+	}
+	for i, name := range want {
+		if got[i] != name {
+			t.Errorf("col %d: got %q want %q", i, got[i], name)
+		}
+	}
+}
+
 func TestRunMigrations_SSHKeys_CheckXOR(t *testing.T) {
 	// Verify the CHECK constraint actually rejects bad rows.
 	db := newTestDB(t)
