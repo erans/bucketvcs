@@ -72,8 +72,8 @@ func runPipeline(ctx context.Context, s storage.ObjectStore, r *repo.Repo, k *ke
 		return report, fmt.Errorf("maintenance: ReadRoot: %w", err)
 	}
 
-	var m0 manifest.Body
-	if err := json.Unmarshal(view.Body, &m0); err != nil {
+	m0, err := manifest.UnmarshalBody(view.Body)
+	if err != nil {
 		report.Outcome = "failed_other"
 		report.DurationMS = elapsed()
 		emitFinalReport(ctx, opts.Logger, report)
@@ -412,8 +412,8 @@ func runPipeline(ctx context.Context, s storage.ObjectStore, r *repo.Repo, k *ke
 					hookFired = true
 					opts.BetweenRepackAndCAS()
 				}
-				var prevBody manifest.Body
-				if perr := json.Unmarshal(prev.Body, &prevBody); perr != nil {
+				prevBody, perr := manifest.UnmarshalBody(prev.Body)
+				if perr != nil {
 					return nil, perr
 				}
 				// Set BaseManifest to the version the indexes were built from
@@ -509,8 +509,8 @@ func runPipeline(ctx context.Context, s storage.ObjectStore, r *repo.Repo, k *ke
 					hookFired = true
 					opts.BetweenRepackAndCAS()
 				}
-				var prevBody manifest.Body
-				if perr := json.Unmarshal(prev.Body, &prevBody); perr != nil {
+				prevBody, perr := manifest.UnmarshalBody(prev.Body)
+				if perr != nil {
 					return nil, perr
 				}
 				// Detect concurrent pack additions. Compact-only does not produce a
@@ -627,8 +627,8 @@ func runPipeline(ctx context.Context, s storage.ObjectStore, r *repo.Repo, k *ke
 	postView, postErr := r.ReadRoot(ctx)
 	if postErr == nil {
 		report.ManifestVersionTo = postView.Header.ManifestVersion
-		var postBody manifest.Body
-		if uErr := json.Unmarshal(postView.Body, &postBody); uErr == nil {
+		postBody, uErr := manifest.UnmarshalBody(postView.Body)
+		if uErr == nil {
 			report.AfterPackCount = len(postBody.Packs)
 			pb, _ := json.Marshal(postBody.Packs)
 			report.AfterManifestPB = int64(len(pb))

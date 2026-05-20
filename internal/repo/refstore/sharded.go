@@ -12,6 +12,7 @@ import (
 
 	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	"github.com/bucketvcs/bucketvcs/internal/repo/oidconst"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
 
@@ -131,7 +132,7 @@ func (s *ShardedRefStore) List(ctx context.Context) (map[string]string, error) {
 // entirely; no "{}" shard object is written.
 //
 // Deletion convention matches InlineRefStore.Stage: empty OID or
-// 40-zero nullOIDHex deletes; any other 40-hex OID upserts.
+// 40-zero oidconst.NullOIDHex deletes; any other 40-hex OID upserts.
 func (s *ShardedRefStore) Stage(ctx context.Context, updates map[string]string) (Stage, error) {
 	if len(updates) == 0 {
 		// No changes: return the existing shard list as-is.
@@ -199,7 +200,7 @@ func (s *ShardedRefStore) Stage(ctx context.Context, updates map[string]string) 
 	for _, sid := range changedIDs {
 		refs := loadedRefs[sid]
 		for refname, oid := range updatesByShard[sid] {
-			if oid == "" || oid == nullOIDHex {
+			if oid == "" || oid == oidconst.NullOIDHex {
 				delete(refs, refname)
 				continue
 			}

@@ -16,6 +16,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	"github.com/bucketvcs/bucketvcs/internal/repo/oidconst"
 	"github.com/bucketvcs/bucketvcs/internal/repo/refstore"
 )
 
@@ -62,7 +63,7 @@ func precheckUpdates(ctx context.Context, rs refstore.RefStore, updates []update
 	}
 	for i, u := range updates {
 		cur, exists := refs[u.Refname]
-		if u.OldOID == nullOID {
+		if u.OldOID == oidconst.NullOIDHex {
 			if exists {
 				statuses[i] = "ng " + u.Refname + " ref already exists"
 				allOK = false
@@ -178,7 +179,7 @@ func completeReceivePack(eng *EngineRequest, w io.Writer, m *mirror.Mirror, rp *
 	//     for "you didn't supply enough to back this ref").
 	var newOIDs []string
 	for i, u := range rp.Updates {
-		if statuses[i] == "" && u.NewOID != nullOID {
+		if statuses[i] == "" && u.NewOID != oidconst.NullOIDHex {
 			newOIDs = append(newOIDs, u.NewOID)
 		}
 	}

@@ -13,7 +13,6 @@ package conformance
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 
 	"github.com/bucketvcs/bucketvcs/internal/maintenance"
@@ -21,6 +20,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	"github.com/bucketvcs/bucketvcs/internal/repo/refstore"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
 
@@ -80,12 +80,13 @@ func runBundleSolo(t *testing.T, s storage.ObjectStore) {
 	if err != nil {
 		t.Fatalf("ReadRoot: %v", err)
 	}
-	var body manifest.Body
-	if err := json.Unmarshal(view.Body, &body); err != nil {
-		t.Fatalf("Unmarshal body: %v", err)
+	body, err := manifest.UnmarshalBody(view.Body)
+	if err != nil {
+		t.Fatalf("UnmarshalBody: %v", err)
 	}
-	if body.RefSharding != "" || len(body.RefShards) > 0 {
-		t.Skipf("conformance helper does not support v2 sharded bodies (TODO(M12 follow-up): route through refstore.List)")
+	rs, err := refstore.New(ctx, s, k, &body)
+	if err != nil {
+		t.Fatalf("refstore.New: %v", err)
 	}
 	if len(body.Bundles) != 1 {
 		t.Fatalf("len(body.Bundles) = %d, want 1", len(body.Bundles))
@@ -97,12 +98,15 @@ func runBundleSolo(t *testing.T, s storage.ObjectStore) {
 	// (GenerateBundleArtifact validates 40-hex format at write time; this
 	// assertion verifies the cross-adapter advertise-time invariant the M11
 	// bundle-uri spec calls out.)
-	wantTip, ok := body.Refs[body.DefaultBranch]
+	wantTip, ok, err := rs.Lookup(ctx, body.DefaultBranch)
+	if err != nil {
+		t.Fatalf("rs.Lookup default branch: %v", err)
+	}
 	if !ok || wantTip == "" {
-		t.Fatalf("body.Refs[%q] missing or empty; body.Refs=%v", body.DefaultBranch, body.Refs)
+		t.Fatalf("default branch %q not found in refs (or has empty OID)", body.DefaultBranch)
 	}
 	if body.Bundles[0].TipOID != wantTip {
-		t.Errorf("Bundles[0].TipOID = %q, want %q (body.Refs[%q])", body.Bundles[0].TipOID, wantTip, body.DefaultBranch)
+		t.Errorf("Bundles[0].TipOID = %q, want %q (default branch tip)", body.Bundles[0].TipOID, wantTip)
 	}
 	assertReachable(t, s, r)
 }

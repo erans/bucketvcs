@@ -9,7 +9,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -432,8 +431,8 @@ func Import(ctx context.Context, store storage.ObjectStore, opts Options) (*Resu
 			return nil, fmt.Errorf("importer: concurrent commit detected (manifest_version=%d, want 1)",
 				prev.Header.ManifestVersion)
 		}
-		var existingBody manifest.Body
-		if jerr := json.Unmarshal(prev.Body, &existingBody); jerr != nil {
+		existingBody, jerr := manifest.UnmarshalBody(prev.Body)
+		if jerr != nil {
 			return nil, fmt.Errorf("importer: unmarshal prev body: %w", jerr)
 		}
 		// Include Bundles in the populated-body check so a version-1 body

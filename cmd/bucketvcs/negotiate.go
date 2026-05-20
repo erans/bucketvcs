@@ -119,8 +119,8 @@ func runNegotiate(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		return 1
 	}
 
-	var body manifest.Body
-	if err := json.Unmarshal(view.Body, &body); err != nil {
+	body, err := manifest.UnmarshalBody(view.Body)
+	if err != nil {
 		fmt.Fprintf(stderr, "negotiate: parse manifest: %v\n", err)
 		return 1
 	}

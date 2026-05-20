@@ -51,17 +51,15 @@ func IsSupportedRefSharding(s string) bool {
 // SHOULD use it in preference to json.Unmarshal(view.Body, &body) so
 // invariant violations are caught at the read boundary.
 //
-// Status: M12+. The validated entry point for v2-aware production
-// code paths is UnmarshalBody. As of M12, the following call sites
-// route through it: exporter, uploadpack/advertise, receivepack/advertise,
-// receivepack/complete precheck, maintenance/reshard. Other call sites
-// (uploadpack/service.go top-level dispatch, importer/buildcommit.go
-// commit-time body parse, maintenance/pipeline, gc/liveset,
-// cmd/bucketvcs/negotiate.go bundle-uri Lookup) still json.Unmarshal
-// directly; they are unaffected because they only touch fields that
-// exist in both v1 and v2 (Packs, Indexes, DefaultBranch, and the ref
-// fields they read or discard before any invariant check) — but a
-// future invariant addition would require routing them here too.
+// Status: M12.1+. UnmarshalBody is the canonical body-parse entry
+// point for all production paths: exporter, uploadpack (top-level
+// dispatcher + advertise + bundle-uri Lookup), receivepack (advertise
+// + complete precheck), importer (BuildAndCommit + Import callback),
+// reachability.Load, gc.BuildLiveSet, maintenance pipeline + reshard
+// + bundle-casmerge + backfill, cmd/bucketvcs negotiate + inspect.
+// Conformance test helpers in internal/gc/conformance, internal/
+// reachability/conformance, and internal/diffharness still call
+// json.Unmarshal directly for fixture purposes.
 func UnmarshalBody(raw []byte) (Body, error) {
 	var b Body
 	if err := json.Unmarshal(raw, &b); err != nil {

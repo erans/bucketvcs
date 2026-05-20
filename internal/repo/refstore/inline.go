@@ -4,14 +4,8 @@ import (
 	"context"
 
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	"github.com/bucketvcs/bucketvcs/internal/repo/oidconst"
 )
-
-// nullOIDHex matches importer.nullOIDHex (40 zeros). Duplicated here
-// rather than imported to avoid a refstore→importer dependency
-// (importer already needs to depend on refstore in Phase 5). The
-// constant is unlikely to drift; both sides reference the SHA-1
-// "no object" sentinel.
-const nullOIDHex = "0000000000000000000000000000000000000000"
 
 // InlineRefStore wraps Body.Refs directly. All operations are
 // in-memory; the ObjectStore is never consulted.
@@ -57,7 +51,7 @@ func (s *InlineRefStore) List(_ context.Context) (map[string]string, error) {
 }
 
 // Stage merges updates into the snapshot and returns a Stage with
-// Mode=ModeInline. Delete convention: empty OID or 40-zero nullOIDHex.
+// Mode=ModeInline. Delete convention: empty OID or 40-zero oidconst.NullOIDHex.
 // The returned NewInlineRefs is a freshly allocated map; mutating it
 // does not affect the store.
 func (s *InlineRefStore) Stage(_ context.Context, updates map[string]string) (Stage, error) {
@@ -66,7 +60,7 @@ func (s *InlineRefStore) Stage(_ context.Context, updates map[string]string) (St
 		out[k] = v
 	}
 	for ref, oid := range updates {
-		if oid == "" || oid == nullOIDHex {
+		if oid == "" || oid == oidconst.NullOIDHex {
 			delete(out, ref)
 			continue
 		}

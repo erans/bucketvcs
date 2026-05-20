@@ -17,6 +17,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest/manifesttest"
+	"github.com/bucketvcs/bucketvcs/internal/repo/oidconst"
 	"github.com/bucketvcs/bucketvcs/internal/repo/refstore"
 	"github.com/bucketvcs/bucketvcs/internal/repo/tx"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
@@ -241,7 +242,7 @@ func TestBuildAndCommit_DeletesRef(t *testing.T) {
 		t.Fatalf("delete feature in mirror: %v: %s", err, out)
 	}
 	body, err := BuildAndCommit(context.Background(), ir.store, ir.tenant, ir.repo, ir.bareDir,
-		map[string]string{"refs/heads/feature": nullOIDHex}, "deleter", nil)
+		map[string]string{"refs/heads/feature": oidconst.NullOIDHex}, "deleter", nil)
 	if err != nil {
 		t.Fatalf("BuildAndCommit delete: %v", err)
 	}
@@ -499,7 +500,7 @@ func TestBuildEffectiveRefs_Inline_PreservesUnrelated(t *testing.T) {
 
 // TestBuildEffectiveRefs_Sharded_DeleteNullOID exercises the sharded
 // path of buildEffectiveRefs with a null-OID deletion. The pre-stage
-// map contains a ref; the update assigns it nullOIDHex; the post-stage
+// map contains a ref; the update assigns it oidconst.NullOIDHex; the post-stage
 // map must NOT contain the ref.
 func TestBuildEffectiveRefs_Sharded_DeleteNullOID(t *testing.T) {
 	stage := refstore.Stage{Mode: refstore.ModeSharded}
@@ -508,14 +509,14 @@ func TestBuildEffectiveRefs_Sharded_DeleteNullOID(t *testing.T) {
 		"refs/heads/legacy": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 	}
 	updates := map[string]string{
-		"refs/heads/legacy": nullOIDHex,
+		"refs/heads/legacy": oidconst.NullOIDHex,
 	}
 	got, err := buildEffectiveRefs(context.Background(), nil, stage, updates, preListed)
 	if err != nil {
 		t.Fatalf("buildEffectiveRefs: %v", err)
 	}
 	if _, ok := got["refs/heads/legacy"]; ok {
-		t.Errorf("refs/heads/legacy still present after nullOID delete: %v", got)
+		t.Errorf("refs/heads/legacy still present after NullOIDHex delete: %v", got)
 	}
 	if got["refs/heads/main"] != preListed["refs/heads/main"] {
 		t.Errorf("unrelated ref not preserved: got %v", got)
@@ -524,7 +525,7 @@ func TestBuildEffectiveRefs_Sharded_DeleteNullOID(t *testing.T) {
 
 // TestBuildEffectiveRefs_Sharded_DeleteEmptyOID exercises the sharded
 // path of buildEffectiveRefs with an empty-OID deletion (same
-// semantics as nullOIDHex per refstore.Stage's contract).
+// semantics as oidconst.NullOIDHex per refstore.Stage's contract).
 func TestBuildEffectiveRefs_Sharded_DeleteEmptyOID(t *testing.T) {
 	stage := refstore.Stage{Mode: refstore.ModeSharded}
 	preListed := map[string]string{
@@ -651,7 +652,7 @@ func TestBuildAndCommit_RejectsDeletingDefaultBranch(t *testing.T) {
 
 	// Attempt to delete the default branch via a null-OID update.
 	updates := map[string]string{
-		body.DefaultBranch: nullOIDHex,
+		body.DefaultBranch: oidconst.NullOIDHex,
 	}
 	_, err := BuildAndCommit(context.Background(), ir.store, ir.tenant, ir.repo, ir.bareDir, updates, "tester", nil)
 	if err == nil {

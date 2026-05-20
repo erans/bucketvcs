@@ -8,6 +8,7 @@ import (
 
 	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest/manifesttest"
+	"github.com/bucketvcs/bucketvcs/internal/repo/oidconst"
 	"github.com/bucketvcs/bucketvcs/internal/repo/refstore"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 )
@@ -76,10 +77,10 @@ func TestPrecheckUpdates_ShardedBody(t *testing.T) {
 		}
 	})
 
-	// Create update: OldOID=nullOID for existing ref — must fail with "ref already exists".
+	// Create update: OldOID=oidconst.NullOIDHex for existing ref — must fail with "ref already exists".
 	t.Run("create on existing ref fails", func(t *testing.T) {
 		updates := []updateCommand{
-			{Refname: "refs/heads/main", OldOID: nullOID, NewOID: oidY},
+			{Refname: "refs/heads/main", OldOID: oidconst.NullOIDHex, NewOID: oidY},
 		}
 		statuses, allOK := precheckUpdates(ctx, rs, updates)
 		if allOK {
@@ -90,10 +91,10 @@ func TestPrecheckUpdates_ShardedBody(t *testing.T) {
 		}
 	})
 
-	// Create update: OldOID=nullOID for non-existing ref — must pass.
+	// Create update: OldOID=oidconst.NullOIDHex for non-existing ref — must pass.
 	t.Run("create on new ref passes", func(t *testing.T) {
 		updates := []updateCommand{
-			{Refname: "refs/heads/new-branch", OldOID: nullOID, NewOID: oidY},
+			{Refname: "refs/heads/new-branch", OldOID: oidconst.NullOIDHex, NewOID: oidY},
 		}
 		statuses, allOK := precheckUpdates(ctx, rs, updates)
 		if !allOK {

@@ -62,7 +62,7 @@ type RefStore interface {
 
 	// Stage computes the layout-aware delta required to publish a
 	// new ref state. updates uses the receive-pack convention: an
-	// empty OID or the 40-zero nullOIDHex means delete; any other
+	// empty OID or the 40-zero oidconst.NullOIDHex means delete; any other
 	// 40-hex value means upsert. The caller must validate refnames
 	// separately (Stage does NOT enforce ref-name syntax).
 	//

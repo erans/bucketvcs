@@ -6,7 +6,6 @@ package conformance
 
 import (
 	"context"
-	"encoding/json"
 	"path/filepath"
 	"testing"
 
@@ -16,6 +15,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	"github.com/bucketvcs/bucketvcs/internal/repo/refstore"
 	"github.com/bucketvcs/bucketvcs/internal/repo/tx"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
@@ -158,7 +158,8 @@ func runTwoMaintenances(t *testing.T, s storage.ObjectStore) {
 
 // assertReachable downloads all packs in the current manifest into a
 // fresh bare repo and runs `git fsck --full`. If fsck succeeds, every
-// commit referenced by manifest.Refs is reachable through manifest.Packs.
+// commit referenced by the manifest refs (v1 inline or v2 sharded) is
+// reachable through manifest.Packs.
 func assertReachable(t *testing.T, s storage.ObjectStore, r *repo.Repo) {
 	t.Helper()
 	ctx := context.Background()
@@ -166,12 +167,21 @@ func assertReachable(t *testing.T, s storage.ObjectStore, r *repo.Repo) {
 	if err != nil {
 		t.Fatalf("ReadRoot: %v", err)
 	}
-	var body manifest.Body
-	if err := json.Unmarshal(view.Body, &body); err != nil {
-		t.Fatalf("Unmarshal body: %v", err)
+	body, err := manifest.UnmarshalBody(view.Body)
+	if err != nil {
+		t.Fatalf("UnmarshalBody: %v", err)
 	}
-	if body.RefSharding != "" || len(body.RefShards) > 0 {
-		t.Skipf("conformance helper does not support v2 sharded bodies (TODO(M12 follow-up): route through refstore.List)")
+	k, err := keys.NewRepo(r.TenantID(), r.RepoID())
+	if err != nil {
+		t.Fatalf("keys.NewRepo: %v", err)
+	}
+	rs, err := refstore.New(ctx, s, k, &body)
+	if err != nil {
+		t.Fatalf("refstore.New: %v", err)
+	}
+	refs, err := rs.List(ctx)
+	if err != nil {
+		t.Fatalf("rs.List: %v", err)
 	}
 	packs := make([]maintenance.PackRef, 0, len(body.Packs))
 	for _, p := range body.Packs {
@@ -181,7 +191,7 @@ func assertReachable(t *testing.T, s storage.ObjectStore, r *repo.Repo) {
 	if err := maintenance.Materialize(ctx, s, maintenance.MaterializeInput{
 		BareDir:       bareParent,
 		Packs:         packs,
-		Refs:          body.Refs,
+		Refs:          refs,
 		DefaultBranch: body.DefaultBranch,
 	}); err != nil {
 		t.Fatalf("Materialize: %v", err)

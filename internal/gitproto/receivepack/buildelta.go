@@ -10,6 +10,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/pack"
 	"github.com/bucketvcs/bucketvcs/internal/reachability"
 	"github.com/bucketvcs/bucketvcs/internal/reachability/deltaindex"
+	"github.com/bucketvcs/bucketvcs/internal/repo/oidconst"
 )
 
 // buildDelta walks the new commits introduced by this push (identified
@@ -117,21 +118,21 @@ func buildDelta(
 	}
 
 	// Build ref-tip diffs: include all accepted (non-ng) updates, including
-	// deletions (NewOID == nullOID). Deletions are represented by a zero NewOID
+	// deletions (NewOID == oidconst.NullOIDHex). Deletions are represented by a zero NewOID
 	// so that Set.Load can remove the ref from the effective ref-tip map when
 	// replaying the delta chain.
 	tips := make([]deltaindex.RefTipDiff, 0, len(updates))
 	for _, u := range updates {
 		newOIDStr := u.NewOID
 		var newOID pack.OID // zero value = deletion
-		if newOIDStr != "" && newOIDStr != nullOID {
+		if newOIDStr != "" && newOIDStr != oidconst.NullOIDHex {
 			var err error
 			if newOID, err = pack.ParseOID(newOIDStr); err != nil {
 				return deltaindex.Delta{}, fmt.Errorf("buildDelta: parse new OID %q: %w", newOIDStr, err)
 			}
 		}
 		var oldOID pack.OID // zero value = creation
-		if u.OldOID != "" && u.OldOID != nullOID {
+		if u.OldOID != "" && u.OldOID != oidconst.NullOIDHex {
 			var err error
 			if oldOID, err = pack.ParseOID(u.OldOID); err != nil {
 				return deltaindex.Delta{}, fmt.Errorf("buildDelta: parse old OID %q: %w", u.OldOID, err)

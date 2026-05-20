@@ -7,7 +7,6 @@ package importer
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -18,14 +17,11 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	"github.com/bucketvcs/bucketvcs/internal/repo/oidconst"
 	"github.com/bucketvcs/bucketvcs/internal/repo/refstore"
 	"github.com/bucketvcs/bucketvcs/internal/repo/tx"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
-
-// nullOIDHex is git's sentinel "no object" hash (40 zeros, SHA-1) used by
-// the receive-pack wire protocol to mean "delete this ref".
-const nullOIDHex = "0000000000000000000000000000000000000000"
 
 // BodyPatcher is an optional callback invoked by BuildAndCommit after all
 // pack/idx/.bvom/.bvcg artifacts are uploaded and a draft Body has been
@@ -99,8 +95,8 @@ func BuildAndCommit(
 	if err != nil {
 		return nil, fmt.Errorf("importer: BuildAndCommit: read root: %w", err)
 	}
-	var currentBody manifest.Body
-	if err := json.Unmarshal(view.Body, &currentBody); err != nil {
+	currentBody, err := manifest.UnmarshalBody(view.Body)
+	if err != nil {
 		return nil, fmt.Errorf("importer: BuildAndCommit: unmarshal current body: %w", err)
 	}
 	startVersion := view.Header.ManifestVersion
@@ -351,13 +347,13 @@ func BuildAndCommit(
 		// to a commit already reachable from another pre-existing ref.
 		excludeArgs := make([]string, 0, len(prePushRefs))
 		for _, oldOID := range prePushRefs {
-			if oldOID == "" || oldOID == nullOIDHex {
+			if oldOID == "" || oldOID == oidconst.NullOIDHex {
 				continue
 			}
 			excludeArgs = append(excludeArgs, "^"+oldOID)
 		}
 		for _, oid := range refUpdates {
-			if oid == "" || oid == nullOIDHex {
+			if oid == "" || oid == oidconst.NullOIDHex {
 				continue
 			}
 			newTipArgs = append(newTipArgs, oid)
@@ -491,7 +487,7 @@ func commitEmptyBody(ctx context.Context, r *repo.Repo, prev manifest.Body, star
 // memory.
 //
 // refUpdates uses the same delete convention as refstore.Stage: empty
-// OID or 40-zero nullOIDHex means delete; any other 40-hex value is
+// OID or 40-zero oidconst.NullOIDHex means delete; any other 40-hex value is
 // an upsert.
 //
 // Precondition: refUpdates has already been refname-validated by the
@@ -521,7 +517,7 @@ func buildEffectiveRefs(ctx context.Context, rs refstore.RefStore, stage refstor
 		if ref == "" {
 			return nil, fmt.Errorf("empty refname in updates")
 		}
-		if oid == "" || oid == nullOIDHex {
+		if oid == "" || oid == oidconst.NullOIDHex {
 			delete(out, ref)
 			continue
 		}

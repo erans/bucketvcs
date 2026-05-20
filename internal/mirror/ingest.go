@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/bucketvcs/bucketvcs/internal/gitcli"
+	"github.com/bucketvcs/bucketvcs/internal/repo/oidconst"
 )
 
 // RefUpdate describes one ref change to apply to the mirror.
@@ -17,9 +18,6 @@ type RefUpdate struct {
 	OldOID  string // 40-char hex; "" or 40 zeros for create
 	NewOID  string // 40-char hex; 40 zeros for delete
 }
-
-// nullOID is the sentinel for create/delete commands.
-const nullOID = "0000000000000000000000000000000000000000"
 
 // IngestPack copies packPath (with companion .idx) into the mirror's
 // objects/pack/ dir, applies ref updates via git, then writes a fresh
@@ -110,9 +108,9 @@ func copyFile(src, dst string) error {
 // otherwise.
 func applyRefUpdate(ctx context.Context, bareDir string, u RefUpdate) error {
 	switch {
-	case u.NewOID == nullOID:
+	case u.NewOID == oidconst.NullOIDHex:
 		return gitcli.UpdateRefDelete(ctx, bareDir, u.Refname, u.OldOID)
-	case u.OldOID == "" || u.OldOID == nullOID:
+	case u.OldOID == "" || u.OldOID == oidconst.NullOIDHex:
 		return gitcli.UpdateRef(ctx, bareDir, u.Refname, u.NewOID)
 	default:
 		return gitcli.UpdateRefCAS(ctx, bareDir, u.Refname, u.NewOID, u.OldOID)

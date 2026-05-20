@@ -2,7 +2,6 @@ package uploadpack
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -112,8 +111,8 @@ func serviceImpl(req *EngineRequest) error {
 	if err != nil {
 		return err
 	}
-	var body manifest.Body
-	if err := json.Unmarshal(view.Body, &body); err != nil {
+	body, err := manifest.UnmarshalBody(view.Body)
+	if err != nil {
 		return err
 	}
 

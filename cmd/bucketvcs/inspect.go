@@ -126,8 +126,7 @@ func runInspect(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		// The raw "reachability" field (base_manifest + deltas) is left intact;
 		// the derived summary is emitted under "reachability_summary" so that
 		// operators can still access the raw delta list via jq .reachability.deltas.
-		var parsedBody manifest.Body
-		if err := json.Unmarshal(view.Body, &parsedBody); err == nil {
+		if parsedBody, err := manifest.UnmarshalBody(view.Body); err == nil {
 			if rb := buildReachabilityBlock(parsedBody); rb != nil {
 				rbJSON, err := json.Marshal(rb)
 				if err != nil {

@@ -3,7 +3,6 @@ package maintenance
 import (
 	"context"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -109,8 +108,8 @@ func BackfillPackChecksumsIfNeeded(
 	var out manifest.Body
 	txBody := tx.Body{Type: "maintenance_backfill_pack_checksum", Actor: actor}
 	_, err := r.Commit(ctx, txBody, func(prev *repo.RootView) ([]byte, error) {
-		var body manifest.Body
-		if uerr := json.Unmarshal(prev.Body, &body); uerr != nil {
+		body, uerr := manifest.UnmarshalBody(prev.Body)
+		if uerr != nil {
 			return nil, fmt.Errorf("backfill: unmarshal: %w", uerr)
 		}
 		anyFilled := false

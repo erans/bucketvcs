@@ -6,6 +6,7 @@ import (
 
 	"github.com/bucketvcs/bucketvcs/internal/gitcli"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
+	"github.com/bucketvcs/bucketvcs/internal/repo/oidconst"
 )
 
 // applyRefUpdateInBare dispatches a single ref change (create/update/
@@ -15,9 +16,9 @@ import (
 // requires the new tips to be reachable from a ref.
 func applyRefUpdateInBare(ctx context.Context, bareDir string, u mirror.RefUpdate) error {
 	switch {
-	case u.NewOID == nullOID:
+	case u.NewOID == oidconst.NullOIDHex:
 		return gitcli.UpdateRefDelete(ctx, bareDir, u.Refname, u.OldOID)
-	case u.OldOID == "" || u.OldOID == nullOID:
+	case u.OldOID == "" || u.OldOID == oidconst.NullOIDHex:
 		return gitcli.UpdateRef(ctx, bareDir, u.Refname, u.NewOID)
 	default:
 		return gitcli.UpdateRefCAS(ctx, bareDir, u.Refname, u.NewOID, u.OldOID)

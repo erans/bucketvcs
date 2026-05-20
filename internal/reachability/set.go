@@ -11,6 +11,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/reachability/deltaindex"
 	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	"github.com/bucketvcs/bucketvcs/internal/repo/oidconst"
 	"github.com/bucketvcs/bucketvcs/internal/repo/refstore"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
@@ -68,7 +69,7 @@ func Load(ctx context.Context, store storage.ObjectStore, k *keys.Repo, body man
 	}
 	refs := make(map[string]pack.OID, len(rawRefs))
 	for name, hex := range rawRefs {
-		if hex == "" || hex == "0000000000000000000000000000000000000000" {
+		if hex == "" || hex == oidconst.NullOIDHex {
 			continue
 		}
 		o, err := pack.ParseOID(hex)

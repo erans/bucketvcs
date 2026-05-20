@@ -15,6 +15,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	"github.com/bucketvcs/bucketvcs/internal/repo/oidconst"
 	"github.com/bucketvcs/bucketvcs/internal/repo/refstore"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
@@ -260,8 +261,6 @@ func downloadBitmapSidecar(ctx context.Context, store storage.ObjectStore, bitma
 	return out.Close()
 }
 
-const nullOID = "0000000000000000000000000000000000000000"
-
 // validRefName reports whether s is in the refs/* namespace and has a
 // reasonable shape. Pseudo-refs (HEAD, ORIG_HEAD, FETCH_HEAD) are rejected
 // here because UpdateRef on them would mutate symbolic state, not create
@@ -294,7 +293,7 @@ func validOID(s string) bool {
 	if len(s) != 40 {
 		return false
 	}
-	if s == nullOID {
+	if s == oidconst.NullOIDHex {
 		return false
 	}
 	for i := 0; i < len(s); i++ {

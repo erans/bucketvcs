@@ -13,10 +13,8 @@ import (
 
 	"github.com/bucketvcs/bucketvcs/internal/gitcli"
 	"github.com/bucketvcs/bucketvcs/internal/pktline"
+	"github.com/bucketvcs/bucketvcs/internal/repo/oidconst"
 )
-
-// nullOID is the 40-zero OID sentinel for create/delete commands.
-const nullOID = "0000000000000000000000000000000000000000"
 
 // ErrFlushOnlyProbe signals that the request body contained only a flush
 // packet (no update commands and no pack data). git-remote-curl's
@@ -56,7 +54,7 @@ type receivePackRequest struct {
 // parseReceivePackRequest drains the v0 receive-pack request body. It reads
 // pkt-line tokens until flush, accumulating <old> <new> <refname> commands;
 // the FIRST command line carries a NUL-suffixed capability list. After the
-// flush, if any command is a non-delete (NewOID != nullOID), the remaining
+// flush, if any command is a non-delete (NewOID != oidconst.NullOIDHex), the remaining
 // body bytes are streamed verbatim into <incoming>/rcv-<rand>.pack.
 // On error the returned *receivePackRequest may carry a non-empty PackPath
 // the caller must clean up.
@@ -132,7 +130,7 @@ func parseReceivePackRequest(ctx context.Context, body io.Reader, incoming strin
 		if strings.HasPrefix(ref, "refs/replace/") {
 			return nil, fmt.Errorf("refs/replace/* writes are not allowed")
 		}
-		if neu == nullOID && old == nullOID {
+		if neu == oidconst.NullOIDHex && old == oidconst.NullOIDHex {
 			return nil, fmt.Errorf("noop command (both OIDs are zero)")
 		}
 		req.Updates = append(req.Updates, updateCommand{OldOID: old, NewOID: neu, Refname: ref})
@@ -164,7 +162,7 @@ func parseReceivePackRequest(ctx context.Context, body io.Reader, incoming strin
 
 	allDelete := true
 	for _, u := range req.Updates {
-		if u.NewOID != nullOID {
+		if u.NewOID != oidconst.NullOIDHex {
 			allDelete = false
 			break
 		}

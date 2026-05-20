@@ -1,7 +1,6 @@
 package gc
 
 import (
-	"encoding/json"
 	"fmt"
 
 	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
@@ -34,12 +33,14 @@ func BuildLiveSet(k *keys.Repo, header manifest.RootHeader, bodyJSON []byte) (Li
 
 	var body manifest.Body
 	if len(bodyJSON) > 0 {
-		if err := json.Unmarshal(bodyJSON, &body); err != nil {
+		parsed, err := manifest.UnmarshalBody(bodyJSON)
+		if err != nil {
 			// Return the header-derived keys plus the error. The caller
 			// must abort GC — continuing without body-derived pack/index
 			// keys risks sweeping live data.
 			return live, fmt.Errorf("gc: parse manifest body: %w", err)
 		}
+		body = parsed
 	}
 
 	for _, p := range body.Packs {

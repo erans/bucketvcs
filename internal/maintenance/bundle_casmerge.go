@@ -2,7 +2,6 @@ package maintenance
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/bucketvcs/bucketvcs/internal/repo"
@@ -51,8 +50,8 @@ func RunBundleCASMerge(ctx context.Context, r *repo.Repo, fresh manifest.BundleE
 	}
 	txBody := tx.Body{Type: "maintenance_bundle", Actor: actor}
 	_, err := r.Commit(ctx, txBody, func(prev *repo.RootView) ([]byte, error) {
-		var prevBody manifest.Body
-		if perr := json.Unmarshal(prev.Body, &prevBody); perr != nil {
+		prevBody, perr := manifest.UnmarshalBody(prev.Body)
+		if perr != nil {
 			return nil, fmt.Errorf("bundle cas: unmarshal: %w", perr)
 		}
 		merged, mErr := MergeBundleEntry(prevBody, fresh)

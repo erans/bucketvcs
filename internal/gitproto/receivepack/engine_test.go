@@ -16,6 +16,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/pktline"
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
+	"github.com/bucketvcs/bucketvcs/internal/repo/oidconst"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 	"github.com/bucketvcs/bucketvcs/internal/v2proto"
 )
@@ -507,7 +508,7 @@ func TestReceivePack_DeleteOnlyPush_PreservesChain(t *testing.T) {
 	// push must record a delete-tip delta so the chain replay removes the ref rather
 	// than resurrecting it as a phantom.
 	deleteUpdates := []updateCommand{
-		{Refname: "refs/heads/feature", OldOID: newOID1, NewOID: nullOID},
+		{Refname: "refs/heads/feature", OldOID: newOID1, NewOID: oidconst.NullOIDHex},
 	}
 	// Pre-push version for push 2 is view.Header.ManifestVersion + 1 (push 1 committed once).
 	prePush2Version := view.Header.ManifestVersion + 1
