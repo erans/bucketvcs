@@ -21,7 +21,7 @@ unchanged against a bucketvcs gateway over both HTTPS and SSH.
 | SSH `git-lfs-authenticate` | ✅ shipped | P4; Basic-auth bearer in the response header |
 | Locks API | ✅ implemented (M13.3) | Stock git-lfs lock/unlock/locks/locks --verify work against this server |
 | Multipart upload | ❌ deferred | Single PUT only; proxied-path cap 5 GiB (5×2³⁰ bytes), direct-path cap is the backend's single-PUT limit (5 GB / 5×10⁹ bytes on S3/R2 — slightly under the proxied cap) |
-| LFS GC | ❌ deferred | LFS objects only sweep when the repo is removed |
+| LFS GC | ✅ implemented (M13.4) | `bucketvcs gc --lfs` walks reachable Git blobs and sweeps unreferenced LFS objects past retention |
 | Per-tenant byte quotas | ❌ deferred | Apply object-store-side quotas / lifecycle rules instead |
 | LFS-aware bandwidth metering | ❌ deferred | Get byte usage from S3 access logs / GCS audit logs / Azure storage analytics |
 | LFS-specific token scopes | ❌ deferred | Today every M4 write token can push LFS; every M4 read token can pull LFS |
@@ -81,7 +81,7 @@ returns one entry per LFS object in the repo.
 
 The flat layout is intentional. LFS clients address objects by full OID; they
 never list. Deep prefixing buys nothing for content-addressed key access and
-complicates the listing path used by operator-side audits and the (future)
+complicates the listing path used by operator-side audits and the M13.4
 LFS GC walk. The trade-off versus a `<aa>/<bb>/<rest>` 2/2 sharded layout —
 the convention some filesystems use to bound directory entry counts — is that
 on filesystems with hard caps on entries per directory (ext2/ext3 with the
@@ -224,12 +224,12 @@ A URL minted right before a GC mark — but downloaded right after the
 following sweep — must remain valid; the 24× headroom is what makes that
 hold against the worst-case GC timing.
 
-LFS GC itself is deferred work (§8.3). Today, LFS objects only disappear
-when the repo is removed. Reachability-based GC (sweep unreachable LFS
-objects after retention elapses) is the milestone that will make the TTL
-rule load-bearing for LFS specifically. Until then, the rule is forward-
-compatible: setting TTLs that respect it today means you do not need to
-revisit your operator config when LFS GC ships.
+LFS GC ships as of M13.4 (§8.3). Reachability-based mark-and-sweep of
+unreferenced LFS objects after retention elapses is now active, so the
+24× headroom rule is load-bearing for LFS too: a signed-URL TTL ≥
+24× the GC cadence ensures URLs minted just before a mark remain
+valid through the following sweep. Operators who configure TTLs in
+respect of this rule do not need to revisit it after M13.4.
 
 ### 4.2 Relevant flags
 
@@ -606,13 +606,59 @@ indicates non-owner force-unlocks are happening in volume and may
 warrant social escalation. Site: `internal/lfs/locks_handler.go`
 `handleLocksUnlock`.
 
+#### `lfs_gc_objects_marked_total{outcome}` (M13.4)
+
+One record per `RunMark` call, emitted after the mark record is built.
+- `outcome`:
+  - `candidate` — count of orphan LFS objects recorded in the mark.
+
+Site: `internal/lfs/gc/gc.go` `RunMark`.
+
+#### `lfs_gc_objects_swept_total{outcome}` (M13.4)
+
+Four records per `RunSweep` call (one per outcome bucket, including
+zero counts so dashboards can graph deltas reliably).
+- `outcome`:
+  - `deleted` — object removed from storage (or counted as such in dry-run).
+  - `skipped_retention` — candidate still inside the retention window.
+  - `skipped_concurrent` — Head/Delete race; will be retried next sweep.
+  - `error` — per-object delete failure (logged + counted in the report).
+
+`skipped_concurrent` is broken out from `skipped_retention` on purpose:
+the two have different operational implications. Concurrent races
+resolve on the next sweep; retention skips wait for the wall clock.
+Operators alerting on "why aren't reclaims happening?" can pivot on
+the bucket.
+
+**Note on the `deleted` bucket:** the count also includes objects
+that disappeared from storage between mark and sweep (e.g., another
+GC run on the same mark, an out-of-band cleanup, or a backend
+lifecycle rule). When two sweeps targeting the same mark race, both
+will increment `deleted` for any already-gone object, inflating
+`lfs_gc_bytes_swept_total` over the true reclaimed-bytes figure for
+that mark. Use the audit-event `deleted_bytes` value cross-referenced
+across `sweep_id`s for accurate per-sweep accounting, or treat
+`lfs_gc_bytes_swept_total` as an upper bound when concurrent sweeps
+are possible.
+
+Site: `internal/lfs/gc/gc.go` `RunSweep`.
+
+#### `lfs_gc_bytes_swept_total` (M13.4)
+
+One record per `RunSweep` call. Value is the total bytes the sweep
+reclaimed (or would have reclaimed, in dry-run). Operators tracking
+storage-cost recovery should chart this against
+`lfs_object_served_total{op=upload}` byte deltas for trend analysis.
+
+Site: `internal/lfs/gc/gc.go` `RunSweep`.
+
 ### 6.2 Audit events
 
-Seven M13 audit events (four from M13/M13.1/M13.2, three added in M13.3
-for the Locks API). All use the flat-attribute slog shape established
-by M11 — each event has a top-level `event=<name>` attr plus event-
-specific attrs. The audit stream is the same stdout/stderr stream that
-carries metrics.
+Nine M13 audit events (four from M13/M13.1/M13.2, three added in M13.3
+for the Locks API, two added in M13.4 for LFS GC). All use the
+flat-attribute slog shape established by M11 — each event has a
+top-level `event=<name>` attr plus event-specific attrs. The audit
+stream is the same stdout/stderr stream that carries metrics.
 
 #### `event=lfs.batch`
 
@@ -709,6 +755,40 @@ Attrs: `repo=<tenant>/<repo>`, `user=<actor name>`,
 
 Site: `internal/lfs/audit.go` `emitLFSLockVerify`, called from
 `internal/lfs/locks_handler.go` `handleLocksVerify`.
+
+#### `event=lfs.gc.mark` (M13.4)
+
+Emitted after `RunMark` finishes one mark pass. One event per repo
+per CLI invocation.
+
+Attrs: `repo=<tenant>/<repo>`, `mark_id=<lfs-...>`,
+`candidates_count=<int>` (orphan LFS objects recorded),
+`manifest_version=<uint64>` (manifest version observed at the start
+of the mark phase), `dry_run=<bool>`.
+
+The `dry_run=true` variant signals that the mark record was NOT
+persisted to storage (e.g. `--mark-only --dry-run`). Audit-log
+consumers should not conclude a mark exists on disk in that case;
+running `--sweep-only` afterwards will fail with `ErrNoMarks`.
+
+Site: `internal/lfs/audit.go` `EmitLFSGCMark`, called from
+`internal/lfs/gc/gc.go` `RunMark`.
+
+#### `event=lfs.gc.sweep` (M13.4)
+
+Emitted after `RunSweep` finishes one sweep pass. One event per repo
+per CLI invocation.
+
+Attrs: `repo=<tenant>/<repo>`, `mark_id=<lfs-...>`,
+`sweep_id=<lfs-sweep-...>`, `deleted_count=<int>`,
+`deleted_bytes=<int64>`, `skipped_retention=<int>`,
+`skipped_concurrent=<int>`, `error_count=<int>`, `dry_run=<bool>`.
+
+The `dry_run=true` variant lets log consumers distinguish what a
+real sweep would have done from what it actually did.
+
+Site: `internal/lfs/audit.go` `EmitLFSGCSweep`, called from
+`internal/lfs/gc/gc.go` `RunSweep`.
 
 ### 6.3 Recommended alerts
 
@@ -861,12 +941,12 @@ out-of-band procedure:
    reachable from any ref. Tag-based archival branches are a common
    source of OIDs that look orphaned but should not be deleted.
 
-This procedure is out-of-band and unsupported by the gateway directly. It
-exists to bridge the gap until LFS GC ships. The trigger condition for
-the deferred LFS-GC work is "storage costs growing without corresponding
-repo activity" — operators who reach that threshold should track the
-deferred item in §8.3 rather than running the manual procedure
-indefinitely.
+This procedure is out-of-band and unsupported by the gateway directly.
+As of M13.4 it is superseded by `bucketvcs gc --lfs` (§8.3), which
+mark-and-sweeps unreferenced LFS objects with carry-forward retention
+semantics. The manual procedure is retained here only for operators
+running a pre-M13.4 binary or for one-off audits of LFS state against
+external systems.
 
 ---
 
@@ -998,29 +1078,69 @@ upload behind a shared URL).
 
 ### 8.3 LFS-aware GC
 
-**Status.** Not implemented. LFS objects are swept only when the entire
-repo is removed (at which point the storage adapter's repo-deletion
-path removes the `tenants/<tenant>/repos/<repo>/` prefix). There is no
-mark-and-sweep against the set of OIDs referenced by reachable commits.
+**Status.** Implemented (M13.4, tag `m13.4-lfs-gc`). Use:
 
-**Why deferred.** The M8 reachability GC (for Git objects) walks the
-commit graph and never needs to leave the object database. LFS GC has
-to additionally enumerate every LFS pointer blob inside every reachable
-tree, then diff against the LFS object set in storage. That walk is
-much more expensive than M8's pack-level walk and benefits from a
-caching layer that does not exist today. The spec scopes LFS GC as a
-post-M13 milestone.
+```
+bucketvcs gc --store=URL --repo=tenant/repo --lfs [--retention=168h] [--dry-run]
+```
 
-**Trigger condition.** Storage-cost growth uncorrelated with repo push
-activity — e.g. monthly LFS byte usage doubling while commit volume
-stays flat. The signal usually surfaces in backend billing dashboards
-rather than gateway metrics (see §8.4 and §9.4).
+Or to GC both Git objects and LFS objects in one invocation:
 
-**Workaround today.** The manual out-of-band procedure in §7.3
-(`aws s3 ls` against the LFS prefix, `git lfs ls-files --all` against a
-clean clone, `comm -23` to compute the orphan set, manual review and
-deletion). The procedure exists to bridge the gap until LFS GC ships
-and is documented as unsupported.
+```
+bucketvcs gc --store=URL --repo=tenant/repo --lfs --include-git-objects
+```
+
+**Discovery.** `RunMark` materializes the repo's mirror (reusing the
+M9 maintenance materialize path), walks every reachable Git blob via
+`git rev-list --objects --all` + `git cat-file --batch`, filters to
+blobs ≤1024 bytes, and extracts the referenced LFS OID from the
+pointer signature. Live set = the union of referenced OIDs across all
+reachable trees on all refs. The mark phase then lists the LFS storage
+prefix and records every object NOT in the live set as a mark
+candidate.
+
+**Cost.** O(reachable Git blobs) per mark — bounded by the blob count
+in the mirror, not the LFS object size. Materialize itself is bounded
+by the pack count.
+
+**Retention.** Default 7 days (mirrors M8's Git-objects GC). An LFS
+object becomes deletable only after it has been marked unreferenced
+for at least the retention window. `first_seen_unreferenced_at`
+carries forward across mark runs, so the retention clock survives
+re-runs and is consistent with the M8 semantics.
+
+**Storage.** Mark records live at
+`tenants/<tenant>/repos/<repo>/gc/lfs-marks/<id>.json`; sweep records
+at `tenants/<tenant>/repos/<repo>/gc/lfs-sweeps/<id>.json`. These are
+parallel to the existing M8 `gc/marks/` and `gc/sweeps/` paths — the
+two kinds of GC keep their records cleanly separated.
+
+**Push-race fail-soft.** Because LFS objects are content-addressed
+(sha256) and the Batch upload path is idempotent, a wrongly-deleted
+object is transparently re-PUT by the next client push. The 7-day
+retention default makes the race practically impossible in normal
+operation; shorter retention is appropriate only when the re-upload
+cost is acceptable.
+
+**Failure modes.**
+| Symptom | Cause | Action |
+|---|---|---|
+| `materialize: ...` error | M9 Materialize failed (storage IO, git fsck) | Investigate logs; retry GC later |
+| `rev-list failed` / `batch-check failed` | `git` binary error or corrupt mirror | Investigate; possibly re-mirror via `bucketvcs maintenance` |
+| Per-object delete error (network, permissions, IAM) | Backend rejected the delete | Counted as `error` in the sweep report; sweep continues; investigate the underlying backend issue |
+| Head/Delete race on a candidate | Object modified between the sweep's Head and Delete | Counted as `skipped_concurrent`; retried automatically on next sweep |
+| `ErrNoMarks` from `--sweep-only` | No prior mark on disk | Run `--mark-only` (or omit `--sweep-only`) first |
+| `retention_overridden_by_mark` warning | `--retention` flag on `--sweep-only` differs from the mark's pinned value | Mark's frozen retention wins; re-mark with the desired retention |
+
+**Operator workflow.** Schedule via cron at the cadence that matches
+your push volume. A typical OSS deployment:
+
+```
+# Daily LFS GC at 03:00 local time
+0 3 * * * /usr/local/bin/bucketvcs gc --store=$STORE_URL --all-repos --lfs --retention=168h
+```
+
+**Observability.** 3 new counter metrics + 2 new audit events. See §6.
 
 ### 8.4 Per-tenant byte quotas + pooling + cross-repo dedupe
 
@@ -1031,9 +1151,10 @@ authentication grants write to the target repo.
 
 **Why deferred.** Per-tenant quotas are a control-plane feature: they
 need a credible accounting store (counter durability, rollover at the
-billing boundary, atomic decrement on object removal once GC ships),
-and they only make sense once LFS GC also ships so that the counter is
-authoritative. Cross-repo dedupe is the opposite trade — pooling LFS
+billing boundary, atomic decrement on object removal — for which M13.4
+LFS GC is the upstream prerequisite, now satisfied). M13.4 unblocked
+the GC half; quotas remain deferred until a control-plane accounting
+store is built. Cross-repo dedupe is the opposite trade — pooling LFS
 objects by OID across an entire tenant maximizes storage savings but
 costs control-plane complexity for repo-scoped access decisions. M13
 intentionally chose per-repo isolation to keep the access model

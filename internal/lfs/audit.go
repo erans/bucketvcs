@@ -155,3 +155,55 @@ func EmitLFSSSHAuthenticate(ctx context.Context, logger *slog.Logger, repo, user
 		slog.String("result", result),
 	)
 }
+
+// EmitLFSGCMark records an "lfs.gc.mark" audit event after RunMark
+// finishes. repo is "<tenant>/<repo>". markID is the freshly-issued
+// mark identifier. candidatesCount is the number of orphan LFS
+// objects recorded. manifestVersion is the manifest version observed
+// at the start of the mark phase. dryRun reflects whether the caller
+// will persist the mark to storage; it's needed in the audit stream
+// so log consumers don't conclude a mark exists on disk when none
+// was written.
+//
+// Exported so the sibling internal/lfs/gc package can call it.
+func EmitLFSGCMark(ctx context.Context, logger *slog.Logger, repo, markID string, candidatesCount int, manifestVersion uint64, dryRun bool) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.LogAttrs(ctx, slog.LevelInfo, "lfs.gc.mark",
+		slog.String("event", "lfs.gc.mark"),
+		slog.String("repo", repo),
+		slog.String("mark_id", markID),
+		slog.Int("candidates_count", candidatesCount),
+		slog.Uint64("manifest_version", manifestVersion),
+		slog.Bool("dry_run", dryRun),
+	)
+}
+
+// EmitLFSGCSweep records an "lfs.gc.sweep" audit event after RunSweep
+// finishes. repo is "<tenant>/<repo>". markID is the mark the sweep
+// operated against. sweepID is the freshly-issued sweep identifier.
+// deletedCount / deletedBytes are the (or would-be, in dry-run)
+// reclaimed counts. skippedRetention / skippedConcurrent partition the
+// skipped candidates; errorCount is per-object delete failures.
+// dryRun reflects whether the sweep persisted any deletions.
+//
+// Exported so the sibling internal/lfs/gc package can call it.
+func EmitLFSGCSweep(ctx context.Context, logger *slog.Logger, repo, markID, sweepID string,
+	deletedCount, skippedRetention, skippedConcurrent, errorCount int, deletedBytes int64, dryRun bool) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.LogAttrs(ctx, slog.LevelInfo, "lfs.gc.sweep",
+		slog.String("event", "lfs.gc.sweep"),
+		slog.String("repo", repo),
+		slog.String("mark_id", markID),
+		slog.String("sweep_id", sweepID),
+		slog.Int("deleted_count", deletedCount),
+		slog.Int64("deleted_bytes", deletedBytes),
+		slog.Int("skipped_retention", skippedRetention),
+		slog.Int("skipped_concurrent", skippedConcurrent),
+		slog.Int("error_count", errorCount),
+		slog.Bool("dry_run", dryRun),
+	)
+}

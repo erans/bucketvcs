@@ -196,3 +196,57 @@ func TestEmitLockDeleteMetric_OK(t *testing.T) {
 		}
 	}
 }
+
+func TestEmitGCObjectsMarkedMetric_OK(t *testing.T) {
+	var buf bytes.Buffer
+	EmitGCObjectsMarkedMetric(context.Background(), captureLogger(&buf), "candidate", 42)
+	line := buf.String()
+	for _, want := range []string{
+		`"metric_name":"lfs_gc_objects_marked_total"`,
+		`"value":42`,
+		`"outcome":"candidate"`,
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("missing %q in %s", want, line)
+		}
+	}
+}
+
+func TestEmitGCObjectsSweptMetric_AllOutcomes(t *testing.T) {
+	cases := []struct {
+		outcome string
+		count   int64
+	}{
+		{"deleted", 7},
+		{"skipped_retention", 3},
+		{"skipped_concurrent", 1},
+		{"error", 0},
+	}
+	for _, tc := range cases {
+		var buf bytes.Buffer
+		EmitGCObjectsSweptMetric(context.Background(), captureLogger(&buf), tc.outcome, tc.count)
+		line := buf.String()
+		for _, want := range []string{
+			`"metric_name":"lfs_gc_objects_swept_total"`,
+			`"outcome":"` + tc.outcome + `"`,
+		} {
+			if !strings.Contains(line, want) {
+				t.Errorf("[%s] missing %q in %s", tc.outcome, want, line)
+			}
+		}
+	}
+}
+
+func TestEmitGCBytesSweptMetric_OK(t *testing.T) {
+	var buf bytes.Buffer
+	EmitGCBytesSweptMetric(context.Background(), captureLogger(&buf), 4096)
+	line := buf.String()
+	for _, want := range []string{
+		`"metric_name":"lfs_gc_bytes_swept_total"`,
+		`"value":4096`,
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("missing %q in %s", want, line)
+		}
+	}
+}

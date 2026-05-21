@@ -143,6 +143,42 @@ func EmitSSHAuthenticateMetric(ctx context.Context, logger *slog.Logger, op, res
 	)
 }
 
+// EmitGCObjectsMarkedMetric increments lfs_gc_objects_marked_total{outcome}.
+// Emitted by RunMark after one mark pass. outcome is:
+//
+//   - "candidate": object found unreferenced and recorded in the mark.
+//
+// Exported so the internal/lfs/gc package (a sibling) can call it
+// without violating Go's lowercase-export rules across packages.
+func EmitGCObjectsMarkedMetric(ctx context.Context, logger *slog.Logger, outcome string, count int64) {
+	emitMetric(ctx, logger, "lfs_gc_objects_marked_total", count, "outcome", outcome)
+}
+
+// EmitGCObjectsSweptMetric increments lfs_gc_objects_swept_total{outcome}.
+// Emitted by RunSweep after one sweep pass, once per outcome bucket.
+// outcome is one of:
+//
+//   - "deleted": object removed from storage (or counted as such in dry-run).
+//   - "skipped_retention": candidate still inside the retention window.
+//   - "skipped_concurrent": Head/Delete race; will be retried next sweep.
+//   - "error": per-object delete failure (logged + counted in the report).
+//
+// Exported for the same cross-package-call reason as
+// EmitGCObjectsMarkedMetric.
+func EmitGCObjectsSweptMetric(ctx context.Context, logger *slog.Logger, outcome string, count int64) {
+	emitMetric(ctx, logger, "lfs_gc_objects_swept_total", count, "outcome", outcome)
+}
+
+// EmitGCBytesSweptMetric increments lfs_gc_bytes_swept_total by bytes.
+// Emitted by RunSweep after one sweep pass with the total bytes the
+// sweep reclaimed (or would have reclaimed, in dry-run).
+//
+// Exported for the same cross-package-call reason as the marked /
+// swept counters above.
+func EmitGCBytesSweptMetric(ctx context.Context, logger *slog.Logger, bytes int64) {
+	emitMetric(ctx, logger, "lfs_gc_bytes_swept_total", bytes)
+}
+
 // TODO(P5): emitPresignSeconds histogram is in the M13 spec §7 metric
 // list. Adding it requires plumbing a Logger + backend label through
 // Store.PresignPut/PresignGet, which is more wiring than fits in P2's

@@ -182,3 +182,63 @@ func TestEmitLFSLockVerify_Shape(t *testing.T) {
 		}
 	}
 }
+
+func TestEmitLFSGCMark_Shape(t *testing.T) {
+	var buf bytes.Buffer
+	EmitLFSGCMark(context.Background(), captureLogger(&buf), "acme/repo", "lfs-20260520T120000Z-deadbeef", 17, 42, false)
+	line := buf.String()
+	for _, want := range []string{
+		`"msg":"lfs.gc.mark"`,
+		`"event":"lfs.gc.mark"`,
+		`"repo":"acme/repo"`,
+		`"mark_id":"lfs-20260520T120000Z-deadbeef"`,
+		`"candidates_count":17`,
+		`"manifest_version":42`,
+		`"dry_run":false`,
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("missing %q in %s", want, line)
+		}
+	}
+}
+
+func TestEmitLFSGCMark_DryRun(t *testing.T) {
+	var buf bytes.Buffer
+	EmitLFSGCMark(context.Background(), captureLogger(&buf), "acme/repo", "m", 0, 1, true)
+	if !strings.Contains(buf.String(), `"dry_run":true`) {
+		t.Errorf("expected dry_run=true in: %s", buf.String())
+	}
+}
+
+func TestEmitLFSGCSweep_Shape(t *testing.T) {
+	var buf bytes.Buffer
+	EmitLFSGCSweep(context.Background(), captureLogger(&buf), "acme/repo",
+		"lfs-20260520T120000Z-deadbeef", "lfs-sweep-20260520T120100Z-cafebabe",
+		7, 3, 1, 0, 8192, false)
+	line := buf.String()
+	for _, want := range []string{
+		`"msg":"lfs.gc.sweep"`,
+		`"event":"lfs.gc.sweep"`,
+		`"repo":"acme/repo"`,
+		`"mark_id":"lfs-20260520T120000Z-deadbeef"`,
+		`"sweep_id":"lfs-sweep-20260520T120100Z-cafebabe"`,
+		`"deleted_count":7`,
+		`"deleted_bytes":8192`,
+		`"skipped_retention":3`,
+		`"skipped_concurrent":1`,
+		`"error_count":0`,
+		`"dry_run":false`,
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("missing %q in %s", want, line)
+		}
+	}
+}
+
+func TestEmitLFSGCSweep_DryRun(t *testing.T) {
+	var buf bytes.Buffer
+	EmitLFSGCSweep(context.Background(), captureLogger(&buf), "acme/repo", "m", "s", 0, 0, 0, 0, 0, true)
+	if !strings.Contains(buf.String(), `"dry_run":true`) {
+		t.Errorf("expected dry_run=true in: %s", buf.String())
+	}
+}
