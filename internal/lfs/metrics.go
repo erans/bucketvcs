@@ -179,6 +179,23 @@ func EmitGCBytesSweptMetric(ctx context.Context, logger *slog.Logger, bytes int6
 	emitMetric(ctx, logger, "lfs_gc_bytes_swept_total", bytes)
 }
 
+// EmitQuotaCheckMetric increments lfs_quota_check_total{outcome}.
+// Emitted once per Batch pre-check call. outcome is "ok" or "exceeded".
+//
+// Exported for cross-package use (internal/lfs/quota package).
+func EmitQuotaCheckMetric(ctx context.Context, logger *slog.Logger, outcome string) {
+	emitMetric(ctx, logger, "lfs_quota_check_total", 1, "outcome", outcome)
+}
+
+// EmitQuotaBytesUsedMetric emits the current used_bytes for a tenant
+// as a gauge. value is the post-update absolute value, not a delta.
+// Refreshed on Add, Subtract, Set, Clear, Reconcile.
+//
+// Exported for cross-package use.
+func EmitQuotaBytesUsedMetric(ctx context.Context, logger *slog.Logger, tenant string, value int64) {
+	emitMetric(ctx, logger, "lfs_quota_bytes_used", value, "tenant", tenant)
+}
+
 // TODO(P5): emitPresignSeconds histogram is in the M13 spec §7 metric
 // list. Adding it requires plumbing a Logger + backend label through
 // Store.PresignPut/PresignGet, which is more wiring than fits in P2's

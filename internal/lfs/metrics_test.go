@@ -250,3 +250,35 @@ func TestEmitGCBytesSweptMetric_OK(t *testing.T) {
 		}
 	}
 }
+
+func TestEmitQuotaCheckMetric_AllOutcomes(t *testing.T) {
+	for _, outcome := range []string{"ok", "exceeded"} {
+		var buf bytes.Buffer
+		EmitQuotaCheckMetric(context.Background(), captureLogger(&buf), outcome)
+		line := buf.String()
+		for _, want := range []string{
+			`"metric_name":"lfs_quota_check_total"`,
+			`"value":1`,
+			`"outcome":"` + outcome + `"`,
+		} {
+			if !strings.Contains(line, want) {
+				t.Errorf("[%s] missing %q in %s", outcome, want, line)
+			}
+		}
+	}
+}
+
+func TestEmitQuotaBytesUsedMetric_OK(t *testing.T) {
+	var buf bytes.Buffer
+	EmitQuotaBytesUsedMetric(context.Background(), captureLogger(&buf), "acme", 1024)
+	line := buf.String()
+	for _, want := range []string{
+		`"metric_name":"lfs_quota_bytes_used"`,
+		`"value":1024`,
+		`"tenant":"acme"`,
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("missing %q in %s", want, line)
+		}
+	}
+}

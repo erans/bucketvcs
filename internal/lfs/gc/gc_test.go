@@ -8,8 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
 	"github.com/bucketvcs/bucketvcs/internal/lfs"
 	"github.com/bucketvcs/bucketvcs/internal/lfs/gc"
+	"github.com/bucketvcs/bucketvcs/internal/lfs/quota"
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
@@ -355,5 +357,71 @@ func TestLoadRefsFromBody_InlineRefs(t *testing.T) {
 	}
 	if got, want := gotRefs["refs/heads/main"], "1234567890123456789012345678901234567890"; got != want {
 		t.Errorf("inline ref oid = %q, want %q", got, want)
+	}
+}
+
+func TestRunSweep_DecrementsQuota(t *testing.T) {
+	const oid = "9999999999999999999999999999999999999999999999999999999999999999"
+	r, store, bare, tenant, _ := seedRepoWithLFSObjects(t, oid)
+
+	authStore, err := sqlitestore.Open(filepath.Join(t.TempDir(), "auth.db"))
+	if err != nil {
+		t.Fatalf("auth open: %v", err)
+	}
+	defer authStore.Close()
+	svc := quota.New(authStore.DB(), nil)
+	ctx := context.Background()
+	if err := svc.Set(ctx, tenant, 1000); err != nil {
+		t.Fatalf("svc.Set: %v", err)
+	}
+	// seedRepoWithLFSObjects writes []byte("dummy") = 5 bytes per OID.
+	if err := svc.Add(ctx, tenant, oid, 5); err != nil {
+		t.Fatalf("svc.Add: %v", err)
+	}
+
+	t0 := time.Unix(1700000000, 0)
+	rec, err := gc.RunMark(ctx, store, r, gc.MarkOptions{
+		Now: func() time.Time { return t0 }, RetentionSeconds: 1, BareDir: bare,
+	})
+	if err != nil {
+		t.Fatalf("RunMark: %v", err)
+	}
+	if _, err := gc.RunSweep(ctx, store, r, rec, gc.SweepOptions{
+		Now:   func() time.Time { return t0.Add(2 * time.Second) },
+		Quota: svc,
+	}); err != nil {
+		t.Fatalf("RunSweep: %v", err)
+	}
+
+	got, err := svc.Get(ctx, tenant)
+	if err != nil {
+		t.Fatalf("svc.Get: %v", err)
+	}
+	if got.UsedBytes != 0 {
+		t.Errorf("after sweep: UsedBytes=%d, want 0", got.UsedBytes)
+	}
+}
+
+func TestRunSweep_NilQuotaIsNoOp(t *testing.T) {
+	// Pin the optionality contract: SweepOptions.Quota=nil produces
+	// zero behavioural change vs. pre-M13.5 — no panic, normal sweep.
+	const oid = "8888888888888888888888888888888888888888888888888888888888888888"
+	r, store, bare, _, _ := seedRepoWithLFSObjects(t, oid)
+	t0 := time.Unix(1700000000, 0)
+	rec, err := gc.RunMark(context.Background(), store, r, gc.MarkOptions{
+		Now: func() time.Time { return t0 }, RetentionSeconds: 1, BareDir: bare,
+	})
+	if err != nil {
+		t.Fatalf("RunMark: %v", err)
+	}
+	rep, err := gc.RunSweep(context.Background(), store, r, rec, gc.SweepOptions{
+		Now: func() time.Time { return t0.Add(2 * time.Second) },
+		// Quota: nil
+	})
+	if err != nil {
+		t.Fatalf("RunSweep: %v", err)
+	}
+	if rep.DeletedCount != 1 {
+		t.Errorf("nil-quota sweep: DeletedCount=%d, want 1", rep.DeletedCount)
 	}
 }

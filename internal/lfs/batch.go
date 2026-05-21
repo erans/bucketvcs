@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"regexp"
 	"time"
 
+	"github.com/bucketvcs/bucketvcs/internal/lfs/quota"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
 
@@ -56,7 +58,7 @@ var validOID = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // repo, oid) — not consume-on-use, so it can be replayed against the
 // same OID within its TTL but cannot be repurposed for upload, download,
 // or another object.
-func Build(ctx context.Context, req BatchRequest, store *Store, presignTTL time.Duration) (BatchResponse, error) {
+func Build(ctx context.Context, req BatchRequest, store *Store, presignTTL time.Duration, q *quota.Service, tenant string) (BatchResponse, error) {
 	if req.Operation != "upload" && req.Operation != "download" {
 		return BatchResponse{}, fmt.Errorf("lfs: unsupported operation %q", req.Operation)
 	}
@@ -71,6 +73,52 @@ func Build(ctx context.Context, req BatchRequest, store *Store, presignTTL time.
 		}
 		if !ok {
 			return BatchResponse{}, fmt.Errorf("lfs: client did not advertise the 'basic' transfer")
+		}
+	}
+	// Quota pre-check (upload only). Sum requested bytes for the
+	// whole batch and ask the Service for a single atomic check.
+	// On rejection, return per-object 507 errors so stock git-lfs
+	// surfaces the failure to the user.
+	if req.Operation == "upload" && q != nil {
+		var requested int64
+		for _, ref := range req.Objects {
+			if ref.Size <= 0 {
+				continue
+			}
+			// Sum would overflow int64 — reject the whole batch as
+			// malformed input. A well-formed LFS batch's total size
+			// never approaches this; a value here implies a malicious
+			// or buggy client. The top-level error path maps to
+			// HTTP 422 in handleBatch.
+			if requested > math.MaxInt64-ref.Size {
+				return BatchResponse{}, fmt.Errorf("lfs: batch object-size sum exceeds int64 — refusing to evaluate quota")
+			}
+			requested += ref.Size
+		}
+		if requested > 0 {
+			if err := q.CheckBatch(ctx, tenant, requested); err != nil {
+				var qerr *quota.QuotaError
+				if errors.As(err, &qerr) {
+					resp := BatchResponse{
+						Transfer:   "basic",
+						Objects:    make([]ObjectAction, 0, len(req.Objects)),
+						QuotaError: qerr,
+					}
+					msg := fmt.Sprintf(
+						"tenant quota exceeded: %d used / %d limit, %d requested",
+						qerr.CurrentBytes, qerr.LimitBytes, qerr.RequestedBytes,
+					)
+					for _, ref := range req.Objects {
+						resp.Objects = append(resp.Objects, ObjectAction{
+							OID:   ref.OID,
+							Size:  ref.Size,
+							Error: &ObjectError{Code: 507, Message: msg},
+						})
+					}
+					return resp, nil
+				}
+				return BatchResponse{}, err
+			}
 		}
 	}
 	resp := BatchResponse{Transfer: "basic", Objects: make([]ObjectAction, 0, len(req.Objects))}

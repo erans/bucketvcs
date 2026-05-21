@@ -15,6 +15,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/gateway/routenames"
 	"github.com/bucketvcs/bucketvcs/internal/lfs/locks"
+	"github.com/bucketvcs/bucketvcs/internal/lfs/quota"
 )
 
 const maxBatchObjects = 1000
@@ -57,6 +58,12 @@ type Deps struct {
 	// requests return 503 with "locks API not configured". Construct
 	// via internal/lfs/locks.New(authdb).
 	LocksStore *locks.Store
+
+	// Quota is OPTIONAL. When non-nil, the Batch handler calls
+	// Quota.CheckBatch on every upload-operation Batch request and
+	// propagates a *quota.QuotaError to each ObjectAction.Error as a
+	// 507. When nil, no quota enforcement occurs (pre-M13.5 behavior).
+	Quota *quota.Service
 }
 
 // lfsRoute enumerates the LFS sub-routes the handler dispatches.
@@ -255,11 +262,28 @@ func handleBatch(ctx context.Context, w http.ResponseWriter, r *http.Request, de
 	// header are minted from Store.ProxiedVerifyURL (kind=5 HMAC token);
 	// no inbound bearer is echoed into the response.
 	store := deps.NewStore(tenant, repo)
-	resp, berr := Build(ctx, req, store, deps.PresignTTL)
+	resp, berr := Build(ctx, req, store, deps.PresignTTL, deps.Quota, tenant)
 	if berr != nil {
 		WriteError(w, http.StatusUnprocessableEntity, berr.Error())
 		emitBatchRequestMetric(ctx, logger, req.Operation, "error")
 		return
+	}
+
+	// M13.5: emit quota metric + audit. Build attaches the
+	// QuotaError to resp on rejection so we don't need a second
+	// authdb read here.
+	if req.Operation == "upload" && deps.Quota != nil {
+		if resp.QuotaError != nil {
+			EmitQuotaCheckMetric(ctx, logger, "exceeded")
+			oids := joinOIDs(req.Objects)
+			EmitLFSQuotaExceeded(ctx, logger, tenant,
+				resp.QuotaError.CurrentBytes,
+				resp.QuotaError.LimitBytes,
+				resp.QuotaError.RequestedBytes,
+				oids)
+		} else {
+			EmitQuotaCheckMetric(ctx, logger, "ok")
+		}
 	}
 
 	// Emit per-object metrics.
@@ -386,4 +410,22 @@ func perObjectResult(op string, o ObjectAction) string {
 		// added (e.g., verify), this case must be updated.
 		return "error"
 	}
+}
+
+// joinOIDs returns a comma-joined OID list for the lfs.quota.exceeded
+// audit, bounded to the first 20 OIDs to keep log lines reasonable
+// (1000 OIDs × 64 hex chars = ~65 KiB per line, painful for log
+// aggregators). Operators who need the full list can correlate via
+// the originating Batch request body in their HTTP access logs.
+func joinOIDs(refs []ObjectRef) string {
+	const maxOIDs = 20
+	parts := make([]string, 0, maxOIDs)
+	for i, r := range refs {
+		if i >= maxOIDs {
+			parts = append(parts, fmt.Sprintf("...(+%d)", len(refs)-maxOIDs))
+			break
+		}
+		parts = append(parts, r.OID)
+	}
+	return strings.Join(parts, ",")
 }

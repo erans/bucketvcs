@@ -22,7 +22,7 @@ unchanged against a bucketvcs gateway over both HTTPS and SSH.
 | Locks API | ✅ implemented (M13.3) | Stock git-lfs lock/unlock/locks/locks --verify work against this server |
 | Multipart upload | ❌ deferred | Single PUT only; proxied-path cap 5 GiB (5×2³⁰ bytes), direct-path cap is the backend's single-PUT limit (5 GB / 5×10⁹ bytes on S3/R2 — slightly under the proxied cap) |
 | LFS GC | ✅ implemented (M13.4) | `bucketvcs gc --lfs` walks reachable Git blobs and sweeps unreferenced LFS objects past retention |
-| Per-tenant byte quotas | ❌ deferred | Apply object-store-side quotas / lifecycle rules instead |
+| Per-tenant byte quotas | ✅ implemented (M13.5) | `bucketvcs quota` CLI; LFS-only; per-tenant hard cap enforced at the Batch handler |
 | LFS-aware bandwidth metering | ❌ deferred | Get byte usage from S3 access logs / GCS audit logs / Azure storage analytics |
 | LFS-specific token scopes | ❌ deferred | Today every M4 write token can push LFS; every M4 read token can pull LFS |
 
@@ -61,7 +61,7 @@ direct URLs; localfs always presents proxied URLs. See §3.2 for the matrix.
 LFS objects are written under the same per-repo storage prefix that holds
 the repository's pack data. No separate bucket, no separate prefix root.
 Objects content-addressed by their LFS pointer SHA-256 deduplicate within a
-single repo; cross-repo dedupe is deferred work (§8.4).
+single repo; cross-repo dedupe remains deferred — see §8.4 "Deferred work" for details.
 
 ---
 
@@ -652,10 +652,30 @@ storage-cost recovery should chart this against
 
 Site: `internal/lfs/gc/gc.go` `RunSweep`.
 
+#### `lfs_quota_check_total{outcome}` (M13.5)
+
+One record per Batch upload pre-check.
+- `outcome`:
+  - `ok` — batch fit the tenant's quota (or no quota row exists).
+  - `exceeded` — batch was rejected; every Upload object returned a 507.
+
+Site: `internal/lfs/handler.go::handleBatch`.
+
+#### `lfs_quota_bytes_used{tenant}` (M13.5)
+
+Gauge of the current `used_bytes` for the named tenant. Refreshed
+on every Add (verify success), Subtract (GC sweep success), Set,
+Clear, and Reconcile. Operators graph this directly; alert when
+`value / limit > 0.9` (soft-cap proxy).
+
+Sites: `internal/lfs/proxied.go::serveVerify`, `internal/lfs/gc/gc.go::RunSweep`,
+`cmd/bucketvcs/quota.go::runQuota{Set,Clear,Reconcile}`.
+
 ### 6.2 Audit events
 
-Nine M13 audit events (four from M13/M13.1/M13.2, three added in M13.3
-for the Locks API, two added in M13.4 for LFS GC). All use the
+Eleven M13 audit events (four from M13/M13.1/M13.2, three added in M13.3
+for the Locks API, two added in M13.4 for LFS GC, two added in M13.5
+for quotas). All use the
 flat-attribute slog shape established by M11 — each event has a
 top-level `event=<name>` attr plus event-specific attrs. The audit
 stream is the same stdout/stderr stream that carries metrics.
@@ -790,6 +810,28 @@ real sweep would have done from what it actually did.
 Site: `internal/lfs/audit.go` `EmitLFSGCSweep`, called from
 `internal/lfs/gc/gc.go` `RunSweep`.
 
+#### `event=lfs.quota.exceeded` (M13.5)
+
+Emitted on every rejected Batch upload.
+
+Attrs: `tenant=<t>`, `current_bytes=<int64>`, `limit_bytes=<int64>`,
+`requested_bytes=<int64>` (sum of object sizes in the rejected batch),
+`oids=<comma-separated>` (rejected OIDs).
+
+Site: `internal/lfs/audit.go::EmitLFSQuotaExceeded`, called from
+`internal/lfs/handler.go::handleBatch`.
+
+#### `event=lfs.quota.reconcile` (M13.5)
+
+Emitted once per `bucketvcs quota reconcile` invocation per tenant.
+
+Attrs: `tenant=<t>`, `before_bytes=<int64>`, `after_bytes=<int64>`,
+`drift_bytes=<int64-signed>` (positive: counter was under-reporting;
+negative: over-reporting), `dry_run=<bool>`.
+
+Site: `internal/lfs/audit.go::EmitLFSQuotaReconcile`, called from
+`cmd/bucketvcs/quota.go::runQuotaReconcile`.
+
 ### 6.3 Recommended alerts
 
 Three alerts capture the operationally significant LFS failure modes.
@@ -908,10 +950,11 @@ or repo touch is needed.
 
 ### 7.3 Removing stale LFS objects
 
-There is no built-in command to garbage-collect orphaned LFS objects
-today. LFS-aware reachability GC is deferred work; see §8. Objects are
-removed only when the entire repo is removed (and even then, the actual
-sweep depends on the storage adapter's behaviour at repo deletion).
+LFS-aware reachability GC ships as of M13.4 (§8.3) — use
+`bucketvcs gc --lfs` for routine orphan cleanup. The out-of-band
+recipe below remains documented for one-off forensic cleanups (e.g.
+auditing what GC would remove before flipping it on, or scrubbing
+specific OIDs the GC retention window has not yet released).
 
 For one-off manual cleanup — for example after a misbehaving client
 uploaded test data that was never committed — operators can use an
@@ -1142,42 +1185,100 @@ your push volume. A typical OSS deployment:
 
 **Observability.** 3 new counter metrics + 2 new audit events. See §6.
 
-### 8.4 Per-tenant byte quotas + pooling + cross-repo dedupe
+### 8.4 Per-tenant byte quotas
 
-**Status.** Not implemented. M13 has no in-process quota counter, no
-shared-OID pool across repos, and no per-tenant ceiling enforced at the
-Batch handler. Every LFS write is allowed as long as the upstream M4
-authentication grants write to the target repo.
+**Status.** Implemented (M13.5, tag `m13.5-quotas`). Use:
 
-**Why deferred.** Per-tenant quotas are a control-plane feature: they
-need a credible accounting store (counter durability, rollover at the
-billing boundary, atomic decrement on object removal — for which M13.4
-LFS GC is the upstream prerequisite, now satisfied). M13.4 unblocked
-the GC half; quotas remain deferred until a control-plane accounting
-store is built. Cross-repo dedupe is the opposite trade — pooling LFS
-objects by OID across an entire tenant maximizes storage savings but
-costs control-plane complexity for repo-scoped access decisions. M13
-intentionally chose per-repo isolation to keep the access model
-identical to the Git object path.
+```
+bucketvcs quota set       --auth-db=PATH --tenant=T --limit=100GiB
+bucketvcs quota show      --auth-db=PATH {--tenant=T | --all}
+bucketvcs quota reconcile --auth-db=PATH --store=URL {--tenant=T | --all-tenants} [--dry-run]
+bucketvcs quota clear     --auth-db=PATH --tenant=T
+```
 
-**Trigger condition.** Contractual byte quotas required per tenant
-(a SaaS offering with per-plan storage tiers, or an internal billing
-chargeback model), or a tenant whose LFS storage cost is dominated by
-the same asset replicated across many forks of one repo.
+**Schema.** New `quotas` table on the M4 authdb (migration 0004):
+columns `tenant PRIMARY KEY`, `limit_bytes`, `used_bytes`, `updated_at`.
 
-**Workaround today.** Object-store-side controls:
+**Enforcement.** The Batch upload handler runs one atomic SQL read
+against the quotas row before issuing upload URLs. If the sum of
+requested object sizes plus `used_bytes` exceeds `limit_bytes`, every
+object in the response gets a 507 ObjectError with a `tenant quota
+exceeded` message; the client surfaces it through stock `git lfs push`.
 
-- S3: bucket policies + S3 Storage Lens metrics + lifecycle rules.
-- R2: per-bucket usage in the Cloudflare dashboard.
-- GCS: bucket-level Storage Lifecycle Management + IAM.
-- Azure Blob: storage account quotas + lifecycle management policies.
-- localfs: filesystem-level quotas (XFS / ZFS quotas, LVM thinpool
-  reservations).
+**Counter accounting.**
+- **Increment at verify-success** — `internal/lfs/proxied.go::serveVerify`
+  calls `quota.Add(ctx, tenant, oid, size)` after the verify check
+  passes. An LRU dedupe ring (capacity 1024) makes the increment
+  idempotent within a verify-token TTL window.
+- **Decrement at GC sweep-success** — `internal/lfs/gc/gc.go::RunSweep`
+  calls `quota.Subtract(ctx, tenant, oid, sizeBytes)` from every
+  success path (normal delete, Head-said-gone, Delete-said-gone-by-race).
+  Subtract is floored at zero via `MAX(used_bytes - ?, 0)` so reconcile
+  -vs-sweep races never produce a negative counter.
+- **Drift correction** — `bucketvcs quota reconcile` walks
+  `tenants/<t>/repos/*/lfs/objects/` across every repo, sums object
+  sizes, and overwrites `used_bytes`. `--dry-run` reports the drift
+  without writing. Operators run this on a daily cron alongside
+  `bucketvcs gc`.
 
-These backend-side controls have no concept of "tenant" — operators
-who run a single bucket per tenant get clean accounting; operators who
-multiplex tenants into one bucket need a separate counter outside the
-gateway.
+**Race semantics.**
+- **Within-batch**: atomic via a single SQL read per pre-check; no
+  race possible inside one Batch request.
+- **Cross-batch**: best-effort. Two concurrent batches at 99/100 GiB
+  each pushing 2 GiB can both pass the pre-check and both verify-
+  increment, leaving the counter at 103 GiB. The next batch from that
+  tenant is correctly rejected (103 > 100). Bounded by
+  `concurrent_batches × max_batch_size`. The §10 bootstrap step and
+  the daily reconcile cron are the operator's resets.
+- **Verify-replay**: the dedupe ring suppresses double-counts within
+  its capacity; beyond eviction (which can happen under sustained
+  load) double-count can occur and is caught by reconcile.
+- **Backend errors during Add/Subtract**: logged at warn, do NOT fail
+  the verify or sweep operation. The trade-off favors LFS availability
+  over counter accuracy; reconcile is the safety net.
+
+**Failure modes.**
+| Symptom | Cause | Action |
+|---|---|---|
+| Batch returns 507 on every upload object | Tenant at or above quota | `quota show --tenant=<t>` to confirm; raise the limit or wait for GC |
+| Tenant exceeds quota despite enforcement | Cross-batch race (above) | `quota reconcile --tenant=<t>` to update the counter; consider lowering the limit by `concurrent_batches × max_object_size` as a buffer |
+| Reconcile shows persistent drift | Add/Subtract write failures | Check authdb error logs; reconcile is the safety net |
+| Reconcile reports drift after a multi-sweep run | Two concurrent sweeps both decremented for the same OID's ErrNotFound path | Counter is floored at zero by the `MAX(used - ?, 0)` clamp; reconcile restores truth; consider gating sweep concurrency to one process per repo |
+| `quota show` reports `over_by=<bytes>` | Limit was lowered below current usage, or drift caught up | New uploads correctly rejected until GC + reconcile drain usage |
+| Verify response latency increases when quotas are enabled | Quota Add is a synchronous sqlite write after `WriteHeader(200)` | Acceptable: response body has already been committed; the latency floor is sqlite write latency. No mitigation needed under normal load. |
+
+**Bootstrap (one-time after upgrade).** Fresh M13.5 deployments
+running against pre-existing LFS objects must seed counters once:
+
+```
+bucketvcs quota reconcile --auth-db=PATH --store=URL --all-tenants
+```
+
+Idempotent — re-running overwrites with the current listing sum.
+
+**Observability.** 2 new metrics + 2 new audit events. See §6.1 / §6.2.
+
+**Opt-out.** Operators who don't want quotas simply don't wire the
+`Service` into `Deps.Quota` / `ProxiedDeps.Quota` / `SweepOptions.Quota`.
+Every integration seam is then a no-op. The `quotas` table from
+migration 0004 exists but stays empty.
+
+**Deferred work (still tracked separately):**
+- **Per-repo quotas** — second table with the same Service shape.
+- **Git pack quotas** — receive-pack and maintenance hooks.
+- **Reservation system** — eliminates the cross-batch race; not worth
+  the state-machine cost for OSS.
+- **Quota tiers / plans / chargeback** — control-plane feature.
+- **Soft-cap mode** — operators alert on the gauge in their own
+  monitoring stack.
+- **Webhooks on threshold crossing** — webhooks themselves are deferred.
+- **Cross-repo dedupe / shared-OID pooling** — pooling LFS objects by
+  OID across an entire tenant maximizes storage savings but costs
+  control-plane complexity for repo-scoped access decisions. M13
+  intentionally chose per-repo isolation to keep the access model
+  identical to the Git object path. Trigger: a tenant whose LFS
+  storage cost is dominated by the same asset replicated across many
+  forks of one repo.
 
 ---
 

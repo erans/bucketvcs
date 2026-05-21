@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/lfs"
+	"github.com/bucketvcs/bucketvcs/internal/lfs/quota"
 	"github.com/bucketvcs/bucketvcs/internal/maintenance"
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
@@ -35,7 +36,8 @@ type MarkOptions struct {
 type SweepOptions struct {
 	Now    func() time.Time
 	DryRun bool
-	Logger *slog.Logger // Task 4 wires metrics/audit via this field.
+	Logger *slog.Logger   // Task 4 wires metrics/audit via this field.
+	Quota  *quota.Service // M13.5: optional; nil = no decrement.
 }
 
 // RunReport aggregates a mark + sweep run.
@@ -191,6 +193,10 @@ func RunSweep(ctx context.Context, store storage.ObjectStore, r *repo.Repo, mark
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
 	startedAt := opts.Now().UTC()
 	retention := time.Duration(mark.RetentionSeconds) * time.Second
 	if retention <= 0 {
@@ -220,6 +226,13 @@ func RunSweep(ctx context.Context, store storage.ObjectStore, r *repo.Repo, mark
 				// Already deleted (idempotent sweep). Count as success.
 				report.DeletedCount++
 				report.DeletedBytes += c.SizeBytes
+				// Concurrent deleter beat us — the bytes are gone
+				// regardless of who removed them, so decrement the
+				// counter for the size we recorded at mark time. The
+				// reconcile pass will reconcile against the listing
+				// (which omits the object), keeping the counter
+				// truthful even if the size drifted.
+				subtractQuota(ctx, opts.Quota, logger, r.TenantID(), c.OID, c.SizeBytes)
 				continue
 			}
 			report.Errors = append(report.Errors, SweepError{OID: c.OID, Err: herr.Error()})
@@ -228,9 +241,12 @@ func RunSweep(ctx context.Context, store storage.ObjectStore, r *repo.Repo, mark
 		if derr := store.DeleteIfVersionMatches(ctx, c.Key, meta.Version); derr != nil {
 			switch {
 			case errors.Is(derr, storage.ErrNotFound):
-				// Concurrent deleter beat us; count as success.
+				// Concurrent deleter beat us; count as success. Subtract
+				// the recorded size from the quota counter — the bytes
+				// are no longer in storage regardless of who removed them.
 				report.DeletedCount++
 				report.DeletedBytes += c.SizeBytes
+				subtractQuota(ctx, opts.Quota, logger, r.TenantID(), c.OID, c.SizeBytes)
 			case errors.Is(derr, storage.ErrVersionMismatch):
 				// Modified between Head and Delete; skip and let next sweep retry.
 				report.SkippedConcurrent++
@@ -241,16 +257,13 @@ func RunSweep(ctx context.Context, store storage.ObjectStore, r *repo.Repo, mark
 		}
 		report.DeletedCount++
 		report.DeletedBytes += c.SizeBytes
+		subtractQuota(ctx, opts.Quota, logger, r.TenantID(), c.OID, c.SizeBytes)
 	}
 	report.CompletedAt = opts.Now().UTC()
 	// Emit metrics + audit BEFORE WriteSweep. They describe the
 	// reclaim work the sweep already performed in memory + storage;
 	// if WriteSweep itself fails, the deletions have still happened
 	// and the operator needs the observability signal to triage.
-	logger := opts.Logger
-	if logger == nil {
-		logger = slog.Default()
-	}
 	lfs.EmitGCObjectsSweptMetric(ctx, logger, "deleted", int64(report.DeletedCount))
 	lfs.EmitGCObjectsSweptMetric(ctx, logger, "skipped_retention", int64(report.SkippedRetention))
 	lfs.EmitGCObjectsSweptMetric(ctx, logger, "skipped_concurrent", int64(report.SkippedConcurrent))
@@ -265,6 +278,32 @@ func RunSweep(ctx context.Context, store storage.ObjectStore, r *repo.Repo, mark
 		}
 	}
 	return report, nil
+}
+
+// subtractQuota decrements the tenant's used_bytes counter by `bytes`
+// after a successful sweep deletion. nil quota = no-op (M13.5 wiring
+// is fully optional). Errors are logged but never returned: a sweep
+// that successfully removed bytes from storage must not be reported
+// as failed just because the counter UPDATE missed; the reconcile
+// pass is the safety net (design spec §6.5).
+func subtractQuota(ctx context.Context, q *quota.Service, logger *slog.Logger, tenant, oid string, bytes int64) {
+	if q == nil {
+		return
+	}
+	if qerr := q.Subtract(ctx, tenant, oid, bytes); qerr != nil {
+		logger.Warn("lfs_gc.quota.subtract_failed",
+			"subsystem", "lfs_gc",
+			"tenant", tenant,
+			"oid", oid,
+			"bytes", bytes,
+			"err", qerr.Error(),
+		)
+		return
+	}
+	// Refresh the gauge.
+	if st, gerr := q.Get(ctx, tenant); gerr == nil && st.Exists {
+		lfs.EmitQuotaBytesUsedMetric(ctx, logger, tenant, st.UsedBytes)
+	}
 }
 
 // oidFromLFSKey extracts the 64-hex OID from the key suffix under the

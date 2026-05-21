@@ -5,7 +5,11 @@
 // only the "basic" transfer adapter is supported.
 package lfs
 
-import "time"
+import (
+	"time"
+
+	"github.com/bucketvcs/bucketvcs/internal/lfs/quota"
+)
 
 // ObjectRef is one object in a batch request.
 type ObjectRef struct {
@@ -47,6 +51,14 @@ type ObjectAction struct {
 type BatchResponse struct {
 	Transfer string         `json:"transfer"`
 	Objects  []ObjectAction `json:"objects"`
+
+	// QuotaError, if non-nil, carries the structured *quota.QuotaError
+	// values for an M13.5 quota-rejected batch. NOT serialized to the
+	// wire (the per-object 507 errors are what the client sees);
+	// exposed so handleBatch can emit the lfs.quota.exceeded audit
+	// without re-querying the authdb. The json:"-" tag keeps the
+	// API surface unchanged for stock git-lfs clients.
+	QuotaError *quota.QuotaError `json:"-"`
 }
 
 // VerifyRequest is the wire shape of a POST verify body.

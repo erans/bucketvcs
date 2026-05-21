@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bucketvcs/bucketvcs/internal/lfs/quota"
 	"github.com/bucketvcs/bucketvcs/internal/proxiedurl"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
@@ -37,6 +38,11 @@ type ProxiedDeps struct {
 	// Logger is used for metric + audit emission. Nil falls back to
 	// slog.Default().
 	Logger *slog.Logger
+
+	// Quota is OPTIONAL. When non-nil, the verify handler calls
+	// Quota.Add on successful verify (after the size check passes).
+	// When nil, no counter changes occur.
+	Quota *quota.Service
 }
 
 // NewProxiedObjectHandler returns the http.Handler mounted at /_lfs/
@@ -55,6 +61,7 @@ func NewProxiedObjectHandler(deps ProxiedDeps) http.Handler {
 		key:    deps.Key,
 		logger: deps.Logger,
 		now:    time.Now,
+		quota:  deps.Quota,
 	}
 	if h.logger == nil {
 		h.logger = slog.Default()
@@ -67,6 +74,7 @@ type proxiedObjectHandler struct {
 	key    []byte
 	logger *slog.Logger
 	now    func() time.Time
+	quota  *quota.Service
 }
 
 func (h *proxiedObjectHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -337,6 +345,26 @@ func (h *proxiedObjectHandler) serveVerify(ctx context.Context, w http.ResponseW
 	case err == nil:
 		w.Header().Set("Content-Type", ContentType)
 		w.WriteHeader(http.StatusOK)
+		if h.quota != nil {
+			if qerr := h.quota.Add(ctx, tenant, oid, vreq.Size); qerr != nil {
+				// Counter write failed — log but do NOT fail the
+				// verify response. The client already uploaded; we
+				// don't want them to retry. Reconcile is the safety
+				// net (see §6.5 of the design spec).
+				h.logger.Warn("lfs.quota.add_failed",
+					"subsystem", "lfs_quota",
+					"tenant", tenant,
+					"oid", oid,
+					"bytes", vreq.Size,
+					"err", qerr.Error(),
+				)
+			} else {
+				// Refresh the gauge for this tenant with the new value.
+				if st, gerr := h.quota.Get(ctx, tenant); gerr == nil && st.Exists {
+					EmitQuotaBytesUsedMetric(ctx, h.logger, tenant, st.UsedBytes)
+				}
+			}
+		}
 		emitVerifyRequestMetric(ctx, h.logger, "ok")
 		emitLFSVerify(ctx, h.logger, repoFQN, "", oid, vreq.Size, "ok")
 	case errors.Is(err, ErrVerifyNotFound):

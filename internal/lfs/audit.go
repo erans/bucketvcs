@@ -207,3 +207,42 @@ func EmitLFSGCSweep(ctx context.Context, logger *slog.Logger, repo, markID, swee
 		slog.Bool("dry_run", dryRun),
 	)
 }
+
+// EmitLFSQuotaExceeded records a "lfs.quota.exceeded" audit event
+// when a Batch upload request is rejected because the tenant's
+// quota would be breached. oids is the comma-joined OID list of
+// the rejected batch.
+//
+// Exported for cross-package use.
+func EmitLFSQuotaExceeded(ctx context.Context, logger *slog.Logger, tenant string, currentBytes, limitBytes, requestedBytes int64, oids string) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.LogAttrs(ctx, slog.LevelInfo, "lfs.quota.exceeded",
+		slog.String("event", "lfs.quota.exceeded"),
+		slog.String("tenant", tenant),
+		slog.Int64("current_bytes", currentBytes),
+		slog.Int64("limit_bytes", limitBytes),
+		slog.Int64("requested_bytes", requestedBytes),
+		slog.String("oids", oids),
+	)
+}
+
+// EmitLFSQuotaReconcile records a "lfs.quota.reconcile" audit event
+// after a Reconcile call completes. driftBytes is signed: positive
+// when actual > counter (under-reporting), negative the other way.
+//
+// Exported for cross-package use.
+func EmitLFSQuotaReconcile(ctx context.Context, logger *slog.Logger, tenant string, beforeBytes, afterBytes, driftBytes int64, dryRun bool) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.LogAttrs(ctx, slog.LevelInfo, "lfs.quota.reconcile",
+		slog.String("event", "lfs.quota.reconcile"),
+		slog.String("tenant", tenant),
+		slog.Int64("before_bytes", beforeBytes),
+		slog.Int64("after_bytes", afterBytes),
+		slog.Int64("drift_bytes", driftBytes),
+		slog.Bool("dry_run", dryRun),
+	)
+}

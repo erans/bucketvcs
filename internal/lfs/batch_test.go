@@ -6,10 +6,13 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
+	"github.com/bucketvcs/bucketvcs/internal/lfs/quota"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
 
@@ -174,7 +177,7 @@ func assertVerifyAction(t *testing.T, vf Action) {
 
 func TestBuild_RejectsUnsupportedOperation(t *testing.T) {
 	s := newProxiedBatchStore(nil, signedFn())
-	_, err := Build(context.Background(), BatchRequest{Operation: "verify"}, s, time.Minute)
+	_, err := Build(context.Background(), BatchRequest{Operation: "verify"}, s, time.Minute, nil, "acme")
 	if err == nil {
 		t.Fatal("expected error for unsupported operation")
 	}
@@ -186,7 +189,7 @@ func TestBuild_RejectsMissingBasicTransfer(t *testing.T) {
 		Operation: "upload",
 		Transfers: []string{"lfs-standalone-file"}, // not "basic"
 		Objects:   []ObjectRef{{OID: oidNew, Size: 1}},
-	}, s, time.Minute)
+	}, s, time.Minute, nil, "acme")
 	if err == nil {
 		t.Fatal("expected error when basic transfer absent")
 	}
@@ -198,7 +201,7 @@ func TestBuild_AcceptsImplicitBasicTransfer(t *testing.T) {
 	resp, err := Build(context.Background(), BatchRequest{
 		Operation: "upload",
 		Objects:   []ObjectRef{{OID: oidNew, Size: 1}},
-	}, s, time.Minute)
+	}, s, time.Minute, nil, "acme")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -213,7 +216,7 @@ func TestBuild_Upload_NewObject(t *testing.T) {
 		Operation: "upload",
 		Transfers: []string{"basic"},
 		Objects:   []ObjectRef{{OID: oidNew, Size: 100}},
-	}, s, time.Minute)
+	}, s, time.Minute, nil, "acme")
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -247,7 +250,7 @@ func TestBuild_Upload_ObjectAlreadyPresentAndSizeMatches(t *testing.T) {
 		Operation: "upload",
 		Transfers: []string{"basic"},
 		Objects:   []ObjectRef{{OID: oidExists, Size: 100}},
-	}, s, time.Minute)
+	}, s, time.Minute, nil, "acme")
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -266,7 +269,7 @@ func TestBuild_Upload_ObjectPresentButSizeMismatch(t *testing.T) {
 		Operation: "upload",
 		Transfers: []string{"basic"},
 		Objects:   []ObjectRef{{OID: oidMismatch, Size: 100}},
-	}, s, time.Minute)
+	}, s, time.Minute, nil, "acme")
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -287,7 +290,7 @@ func TestBuild_Download_ObjectFound(t *testing.T) {
 		Operation: "download",
 		Transfers: []string{"basic"},
 		Objects:   []ObjectRef{{OID: oidExists, Size: 200}},
-	}, s, time.Minute)
+	}, s, time.Minute, nil, "acme")
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -316,7 +319,7 @@ func TestBuild_Download_ObjectMissing(t *testing.T) {
 		Operation: "download",
 		Transfers: []string{"basic"},
 		Objects:   []ObjectRef{{OID: oidMissing, Size: 100}},
-	}, s, time.Minute)
+	}, s, time.Minute, nil, "acme")
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -340,7 +343,7 @@ func TestBuild_PresignErrorBecomesPerObjectError(t *testing.T) {
 		Operation: "upload",
 		Transfers: []string{"basic"},
 		Objects:   []ObjectRef{{OID: oidPresign, Size: 1}},
-	}, s, time.Minute)
+	}, s, time.Minute, nil, "acme")
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -362,7 +365,7 @@ func TestBuild_ProxiedFallbackEmptyURLBecomesPerObject503(t *testing.T) {
 		Operation: "upload",
 		Transfers: []string{"basic"},
 		Objects:   []ObjectRef{{OID: oidPresign, Size: 1}},
-	}, s, time.Minute)
+	}, s, time.Minute, nil, "acme")
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -386,7 +389,7 @@ func TestBuild_VerifyURL_RequiresProxiedConfig(t *testing.T) {
 		Operation: "upload",
 		Transfers: []string{"basic"},
 		Objects:   []ObjectRef{{OID: oidNew, Size: 1}},
-	}, s, time.Minute)
+	}, s, time.Minute, nil, "acme")
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -419,7 +422,7 @@ func TestBuild_PerObjectIndependence(t *testing.T) {
 			{OID: oidPresent, Size: 10},
 			{OID: oidMissing, Size: 20},
 		},
-	}, s, time.Minute)
+	}, s, time.Minute, nil, "acme")
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -446,7 +449,7 @@ func TestBuild_Upload_RejectsNonPositiveSize(t *testing.T) {
 			Operation: "upload",
 			Transfers: []string{"basic"},
 			Objects:   []ObjectRef{{OID: oidNew, Size: size}},
-		}, s, time.Minute)
+		}, s, time.Minute, nil, "acme")
 		if err != nil {
 			t.Fatalf("Build(size=%d): %v", size, err)
 		}
@@ -463,7 +466,7 @@ func TestBuild_Download_RejectsNegativeSize(t *testing.T) {
 		Operation: "download",
 		Transfers: []string{"basic"},
 		Objects:   []ObjectRef{{OID: oidPresent, Size: -1}},
-	}, s, time.Minute)
+	}, s, time.Minute, nil, "acme")
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -493,7 +496,7 @@ func TestBuild_RejectsInvalidOID(t *testing.T) {
 			Operation: "upload",
 			Transfers: []string{"basic"},
 			Objects:   []ObjectRef{{OID: oid, Size: 1}},
-		}, s, time.Minute)
+		}, s, time.Minute, nil, "acme")
 		if err != nil {
 			t.Fatalf("Build(oid=%q): %v", oid, err)
 		}
@@ -501,5 +504,100 @@ func TestBuild_RejectsInvalidOID(t *testing.T) {
 		if o.Error == nil || o.Error.Code != 422 {
 			t.Errorf("oid=%q: expected per-object 422; got %+v", oid, o.Error)
 		}
+	}
+}
+
+// TestBuild_QuotaExceededReturns507 exercises the M13.5 quota
+// pre-check: when the batch's total requested bytes would push the
+// tenant's used+requested over its limit, Build returns a response
+// where every ObjectAction carries a 507 error (LFS spec code for
+// "insufficient storage"). The store pointer is unused on this path
+// because CheckBatch rejects before the per-object loop.
+func TestBuild_QuotaExceededReturns507(t *testing.T) {
+	tmp := t.TempDir()
+	store, err := sqlitestore.Open(filepath.Join(tmp, "auth.db"))
+	if err != nil {
+		t.Fatalf("sqlitestore.Open: %v", err)
+	}
+	defer store.Close()
+	svc := quota.New(store.DB(), nil)
+	ctx := context.Background()
+	if err := svc.Set(ctx, "acme", 100); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	req := BatchRequest{
+		Operation: "upload",
+		Objects: []ObjectRef{
+			{OID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Size: 60},
+			{OID: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Size: 50},
+		},
+	}
+	resp, err := Build(ctx, req, nil, 0, svc, "acme")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(resp.Objects) != 2 {
+		t.Fatalf("got %d objects, want 2", len(resp.Objects))
+	}
+	for _, o := range resp.Objects {
+		if o.Error == nil || o.Error.Code != 507 {
+			t.Errorf("oid %s: error=%+v, want code=507", o.OID, o.Error)
+		}
+		if len(o.Actions) != 0 {
+			t.Errorf("oid %s: expected no actions on quota reject; got %+v", o.OID, o.Actions)
+		}
+	}
+}
+
+// TestBuild_QuotaNilIsNoOp pins the optionality contract: Quota=nil
+// must not panic or short-circuit Build. We don't assert anything
+// about the downstream store outcome — the nil-quota path is what
+// the test cares about.
+func TestBuild_QuotaNilIsNoOp(t *testing.T) {
+	req := BatchRequest{
+		Operation: "upload",
+		Objects:   []ObjectRef{{OID: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", Size: 5}},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Build with nil quota panicked: %v", r)
+		}
+	}()
+	s := newProxiedBatchStore(nil, signedFn())
+	_, _ = Build(context.Background(), req, s, time.Minute, nil, "acme")
+}
+
+// TestBuild_QuotaWithinLimitAllowsBatch confirms that a request that
+// fits inside the tenant's headroom passes through to the per-object
+// loop unmodified — the quota path is non-destructive on the happy
+// path.
+func TestBuild_QuotaWithinLimitAllowsBatch(t *testing.T) {
+	tmp := t.TempDir()
+	store, err := sqlitestore.Open(filepath.Join(tmp, "auth.db"))
+	if err != nil {
+		t.Fatalf("sqlitestore.Open: %v", err)
+	}
+	defer store.Close()
+	svc := quota.New(store.DB(), nil)
+	ctx := context.Background()
+	if err := svc.Set(ctx, "acme", 1000); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	s := newProxiedBatchStore(nil, signedFn())
+	resp, err := Build(ctx, BatchRequest{
+		Operation: "upload",
+		Objects:   []ObjectRef{{OID: oidNew, Size: 10}},
+	}, s, time.Minute, svc, "acme")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	o := resp.Objects[0]
+	if o.Error != nil {
+		t.Fatalf("unexpected per-object error: %+v", o.Error)
+	}
+	if _, ok := o.Actions["upload"]; !ok {
+		t.Errorf("expected upload action; got %+v", o.Actions)
 	}
 }

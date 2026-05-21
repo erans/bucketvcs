@@ -242,3 +242,43 @@ func TestEmitLFSGCSweep_DryRun(t *testing.T) {
 		t.Errorf("expected dry_run=true in: %s", buf.String())
 	}
 }
+
+func TestEmitLFSQuotaExceeded_Shape(t *testing.T) {
+	var buf bytes.Buffer
+	EmitLFSQuotaExceeded(context.Background(), captureLogger(&buf),
+		"acme", 99<<30, 100<<30, 10<<30, "oid1,oid2")
+	line := buf.String()
+	for _, want := range []string{
+		`"msg":"lfs.quota.exceeded"`,
+		`"event":"lfs.quota.exceeded"`,
+		`"tenant":"acme"`,
+		`"current_bytes":106300440576`,
+		`"limit_bytes":107374182400`,
+		`"requested_bytes":10737418240`,
+		`"oids":"oid1,oid2"`,
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("missing %q in %s", want, line)
+		}
+	}
+}
+
+func TestEmitLFSQuotaReconcile_Shape(t *testing.T) {
+	var buf bytes.Buffer
+	EmitLFSQuotaReconcile(context.Background(), captureLogger(&buf),
+		"acme", 500, 487, -13, false)
+	line := buf.String()
+	for _, want := range []string{
+		`"msg":"lfs.quota.reconcile"`,
+		`"event":"lfs.quota.reconcile"`,
+		`"tenant":"acme"`,
+		`"before_bytes":500`,
+		`"after_bytes":487`,
+		`"drift_bytes":-13`,
+		`"dry_run":false`,
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("missing %q in %s", want, line)
+		}
+	}
+}
