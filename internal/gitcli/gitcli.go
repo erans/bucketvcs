@@ -864,11 +864,16 @@ func IndexPackStrict(ctx context.Context, dir, packPath string) (string, error) 
 			stderr: stderr.String(),
 		}
 	}
-	// Stdout is "<pack-hash>\n" without --keep, or "keep\t<pack-hash>\n"
-	// when --keep is in effect. Strip the optional "keep\t" prefix and
-	// validate.
+	// Stdout is "<pack-hash>\n" without --keep, "keep\t<pack-hash>\n"
+	// when --keep is in effect and the pack is newly indexed, or
+	// "pack\t<pack-hash>\n" when --keep is requested but the pack file
+	// already exists in objects/pack (git 2.30+; e.g. observed after a
+	// receive-pack precheck rejection leaves the pack on disk and a
+	// subsequent retry re-indexes the same bytes). Strip either prefix
+	// and validate.
 	hash := strings.TrimSpace(stdout.String())
 	hash = strings.TrimPrefix(hash, "keep\t")
+	hash = strings.TrimPrefix(hash, "pack\t")
 	if !validHexOID(hash) {
 		return "", fmt.Errorf("gitcli: IndexPackStrict: unexpected stdout %q", stdout.String())
 	}

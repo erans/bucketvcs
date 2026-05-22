@@ -21,6 +21,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/lfs"
 	"github.com/bucketvcs/bucketvcs/internal/lfs/locks"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
+	"github.com/bucketvcs/bucketvcs/internal/policy"
 	"github.com/bucketvcs/bucketvcs/internal/sshd"
 )
 
@@ -161,6 +162,12 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 
 	logger := slog.Default()
 
+	// M14 protected-refs enforcement. Always constructed against the
+	// same authdb the gateway uses; when the operator has added no
+	// rules via `bucketvcs policy refs add`, CheckUpdate's List call
+	// returns zero rows and the engine accepts every update.
+	policySvc := policy.New(authS.DB())
+
 	// Build URLBuilder-backed closures once and share between the HTTP
 	// gateway and the SSH listener. Building here (rather than letting
 	// gateway construct them internally) keeps the wiring symmetric across
@@ -235,6 +242,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			LFSProxiedURLSigningKey: signingKey,
 			LFSProxiedBaseURL:       *proxiedBaseURL,
 			LFSLocksStore:           lfsLocksStore,
+			Policy:                  policySvc,
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "serve: NewServer: %v\n", err)
@@ -316,6 +324,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			LFSTokenIssuer:    lfsIssuer,
 			LFSBaseURL:        lfsBaseURL,
 			LFSSSHTokenTTL:    lfsSSHTTL,
+			Policy:            policySvc,
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "serve: ssh new server: %v\n", err)

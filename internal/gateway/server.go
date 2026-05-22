@@ -13,6 +13,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/lfs"
 	"github.com/bucketvcs/bucketvcs/internal/lfs/locks"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
+	"github.com/bucketvcs/bucketvcs/internal/policy"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
 
@@ -135,6 +136,12 @@ type Options struct {
 	// /info/lfs/locks/<id>/unlock) are dispatched to the LFS handler
 	// with this store attached. Ignored when LFSEnabled is false.
 	LFSLocksStore *locks.Store
+
+	// Policy enables M14 protected-refs enforcement in receive-pack
+	// step 8b. When nil, ref updates are accepted as in pre-M14
+	// deployments. When non-nil, CheckUpdate runs for every ref in the
+	// command list and blocks updates that match a protected_refs rule.
+	Policy *policy.Service
 
 	// Logger is used for structured metric + audit emission. When nil, the
 	// gateway falls back to slog.Default(). M11 Phase 12.5 adds this for

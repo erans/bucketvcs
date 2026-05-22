@@ -28,6 +28,8 @@ func (s *Server) handleReceivePack(w http.ResponseWriter, r *http.Request, tenan
 		Store:        s.store,
 		Mirror:       s.mgr,
 		AgentVersion: s.opts.Version,
+		Policy:       s.opts.Policy,
+		Logger:       s.opts.Logger,
 	}
 	err := receivepack.Service(req)
 	if err == nil {

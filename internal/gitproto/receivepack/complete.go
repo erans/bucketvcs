@@ -12,6 +12,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/importer"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/pack"
+	"github.com/bucketvcs/bucketvcs/internal/policy"
 	"github.com/bucketvcs/bucketvcs/internal/reachability"
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
@@ -195,6 +196,57 @@ func completeReceivePack(eng *EngineRequest, w io.Writer, m *mirror.Mirror, rp *
 		}
 	}
 
+	// Step 8b: M14 policy enforcement. For each accepted update,
+	// walk the repo's protected_refs rules; reject the update if any
+	// matching rule blocks the operation. Opt-in via eng.Policy=nil.
+	if eng.Policy != nil {
+		for i, u := range rp.Updates {
+			if statuses[i] != "" {
+				continue
+			}
+			err := eng.Policy.CheckUpdate(ctx, tenant, repoID,
+				m.BareDir(), u.Refname, u.OldOID, u.NewOID)
+			if err == nil {
+				policy.EmitRefCheckMetric(ctx, eng.loggerOrDefault(), "ok")
+				continue
+			}
+			var perr *policy.PolicyError
+			if errors.As(err, &perr) {
+				statuses[i] = "ng " + u.Refname + " " + perr.Error()
+				policy.EmitRefCheckMetric(ctx, eng.loggerOrDefault(), perr.MetricOutcome())
+				policy.EmitRefRejected(ctx, eng.loggerOrDefault(),
+					tenant, repoID, perr, actorNameFromEng(eng))
+				continue
+			}
+			// Non-policy error from CheckUpdate (sqlite read failure,
+			// git subprocess failure). Failing closed: a policy lookup
+			// failure CANNOT silently allow a write to a protected ref.
+			statuses[i] = "ng " + u.Refname + " internal-error: " + err.Error()
+			policy.EmitRefCheckMetric(ctx, eng.loggerOrDefault(), "internal_error")
+			policy.EmitRefInternalError(ctx, eng.loggerOrDefault(),
+				tenant, repoID, u.Refname, actorNameFromEng(eng), err)
+		}
+		// Atomic-batch poisoning: if any policy rejection landed and
+		// the client requested atomic mode, mark every empty status
+		// as atomic-batch-failed. Mirrors the existing precheck atomic
+		// handling.
+		if rp.IsAtomic && anyStatusNonEmpty(statuses) && !allStatusesNonEmpty(statuses) {
+			for i, u := range rp.Updates {
+				if statuses[i] == "" {
+					statuses[i] = "ng " + u.Refname + " atomic-batch-failed"
+				}
+			}
+			writeReceiveReport(w, "ok", statuses, rp.Caps)
+			return
+		}
+		// If everything failed, short-circuit with the report —
+		// nothing to commit.
+		if allStatusesNonEmpty(statuses) {
+			writeReceiveReport(w, "ok", statuses, rp.Caps)
+			return
+		}
+	}
+
 	// Step 9: build the refUpdates map for accepted commands.
 	refUpdates := map[string]string{}
 	for i, u := range rp.Updates {
@@ -260,15 +312,7 @@ func completeReceivePack(eng *EngineRequest, w io.Writer, m *mirror.Mirror, rp *
 	// auth middleware with ActionWrite, so a non-nil actor is the expected
 	// path; the "anonymous" fallback is defensive only (RunAuth's Decide
 	// rejects nil-actor writes with 401 before we get here).
-	actorName := "anonymous"
-	if a := eng.Actor; a != nil {
-		switch {
-		case a.Name != "":
-			actorName = a.Name
-		case a.UserID != "":
-			actorName = a.UserID
-		}
-	}
+	actorName := actorNameFromEng(eng)
 
 	// Build the M10 .bvrd delta patcher. Captures the pre-push body and
 	// the accepted ref updates so the patcher can build the delta from
@@ -476,4 +520,38 @@ func makeDeltaPatcher(eng *EngineRequest, bareDir string, acceptedUpdates []upda
 		draft.Indexes.Reachability = &rc
 		return draft, nil
 	}
+}
+
+// actorNameFromEng extracts a display name for tx attribution from
+// eng.Actor, falling back to "anonymous". The "anonymous" fallback is
+// defensive: RunAuth's Decide rejects nil-actor writes with 401 before
+// receive-pack runs.
+func actorNameFromEng(eng *EngineRequest) string {
+	if a := eng.Actor; a != nil {
+		switch {
+		case a.Name != "":
+			return a.Name
+		case a.UserID != "":
+			return a.UserID
+		}
+	}
+	return "anonymous"
+}
+
+func anyStatusNonEmpty(statuses []string) bool {
+	for _, s := range statuses {
+		if s != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func allStatusesNonEmpty(statuses []string) bool {
+	for _, s := range statuses {
+		if s == "" {
+			return false
+		}
+	}
+	return true
 }

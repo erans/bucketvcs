@@ -216,6 +216,8 @@ run:
 			Store:           s.opts.BVStore,
 			Mirror:          s.opts.Mirror,
 			AgentVersion:    s.opts.AgentVersion,
+			Policy:          s.opts.Policy,
+			Logger:          s.opts.Logger,
 		}
 		serveErr = receivepack.Serve(req)
 	case OpLFSAuthenticate:

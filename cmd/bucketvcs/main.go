@@ -56,6 +56,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return runNegotiate(ctx, rest, stdout, stderr)
 	case "reshard-refs":
 		return runReshardRefs(ctx, rest, stdout, stderr)
+	case "policy":
+		return runPolicy(ctx, rest, stdout, stderr)
 	case "quota":
 		return runQuota(ctx, rest, stdout, stderr)
 	case "-h", "--help", "help":
@@ -86,6 +88,7 @@ Subcommands:
   maintenance        Run repack maintenance against repos
   negotiate          Debug: compute shipping plan via pure-Go reachability index
   reshard-refs       Convert a repo from inline refs to sharded refs (M12)
+  policy             Manage protected refs (refs add/list/remove)
   quota              Manage LFS storage quotas (set/show/reconcile/clear)
 
 Run "bucketvcs <subcommand> --help" for subcommand flags.

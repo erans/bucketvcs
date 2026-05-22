@@ -15,6 +15,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/lfs"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
+	"github.com/bucketvcs/bucketvcs/internal/policy"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
 
@@ -70,6 +71,11 @@ type Options struct {
 	// git-lfs-authenticate. Zero falls back to 15 minutes (applied
 	// in NewServer); negative values are rejected at NewServer time.
 	LFSSSHTokenTTL time.Duration
+
+	// Policy enables M14 protected-refs enforcement in receive-pack
+	// step 8b on the SSH transport. nil = pre-M14 behavior (all ref
+	// updates accepted). Mirrors gateway.Options.Policy.
+	Policy *policy.Service
 }
 
 // Server is the bucketvcs SSH listener. Construct via NewServer.

@@ -3,9 +3,11 @@ package receivepack
 import (
 	"context"
 	"io"
+	"log/slog"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
+	"github.com/bucketvcs/bucketvcs/internal/policy"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
 
@@ -28,6 +30,16 @@ type EngineRequest struct {
 
 	Store  storage.ObjectStore
 	Mirror *mirror.Manager
+
+	// Policy is OPTIONAL. When non-nil, completeReceivePack runs
+	// step 8b (M14 protected-ref enforcement) between connectivity
+	// check and refUpdates map build. nil means no enforcement
+	// (pre-M14 behavior).
+	Policy *policy.Service
+
+	// Logger is OPTIONAL. Used by step 8b's metric + audit emission.
+	// nil falls back to slog.Default() at emission time.
+	Logger *slog.Logger
 }
 
 // Serve runs Advertise followed by Service on the same request.
@@ -36,4 +48,13 @@ func Serve(req *EngineRequest) error {
 		return err
 	}
 	return Service(req)
+}
+
+// loggerOrDefault returns e.Logger or slog.Default() if nil. Used by
+// step 8b's policy emissions.
+func (e *EngineRequest) loggerOrDefault() *slog.Logger {
+	if e.Logger != nil {
+		return e.Logger
+	}
+	return slog.Default()
 }
