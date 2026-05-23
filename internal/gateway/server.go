@@ -15,6 +15,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/policy"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
+	"github.com/bucketvcs/bucketvcs/internal/webhooks"
 )
 
 // Options configures a Server.
@@ -142,6 +143,11 @@ type Options struct {
 	// deployments. When non-nil, CheckUpdate runs for every ref in the
 	// command list and blocks updates that match a protected_refs rule.
 	Policy *policy.Service
+
+	// Webhooks enables M15 webhook delivery. When non-nil, receive-pack
+	// emits EventPush + EventPolicyRefRejected, and the LFS verify/lock
+	// paths emit their respective events. nil disables all enqueues.
+	Webhooks *webhooks.Service
 
 	// Logger is used for structured metric + audit emission. When nil, the
 	// gateway falls back to slog.Default(). M11 Phase 12.5 adds this for
@@ -363,6 +369,7 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 			PresignTTL: ttl,
 			Logger:     opts.Logger,
 			LocksStore: opts.LFSLocksStore,
+			Webhooks:   opts.Webhooks,
 		})
 
 		// Mount the proxied object handler at /_lfs/ when proxied URL
@@ -371,9 +378,10 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 		// returns empty URLs (which Build then surfaces as per-object 503).
 		if len(proxiedKey) >= 16 {
 			s.lfsObjectHandler = lfs.NewProxiedObjectHandler(lfs.ProxiedDeps{
-				Store:  store,
-				Key:    proxiedKey,
-				Logger: opts.Logger,
+				Store:    store,
+				Key:      proxiedKey,
+				Logger:   opts.Logger,
+				Webhooks: opts.Webhooks,
 			})
 		}
 	}

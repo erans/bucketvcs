@@ -487,6 +487,28 @@ func (s *Store) RegisterRepo(ctx context.Context, tenant, name string) error {
 	return err
 }
 
+// RegisterRepoIfNew is like RegisterRepo but additionally reports whether
+// the row was actually created. Returns inserted=true iff a new row was
+// inserted (i.e., the (tenant, name) pair did not previously exist).
+//
+// Use this instead of pre-checking with GetRepoFlags + then calling
+// RegisterRepo — that pattern races with a concurrent registration.
+func (s *Store) RegisterRepoIfNew(ctx context.Context, tenant, name string) (bool, error) {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO repos (tenant, name, public_read, created_at)
+		 VALUES (?, ?, 0, ?)`,
+		tenant, name, time.Now().Unix(),
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // GetRepoFlags returns the per-repo authorization flags.
 func (s *Store) GetRepoFlags(ctx context.Context, tenant, repo string) (auth.RepoFlags, error) {
 	row := s.db.QueryRowContext(ctx,

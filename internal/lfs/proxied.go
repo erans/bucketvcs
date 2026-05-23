@@ -17,6 +17,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/lfs/quota"
 	"github.com/bucketvcs/bucketvcs/internal/proxiedurl"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
+	"github.com/bucketvcs/bucketvcs/internal/webhooks"
 )
 
 // maxLFSObjectSize is the hard contract for /_lfs/ PUT body size. The
@@ -43,6 +44,10 @@ type ProxiedDeps struct {
 	// Quota.Add on successful verify (after the size check passes).
 	// When nil, no counter changes occur.
 	Quota *quota.Service
+
+	// Webhooks is OPTIONAL. When non-nil, the verify handler enqueues
+	// EventLFSUpload after a successful verify (200 path). Fail-open.
+	Webhooks *webhooks.Service
 }
 
 // NewProxiedObjectHandler returns the http.Handler mounted at /_lfs/
@@ -57,11 +62,12 @@ func NewProxiedObjectHandler(deps ProxiedDeps) http.Handler {
 		panic("lfs.NewProxiedObjectHandler: ProxiedDeps.Key must be >= 16 bytes")
 	}
 	h := &proxiedObjectHandler{
-		store:  deps.Store,
-		key:    deps.Key,
-		logger: deps.Logger,
-		now:    time.Now,
-		quota:  deps.Quota,
+		store:    deps.Store,
+		key:      deps.Key,
+		logger:   deps.Logger,
+		now:      time.Now,
+		quota:    deps.Quota,
+		webhooks: deps.Webhooks,
 	}
 	if h.logger == nil {
 		h.logger = slog.Default()
@@ -70,11 +76,12 @@ func NewProxiedObjectHandler(deps ProxiedDeps) http.Handler {
 }
 
 type proxiedObjectHandler struct {
-	store  storage.ObjectStore
-	key    []byte
-	logger *slog.Logger
-	now    func() time.Time
-	quota  *quota.Service
+	store    storage.ObjectStore
+	key      []byte
+	logger   *slog.Logger
+	now      func() time.Time
+	quota    *quota.Service
+	webhooks *webhooks.Service
 }
 
 func (h *proxiedObjectHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -367,6 +374,22 @@ func (h *proxiedObjectHandler) serveVerify(ctx context.Context, w http.ResponseW
 		}
 		emitVerifyRequestMetric(ctx, h.logger, "ok")
 		emitLFSVerify(ctx, h.logger, repoFQN, "", oid, vreq.Size, "ok")
+		// M15 webhook: lfs.upload after a successful verify (object is
+		// durably accepted into storage). Fail-open — enqueue errors do
+		// not affect the verify response. Token-authenticated path has
+		// no actor in context; emit with empty actor (operators correlate
+		// via tenant/repo/oid in the payload).
+		if h.webhooks != nil {
+			payload := webhooks.LFSUploadPayload{
+				OID:       oid,
+				SizeBytes: vreq.Size,
+			}
+			if werr := h.webhooks.Enqueue(ctx, webhooks.EventLFSUpload,
+				tenant, repo, "", payload); werr != nil {
+				webhooks.EmitEnqueueFailed(ctx, h.logger,
+					tenant, repo, "lfs.upload", werr.Error())
+			}
+		}
 	case errors.Is(err, ErrVerifyNotFound):
 		WriteError(w, http.StatusNotFound, "object not uploaded")
 		emitVerifyRequestMetric(ctx, h.logger, "missing")

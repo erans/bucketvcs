@@ -6,9 +6,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"os/user"
 	"strings"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
+	"github.com/bucketvcs/bucketvcs/internal/webhooks"
 )
 
 func runRepo(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -111,9 +114,21 @@ func repoRegister(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		return 1
 	}
 	defer s.Close()
-	if err := s.RegisterRepo(ctx, tenant, repo); err != nil {
+	// RegisterRepoIfNew is INSERT OR IGNORE under the hood and reports
+	// whether a new row was actually inserted — TOCTOU-free vs a separate
+	// GetRepoFlags pre-check.
+	inserted, err := s.RegisterRepoIfNew(ctx, tenant, repo)
+	if err != nil {
 		fmt.Fprintf(stderr, "register: %v\n", err)
 		return 1
+	}
+	if inserted {
+		webhookSvc := webhooks.New(s.DB())
+		if werr := webhookSvc.Enqueue(ctx, webhooks.EventRepoCreated,
+			tenant, repo, cliActor(), webhooks.RepoLifecyclePayload{}); werr != nil {
+			webhooks.EmitEnqueueFailed(ctx, nil, tenant, repo, "repo.created", werr.Error())
+			fmt.Fprintf(stderr, "warning: webhooks.enqueue_failed for repo.created: %v\n", werr)
+		}
 	}
 	return 0
 }
@@ -250,4 +265,29 @@ func repoList(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		fmt.Fprintf(stdout, "%s\t%s\t%s\t%d\n", r.Tenant, r.Name, pub, r.CreatedAt)
 	}
 	return 0
+}
+
+// cliActor returns a best-effort display name for the OS user running the
+// CLI. Used to attribute webhook events emitted from CLI subcommands
+// (M15 Task 5). Falls back to "cli" if the OS user lookup fails or the
+// environment lacks both USER and LOGNAME.
+//
+// WARNING (deferred — privacy follow-on milestone): this value is emitted
+// as the `actor` field of repo-lifecycle webhooks sent to operator-
+// configured external receivers. On shared hosts the OS username may be
+// `root`, a service account name, or otherwise reveal infra topology.
+// A future milestone will add an explicit `--actor=<string>` override on
+// the CLI subcommands; until then operators who want to hide the host
+// identity can run subcommands as a dedicated bucketvcs service account
+// or override via the env vars `user.Current()` reads.
+func cliActor() string {
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username
+	}
+	for _, env := range []string{"USER", "LOGNAME"} {
+		if v := os.Getenv(env); v != "" {
+			return v
+		}
+	}
+	return "cli"
 }

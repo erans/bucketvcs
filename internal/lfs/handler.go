@@ -16,6 +16,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/gateway/routenames"
 	"github.com/bucketvcs/bucketvcs/internal/lfs/locks"
 	"github.com/bucketvcs/bucketvcs/internal/lfs/quota"
+	"github.com/bucketvcs/bucketvcs/internal/webhooks"
 )
 
 const maxBatchObjects = 1000
@@ -64,6 +65,12 @@ type Deps struct {
 	// propagates a *quota.QuotaError to each ObjectAction.Error as a
 	// 507. When nil, no quota enforcement occurs (pre-M13.5 behavior).
 	Quota *quota.Service
+
+	// Webhooks is OPTIONAL. When non-nil, the locks-create and
+	// locks-unlock handlers enqueue EventLFSLockCreated /
+	// EventLFSLockReleased after their respective 201/200 responses.
+	// Fail-open — enqueue errors do not affect the response.
+	Webhooks *webhooks.Service
 }
 
 // lfsRoute enumerates the LFS sub-routes the handler dispatches.

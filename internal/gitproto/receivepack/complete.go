@@ -19,6 +19,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
 	"github.com/bucketvcs/bucketvcs/internal/repo/oidconst"
 	"github.com/bucketvcs/bucketvcs/internal/repo/refstore"
+	"github.com/bucketvcs/bucketvcs/internal/webhooks"
 )
 
 // completeReceivePack runs the validate + commit + IngestPack pipeline.
@@ -216,6 +217,22 @@ func completeReceivePack(eng *EngineRequest, w io.Writer, m *mirror.Mirror, rp *
 				policy.EmitRefCheckMetric(ctx, eng.loggerOrDefault(), perr.MetricOutcome())
 				policy.EmitRefRejected(ctx, eng.loggerOrDefault(),
 					tenant, repoID, perr, actorNameFromEng(eng))
+				// M15 webhook: policy.ref.rejected. Fail-open — enqueue
+				// errors do not affect receive outcome.
+				if eng.Webhooks != nil {
+					payload := webhooks.PolicyRefRejectedPayload{
+						Refname:        perr.Refname,
+						MatchedPattern: perr.MatchedPattern,
+						Reason:         perr.Reason,
+						OldOID:         perr.OldOID,
+						NewOID:         perr.NewOID,
+					}
+					if werr := eng.Webhooks.Enqueue(ctx, webhooks.EventPolicyRefRejected,
+						tenant, repoID, actorNameFromEng(eng), payload); werr != nil {
+						webhooks.EmitEnqueueFailed(ctx, eng.loggerOrDefault(),
+							tenant, repoID, "policy.ref.rejected", werr.Error())
+					}
+				}
 				continue
 			}
 			// Non-policy error from CheckUpdate (sqlite read failure,
@@ -424,6 +441,39 @@ func completeReceivePack(eng *EngineRequest, w io.Writer, m *mirror.Mirror, rp *
 	// (which would require an importer-package change).
 	markMirrorStale(m)
 
+	// M15 webhook: one push event per receive that mutated at least one
+	// ref. Fail-open — enqueue errors do not affect receive outcome.
+	if eng.Webhooks != nil {
+		var refUpdates []webhooks.RefUpdate
+		for i, u := range rp.Updates {
+			if statuses[i] != "" {
+				continue
+			}
+			refUpdates = append(refUpdates, webhooks.RefUpdate{
+				Refname: u.Refname,
+				OldOID:  u.OldOID,
+				NewOID:  u.NewOID,
+			})
+		}
+		if len(refUpdates) > 0 {
+			payload := webhooks.PushPayload{
+				TxID:            viewAfter.Header.LatestTx,
+				ManifestVersion: int64(viewAfter.Header.ManifestVersion),
+				StorageBackend:  "",
+				RefUpdates:      refUpdates,
+				CommitsSummary: webhooks.CommitsSummary{
+					Count: len(refUpdates),
+					Head:  pushHeadOID(refUpdates),
+				},
+			}
+			if werr := eng.Webhooks.Enqueue(ctx, webhooks.EventPush,
+				tenant, repoID, actorName, payload); werr != nil {
+				webhooks.EmitEnqueueFailed(ctx, eng.loggerOrDefault(),
+					tenant, repoID, "push", werr.Error())
+			}
+		}
+	}
+
 	// Step 15: success. Fill in "ok <ref>" for every accepted command;
 	// rejected ones already carry their "ng <ref> <reason>".
 	for i, u := range rp.Updates {
@@ -554,4 +604,22 @@ func allStatusesNonEmpty(statuses []string) bool {
 		}
 	}
 	return true
+}
+
+// pushHeadOID returns the first non-null NewOID of a refs/heads/* update, or
+// the first non-null NewOID across any ref type as a fallback. Tier 1
+// minimal commits_summary.head. Delete-only pushes (every NewOID is the null
+// OID) return "" so the receiver doesn't see a 0000… head.
+func pushHeadOID(updates []webhooks.RefUpdate) string {
+	for _, u := range updates {
+		if strings.HasPrefix(u.Refname, "refs/heads/") && u.NewOID != oidconst.NullOIDHex {
+			return u.NewOID
+		}
+	}
+	for _, u := range updates {
+		if u.NewOID != oidconst.NullOIDHex {
+			return u.NewOID
+		}
+	}
+	return ""
 }

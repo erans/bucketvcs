@@ -58,6 +58,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return runReshardRefs(ctx, rest, stdout, stderr)
 	case "policy":
 		return runPolicy(ctx, rest, stdout, stderr)
+	case "webhook":
+		return runWebhook(ctx, rest, stdout, stderr)
 	case "quota":
 		return runQuota(ctx, rest, stdout, stderr)
 	case "-h", "--help", "help":

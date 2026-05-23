@@ -217,6 +217,7 @@ run:
 			Mirror:          s.opts.Mirror,
 			AgentVersion:    s.opts.AgentVersion,
 			Policy:          s.opts.Policy,
+			Webhooks:        s.opts.Webhooks,
 			Logger:          s.opts.Logger,
 		}
 		serveErr = receivepack.Serve(req)

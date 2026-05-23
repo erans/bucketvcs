@@ -23,6 +23,7 @@ import (
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/lfs/locks"
+	"github.com/bucketvcs/bucketvcs/internal/webhooks"
 )
 
 // requireLFSContentType returns true if the request has a valid LFS
@@ -116,6 +117,19 @@ func handleLocksCreate(w http.ResponseWriter, r *http.Request, deps *Deps, tenan
 	// avoids entirely.
 	emitLockCreateMetric(ctx, logger, "created")
 	emitLFSLockCreate(ctx, logger, tenant+"/"+repo, actor.Name, actor.UserID, id, in.Path, in.RefName)
+	// M15 webhook: lfs.lock.created. Fail-open.
+	if deps.Webhooks != nil {
+		payload := webhooks.LFSLockPayload{
+			LockID: id,
+			Path:   in.Path,
+			Ref:    in.RefName,
+		}
+		if werr := deps.Webhooks.Enqueue(ctx, webhooks.EventLFSLockCreated,
+			tenant, repo, actor.Name, payload); werr != nil {
+			webhooks.EmitEnqueueFailed(ctx, logger,
+				tenant, repo, "lfs.lock.created", werr.Error())
+		}
+	}
 	wire := LockWire{
 		ID:       id,
 		Path:     in.Path,
@@ -308,6 +322,19 @@ func handleLocksUnlock(w http.ResponseWriter, r *http.Request, deps *Deps, tenan
 		// Non-owner force-unlock.
 		emitLockDeleteMetric(ctx, logger, true, "forced")
 		emitLFSLockDelete(ctx, logger, tenant+"/"+repo, actor.Name, lockID, true, lock.Owner.UserID)
+	}
+	// M15 webhook: lfs.lock.released. Fail-open.
+	if deps.Webhooks != nil {
+		payload := webhooks.LFSLockPayload{
+			LockID: lock.ID,
+			Path:   lock.Path,
+			Ref:    lock.RefName,
+		}
+		if werr := deps.Webhooks.Enqueue(ctx, webhooks.EventLFSLockReleased,
+			tenant, repo, actor.Name, payload); werr != nil {
+			webhooks.EmitEnqueueFailed(ctx, logger,
+				tenant, repo, "lfs.lock.released", werr.Error())
+		}
 	}
 	writeLockJSON(w, http.StatusOK, UnlockResponse{Lock: toLockWire(lock)})
 }

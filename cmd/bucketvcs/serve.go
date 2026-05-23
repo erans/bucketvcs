@@ -23,6 +23,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/policy"
 	"github.com/bucketvcs/bucketvcs/internal/sshd"
+	"github.com/bucketvcs/bucketvcs/internal/webhooks"
 )
 
 const defaultMirrorSubdir = "bucketvcs/mirrors"
@@ -168,6 +169,11 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	// returns zero rows and the engine accepts every update.
 	policySvc := policy.New(authS.DB())
 
+	// M15 webhook service. Backed by the same authdb (webhook_endpoints +
+	// webhook_deliveries tables added by migration 0006). The worker is
+	// started below once HTTP and SSH listeners are configured.
+	webhookSvc := webhooks.New(authS.DB())
+
 	// Build URLBuilder-backed closures once and share between the HTTP
 	// gateway and the SSH listener. Building here (rather than letting
 	// gateway construct them internally) keeps the wiring symmetric across
@@ -215,6 +221,11 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	serveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// M15 webhook delivery worker. Runs for the lifetime of serveCtx;
+	// returns when ctx is cancelled at shutdown. Backed by the same
+	// authdb as enqueue, so no extra DB handle is needed.
+	go webhooks.StartWorker(serveCtx, webhookSvc, webhooks.DefaultWorkerConfig())
+
 	// ---- HTTP listener ----
 	var httpSrv *http.Server
 	httpErrCh := make(chan error, 1)
@@ -243,6 +254,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			LFSProxiedBaseURL:       *proxiedBaseURL,
 			LFSLocksStore:           lfsLocksStore,
 			Policy:                  policySvc,
+			Webhooks:                webhookSvc,
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "serve: NewServer: %v\n", err)
@@ -325,6 +337,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			LFSBaseURL:        lfsBaseURL,
 			LFSSSHTokenTTL:    lfsSSHTTL,
 			Policy:            policySvc,
+			Webhooks:          webhookSvc,
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "serve: ssh new server: %v\n", err)

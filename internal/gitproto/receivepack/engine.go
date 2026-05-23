@@ -9,6 +9,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/policy"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
+	"github.com/bucketvcs/bucketvcs/internal/webhooks"
 )
 
 // EngineRequest is the inputs to every entry point.
@@ -36,6 +37,13 @@ type EngineRequest struct {
 	// check and refUpdates map build. nil means no enforcement
 	// (pre-M14 behavior).
 	Policy *policy.Service
+
+	// Webhooks is OPTIONAL. When non-nil, completeReceivePack enqueues
+	// EventPush after a successful BuildAndCommit (and EventPolicyRefRejected
+	// after each step 8b policy rejection). nil means no enqueues.
+	// Enqueue failures are logged and never affect the receive outcome
+	// (fail-open).
+	Webhooks *webhooks.Service
 
 	// Logger is OPTIONAL. Used by step 8b's metric + audit emission.
 	// nil falls back to slog.Default() at emission time.

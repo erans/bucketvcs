@@ -17,6 +17,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/policy"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
+	"github.com/bucketvcs/bucketvcs/internal/webhooks"
 )
 
 // Options configures the SSH listener and the underlying engine seam.
@@ -76,6 +77,10 @@ type Options struct {
 	// step 8b on the SSH transport. nil = pre-M14 behavior (all ref
 	// updates accepted). Mirrors gateway.Options.Policy.
 	Policy *policy.Service
+
+	// Webhooks enables M15 webhook emission for SSH receive-pack.
+	// Mirrors gateway.Options.Webhooks. nil disables all enqueues.
+	Webhooks *webhooks.Service
 }
 
 // Server is the bucketvcs SSH listener. Construct via NewServer.
