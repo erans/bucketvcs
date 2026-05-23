@@ -112,14 +112,19 @@ func (s *Service) Remove(ctx context.Context, tenant, repo, pattern string) erro
 type PolicyError struct {
 	Refname        string
 	MatchedPattern string
-	Reason         string // "deletion blocked" | "non-fast-forward push blocked"
+	Reason         string // "deletion blocked" | "non-fast-forward push blocked" | "blocked_path"
 	OldOID         string
 	NewOID         string
+	MatchedPath    string // M16: populated only when Reason == "blocked_path"
 }
 
 func (e *PolicyError) Error() string {
-	return fmt.Sprintf("protected-branch: %s by pattern %s (refname=%s)",
+	base := fmt.Sprintf("protected-branch: %s by pattern %s (refname=%s)",
 		e.Reason, e.MatchedPattern, e.Refname)
+	if e.MatchedPath != "" {
+		base += " path=" + e.MatchedPath
+	}
+	return base
 }
 
 // MetricOutcome returns the value used as the {outcome} label on
@@ -131,6 +136,8 @@ func (e *PolicyError) MetricOutcome() string {
 		return "blocked_deletion"
 	case "non-fast-forward push blocked":
 		return "blocked_force_push"
+	case "blocked_path":
+		return "blocked_path"
 	default:
 		return "blocked_other"
 	}
@@ -236,3 +243,14 @@ func boolToInt(b bool) int {
 // "no rule" from "no rows". Currently unused but exported so the API
 // shape is stable.
 var ErrNotFound = errors.New("policy: not found")
+
+// ErrInvalidInput is returned when CRUD inputs fail validation
+// (empty required fields, malformed patterns, etc.).
+var ErrInvalidInput = errors.New("policy: invalid input")
+
+// ErrConflict is reserved for future strict-mode CRUD entry points that
+// reject duplicate inserts instead of upserting. Idempotent-mode CRUD
+// (current Add* methods) uses INSERT ... ON CONFLICT DO NOTHING and
+// returns nil on duplicates, so this sentinel is currently a
+// forward-declaration with no production return site.
+var ErrConflict = errors.New("policy: conflict")

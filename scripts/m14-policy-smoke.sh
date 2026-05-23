@@ -166,4 +166,114 @@ if ! grep -Eq 'event="?policy\.ref\.rejected"?' "$ROOT/gateway.log"; then
 fi
 echo "    metrics + audit observed"
 
+# ---------------------------------------------------------------------------
+# M16 Tier 2: protected_paths.
+#
+# Prior scenarios removed the protected_refs rule on main, so path checks
+# run on every push without ref-level interference. We add a fresh path
+# rule blocking secrets/**, push a commit that touches secrets/ (must
+# reject), then a non-secret commit (must accept), then remove the rule
+# and retry the secret push (must accept).
+# ---------------------------------------------------------------------------
+echo "==> M16 Tier 2: add a protected_paths rule blocking secrets/**"
+"$BIN" policy paths add --auth-db="$AUTHDB" --tenant="$TENANT" --repo="$REPO" \
+    --refname-pattern="refs/heads/main" --path-pattern="secrets/**"
+
+# M16 L3 (round-1 fix): register a webhook endpoint so the next path
+# rejection enqueues a webhook_deliveries row. We then assert below
+# that the payload carries the matched_path field — guarding against
+# any regression that drops MatchedPath from PolicyRefRejectedPayload.
+# The endpoint URL points at 127.0.0.1:1 (RFC 6890 discard); deliveries
+# will fail to send but the row + payload land in webhook_deliveries
+# before the worker tries to deliver, which is what we're asserting on.
+echo "==> M16 L3: register webhook endpoint for policy.ref.rejected"
+"$BIN" webhook endpoint add --auth-db="$AUTHDB" \
+    --tenant="$TENANT" --repo="$REPO" \
+    --url="http://127.0.0.1:1/" \
+    --events="policy.ref.rejected" >"$ROOT/m16-webhook-add.out"
+
+echo "==> M16 step a: push a commit touching secrets/ (expect REJECT)"
+(
+    cd "$WORK"
+    mkdir -p secrets
+    echo "secret-value" > secrets/api.key
+    git add secrets/
+    git commit -q -m "add secret"
+    if git push "$CLONE_URL" main:refs/heads/main 2>"$ROOT/m16-push-secrets.err"; then
+        echo "FAIL: M16 path rule did not reject secrets/ push"
+        cat "$ROOT/m16-push-secrets.err" >&2
+        exit 1
+    fi
+)
+if ! grep -Eq "blocked_path|secrets/api.key" "$ROOT/m16-push-secrets.err"; then
+    echo "FAIL: M16 rejection message missing blocked_path/secrets path"
+    cat "$ROOT/m16-push-secrets.err" >&2
+    exit 1
+fi
+echo "    secrets/ push rejected with: $(grep -oE 'protected-branch[^]]*' "$ROOT/m16-push-secrets.err" | head -1)"
+
+# M16 L3 (round-1 fix): assert the webhook delivery row enqueued during
+# step a carries matched_path in its payload_json. sqlite3 CLI is used
+# directly because `bucketvcs webhook delivery list` doesn't expose
+# payload_json (only metadata columns). If sqlite3 is unavailable the
+# smoke must still fail loudly rather than silently skipping.
+if ! command -v sqlite3 >/dev/null 2>&1; then
+    echo "FAIL: M16 L3 webhook payload assertion requires sqlite3 CLI"
+    exit 1
+fi
+PAYLOAD=$(sqlite3 "$AUTHDB" \
+  "SELECT payload_json FROM webhook_deliveries WHERE event_type='policy.ref.rejected' ORDER BY rowid DESC LIMIT 1;")
+if [ -z "$PAYLOAD" ]; then
+    echo "FAIL: M16 L3 no webhook_deliveries row for policy.ref.rejected after step a"
+    exit 1
+fi
+if ! echo "$PAYLOAD" | grep -q '"matched_path":"secrets/api.key"'; then
+    echo "FAIL: M16 L3 webhook payload missing matched_path=secrets/api.key"
+    echo "    payload=$PAYLOAD"
+    exit 1
+fi
+echo "    webhook delivery payload carries matched_path"
+
+echo "==> M16 step b: drop the secret commit + push a non-secret change (expect ACCEPT)"
+(
+    cd "$WORK"
+    # The secret commit landed locally but never on the remote; rewind one
+    # commit so the next push doesn't carry secrets/ in its diff-tree walk.
+    git reset --hard HEAD~1 -q
+    date > README.md
+    git add README.md
+    git commit -q -m "non-secret update"
+    if ! git push "$CLONE_URL" main:refs/heads/main 2>"$ROOT/m16-nonsecret.err"; then
+        echo "FAIL: M16 non-secret push rejected unexpectedly"
+        cat "$ROOT/m16-nonsecret.err" >&2
+        exit 1
+    fi
+)
+echo "    non-secret push accepted"
+
+echo "==> M16 step c: remove the path rule + retry the secret push (expect ACCEPT)"
+"$BIN" policy paths remove --auth-db="$AUTHDB" --tenant="$TENANT" --repo="$REPO" \
+    --refname-pattern="refs/heads/main" --path-pattern="secrets/**"
+(
+    cd "$WORK"
+    mkdir -p secrets
+    echo "now-allowed" > secrets/api.key
+    git add secrets/
+    git commit -q -m "add secret after rule remove"
+    if ! git push "$CLONE_URL" main:refs/heads/main 2>"$ROOT/m16-secret2.err"; then
+        echo "FAIL: M16 secret push rejected after path rule removed"
+        cat "$ROOT/m16-secret2.err" >&2
+        exit 1
+    fi
+)
+echo "    secret push accepted after rule removal"
+
+echo "==> M16 sanity check: gateway log emitted blocked_path outcome"
+if ! grep -Eq 'outcome="?blocked_path"?' "$ROOT/gateway.log"; then
+    echo "FAIL: gateway log missing policy_refs_check_total outcome=blocked_path"
+    tail -80 "$ROOT/gateway.log" >&2
+    exit 1
+fi
+echo "    blocked_path metric observed"
+
 echo "==> M14 protected-refs smoke: OK"

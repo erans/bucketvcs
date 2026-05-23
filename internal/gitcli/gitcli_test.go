@@ -3,6 +3,7 @@ package gitcli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -1317,6 +1318,119 @@ func TestRevParse_RejectsBadRef(t *testing.T) {
 	}
 }
 
+// initBareWithCommits creates a bare repo and a working clone with n linear
+// commits, each adding fileN.txt. Pushes them to bare. Returns (bareDir, oids).
+func initBareWithCommits(t *testing.T, n int) (string, []string) {
+	t.Helper()
+	skipIfNoGit(t)
+	tmp := t.TempDir()
+	bareDir := filepath.Join(tmp, "bare.git")
+	work := filepath.Join(tmp, "work")
+	mustGit(t, tmp, "init", "--bare", "-q", bareDir)
+	mustGit(t, tmp, "init", "-q", work)
+	mustGit(t, work, "config", "user.email", "smoke@local")
+	mustGit(t, work, "config", "user.name", "smoke")
+	mustGit(t, work, "config", "commit.gpgsign", "false")
+	mustGit(t, work, "remote", "add", "origin", bareDir)
+
+	var oids []string
+	for i := 0; i < n; i++ {
+		fp := filepath.Join(work, "file"+fmt.Sprintf("%d", i)+".txt")
+		if err := os.WriteFile(fp, []byte("content"+fmt.Sprintf("%d\n", i)), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		mustGit(t, work, "add", ".")
+		mustGit(t, work, "commit", "-qm", "c"+fmt.Sprintf("%d", i))
+		oid := strings.TrimSpace(string(mustGitCapture(t, work, "rev-parse", "HEAD")))
+		oids = append(oids, oid)
+	}
+	mustGit(t, work, "branch", "-M", "main")
+	mustGit(t, work, "push", "-q", "origin", "main")
+	return bareDir, oids
+}
+
+const diffTreeNullOID = "0000000000000000000000000000000000000000"
+
+func strSliceEq(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestDiffTreeChangedPaths_FF(t *testing.T) {
+	bareDir, oids := initBareWithCommits(t, 3)
+	got, err := DiffTreeChangedPaths(context.Background(), bareDir, oids[0], oids[2])
+	if err != nil {
+		t.Fatalf("DiffTreeChangedPaths: %v", err)
+	}
+	sortStrings(got)
+	want := []string{"file1.txt", "file2.txt"}
+	if !strSliceEq(got, want) {
+		t.Errorf("paths=%v, want %v", got, want)
+	}
+}
+
+func TestDiffTreeChangedPaths_NewRef(t *testing.T) {
+	bareDir, oids := initBareWithCommits(t, 3)
+	got, err := DiffTreeChangedPaths(context.Background(), bareDir, diffTreeNullOID, oids[2])
+	if err != nil {
+		t.Fatalf("DiffTreeChangedPaths new-ref: %v", err)
+	}
+	sortStrings(got)
+	want := []string{"file0.txt", "file1.txt", "file2.txt"}
+	if !strSliceEq(got, want) {
+		t.Errorf("new-ref paths=%v, want %v", got, want)
+	}
+}
+
+func TestDiffTreeChangedPaths_Deletion(t *testing.T) {
+	bareDir, oids := initBareWithCommits(t, 2)
+	got, err := DiffTreeChangedPaths(context.Background(), bareDir, oids[1], diffTreeNullOID)
+	if err != nil {
+		t.Fatalf("DiffTreeChangedPaths deletion: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("deletion: paths=%v, want empty", got)
+	}
+}
+
+func TestDiffTreeChangedPaths_NoOp(t *testing.T) {
+	bareDir, oids := initBareWithCommits(t, 2)
+	got, err := DiffTreeChangedPaths(context.Background(), bareDir, oids[1], oids[1])
+	if err != nil {
+		t.Fatalf("DiffTreeChangedPaths no-op: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("no-op: paths=%v, want empty", got)
+	}
+}
+
+// Ensure ErrTooManyPaths is exported and reachable via errors.Is.
+func TestDiffTreeChangedPaths_ErrTooManyPathsExported(t *testing.T) {
+	if ErrTooManyPaths == nil {
+		t.Errorf("ErrTooManyPaths is nil; want sentinel")
+	}
+	if !errors.Is(ErrTooManyPaths, ErrTooManyPaths) {
+		t.Errorf("errors.Is reflexive check failed")
+	}
+}
+
+// sortStrings sorts in place; small helper to avoid bringing in sort
+// in many other tests.
+func sortStrings(s []string) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j-1] > s[j]; j-- {
+			s[j-1], s[j] = s[j], s[j-1]
+		}
+	}
+}
+
 func TestRevListNotAll_RejectsNonHexInputs(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -1337,5 +1451,87 @@ func TestRevListNotAll_RejectsNonHexInputs(t *testing.T) {
 		if _, err := RevListNotAll(ctx, bare, []string{bad}); err == nil {
 			t.Fatalf("RevListNotAll(%q): expected error", bad)
 		}
+	}
+}
+
+// TestDiffTreeChangedPaths_MergeCommitConflictResolution exercises the
+// M16 round-1 fix: paths introduced ONLY on a merge commit (present on
+// neither parent — the classic conflict-resolution case) must appear in
+// the diff. The previous `--no-merges` form silently skipped merge
+// commits entirely, letting protected-path content land via merge-time
+// resolution. With `-m --first-parent`, the merge commit emits a diff
+// against the mainline parent, capturing those changes.
+func TestDiffTreeChangedPaths_MergeCommitConflictResolution(t *testing.T) {
+	skipIfNoGit(t)
+	tmp := t.TempDir()
+	bareDir := filepath.Join(tmp, "bare.git")
+	work := filepath.Join(tmp, "work")
+	mustGit(t, "", "init", "--bare", "-q", bareDir)
+	mustGit(t, "", "init", "-q", work)
+	mustGit(t, work, "config", "user.email", "smoke@local")
+	mustGit(t, work, "config", "user.name", "smoke")
+	mustGit(t, work, "config", "commit.gpgsign", "false")
+	mustGit(t, work, "remote", "add", "origin", bareDir)
+
+	// Base commit C0 on the default branch — normalize to "main" so the
+	// later push to refs/heads/main is a fast-forward regardless of the
+	// host git's init.defaultBranch.
+	if err := os.WriteFile(filepath.Join(work, "base.txt"), []byte("base"), 0o644); err != nil {
+		t.Fatalf("WriteFile base: %v", err)
+	}
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "commit", "-qm", "C0")
+	mustGit(t, work, "branch", "-M", "main")
+	c0 := strings.TrimSpace(string(mustGitCapture(t, work, "rev-parse", "HEAD")))
+
+	// Branch A: adds a.txt.
+	mustGit(t, work, "checkout", "-qb", "branch-a")
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("a"), 0o644); err != nil {
+		t.Fatalf("WriteFile a: %v", err)
+	}
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "commit", "-qm", "A")
+
+	// Branch B from C0: adds b.txt.
+	mustGit(t, work, "checkout", "-qb", "branch-b", c0)
+	if err := os.WriteFile(filepath.Join(work, "b.txt"), []byte("b"), 0o644); err != nil {
+		t.Fatalf("WriteFile b: %v", err)
+	}
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "commit", "-qm", "B")
+
+	// Merge branch-a into branch-b, then amend the merge to include a
+	// brand-new file that exists on NEITHER parent. This mirrors the
+	// real-world conflict-resolution case: the file lives only on the
+	// merge commit M itself.
+	mustGit(t, work, "merge", "--no-ff", "-qm", "merge", "branch-a")
+	if err := os.MkdirAll(filepath.Join(work, "secrets"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "secrets/api.key"), []byte("leaked-via-merge"), 0o644); err != nil {
+		t.Fatalf("WriteFile secrets: %v", err)
+	}
+	mustGit(t, work, "add", "secrets/api.key")
+	mustGit(t, work, "commit", "--amend", "--no-edit", "-q")
+	mergeOID := strings.TrimSpace(string(mustGitCapture(t, work, "rev-parse", "HEAD")))
+	mustGit(t, work, "push", "-q", "origin", "branch-b:refs/heads/main")
+
+	got, err := DiffTreeChangedPaths(context.Background(), bareDir, c0, mergeOID)
+	if err != nil {
+		t.Fatalf("DiffTreeChangedPaths: %v", err)
+	}
+	sortStrings(got)
+	// secrets/api.key MUST be in the diff — that's the bypass we're
+	// closing. With --no-merges the merge commit (where secrets/api.key
+	// lives) was skipped entirely and this path went missing.
+	var found bool
+	for _, p := range got {
+		if p == "secrets/api.key" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("merge-commit conflict-resolution path missing; got %v", got)
 	}
 }

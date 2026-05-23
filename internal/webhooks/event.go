@@ -191,4 +191,8 @@ type PolicyRefRejectedPayload struct {
 	Reason         string `json:"reason"`
 	OldOID         string `json:"old_oid"`
 	NewOID         string `json:"new_oid"`
+	// MatchedPath is populated only for M16 path-rule rejections
+	// (Reason == "blocked_path"). Omitted otherwise so receivers see
+	// no key when empty.
+	MatchedPath string `json:"matched_path,omitempty"`
 }

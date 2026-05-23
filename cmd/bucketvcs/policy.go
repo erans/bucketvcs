@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -20,6 +21,11 @@ Objects + actions:
               [--allow-deletion] [--allow-force-push]
   refs list   --auth-db=<path> --tenant=<t> --repo=<r> [--format=text|json]
   refs remove --auth-db=<path> --tenant=<t> --repo=<r> --pattern=<glob>
+  paths add    --auth-db=<path> --tenant=<t> --repo=<r>
+               --refname-pattern=<glob> --path-pattern=<glob>
+  paths list   --auth-db=<path> --tenant=<t> --repo=<r> [--format=text|json]
+  paths remove --auth-db=<path> --tenant=<t> --repo=<r>
+               --refname-pattern=<glob> --path-pattern=<glob>
 
 Output formats:
   text  one record per line, key=value style.
@@ -51,6 +57,8 @@ func runPolicy(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	switch args[0] {
 	case "refs":
 		return runPolicyRefs(ctx, args[1:], stdout, stderr)
+	case "paths":
+		return runPolicyPaths(ctx, args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "policy: unknown object %q\n%s", args[0], policyUsage)
 		return 2
@@ -203,6 +211,151 @@ func runPolicyRefsRemove(ctx context.Context, args []string, stdout, stderr io.W
 		return 1
 	}
 	fmt.Fprintf(stdout, "tenant=%s  repo=%s  pattern=%s  removed\n", *tenant, *repo, *pattern)
+	return 0
+}
+
+func runPolicyPaths(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "policy paths: action required (add|list|remove)")
+		return 2
+	}
+	switch args[0] {
+	case "add":
+		return runPolicyPathsAdd(ctx, args[1:], stdout, stderr)
+	case "list":
+		return runPolicyPathsList(ctx, args[1:], stdout, stderr)
+	case "remove":
+		return runPolicyPathsRemove(ctx, args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "policy paths: unknown action %q (want add|list|remove)\n", args[0])
+		return 2
+	}
+}
+
+func runPolicyPathsAdd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("policy paths add", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	authDB := fs.String("auth-db", "", "Path to authdb (required)")
+	tenant := fs.String("tenant", "", "Tenant ID (required)")
+	repo := fs.String("repo", "", "Repo ID (required)")
+	refnamePattern := fs.String("refname-pattern", "", "Refname glob (required, e.g. refs/heads/main)")
+	pathPattern := fs.String("path-pattern", "", "Path glob (required, e.g. secrets/**)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *authDB == "" || *tenant == "" || *repo == "" || *refnamePattern == "" || *pathPattern == "" {
+		fmt.Fprintln(stderr, "policy paths add: --auth-db, --tenant, --repo, --refname-pattern, --path-pattern required")
+		return 2
+	}
+	svc, store, err := openPolicySvc(*authDB)
+	if err != nil {
+		fmt.Fprintf(stderr, "policy paths add: %v\n", err)
+		return 1
+	}
+	defer store.Close()
+	if err := svc.AddPathRule(ctx, policy.ProtectedPath{
+		Tenant:         *tenant,
+		Repo:           *repo,
+		RefnamePattern: *refnamePattern,
+		PathPattern:    *pathPattern,
+	}); err != nil {
+		if errors.Is(err, policy.ErrInvalidInput) {
+			fmt.Fprintf(stderr, "policy paths add: %v\n", err)
+			return 2
+		}
+		fmt.Fprintf(stderr, "policy paths add: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "tenant=%s  repo=%s  refname-pattern=%s  path-pattern=%s\n",
+		*tenant, *repo, *refnamePattern, *pathPattern)
+	return 0
+}
+
+func runPolicyPathsList(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("policy paths list", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	authDB := fs.String("auth-db", "", "Path to authdb (required)")
+	tenant := fs.String("tenant", "", "Tenant ID (required)")
+	repo := fs.String("repo", "", "Repo ID (required)")
+	format := fs.String("format", "text", "Output format: text|json")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *authDB == "" || *tenant == "" || *repo == "" {
+		fmt.Fprintln(stderr, "policy paths list: --auth-db, --tenant, --repo required")
+		return 2
+	}
+	if *format != "text" && *format != "json" {
+		fmt.Fprintf(stderr, "policy paths list: --format must be text|json (got %q)\n", *format)
+		return 2
+	}
+	svc, store, err := openPolicySvc(*authDB)
+	if err != nil {
+		fmt.Fprintf(stderr, "policy paths list: %v\n", err)
+		return 1
+	}
+	defer store.Close()
+	rules, err := svc.ListPathRules(ctx, *tenant, *repo)
+	if err != nil {
+		fmt.Fprintf(stderr, "policy paths list: %v\n", err)
+		return 1
+	}
+	if len(rules) == 0 {
+		// JSON format is NDJSON — empty list emits nothing; callers
+		// parse line-by-line and an empty input is correctly an
+		// empty result. Mirrors the refs list contract.
+		if *format == "json" {
+			return 0
+		}
+		fmt.Fprintf(stdout, "tenant=%s  repo=%s  (no protected paths)\n", *tenant, *repo)
+		return 0
+	}
+	for _, r := range rules {
+		if *format == "json" {
+			_ = json.NewEncoder(stdout).Encode(map[string]any{
+				"tenant":          r.Tenant,
+				"repo":            r.Repo,
+				"refname_pattern": r.RefnamePattern,
+				"path_pattern":    r.PathPattern,
+				"created_at":      r.CreatedAt.Format(time.RFC3339),
+			})
+			continue
+		}
+		fmt.Fprintf(stdout,
+			"tenant=%s  repo=%s  refname-pattern=%s  path-pattern=%s  created=%s\n",
+			r.Tenant, r.Repo, r.RefnamePattern, r.PathPattern,
+			r.CreatedAt.Format(time.RFC3339))
+	}
+	return 0
+}
+
+func runPolicyPathsRemove(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("policy paths remove", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	authDB := fs.String("auth-db", "", "Path to authdb (required)")
+	tenant := fs.String("tenant", "", "Tenant ID (required)")
+	repo := fs.String("repo", "", "Repo ID (required)")
+	refnamePattern := fs.String("refname-pattern", "", "Refname glob (required, exact match)")
+	pathPattern := fs.String("path-pattern", "", "Path glob (required, exact match)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *authDB == "" || *tenant == "" || *repo == "" || *refnamePattern == "" || *pathPattern == "" {
+		fmt.Fprintln(stderr, "policy paths remove: --auth-db, --tenant, --repo, --refname-pattern, --path-pattern required")
+		return 2
+	}
+	svc, store, err := openPolicySvc(*authDB)
+	if err != nil {
+		fmt.Fprintf(stderr, "policy paths remove: %v\n", err)
+		return 1
+	}
+	defer store.Close()
+	if err := svc.RemovePathRule(ctx, *tenant, *repo, *refnamePattern, *pathPattern); err != nil {
+		fmt.Fprintf(stderr, "policy paths remove: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "tenant=%s  repo=%s  refname-pattern=%s  path-pattern=%s  removed\n",
+		*tenant, *repo, *refnamePattern, *pathPattern)
 	return 0
 }
 

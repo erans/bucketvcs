@@ -209,6 +209,10 @@ func completeReceivePack(eng *EngineRequest, w io.Writer, m *mirror.Mirror, rp *
 				m.BareDir(), u.Refname, u.OldOID, u.NewOID)
 			if err == nil {
 				policy.EmitRefCheckMetric(ctx, eng.loggerOrDefault(), "ok")
+				// M16: continue with the path-rule check for accepted
+				// updates. The helper populates statuses[i] and emits
+				// metrics/audit/webhook on rejection; no-op on accept.
+				checkPathsForUpdate(ctx, eng, m.BareDir(), tenant, repoID, u, i, statuses)
 				continue
 			}
 			var perr *policy.PolicyError
@@ -590,6 +594,68 @@ func actorNameFromEng(eng *EngineRequest) string {
 		}
 	}
 	return "anonymous"
+}
+
+// checkPathsForUpdate runs the M16 path-rule check for one accepted ref
+// update (i.e. one that already passed CheckUpdate). On rejection it
+// populates statuses[i] and emits the rejection metric + audit event +
+// webhook. On accept it's a no-op. On internal error (gitcli or sqlite
+// failure) it populates statuses[i] with internal-error and emits the
+// matching metric + audit — failing CLOSED so a path-lookup failure
+// can never silently allow a write that policy would have rejected.
+//
+// Deletes and creates of zero-OID refs short-circuit inside
+// gitcli.DiffTreeChangedPaths (newOID == null returns empty paths), so
+// this helper is also safe to call for those cases.
+func checkPathsForUpdate(ctx context.Context, eng *EngineRequest, bareDir, tenant, repoID string,
+	u updateCommand, i int, statuses []string) {
+	changedPaths, err := gitcli.DiffTreeChangedPaths(ctx, bareDir, u.OldOID, u.NewOID)
+	if err != nil {
+		statuses[i] = "ng " + u.Refname + " internal-error: " + err.Error()
+		policy.EmitRefCheckMetric(ctx, eng.loggerOrDefault(), "blocked_path_internal_error")
+		policy.EmitRefInternalError(ctx, eng.loggerOrDefault(),
+			tenant, repoID, u.Refname, actorNameFromEng(eng), err)
+		return
+	}
+	cerr := eng.Policy.CheckPaths(ctx, tenant, repoID, u.Refname, changedPaths)
+	if cerr == nil {
+		return
+	}
+	var pathErr *policy.PolicyError
+	if errors.As(cerr, &pathErr) {
+		// CheckPaths fills MatchedPattern/MatchedPath/Refname/Reason
+		// only; decorate with OldOID/NewOID for the audit + webhook.
+		pathErr.OldOID = u.OldOID
+		pathErr.NewOID = u.NewOID
+		statuses[i] = "ng " + u.Refname + " " + pathErr.Error()
+		policy.EmitRefCheckMetric(ctx, eng.loggerOrDefault(), pathErr.MetricOutcome())
+		policy.EmitRefRejected(ctx, eng.loggerOrDefault(),
+			tenant, repoID, pathErr, actorNameFromEng(eng))
+		// M15 webhook: policy.ref.rejected. Fail-open — enqueue
+		// errors do not affect receive outcome.
+		if eng.Webhooks != nil {
+			payload := webhooks.PolicyRefRejectedPayload{
+				Refname:        pathErr.Refname,
+				MatchedPattern: pathErr.MatchedPattern,
+				MatchedPath:    pathErr.MatchedPath,
+				Reason:         pathErr.Reason,
+				OldOID:         pathErr.OldOID,
+				NewOID:         pathErr.NewOID,
+			}
+			if werr := eng.Webhooks.Enqueue(ctx, webhooks.EventPolicyRefRejected,
+				tenant, repoID, actorNameFromEng(eng), payload); werr != nil {
+				webhooks.EmitEnqueueFailed(ctx, eng.loggerOrDefault(),
+					tenant, repoID, "policy.ref.rejected", werr.Error())
+			}
+		}
+		return
+	}
+	// Non-policy error from CheckPaths (sqlite read failure, bad
+	// stored pattern). Failing closed — see CheckUpdate handling above.
+	statuses[i] = "ng " + u.Refname + " internal-error: " + cerr.Error()
+	policy.EmitRefCheckMetric(ctx, eng.loggerOrDefault(), "blocked_path_internal_error")
+	policy.EmitRefInternalError(ctx, eng.loggerOrDefault(),
+		tenant, repoID, u.Refname, actorNameFromEng(eng), cerr)
 }
 
 func anyStatusNonEmpty(statuses []string) bool {

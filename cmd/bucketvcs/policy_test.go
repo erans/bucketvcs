@@ -180,3 +180,106 @@ func TestPolicy_CLI_ListJSONFormat(t *testing.T) {
 		}
 	}
 }
+
+func TestPolicy_PathsAddListRemove(t *testing.T) {
+	authDB := tempAuthDBWithRepo(t, "acme", "site")
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	code := runPolicy(ctx, []string{
+		"paths", "add",
+		"--auth-db=" + authDB,
+		"--tenant=acme", "--repo=site",
+		"--refname-pattern=refs/heads/main",
+		"--path-pattern=secrets/**",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("add: rc=%d, stderr=%s", code, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = runPolicy(ctx, []string{
+		"paths", "list",
+		"--auth-db=" + authDB,
+		"--tenant=acme", "--repo=site",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("list: rc=%d, stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "secrets/**") {
+		t.Errorf("list output missing rule: %s", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = runPolicy(ctx, []string{
+		"paths", "list",
+		"--auth-db=" + authDB,
+		"--tenant=acme", "--repo=site",
+		"--format=json",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("list json: rc=%d, stderr=%s", code, stderr.String())
+	}
+	lines := strings.Split(strings.TrimRight(stdout.String(), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Errorf("expected 1 NDJSON line, got %d: %s", len(lines), stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = runPolicy(ctx, []string{
+		"paths", "remove",
+		"--auth-db=" + authDB,
+		"--tenant=acme", "--repo=site",
+		"--refname-pattern=refs/heads/main",
+		"--path-pattern=secrets/**",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("remove: rc=%d, stderr=%s", code, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	_ = runPolicy(ctx, []string{
+		"paths", "list",
+		"--auth-db=" + authDB,
+		"--tenant=acme", "--repo=site",
+	}, &stdout, &stderr)
+	if !strings.Contains(stdout.String(), "no protected paths") {
+		t.Errorf("after remove: expected 'no protected paths', got %s", stdout.String())
+	}
+}
+
+func TestPolicy_PathsAdd_BadPattern(t *testing.T) {
+	authDB := tempAuthDBWithRepo(t, "acme", "site")
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+	code := runPolicy(ctx, []string{
+		"paths", "add",
+		"--auth-db=" + authDB,
+		"--tenant=acme", "--repo=site",
+		"--refname-pattern=refs/heads/main",
+		"--path-pattern=/leading-slash",
+	}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("bad pattern: rc=%d, want 2; stderr=%s", code, stderr.String())
+	}
+}
+
+func TestPolicy_PathsRemove_NotFound(t *testing.T) {
+	authDB := tempAuthDBWithRepo(t, "acme", "site")
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+	code := runPolicy(ctx, []string{
+		"paths", "remove",
+		"--auth-db=" + authDB,
+		"--tenant=acme", "--repo=site",
+		"--refname-pattern=refs/heads/main",
+		"--path-pattern=does/not/exist",
+	}, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("remove non-existent: rc=%d, want 1; stderr=%s", code, stderr.String())
+	}
+}

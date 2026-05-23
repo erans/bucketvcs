@@ -972,3 +972,110 @@ func FsckConnectivityOnly(ctx context.Context, dir string) error {
 	_, err := run(ctx, dir, "--no-replace-objects", "fsck", "--connectivity-only", "--no-dangling", "--no-progress")
 	return err
 }
+
+// nullOIDHex is the all-zero OID used to mark ref creation/deletion in
+// the receive-pack protocol.
+const nullOIDHex = "0000000000000000000000000000000000000000"
+
+// maxNewRefDiffPaths caps the number of paths returned when oldOID is
+// the null OID (ref creation). Above the cap, DiffTreeChangedPaths
+// returns ErrTooManyPaths.
+const maxNewRefDiffPaths = 10000
+
+// ErrTooManyPaths is returned by DiffTreeChangedPaths when a new-ref
+// creation introduces more paths than maxNewRefDiffPaths. Receivepack
+// treats this as an internal-error rejection with operator-friendly
+// "squash or rebase" guidance.
+var ErrTooManyPaths = errors.New("gitcli: new-ref diff exceeds cap; squash or rebase")
+
+// DiffTreeChangedPaths returns the union of paths touched by commits in
+// the range (oldOID, newOID]. Single `git log --name-only` subprocess
+// regardless of commit count.
+//
+// Special cases:
+//   - newOID == nullOIDHex (deletion): returns nil, nil
+//   - oldOID == nullOIDHex (creation): walks every commit reachable from
+//     newOID (`--root` so the initial commit's create-event is included)
+//     with cap maxNewRefDiffPaths; returns ErrTooManyPaths on cap
+//   - oldOID == newOID (no-op): returns nil, nil
+//
+// Path order matches `git log` output; duplicates collapsed.
+func DiffTreeChangedPaths(ctx context.Context, dir, oldOID, newOID string) ([]string, error) {
+	if !validHexOID(oldOID) {
+		return nil, fmt.Errorf("gitcli: DiffTreeChangedPaths: invalid oldOID %q", oldOID)
+	}
+	if !validHexOID(newOID) {
+		return nil, fmt.Errorf("gitcli: DiffTreeChangedPaths: invalid newOID %q", newOID)
+	}
+	if newOID == nullOIDHex || oldOID == newOID {
+		return nil, nil
+	}
+	// We use `git log --name-only --pretty=format:` so the union of paths
+	// touched across all commits in the range is enumerated — a single
+	// subprocess regardless of commit count. `git diff-tree A..B` would
+	// only give the endpoint-to-endpoint diff, missing intermediate
+	// changes that were later reverted but still subject to policy.
+	var args []string
+	if oldOID == nullOIDHex {
+		// New ref: walk every commit reachable from newOID. `--root`
+		// makes the initial commit show as a big create event so its
+		// files are listed too. `-m --first-parent` ensures merge
+		// commits emit a diff against their first parent (mainline),
+		// closing the conflict-resolution bypass where a file
+		// introduced only on the merge commit M (present on neither
+		// parent) would silently escape the path-policy gate.
+		// `--first-parent` constrains the diff to a single parent so
+		// paths are not duplicated N times for an N-parent merge.
+		args = []string{
+			"log", "--root", "-m", "--first-parent", "--name-only",
+			"--pretty=format:", "--diff-filter=ACMDRT", newOID,
+		}
+	} else {
+		// Range push: walk commits in (oldOID, newOID].
+		// See above re: `-m --first-parent` for merge-commit handling.
+		args = []string{
+			"log", "-m", "--first-parent", "--name-only",
+			"--pretty=format:", "--diff-filter=ACMDRT",
+			oldOID + ".." + newOID,
+		}
+	}
+	out, err := run(ctx, dir, args...)
+	if err != nil {
+		return nil, fmt.Errorf("gitcli: diff-tree %s..%s: %w",
+			shortOID(oldOID), shortOID(newOID), err)
+	}
+	trimmed := strings.TrimSpace(string(out))
+	if trimmed == "" {
+		return nil, nil
+	}
+	lines := strings.Split(trimmed, "\n")
+	seen := make(map[string]struct{}, len(lines))
+	var paths []string
+	capped := false
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		if _, dup := seen[line]; dup {
+			continue
+		}
+		seen[line] = struct{}{}
+		paths = append(paths, line)
+		if oldOID == nullOIDHex && len(paths) > maxNewRefDiffPaths {
+			capped = true
+			break
+		}
+	}
+	if capped {
+		return nil, ErrTooManyPaths
+	}
+	return paths, nil
+}
+
+// shortOID returns the first 12 hex chars of oid for error messages.
+func shortOID(oid string) string {
+	if len(oid) > 12 {
+		return oid[:12]
+	}
+	return oid
+}
