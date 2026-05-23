@@ -98,3 +98,19 @@ func EmitEndpointRemoved(ctx context.Context, logger *slog.Logger,
 		slog.String("repo", repo),
 	)
 }
+
+// EmitEndpointSecretRotated logs the webhooks.endpoint_secret_rotated audit
+// event when an operator rotates an endpoint's signing secret. The new
+// secret value is NEVER logged.
+func EmitEndpointSecretRotated(ctx context.Context, logger *slog.Logger,
+	endpointID int64, tenant, repo, actor string) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.LogAttrs(ctx, slog.LevelInfo, "webhooks.endpoint_secret_rotated",
+		slog.Int64("endpoint_id", endpointID),
+		slog.String("tenant", tenant),
+		slog.String("repo", repo),
+		slog.String("actor", actor),
+	)
+}

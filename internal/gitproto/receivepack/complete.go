@@ -456,10 +456,14 @@ func completeReceivePack(eng *EngineRequest, w io.Writer, m *mirror.Mirror, rp *
 			})
 		}
 		if len(refUpdates) > 0 {
+			storageBackend := ""
+			if eng.Store != nil {
+				storageBackend = eng.Store.Name()
+			}
 			payload := webhooks.PushPayload{
 				TxID:            viewAfter.Header.LatestTx,
 				ManifestVersion: int64(viewAfter.Header.ManifestVersion),
-				StorageBackend:  "",
+				StorageBackend:  storageBackend,
 				RefUpdates:      refUpdates,
 				CommitsSummary: webhooks.CommitsSummary{
 					Count: len(refUpdates),

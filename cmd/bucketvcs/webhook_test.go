@@ -145,3 +145,79 @@ func TestWebhook_UsageErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestWebhook_EndpointRotateSecret(t *testing.T) {
+	authDB := setupAuthDBForWebhook(t, "acme", "site")
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	code := runWebhook(ctx, []string{
+		"endpoint", "add",
+		"--auth-db=" + authDB,
+		"--tenant=acme", "--repo=site",
+		"--url=https://hook.example.com",
+		"--events=push",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("add: rc=%d, stderr=%s", code, stderr.String())
+	}
+	originalOutput := stdout.String()
+	if !strings.Contains(originalOutput, "secret=") {
+		t.Fatalf("add output missing secret: %s", originalOutput)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = runWebhook(ctx, []string{
+		"endpoint", "rotate-secret",
+		"--auth-db=" + authDB,
+		"--id=1",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("rotate-secret: rc=%d, stderr=%s", code, stderr.String())
+	}
+	rotateOutput := stdout.String()
+	if !strings.Contains(rotateOutput, "endpoint_id=1") {
+		t.Errorf("rotate output missing endpoint_id=1: %s", rotateOutput)
+	}
+	if !strings.Contains(rotateOutput, "rotated") {
+		t.Errorf("rotate output missing 'rotated': %s", rotateOutput)
+	}
+	if !strings.Contains(rotateOutput, "secret=") {
+		t.Errorf("rotate output missing secret=: %s", rotateOutput)
+	}
+
+	originalSecret := extractSecret(t, originalOutput)
+	newSecret := extractSecret(t, rotateOutput)
+	if originalSecret == newSecret {
+		t.Errorf("rotate-secret returned same secret as add: %q", newSecret)
+	}
+}
+
+func TestWebhook_RotateSecretNotFound(t *testing.T) {
+	authDB := setupAuthDBForWebhook(t, "acme", "site")
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+	code := runWebhook(ctx, []string{
+		"endpoint", "rotate-secret",
+		"--auth-db=" + authDB,
+		"--id=99999",
+	}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("rotate-secret non-existent: rc=%d, want 2", code)
+	}
+}
+
+func extractSecret(t *testing.T, out string) string {
+	t.Helper()
+	idx := strings.Index(out, "secret=")
+	if idx < 0 {
+		t.Fatalf("no secret in output: %s", out)
+	}
+	tail := out[idx+len("secret="):]
+	end := strings.IndexAny(tail, " \t\n\r")
+	if end < 0 {
+		end = len(tail)
+	}
+	return tail[:end]
+}

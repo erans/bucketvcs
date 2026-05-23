@@ -435,6 +435,7 @@ func (s *localFileStore) pathFor(key string) (string, error) {
 	return "", fmt.Errorf("localFileStore: unknown key %q", key)
 }
 
+func (s *localFileStore) Name() string                       { return "localfile-test" }
 func (s *localFileStore) Capabilities() storage.Capabilities { return storage.Capabilities{} }
 
 func (s *localFileStore) Get(ctx context.Context, key string, opts *storage.GetOptions) (*storage.Object, error) {

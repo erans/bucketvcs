@@ -189,3 +189,50 @@ func TestService_EnableDisable(t *testing.T) {
 		t.Errorf("after Enable: Active=false, want true")
 	}
 }
+
+func TestService_RotateSecret(t *testing.T) {
+	db := openTestDB(t, "acme", "site")
+	svc := webhooks.New(db)
+	ctx := context.Background()
+
+	ep, err := svc.Create(ctx, webhooks.EndpointInput{
+		Tenant: "acme", Repo: "site",
+		URL:       "https://hooks.example.com/x",
+		EventMask: webhooks.EventPush,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	oldSecret := ep.Secret
+
+	newSecret, err := svc.RotateSecret(ctx, ep.ID)
+	if err != nil {
+		t.Fatalf("RotateSecret: %v", err)
+	}
+	if newSecret == "" {
+		t.Errorf("RotateSecret returned empty new secret")
+	}
+	if newSecret == oldSecret {
+		t.Errorf("RotateSecret returned the same secret: %q", newSecret)
+	}
+	if len(newSecret) < 32 {
+		t.Errorf("RotateSecret returned short secret: %d bytes", len(newSecret))
+	}
+
+	got, err := svc.GetWithSecret(ctx, ep.ID)
+	if err != nil {
+		t.Fatalf("GetWithSecret: %v", err)
+	}
+	if got.Secret != newSecret {
+		t.Errorf("GetWithSecret returned %q, want %q", got.Secret, newSecret)
+	}
+}
+
+func TestService_RotateSecretNotFound(t *testing.T) {
+	db := openTestDB(t, "acme", "site")
+	svc := webhooks.New(db)
+	_, err := svc.RotateSecret(context.Background(), 99999)
+	if !errors.Is(err, webhooks.ErrNotFound) {
+		t.Errorf("RotateSecret(non-existent): err=%v, want ErrNotFound", err)
+	}
+}

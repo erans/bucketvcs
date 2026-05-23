@@ -30,6 +30,13 @@ import (
 //     third party for read access. Adapters that do not support this
 //     return ErrNotSupported and report Capabilities{SignedURLs: false}.
 type ObjectStore interface {
+	// Name returns the canonical backend kind: "localfs", "s3compat",
+	// "gcs", "azureblob". Used by receivepack to populate
+	// PushPayload.StorageBackend (spec §24) and by operator-facing logs.
+	// Implementations MUST return one of the documented kind strings;
+	// new backends pick a stable lowercase identifier.
+	Name() string
+
 	// Capabilities reports adapter features and limits.
 	Capabilities() Capabilities
 

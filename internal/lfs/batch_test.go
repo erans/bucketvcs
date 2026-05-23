@@ -61,6 +61,7 @@ type fakeBatchStore struct {
 	headOverride func(context.Context, string) (*storage.ObjectMetadata, error)
 }
 
+func (f *fakeBatchStore) Name() string { return "fake" }
 func (f *fakeBatchStore) Capabilities() storage.Capabilities {
 	return storage.Capabilities{SignedURLs: true}
 }

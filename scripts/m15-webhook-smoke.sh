@@ -227,4 +227,72 @@ if ! grep -Eq 'webhooks\.delivered' "$ROOT/gateway.log"; then
 fi
 echo "    metrics + audit observed"
 
+echo "==> Step 8: webhook endpoint rotate-secret"
+"$BIN" webhook endpoint rotate-secret \
+    --auth-db="$AUTHDB" --id=1 >"$ROOT/rotate.out"
+if ! grep -q "endpoint_id=1" "$ROOT/rotate.out"; then
+    echo "FAIL: rotate-secret missing endpoint_id"
+    cat "$ROOT/rotate.out" >&2
+    exit 1
+fi
+if ! grep -q "rotated" "$ROOT/rotate.out"; then
+    echo "FAIL: rotate-secret missing 'rotated'"
+    cat "$ROOT/rotate.out" >&2
+    exit 1
+fi
+if ! grep -q "secret=" "$ROOT/rotate.out"; then
+    echo "FAIL: rotate-secret missing new secret"
+    cat "$ROOT/rotate.out" >&2
+    exit 1
+fi
+echo "    rotate-secret output ok"
+
+echo "==> Step 9: repo delete + EventRepoDeleted emission with --actor=ops-cron"
+# Use a dedicated tenant/repo so the delete doesn't interfere with the
+# main flow's records. Register the repo first (webhook_endpoints has a
+# FK on (tenant, repo) → repos), then subscribe an endpoint to
+# repo.deleted, then exercise the delete.
+"$BIN" repo register --auth-db="$AUTHDB" --no-init \
+    --actor=ops-cron acme/delme >/dev/null
+
+"$BIN" webhook endpoint add \
+    --auth-db="$AUTHDB" \
+    --tenant="acme" --repo="delme" \
+    --url="http://127.0.0.1:$RECEIVER_PORT/" \
+    --events=repo.deleted >"$ROOT/endpoint-delme.out"
+if ! grep -q "secret=" "$ROOT/endpoint-delme.out"; then
+    echo "FAIL: endpoint add for acme/delme missing secret"
+    cat "$ROOT/endpoint-delme.out" >&2
+    exit 1
+fi
+
+"$BIN" repo delete --auth-db="$AUTHDB" \
+    --actor=ops-cron acme/delme >"$ROOT/delete.out"
+if ! grep -q "deleted" "$ROOT/delete.out"; then
+    echo "FAIL: repo delete output missing 'deleted'"
+    cat "$ROOT/delete.out" >&2
+    exit 1
+fi
+
+for i in $(seq 1 100); do
+    if grep -q '"event":"repo.deleted"' "$RECEIVED_LOG" 2>/dev/null && \
+       grep -q '"actor":"ops-cron"' "$RECEIVED_LOG" 2>/dev/null; then
+        # Both substrings appear in the log. Confirm they appear on the
+        # same line (i.e. in the same delivery body) before declaring
+        # success — receiver writes one body per line.
+        if grep '"event":"repo.deleted"' "$RECEIVED_LOG" 2>/dev/null | \
+           grep -q '"actor":"ops-cron"'; then
+            break
+        fi
+    fi
+    sleep 0.1
+done
+if ! grep '"event":"repo.deleted"' "$RECEIVED_LOG" 2>/dev/null | \
+     grep -q '"actor":"ops-cron"'; then
+    echo "FAIL: no repo.deleted with actor=ops-cron after 10s"
+    echo "--- received.log ---"; cat "$RECEIVED_LOG" 2>/dev/null || true
+    exit 1
+fi
+echo "    repo.deleted emitted with --actor=ops-cron"
+
 echo "==> M15 webhooks smoke: OK"

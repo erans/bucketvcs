@@ -14,6 +14,8 @@ type S3Compat struct {
 
 var _ storage.ObjectStore = (*S3Compat)(nil)
 
+func (s *S3Compat) Name() string { return "s3compat" }
+
 // Capabilities reports the S3-compatible adapter capabilities. Values
 // match real provider limits (5 MiB / 10000 parts / 5 TiB; strong list;
 // signed URLs).

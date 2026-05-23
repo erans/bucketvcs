@@ -146,6 +146,7 @@ func (m *memoryStore) put(key string, body []byte) {
 	m.objects[key] = append([]byte(nil), body...)
 }
 
+func (m *memoryStore) Name() string                       { return "memory-test" }
 func (m *memoryStore) Capabilities() storage.Capabilities { return storage.Capabilities{} }
 
 func (m *memoryStore) Get(_ context.Context, key string, _ *storage.GetOptions) (*storage.Object, error) {

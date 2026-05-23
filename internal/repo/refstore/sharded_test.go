@@ -537,6 +537,8 @@ func (f *fakeStore) overwriteRaw(key string, body []byte) {
 	f.objects[key] = append([]byte(nil), body...)
 }
 
+func (f *fakeStore) Name() string { return "fake" }
+
 func (f *fakeStore) Capabilities() storage.Capabilities {
 	return storage.Capabilities{}
 }

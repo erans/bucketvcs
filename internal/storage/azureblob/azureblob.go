@@ -16,6 +16,8 @@ type AzureBlob struct {
 
 var _ bvstorage.ObjectStore = (*AzureBlob)(nil)
 
+func (a *AzureBlob) Name() string { return "azureblob" }
+
 // Capabilities reports the Azure adapter capabilities. MultipartMinPartSize
 // reflects Azure's ~100 KiB practical block-blob minimum; MultipartMaxParts
 // is Azure's documented 50000-block ceiling per blob; MaxObjectSize is the

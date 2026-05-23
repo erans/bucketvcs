@@ -25,6 +25,8 @@ type GCS struct {
 
 var _ bvstorage.ObjectStore = (*GCS)(nil)
 
+func (g *GCS) Name() string { return "gcs" }
+
 // Capabilities reports the GCS adapter capabilities. MultipartMinPartSize
 // is GCS's 256 KiB resumable-chunk minimum. MultipartMaxParts is 0
 // because we model MultipartUpload as a single resumable-upload session,

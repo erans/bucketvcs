@@ -94,7 +94,25 @@ bucketvcs webhook endpoint enable  --auth-db=<path> --id=<N>
 
 `disable` keeps the row but suppresses future enqueues. `remove` deletes the row outright (and detaches any pending deliveries via the FK ON DELETE). `enable` reverses `disable`. All three are idempotent — running `disable` on an already-disabled endpoint exits 0.
 
-### 2.4 Inspect and replay deliveries
+### 2.4 Re-registering a deleted repo
+
+When `bucketvcs repo delete` removes a (tenant, repo), its webhook endpoints are NOT cascade-deleted (we keep them so the final `repo.deleted` event has somewhere to drain). If you later re-register the same (tenant, repo) via `bucketvcs repo register`, the orphan endpoints become active subscriptions for the new repo — your new repo will fire webhooks at receivers configured for the deleted one, signed with the deleted endpoint's secret.
+
+**Recommended pre-registration check:**
+
+```
+bucketvcs webhook endpoint list --auth-db=auth.db --tenant=acme --repo=site
+```
+
+Remove any unwanted carry-overs:
+
+```
+bucketvcs webhook endpoint remove --auth-db=auth.db --id=<N>
+```
+
+A future milestone will add an automated webhook-prune sweep for endpoints whose (tenant, repo) has no matching `repos` row AND zero pending deliveries.
+
+### 2.5 Inspect and replay deliveries
 
 ```
 bucketvcs webhook delivery list --auth-db=<path> [--endpoint-id=<N>] \

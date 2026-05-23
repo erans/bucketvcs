@@ -13,6 +13,7 @@ import (
 // test corresponds to one numbered item in §29.
 func runCorrectness(t *testing.T, f Factory) {
 	t.Helper()
+	t.Run("Name", func(t *testing.T) { testName(t, f) })
 	t.Run("§29#4_PutThenGet_RAW", func(t *testing.T) { test29_4(t, f) })
 	t.Run("§29#9_GetRange", func(t *testing.T) { test29_9(t, f) })
 	t.Run("§29#1_ConcurrentPutIfAbsent", func(t *testing.T) { test29_1(t, f) })
@@ -40,6 +41,29 @@ func runCorrectness(t *testing.T, f Factory) {
 	t.Run("MultipartConcurrentComplete", func(t *testing.T) { testMultipartConcurrentComplete(t, f) })
 	t.Run("MultipartAbortIdempotent", func(t *testing.T) { testMultipartAbortIdempotent(t, f) })
 	t.Run("MultipartCompleteAfterAbort", func(t *testing.T) { testMultipartCompleteAfterAbort(t, f) })
+}
+
+// testName asserts the backend returns a non-empty kind identifier from
+// ObjectStore.Name(). Used by receivepack to populate
+// PushPayload.StorageBackend (spec §24).
+func testName(t *testing.T, f Factory) {
+	s := newStore(t, f)
+	n := s.Name()
+	if n == "" {
+		t.Errorf("Name() returned empty string; want a kind identifier")
+		return
+	}
+	for _, r := range n {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= '0' && r <= '9',
+			r == '-', r == '_', r == '.':
+			// ok
+		default:
+			t.Errorf("Name() = %q; expected lowercase alphanumeric / -_.", n)
+			return
+		}
+	}
 }
 
 // §29 #4: Read after write sees latest object.

@@ -37,6 +37,8 @@ func (s *localFilePackStore) pathFor(key string) (string, error) {
 	return "", fmt.Errorf("localFilePackStore: unknown key %q", key)
 }
 
+func (s *localFilePackStore) Name() string { return "localfile-test" }
+
 func (s *localFilePackStore) Capabilities() storage.Capabilities {
 	return storage.Capabilities{}
 }

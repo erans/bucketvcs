@@ -261,6 +261,34 @@ func secretPreview(secret string) string {
 	return secret[:6] + "..."
 }
 
+// RotateSecret generates a new 32-byte random secret for the endpoint and
+// returns it. Existing in_flight deliveries continue with the secret they
+// captured at claim time; pending deliveries pick up the new secret on
+// next claim. Returns ErrNotFound if no endpoint matches.
+//
+// Operators who need strict cutover (no overlap window where both old and
+// new secrets validate) should Disable the endpoint first, wait for queue
+// drain, then call RotateSecret and Enable.
+func (s *Service) RotateSecret(ctx context.Context, id int64) (string, error) {
+	secret, err := generateSecret()
+	if err != nil {
+		return "", fmt.Errorf("webhooks: generate secret: %w", err)
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE webhook_endpoints SET secret=? WHERE id=?`, secret, id)
+	if err != nil {
+		return "", fmt.Errorf("webhooks: rotate secret %d: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return "", fmt.Errorf("webhooks: rotate secret %d rows affected: %w", id, err)
+	}
+	if n == 0 {
+		return "", ErrNotFound
+	}
+	return secret, nil
+}
+
 // Delivery is the operator-facing view of one row in webhook_deliveries.
 type Delivery struct {
 	ID             string

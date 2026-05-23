@@ -198,6 +198,8 @@ func (l *Localfs) checkOpen() error {
 	return nil
 }
 
+func (l *Localfs) Name() string { return "localfs" }
+
 func (l *Localfs) Capabilities() storage.Capabilities {
 	return storage.Capabilities{
 		SignedURLs:           false,

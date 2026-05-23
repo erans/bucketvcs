@@ -23,6 +23,7 @@ Objects + actions:
   endpoint remove  --auth-db=<path> --id=<N>
   endpoint enable  --auth-db=<path> --id=<N>
   endpoint disable --auth-db=<path> --id=<N>
+  endpoint rotate-secret --auth-db=<path> --id=<N>
 
   delivery list    --auth-db=<path> [--endpoint-id=<N>]
                    [--status=pending|in_flight|delivered|dead_letter]
@@ -68,7 +69,7 @@ func runWebhook(ctx context.Context, args []string, stdout, stderr io.Writer) in
 
 func runWebhookEndpoint(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "webhook endpoint: action required (add|list|remove|enable|disable)")
+		fmt.Fprintln(stderr, "webhook endpoint: action required (add|list|remove|enable|disable|rotate-secret)")
 		return 2
 	}
 	switch args[0] {
@@ -82,6 +83,8 @@ func runWebhookEndpoint(ctx context.Context, args []string, stdout, stderr io.Wr
 		return runWebhookEndpointEnable(ctx, args[1:], stdout, stderr)
 	case "disable":
 		return runWebhookEndpointDisable(ctx, args[1:], stdout, stderr)
+	case "rotate-secret":
+		return runWebhookEndpointRotateSecret(ctx, args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "webhook endpoint: unknown action %q\n", args[0])
 		return 2
@@ -394,6 +397,45 @@ func runWebhookDeliveryReplay(ctx context.Context, args []string, stdout, stderr
 		return 1
 	}
 	fmt.Fprintf(stdout, "id=%s  replay-scheduled\n", *id)
+	return 0
+}
+
+func runWebhookEndpointRotateSecret(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("webhook endpoint rotate-secret", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	authDB := fs.String("auth-db", "", "Path to authdb (required)")
+	id := fs.Int64("id", 0, "Endpoint ID (required)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *authDB == "" || *id == 0 {
+		fmt.Fprintln(stderr, "webhook endpoint rotate-secret: --auth-db, --id required")
+		return 2
+	}
+	svc, store, err := openWebhookSvc(*authDB)
+	if err != nil {
+		fmt.Fprintf(stderr, "webhook endpoint rotate-secret: %v\n", err)
+		return 1
+	}
+	defer store.Close()
+	newSecret, err := svc.RotateSecret(ctx, *id)
+	if err != nil {
+		if errors.Is(err, webhooks.ErrNotFound) {
+			fmt.Fprintf(stderr, "webhook endpoint rotate-secret: %v\n", err)
+			return 2
+		}
+		fmt.Fprintf(stderr, "webhook endpoint rotate-secret: %v\n", err)
+		return 1
+	}
+	// Look up tenant/repo for the audit event. Rotation already succeeded;
+	// failure to read tenant/repo only affects the audit field (emit empty).
+	var auditTenant, auditRepo string
+	if ep, gerr := svc.Get(ctx, *id); gerr == nil {
+		auditTenant, auditRepo = ep.Tenant, ep.Repo
+	}
+	webhooks.EmitEndpointSecretRotated(ctx, nil, *id, auditTenant, auditRepo, cliActor())
+	fmt.Fprintf(stdout, "endpoint_id=%d  rotated\nsecret=%s   # store this now — it will not be shown again\n",
+		*id, newSecret)
 	return 0
 }
 
