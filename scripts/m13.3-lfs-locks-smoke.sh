@@ -61,8 +61,8 @@ echo "==> Create users + grants + tokens"
 "$BIN" user add bob   --auth-db="$AUTHDB"
 "$BIN" repo grant alice "$TENANT/$REPO" write --auth-db="$AUTHDB"
 "$BIN" repo grant bob   "$TENANT/$REPO" write --auth-db="$AUTHDB"
-ALICE_TOKEN=$("$BIN" token create alice --auth-db="$AUTHDB" | grep -m1 '^bvts_')
-BOB_TOKEN=$("$BIN"   token create bob   --auth-db="$AUTHDB" | grep -m1 '^bvts_')
+ALICE_TOKEN=$("$BIN" token create alice --auth-db="$AUTHDB" 2>/dev/null | sed -n 's/^token=//p' | head -1)
+BOB_TOKEN=$("$BIN"   token create bob   --auth-db="$AUTHDB" 2>/dev/null | sed -n 's/^token=//p' | head -1)
 if [[ -z "$ALICE_TOKEN" || -z "$BOB_TOKEN" ]]; then echo "FAIL: could not extract bvts_ tokens"; exit 1; fi
 ALICE_AUTH=$(printf "alice:%s" "$ALICE_TOKEN" | base64 -w0)
 BOB_AUTH=$(printf "bob:%s" "$BOB_TOKEN" | base64 -w0)

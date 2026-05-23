@@ -206,6 +206,37 @@ func handleBatch(ctx context.Context, w http.ResponseWriter, r *http.Request, de
 		return
 	}
 
+	// M17 token scopes: when a credential authenticated the request,
+	// the token must carry lfs:read for downloads / lfs:write for
+	// uploads. Anonymous public-read flows have a nil actor and skip
+	// the scope check (the existing auth.Decide path still enforces
+	// repo policy). Legacy tokens (Scopes==0) bypass via CheckScope.
+	if actor != nil {
+		required := auth.ScopeLFSRead
+		scopeName := "lfs:read"
+		if req.Operation == "upload" {
+			required = auth.ScopeLFSWrite
+			scopeName = "lfs:write"
+		}
+		if err := auth.CheckScope(actor, required); err != nil {
+			// M17 Task 6: audit the denial. token_id_prefix is empty
+			// because Actor does not carry the token id today; operators
+			// correlate via user_id + timestamp until a follow-up wires
+			// the token id through.
+			op := "lfs.batch.download"
+			if req.Operation == "upload" {
+				op = "lfs.batch.upload"
+			}
+			auth.EmitScopeDenied(ctx, logger,
+				actor.UserID, "", tenant, repo, op,
+				required, actor.Scopes)
+			WriteError(w, http.StatusForbidden, "insufficient scope: token lacks "+scopeName)
+			emitBatchRequestMetric(ctx, logger, req.Operation, "forbidden")
+			emitLFSBatch(ctx, logger, tenant+"/"+repo, actorName(actor), req.Operation, 0, "forbidden")
+			return
+		}
+	}
+
 	// Secondary write check for upload operations. RunAuth in the
 	// gateway already passed ActionRead; we re-Decide with
 	// ActionWrite here.

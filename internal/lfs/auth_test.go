@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bucketvcs/bucketvcs/internal/auth"
 )
 
 type fakeTokenIssuer struct {
@@ -23,7 +25,7 @@ type fakeTokenRow struct {
 	hasExpires bool
 }
 
-func (f *fakeTokenIssuer) CreateToken(ctx context.Context, tokenID, userID, secretHash, label string, expiresAt *int64) error {
+func (f *fakeTokenIssuer) CreateToken(ctx context.Context, tokenID, userID, secretHash, label string, expiresAt *int64, scopes auth.TokenScope) error {
 	if f.createErr != nil {
 		return f.createErr
 	}

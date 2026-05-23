@@ -133,7 +133,7 @@ openssl rand -hex 16 > "$ROOT/signing.key"
 # silently break. Capture both streams so a CLI error surfaces on the
 # diagnostic path below instead of being masked by the regex check.
 TOKEN_OUT="$("$BIN" token create alice 2>&1)"
-TOKEN=$(printf '%s\n' "$TOKEN_OUT" | grep -m1 '^bvts_' || true)
+TOKEN=$(printf '%s\n' "$TOKEN_OUT" | sed -n 's/^token=//p' | head -1 || true)
 if [[ ! "$TOKEN" =~ ^bvts_[A-Za-z0-9_]+$ ]]; then
     echo "FAIL: 'bucketvcs token create' output did not match expected bvts_<alphanum_> shape"
     echo "  raw extracted: ${TOKEN:-<empty>}"

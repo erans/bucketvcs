@@ -31,7 +31,7 @@ func TestStress_VerifyMany(t *testing.T) {
 	for i := 0; i < N; i++ {
 		tok, id, secret, _ := auth.GenerateToken()
 		hash, _ := auth.HashSecret(secret)
-		if err := s.CreateToken(ctx, id, uid, hash, "", nil); err != nil {
+		if err := s.CreateToken(ctx, id, uid, hash, "", nil, auth.ScopeLegacy); err != nil {
 			t.Fatalf("CreateToken %d: %v", i, err)
 		}
 		tokens[i] = tok
@@ -68,7 +68,7 @@ func TestStress_ConcurrentVerify(t *testing.T) {
 	for i := 0; i < N; i++ {
 		tok, id, secret, _ := auth.GenerateToken()
 		hash, _ := auth.HashSecret(secret)
-		if err := s.CreateToken(ctx, id, uid, hash, "", nil); err != nil {
+		if err := s.CreateToken(ctx, id, uid, hash, "", nil, auth.ScopeLegacy); err != nil {
 			t.Fatal(err)
 		}
 		tokens[i] = tok

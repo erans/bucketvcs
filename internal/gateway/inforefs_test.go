@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/importer"
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
@@ -346,5 +347,117 @@ func TestInfoRefs_V0UploadPack_UnbornDefaultBranch_AdvertisesSymref(t *testing.T
 	}
 	if bytes.Contains(body, []byte(" HEAD\x00")) {
 		t.Fatalf("must not advertise HEAD line for unborn default: %q", body)
+	}
+}
+
+// scopedAuthStore wraps permissiveAuthStore and overrides VerifyCredential to
+// return an actor with a specific Scopes bitmask. Used by the M17 round-1
+// roborev info/refs scope-rejection tests.
+type scopedAuthStore struct {
+	permissiveAuthStore
+	scopes auth.TokenScope
+}
+
+func (s *scopedAuthStore) VerifyCredential(ctx context.Context, c auth.Credential) (*auth.Actor, string, *auth.Scope, error) {
+	return &auth.Actor{
+		UserID: "scoped-user",
+		Name:   "scoped-user",
+		Scopes: s.scopes,
+	}, "scoped-token", nil, nil
+}
+
+// TestInfoRefs_LFSReadOnlyTokenRejected ensures the round-1 roborev fix: a
+// token that authenticated successfully but carries only lfs:read (no
+// repo:read) MUST be rejected at GET /info/refs?service=git-upload-pack with
+// 403. Without the scope check on info/refs, the ref advertisement (branch +
+// tag names + tip OIDs) would leak past the scope boundary before the POST
+// upload-pack handler's CheckScope fires.
+func TestInfoRefs_LFSReadOnlyTokenRejected(t *testing.T) {
+	storeDir := t.TempDir()
+	store, err := localfs.Open(storeDir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	authStore := &scopedAuthStore{
+		permissiveAuthStore: permissiveAuthStore{tenant: "acme", repo: "demo"},
+		scopes:              auth.ScopeLFSRead,
+	}
+	srv, err := NewServer(store, Options{
+		MirrorDir: t.TempDir(),
+		Version:   "test",
+		AuthStore: authStore,
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	for _, svc := range []string{"git-upload-pack", "git-receive-pack"} {
+		t.Run(svc, func(t *testing.T) {
+			req, _ := http.NewRequest("GET",
+				ts.URL+"/acme/demo.git/info/refs?service="+svc, nil)
+			req.SetBasicAuth("scoped-user", "any")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("GET: %v", err)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode != http.StatusForbidden {
+				t.Fatalf("%s: status=%d, want 403; body=%q", svc, resp.StatusCode, body)
+			}
+			if !bytes.Contains(body, []byte("insufficient scope")) {
+				t.Errorf("%s: body missing 'insufficient scope' marker: %q", svc, body)
+			}
+		})
+	}
+}
+
+// TestInfoRefs_RepoReadTokenAllowsUploadPack confirms the round-1 fix did
+// not regress the happy path: a token with repo:read MUST be allowed
+// through info/refs for git-upload-pack.
+func TestInfoRefs_RepoReadTokenAllowsUploadPack(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeRepoInStore(t, storeDir, "acme", "demo")
+	store, err := localfs.Open(storeDir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	authStore := &scopedAuthStore{
+		permissiveAuthStore: permissiveAuthStore{tenant: "acme", repo: "demo"},
+		scopes:              auth.ScopeRepoRead,
+	}
+	srv, err := NewServer(store, Options{
+		MirrorDir: t.TempDir(),
+		Version:   "test",
+		AuthStore: authStore,
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	req, _ := http.NewRequest("GET",
+		ts.URL+"/acme/demo.git/info/refs?service=git-upload-pack", nil)
+	req.SetBasicAuth("scoped-user", "any")
+	req.Header.Set("Git-Protocol", "version=2")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want 200; body=%q", resp.StatusCode, body)
+	}
+	if !bytes.Contains(body, []byte("version 2")) {
+		t.Errorf("body missing 'version 2': %q", body)
 	}
 }

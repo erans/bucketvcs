@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/gitproto/uploadpack"
 )
 
@@ -26,6 +27,23 @@ func (s *Server) handleUploadPack(w http.ResponseWriter, r *http.Request, tenant
 	if !wantsV2(r.Header.Get("Git-Protocol")) {
 		http.Error(w, "protocol v2 required (Git-Protocol: version=2)", http.StatusBadRequest)
 		return
+	}
+	// M17 token scopes: when a credential authenticated the request, the token
+	// must carry repo:read (legacy tokens with Scopes==0 bypass via CheckScope).
+	// Anonymous public-read flows have a nil actor and skip the scope check.
+	if actor := ActorFromContext(r.Context()); actor != nil {
+		if err := auth.CheckScope(actor, auth.ScopeRepoRead); err != nil {
+			// M17 Task 6: audit the denial. token_id_prefix is empty
+			// because Actor does not carry the token id today; operators
+			// correlate via user_id + timestamp until a follow-up wires
+			// the token id through.
+			required := auth.ScopeRepoRead
+			auth.EmitScopeDenied(r.Context(), s.logger,
+				actor.UserID, "", tenant, repoID, "upload-pack",
+				required, actor.Scopes)
+			http.Error(w, "insufficient scope: token lacks "+required.String(), http.StatusForbidden)
+			return
+		}
 	}
 	defer r.Body.Close()
 	// Use the SMALLER of (a) the operator-configured global cap and

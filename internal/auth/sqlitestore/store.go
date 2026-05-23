@@ -313,12 +313,18 @@ type Token struct {
 	ExpiresAt  *int64
 	LastUsedAt *int64
 	RevokedAt  *int64
+	Scopes     auth.TokenScope // M17
 }
 
 // CreateToken inserts a token row. The caller supplies the token-id segment
 // (from auth.GenerateToken) and the PHC-encoded argon2id hash of the secret
 // segment (from auth.HashSecret).
-func (s *Store) CreateToken(ctx context.Context, id, userID, secretHash, label string, expiresAt *int64) error {
+//
+// The scopes argument carries the M17 TokenScope bitmask. Pre-M17 callers
+// (M4-era CLI, SSH-issued LFS tokens, and the M4 conformance seeder) pass
+// auth.ScopeLegacy (=0) to preserve grant-table-only semantics; new HTTPS-
+// token paths pass a non-zero mask.
+func (s *Store) CreateToken(ctx context.Context, id, userID, secretHash, label string, expiresAt *int64, scopes auth.TokenScope) error {
 	now := time.Now().Unix()
 	var exp sql.NullInt64
 	if expiresAt != nil {
@@ -329,9 +335,9 @@ func (s *Store) CreateToken(ctx context.Context, id, userID, secretHash, label s
 		lbl = sql.NullString{String: label, Valid: true}
 	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO tokens (id, user_id, secret_hash, label, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		id, userID, secretHash, lbl, now, exp,
+		`INSERT INTO tokens (id, user_id, secret_hash, label, created_at, expires_at, scopes)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		id, userID, secretHash, lbl, now, exp, int64(scopes),
 	)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -346,12 +352,13 @@ func (s *Store) CreateToken(ctx context.Context, id, userID, secretHash, label s
 func (s *Store) GetTokenByID(ctx context.Context, id string) (*Token, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id, user_id, secret_hash, COALESCE(label,''), created_at,
-		        expires_at, last_used_at, revoked_at
+		        expires_at, last_used_at, revoked_at, scopes
 		   FROM tokens WHERE id = ?`, id,
 	)
 	t := &Token{}
 	var exp, last, rev sql.NullInt64
-	if err := row.Scan(&t.ID, &t.UserID, &t.SecretHash, &t.Label, &t.CreatedAt, &exp, &last, &rev); err != nil {
+	var scopesRaw int64
+	if err := row.Scan(&t.ID, &t.UserID, &t.SecretHash, &t.Label, &t.CreatedAt, &exp, &last, &rev, &scopesRaw); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, auth.ErrNoSuchToken
 		}
@@ -369,6 +376,7 @@ func (s *Store) GetTokenByID(ctx context.Context, id string) (*Token, error) {
 		v := rev.Int64
 		t.RevokedAt = &v
 	}
+	t.Scopes = auth.TokenScope(scopesRaw)
 	return t, nil
 }
 
@@ -380,7 +388,7 @@ func (s *Store) ListTokensForUser(ctx context.Context, name string) ([]*Token, e
 	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, user_id, secret_hash, COALESCE(label,''), created_at,
-		        expires_at, last_used_at, revoked_at
+		        expires_at, last_used_at, revoked_at, scopes
 		   FROM tokens WHERE user_id = ?
 		  ORDER BY created_at DESC`, u.ID,
 	)
@@ -392,7 +400,8 @@ func (s *Store) ListTokensForUser(ctx context.Context, name string) ([]*Token, e
 	for rows.Next() {
 		t := &Token{}
 		var exp, last, rev sql.NullInt64
-		if err := rows.Scan(&t.ID, &t.UserID, &t.SecretHash, &t.Label, &t.CreatedAt, &exp, &last, &rev); err != nil {
+		var scopesRaw int64
+		if err := rows.Scan(&t.ID, &t.UserID, &t.SecretHash, &t.Label, &t.CreatedAt, &exp, &last, &rev, &scopesRaw); err != nil {
 			return nil, err
 		}
 		if exp.Valid {
@@ -407,6 +416,7 @@ func (s *Store) ListTokensForUser(ctx context.Context, name string) ([]*Token, e
 			v := rev.Int64
 			t.RevokedAt = &v
 		}
+		t.Scopes = auth.TokenScope(scopesRaw)
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -429,6 +439,29 @@ func (s *Store) RevokeToken(ctx context.Context, id string) error {
 		}
 		// Already revoked: idempotent success.
 		return nil
+	}
+	return nil
+}
+
+// RotateToken atomically replaces the PHC-encoded secret_hash on a non-
+// revoked token. The id, user binding, scopes, and expires_at are preserved
+// — only the secret material changes. Returns auth.ErrNoSuchToken when id
+// doesn't match a non-revoked row (caller can disambiguate against
+// GetTokenByID if needed for "revoked vs missing" reporting).
+func (s *Store) RotateToken(ctx context.Context, id, newSecretHash string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE tokens SET secret_hash = ? WHERE id = ? AND revoked_at IS NULL`,
+		newSecretHash, id,
+	)
+	if err != nil {
+		return fmt.Errorf("rotate token: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rotate token rows affected: %w", err)
+	}
+	if n == 0 {
+		return auth.ErrNoSuchToken
 	}
 	return nil
 }
@@ -732,6 +765,7 @@ func (s *Store) verifyBasicPassword(ctx context.Context, bp auth.BasicPassword) 
 		UserID:  tok.UserID,
 		Name:    name,
 		IsAdmin: adminInt != 0,
+		Scopes:  tok.Scopes, // M17: propagate token scopes to actor for gateway enforcement.
 	}, tokenID, nil, nil
 }
 

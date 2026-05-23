@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/gitproto/receivepack"
 	"github.com/bucketvcs/bucketvcs/internal/gitproto/uploadpack"
 	"github.com/bucketvcs/bucketvcs/internal/pktline"
@@ -18,6 +19,34 @@ func (s *Server) handleInfoRefs(w http.ResponseWriter, r *http.Request, tenant, 
 	default:
 		http.Error(w, "unknown service", http.StatusBadRequest)
 		return
+	}
+
+	// M17 token scopes: the ref advertisement leaks branch/tag names and tip
+	// OIDs, so it is gated by the same scope as the corresponding POST
+	// handler. Without this check, a token authenticated but lacking
+	// repo:read (e.g. an lfs:read-only token whose user has read perm on the
+	// repo) could call GET /info/refs?service=git-upload-pack and pull the
+	// full ref list before the POST scope check would have fired. Anonymous
+	// public-read flows have a nil actor and skip the scope check; legacy
+	// tokens (Scopes==0) also bypass via auth.CheckScope.
+	if actor := ActorFromContext(r.Context()); actor != nil {
+		required := auth.ScopeRepoRead
+		op := "info/refs.upload-pack"
+		if service == "git-receive-pack" {
+			required = auth.ScopeRepoWrite
+			op = "info/refs.receive-pack"
+		}
+		if err := auth.CheckScope(actor, required); err != nil {
+			// M17 Task 6: audit the denial. token_id_prefix is empty
+			// because Actor does not carry the token id today; operators
+			// correlate via user_id + timestamp until a follow-up wires
+			// the token id through.
+			auth.EmitScopeDenied(r.Context(), s.logger,
+				actor.UserID, "", tenant, repoID, op,
+				required, actor.Scopes)
+			http.Error(w, "insufficient scope: token lacks "+required.String(), http.StatusForbidden)
+			return
+		}
 	}
 
 	if service == "git-upload-pack" {

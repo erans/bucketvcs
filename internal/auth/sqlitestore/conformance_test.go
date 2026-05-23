@@ -19,7 +19,7 @@ func (sd *sqliteSeeder) CreateUser(ctx context.Context, name string, isAdmin boo
 	return id
 }
 func (sd *sqliteSeeder) CreateToken(ctx context.Context, userID, tokenID, hash string, exp *int64) {
-	if err := sd.s.CreateToken(ctx, tokenID, userID, hash, "", exp); err != nil {
+	if err := sd.s.CreateToken(ctx, tokenID, userID, hash, "", exp, auth.ScopeLegacy); err != nil {
 		panic(err)
 	}
 }

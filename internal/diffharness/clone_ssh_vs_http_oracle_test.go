@@ -141,7 +141,7 @@ func newSSHHTTPOracle(t *testing.T, name string, build fixtures.Builder) *sshHTT
 	if err != nil {
 		t.Fatalf("[%s] HashSecret: %v", name, err)
 	}
-	if err := authStore.CreateToken(ctx, tokID, uid, tokHash, "diffharness", nil); err != nil {
+	if err := authStore.CreateToken(ctx, tokID, uid, tokHash, "diffharness", nil, auth.ScopeLegacy); err != nil {
 		t.Fatalf("[%s] CreateToken: %v", name, err)
 	}
 

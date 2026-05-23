@@ -64,7 +64,7 @@ BASE_URL="http://127.0.0.1:$PORT"
 # Extract the token by its bvts_ prefix rather than positional line
 # selection, so a future CLI banner or notice rearrangement does not
 # silently bind TOKEN to non-secret text.
-TOKEN=$("$BUCKETVCS" token create alice --auth-db "$AUTH_DB" | grep -m1 '^bvts_')
+TOKEN=$("$BUCKETVCS" token create alice --auth-db "$AUTH_DB" 2>/dev/null | sed -n 's/^token=//p' | head -1)
 if [[ -z "$TOKEN" ]]; then
     echo "could not extract token from 'bucketvcs token create' output"
     exit 1

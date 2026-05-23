@@ -315,6 +315,13 @@ func (h *proxiedObjectHandler) serveGet(ctx context.Context, w http.ResponseWrit
 // Auth note: token-authenticated, no actor in context. The audit event's
 // user attribute is empty string — operators correlate via the repo and
 // oid fields.
+//
+// M17 scope note: verify-token (M13.1) is an HMAC bearer minted by the
+// gateway alongside the upload presign — it does not carry an auth.Actor
+// or token scopes. The token's binding to (tenant, repo, oid) IS the
+// authorization. The corresponding lfs:write scope check is enforced
+// upstream at the Batch handler (handler.go handleBatch) when the
+// "upload" operation request is received and the verify URL is minted.
 func (h *proxiedObjectHandler) serveVerify(ctx context.Context, w http.ResponseWriter, r *http.Request, tenant, repo, oid string) {
 	repoFQN := tenant + "/" + repo
 

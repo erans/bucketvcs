@@ -127,7 +127,7 @@ openssl rand -hex 16 > "$ROOT/signing.key"
 # by its bvts_ prefix so a future CLI banner change does not silently break.
 # `|| true` keeps pipefail from killing the script before the diagnostic
 # below has a chance to fire.
-TOKEN=$("$BIN" token create alice | grep -m1 '^bvts_' || true)
+TOKEN=$("$BIN" token create alice 2>/dev/null | sed -n 's/^token=//p' | head -1 || true)
 if [[ ! "$TOKEN" =~ ^bvts_[A-Za-z0-9_]+$ ]]; then
     echo "FAIL: 'bucketvcs token create' output did not match expected bvts_<alphanum_> shape"
     echo "  raw extracted: ${TOKEN:-<empty>}"

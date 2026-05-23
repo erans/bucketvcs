@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/gitproto/receivepack"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
 )
@@ -14,6 +15,23 @@ import (
 // It is now a thin HTTP adapter: body-cap + header setup, then delegates
 // to receivepack.Service for all protocol logic.
 func (s *Server) handleReceivePack(w http.ResponseWriter, r *http.Request, tenant, repoID string) {
+	// M17 token scopes: receive-pack always requires an authenticated actor
+	// (RunAuth has already enforced this for write actions), but defensively
+	// nil-guard anyway. Legacy tokens (Scopes==0) bypass via CheckScope.
+	if actor := ActorFromContext(r.Context()); actor != nil {
+		if err := auth.CheckScope(actor, auth.ScopeRepoWrite); err != nil {
+			// M17 Task 6: audit the denial. token_id_prefix is empty
+			// because Actor does not carry the token id today; operators
+			// correlate via user_id + timestamp until a follow-up wires
+			// the token id through.
+			required := auth.ScopeRepoWrite
+			auth.EmitScopeDenied(r.Context(), s.logger,
+				actor.UserID, "", tenant, repoID, "receive-pack",
+				required, actor.Scopes)
+			http.Error(w, "insufficient scope: token lacks "+required.String(), http.StatusForbidden)
+			return
+		}
+	}
 	defer r.Body.Close()
 	body := http.MaxBytesReader(w, r.Body, s.opts.MaxBodyBytes)
 
@@ -30,7 +48,7 @@ func (s *Server) handleReceivePack(w http.ResponseWriter, r *http.Request, tenan
 		AgentVersion: s.opts.Version,
 		Policy:       s.opts.Policy,
 		Webhooks:     s.opts.Webhooks,
-		Logger:       s.opts.Logger,
+		Logger:       s.logger,
 	}
 	err := receivepack.Service(req)
 	if err == nil {

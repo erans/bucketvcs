@@ -153,7 +153,7 @@ export BUCKETVCS_AUTH_DB="$ROOT/auth.db"
 openssl rand -hex 16 > "$ROOT/signing.key"
 
 "$BIN" user add alice
-TOKEN=$("$BIN" token create alice | grep -m1 '^bvts_' || true)
+TOKEN=$("$BIN" token create alice 2>/dev/null | sed -n 's/^token=//p' | head -1 || true)
 if [[ ! "$TOKEN" =~ ^bvts_[A-Za-z0-9_]+$ ]]; then
     echo "FAIL: 'bucketvcs token create' output did not match expected bvts_<alphanum_> shape"
     echo "  raw extracted: ${TOKEN:-<empty>}"

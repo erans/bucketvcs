@@ -5,6 +5,7 @@ type Actor struct {
 	UserID  string
 	Name    string
 	IsAdmin bool
+	Scopes  TokenScope // M17: populated by HTTPS Basic path; zero (=ScopeLegacy) on SSH
 }
 
 // Credential is the closed set of credential shapes the gateway accepts.

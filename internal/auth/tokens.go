@@ -32,8 +32,18 @@ func GenerateToken() (token, id, secret string, err error) {
 	if err != nil {
 		return "", "", "", fmt.Errorf("generate token secret: %w", err)
 	}
-	token = tokenPrefix + "_" + id + "_" + secret
+	token = AssembleToken(id, secret)
 	return token, id, secret, nil
+}
+
+// AssembleToken returns the wire-format token string for the given id and
+// secret. GenerateToken (creating a new token) and the CLI's tokenRotate
+// path (replacing the secret on an existing id) both route through this
+// helper so the tokenPrefix and separator remain a single source of truth.
+// ParseToken is the inverse and must stay in sync if the format ever
+// changes.
+func AssembleToken(id, secret string) string {
+	return tokenPrefix + "_" + id + "_" + secret
 }
 
 // ParseToken splits a token string into its id and secret segments,

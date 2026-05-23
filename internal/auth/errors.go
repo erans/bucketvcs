@@ -14,3 +14,7 @@ var (
 	ErrConflict             = errors.New("auth: conflict")
 	ErrDuplicateFingerprint = errors.New("auth: duplicate fingerprint")
 )
+
+// ErrInsufficientScope is returned by CheckScope when the actor's token
+// scopes don't satisfy the required scope. M17.
+var ErrInsufficientScope = errors.New("auth: insufficient scope")

@@ -63,7 +63,7 @@ echo "==> Init + register repo"
 echo "==> Create user + token + grant"
 "$BIN" user add alice --auth-db="$AUTHDB"
 "$BIN" repo grant alice "$TENANT/$REPO" write --auth-db="$AUTHDB"
-ALICE_TOKEN=$("$BIN" token create alice --auth-db="$AUTHDB" | grep -m1 '^bvts_')
+ALICE_TOKEN=$("$BIN" token create alice --auth-db="$AUTHDB" 2>/dev/null | sed -n 's/^token=//p' | head -1)
 if [[ -z "$ALICE_TOKEN" ]]; then echo "FAIL: could not extract alice token"; exit 1; fi
 
 echo "==> Start gateway on $URL"

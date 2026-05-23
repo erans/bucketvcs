@@ -19,8 +19,13 @@ type SSHAuthResponse struct {
 // TokenIssuer is the narrow seam IssueSSHToken needs to persist a
 // token row. We deliberately do NOT reuse auth.Store — token creation
 // is admin-only and not part of the gateway request-path interface.
+//
+// The scopes argument carries the M17 TokenScope bitmask. SSH-issued LFS
+// tokens currently pass auth.ScopeLegacy (=0) because the gateway's LFS
+// path falls back to grant-table semantics when scopes is zero. A future
+// M17 follow-up may narrow these to lfs:read/lfs:write per op.
 type TokenIssuer interface {
-	CreateToken(ctx context.Context, tokenID, userID, secretHash, label string, expiresAt *int64) error
+	CreateToken(ctx context.Context, tokenID, userID, secretHash, label string, expiresAt *int64, scopes auth.TokenScope) error
 }
 
 // IssueSSHToken mints a short-TTL HTTP token scoped to (userID, repo,
@@ -71,7 +76,7 @@ func IssueSSHToken(ctx context.Context, issuer TokenIssuer, userID, userName, te
 	expUnix := expires.Unix()
 	label := fmt.Sprintf("lfs-ssh:%s:%s/%s", op, tenant, repo)
 
-	if err := issuer.CreateToken(ctx, id, userID, hash, label, &expUnix); err != nil {
+	if err := issuer.CreateToken(ctx, id, userID, hash, label, &expUnix, auth.ScopeLegacy); err != nil {
 		return SSHAuthResponse{}, fmt.Errorf("lfs.IssueSSHToken: CreateToken: %w", err)
 	}
 

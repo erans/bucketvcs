@@ -57,6 +57,19 @@ func handleLocksCreate(w http.ResponseWriter, r *http.Request, deps *Deps, tenan
 		WriteError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
+	// M17 token scopes: creating a lock requires lfs:write. Legacy
+	// tokens (Scopes==0) bypass via CheckScope.
+	if err := auth.CheckScope(actor, auth.ScopeLFSWrite); err != nil {
+		// M17 Task 6: audit the denial. token_id_prefix is empty because
+		// Actor does not carry the token id today; operators correlate
+		// via user_id + timestamp until a follow-up wires it through.
+		auth.EmitScopeDenied(ctx, logger,
+			actor.UserID, "", tenant, repo, "lfs.lock.create",
+			auth.ScopeLFSWrite, actor.Scopes)
+		emitLockCreateMetric(ctx, logger, "error")
+		WriteError(w, http.StatusForbidden, "insufficient scope: token lacks lfs:write")
+		return
+	}
 	if !requireLFSContentType(w, r) {
 		emitLockCreateMetric(ctx, logger, "error")
 		return
@@ -154,6 +167,19 @@ func handleLocksList(w http.ResponseWriter, r *http.Request, deps *Deps, tenant,
 		WriteError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
+	// M17 token scopes: listing locks requires lfs:read. Legacy tokens
+	// (Scopes==0) bypass via CheckScope.
+	if err := auth.CheckScope(actor, auth.ScopeLFSRead); err != nil {
+		// M17 Task 6: audit the denial. token_id_prefix is empty because
+		// Actor does not carry the token id today; operators correlate
+		// via user_id + timestamp until a follow-up wires it through.
+		auth.EmitScopeDenied(ctx, logger,
+			actor.UserID, "", tenant, repo, "lfs.lock.list",
+			auth.ScopeLFSRead, actor.Scopes)
+		emitLockListMetric(ctx, logger, "error")
+		WriteError(w, http.StatusForbidden, "insufficient scope: token lacks lfs:read")
+		return
+	}
 	q := r.URL.Query()
 	opts := locks.ListOptions{
 		Path:    q.Get("path"),
@@ -204,6 +230,19 @@ func handleLocksVerify(w http.ResponseWriter, r *http.Request, deps *Deps, tenan
 		emitLockVerifyMetric(ctx, logger, "error")
 		w.Header().Set("WWW-Authenticate", `Basic realm="bucketvcs"`)
 		WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	// M17 token scopes: verifying lock state requires lfs:read. Legacy
+	// tokens (Scopes==0) bypass via CheckScope.
+	if err := auth.CheckScope(actor, auth.ScopeLFSRead); err != nil {
+		// M17 Task 6: audit the denial. token_id_prefix is empty because
+		// Actor does not carry the token id today; operators correlate
+		// via user_id + timestamp until a follow-up wires it through.
+		auth.EmitScopeDenied(ctx, logger,
+			actor.UserID, "", tenant, repo, "lfs.lock.verify",
+			auth.ScopeLFSRead, actor.Scopes)
+		emitLockVerifyMetric(ctx, logger, "error")
+		WriteError(w, http.StatusForbidden, "insufficient scope: token lacks lfs:read")
 		return
 	}
 	if !requireLFSContentType(w, r) {
@@ -268,6 +307,19 @@ func handleLocksUnlock(w http.ResponseWriter, r *http.Request, deps *Deps, tenan
 		emitLockDeleteMetric(ctx, logger, false, "error")
 		w.Header().Set("WWW-Authenticate", `Basic realm="bucketvcs"`)
 		WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	// M17 token scopes: releasing a lock requires lfs:write. Legacy
+	// tokens (Scopes==0) bypass via CheckScope.
+	if err := auth.CheckScope(actor, auth.ScopeLFSWrite); err != nil {
+		// M17 Task 6: audit the denial. token_id_prefix is empty because
+		// Actor does not carry the token id today; operators correlate
+		// via user_id + timestamp until a follow-up wires it through.
+		auth.EmitScopeDenied(ctx, logger,
+			actor.UserID, "", tenant, repo, "lfs.lock.release",
+			auth.ScopeLFSWrite, actor.Scopes)
+		emitLockDeleteMetric(ctx, logger, false, "error")
+		WriteError(w, http.StatusForbidden, "insufficient scope: token lacks lfs:write")
 		return
 	}
 	if lockID == "" {
