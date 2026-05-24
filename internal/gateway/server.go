@@ -10,6 +10,7 @@ import (
 	"unicode"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
+	"github.com/bucketvcs/bucketvcs/internal/auth/ratelimit"
 	"github.com/bucketvcs/bucketvcs/internal/lfs"
 	"github.com/bucketvcs/bucketvcs/internal/lfs/locks"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
@@ -154,6 +155,18 @@ type Options struct {
 	// gateway-side observability; before that the gateway only used slog.Default()
 	// ad-hoc for startup warnings.
 	Logger *slog.Logger
+
+	// Limiter, when non-nil, enforces per-IP / per-username rate limits on
+	// auth-bearing HTTPS requests handled by RunAuth. nil disables rate
+	// limiting (calls to Check / MarkFailure / MarkSuccess are no-ops). M18.
+	Limiter *ratelimit.Limiter
+
+	// TrustProxyHeaders, when true, instructs the gateway to honor the
+	// first hop of the X-Forwarded-For header when computing the client IP
+	// (for rate-limit bucketing and audit). Operators must only enable this
+	// when the gateway sits behind a trusted reverse proxy that overwrites
+	// the header on ingress; otherwise clients can spoof their IP. M18.
+	TrustProxyHeaders bool
 }
 
 // Server implements http.Handler.

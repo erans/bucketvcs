@@ -13,6 +13,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
+	"github.com/bucketvcs/bucketvcs/internal/auth/ratelimit"
 	"github.com/bucketvcs/bucketvcs/internal/lfs"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/policy"
@@ -81,6 +82,12 @@ type Options struct {
 	// Webhooks enables M15 webhook emission for SSH receive-pack.
 	// Mirrors gateway.Options.Webhooks. nil disables all enqueues.
 	Webhooks *webhooks.Service
+
+	// Limiter throttles repeated key-rejections from a single IP. Nil
+	// disables rate limiting entirely (Check / MarkFailure / MarkSuccess
+	// are all no-ops on a nil receiver). Mirrors gateway.Options.Limiter.
+	// See spec §30.5 / M18.
+	Limiter *ratelimit.Limiter
 }
 
 // Server is the bucketvcs SSH listener. Construct via NewServer.
@@ -167,21 +174,65 @@ func NewServer(opts Options) (*Server, error) {
 // publicKeyCallback authenticates a presented public key against the auth
 // Store. On success, the actor + scope + key id are stashed in
 // ssh.Permissions.Extensions for the session handler.
+//
+// M18: this callback is the SSH-side rate-limit point. The Limiter is
+// consulted BEFORE the store is touched, so a rate-limited client never
+// reaches VerifyCredential. The username is unknown pre-resolution (SSH
+// always presents user="git"), so Check uses ip + empty user. On
+// credential-state errors we MarkFailure(ip, "") to increment the IP
+// bucket; on success we MarkSuccess(ip, resolvedUser) to reset both the
+// IP bucket and (best-effort) the resolved user's bucket. Internal-state
+// errors (DB unreachable, etc.) are NOT counted as failures — they
+// would otherwise let a flaky backend lock out legitimate clients.
 func (s *Server) publicKeyCallback(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 	if meta.User() != "git" {
 		return nil, errors.New("only the 'git' user is supported")
 	}
-	fp := SHA256Fingerprint(key)
 
 	// x/crypto/ssh has no per-callback context; pass background. The Store
 	// implementations honor ctx for cancellation but we have none here.
+	ctx := context.Background()
+
+	// M18 — rate-limit gate before any store call. The user is unknown at
+	// this point (SSH client always sends user="git"), so we check only
+	// the IP bucket. SSH has no Retry-After equivalent in the protocol;
+	// we just close the connection with an error.
+	ip := sshRemoteIP(meta)
+	if allowed, retryAfter, _ := s.opts.Limiter.CheckDetailed(ip, ""); !allowed {
+		retrySec := int(retryAfter.Seconds())
+		if retrySec < 1 {
+			retrySec = 1
+		}
+		auth.EmitRateLimitHit(ctx, s.opts.Logger, ip, "", "ip", retrySec, "ssh")
+		ratelimit.EmitRateLimitMetric(ctx, s.opts.Logger, "limited_ip")
+		return nil, errors.New("rate limited")
+	}
+
+	fp := SHA256Fingerprint(key)
 	actor, keyID, scope, err := s.opts.Store.VerifyCredential(
-		context.Background(),
+		ctx,
 		auth.SSHKeyFingerprint{Fingerprint: fp},
 	)
 	if err != nil {
+		// Only credential-state errors count as failures. Backend / internal
+		// errors (DB unreachable, etc.) must not bump the bucket — otherwise
+		// a flaky store could lock out legitimate clients.
+		if auth.IsCredentialError(err) {
+			s.opts.Limiter.MarkFailure(ip, "")
+			ratelimit.EmitRateLimitMetric(ctx, s.opts.Logger, "failure_counted")
+		}
 		return nil, err
 	}
+
+	// Successful key verification resets the rate-limit bucket. Use the
+	// resolved actor name so the per-user bucket is also reset; the IP
+	// bucket is reset either way (MarkSuccess(ip, "") still clears it).
+	user := ""
+	if actor != nil {
+		user = actor.Name
+	}
+	s.opts.Limiter.MarkSuccess(ip, user)
+	ratelimit.EmitRateLimitMetric(ctx, s.opts.Logger, "success_reset")
 
 	return &ssh.Permissions{Extensions: map[string]string{
 		"actor_id":   actor.UserID,
@@ -190,6 +241,25 @@ func (s *Server) publicKeyCallback(meta ssh.ConnMetadata, key ssh.PublicKey) (*s
 		"scope":      encodeScope(scope),
 		"key_id":     keyID,
 	}}, nil
+}
+
+// sshRemoteIP returns the host portion of an SSH connection's RemoteAddr,
+// stripping the port. Falls back to the full RemoteAddr string when the
+// host:port split fails (e.g., unusual transports in tests). Returns ""
+// when meta.RemoteAddr() is nil — golang.org/x/crypto/ssh does not recover
+// panics from auth callbacks, so the nil guard prevents a process-crashing
+// dereference if the transport ever yields a nil addr.
+func sshRemoteIP(meta ssh.ConnMetadata) string {
+	a := meta.RemoteAddr()
+	if a == nil {
+		return ""
+	}
+	addr := a.String()
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return addr
+	}
+	return host
 }
 
 // logAuthAttempt records every SSH auth attempt (success or failure).

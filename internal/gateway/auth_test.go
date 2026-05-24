@@ -7,8 +7,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
+	"github.com/bucketvcs/bucketvcs/internal/auth/ratelimit"
 )
 
 // fakeStore is an in-memory minimal auth.Store for middleware tests.
@@ -69,7 +71,7 @@ func TestRunAuth_AnonymousReadPublic(t *testing.T) {
 	rr := &RoutedRequest{Tenant: "a", Repo: "b", Op: OpUploadPack, RequiredAction: auth.ActionRead}
 	w := httptest.NewRecorder()
 	r := req(t, "POST", "/a/b.git/git-upload-pack", "", "", "")
-	actor, ok := RunAuth(w, r, st, rr)
+	actor, ok := RunAuth(w, r, st, rr, nil, false, nil)
 	if !ok {
 		t.Fatalf("expected allow, got status %d", w.Code)
 	}
@@ -83,7 +85,7 @@ func TestRunAuth_AnonymousWritePublic_Challenge(t *testing.T) {
 	rr := &RoutedRequest{Tenant: "a", Repo: "b", Op: OpReceivePack, RequiredAction: auth.ActionWrite}
 	w := httptest.NewRecorder()
 	r := req(t, "POST", "/a/b.git/git-receive-pack", "", "", "")
-	if _, ok := RunAuth(w, r, st, rr); ok {
+	if _, ok := RunAuth(w, r, st, rr, nil, false, nil); ok {
 		t.Fatal("expected deny")
 	}
 	if w.Code != http.StatusUnauthorized {
@@ -99,7 +101,7 @@ func TestRunAuth_AnonymousReadPrivate_Challenge(t *testing.T) {
 	rr := &RoutedRequest{Tenant: "a", Repo: "b", Op: OpUploadPack, RequiredAction: auth.ActionRead}
 	w := httptest.NewRecorder()
 	r := req(t, "POST", "/a/b.git/git-upload-pack", "", "", "")
-	if _, ok := RunAuth(w, r, st, rr); ok {
+	if _, ok := RunAuth(w, r, st, rr, nil, false, nil); ok {
 		t.Fatal("expected deny")
 	}
 	if w.Code != http.StatusUnauthorized {
@@ -112,7 +114,7 @@ func TestRunAuth_NoSuchRepo404(t *testing.T) {
 	rr := &RoutedRequest{Tenant: "a", Repo: "b", Op: OpUploadPack, RequiredAction: auth.ActionRead}
 	w := httptest.NewRecorder()
 	r := req(t, "POST", "/a/b.git/git-upload-pack", "", "", "")
-	if _, ok := RunAuth(w, r, st, rr); ok {
+	if _, ok := RunAuth(w, r, st, rr, nil, false, nil); ok {
 		t.Fatal("expected deny")
 	}
 	if w.Code != http.StatusNotFound {
@@ -125,7 +127,7 @@ func TestRunAuth_BadCredentials_401(t *testing.T) {
 	rr := &RoutedRequest{Tenant: "a", Repo: "b", Op: OpUploadPack, RequiredAction: auth.ActionRead}
 	w := httptest.NewRecorder()
 	r := req(t, "POST", "/a/b.git/git-upload-pack", "", "alice", "bvts_BAD")
-	if _, ok := RunAuth(w, r, st, rr); ok {
+	if _, ok := RunAuth(w, r, st, rr, nil, false, nil); ok {
 		t.Fatal("expected deny")
 	}
 	if w.Code != http.StatusUnauthorized {
@@ -139,7 +141,7 @@ func TestRunAuth_AuthenticatedUnauthorized_403(t *testing.T) {
 	rr := &RoutedRequest{Tenant: "a", Repo: "b", Op: OpReceivePack, RequiredAction: auth.ActionWrite}
 	w := httptest.NewRecorder()
 	r := req(t, "POST", "/a/b.git/git-receive-pack", "", "alice", "bvts_OK")
-	if _, ok := RunAuth(w, r, st, rr); ok {
+	if _, ok := RunAuth(w, r, st, rr, nil, false, nil); ok {
 		t.Fatal("expected deny")
 	}
 	if w.Code != http.StatusForbidden {
@@ -153,7 +155,7 @@ func TestRunAuth_AuthenticatedAuthorized_AttachesActor(t *testing.T) {
 	rr := &RoutedRequest{Tenant: "a", Repo: "b", Op: OpReceivePack, RequiredAction: auth.ActionWrite}
 	w := httptest.NewRecorder()
 	r := req(t, "POST", "/a/b.git/git-receive-pack", "", "alice", "bvts_OK")
-	got, ok := RunAuth(w, r, st, rr)
+	got, ok := RunAuth(w, r, st, rr, nil, false, nil)
 	if !ok {
 		t.Fatalf("expected allow, status=%d", w.Code)
 	}
@@ -167,7 +169,7 @@ func TestRunAuth_PassesContextErrors(t *testing.T) {
 	rr := &RoutedRequest{Tenant: "a", Repo: "b", Op: OpUploadPack, RequiredAction: auth.ActionRead}
 	w := httptest.NewRecorder()
 	r := req(t, "POST", "/a/b.git/git-upload-pack", "", "", "")
-	if _, ok := RunAuth(w, r, st, rr); ok {
+	if _, ok := RunAuth(w, r, st, rr, nil, false, nil); ok {
 		t.Fatal("expected deny on internal error")
 	}
 	if w.Code != http.StatusInternalServerError {
@@ -183,7 +185,7 @@ func TestRunAuth_VerifyCredentialBackendError_500(t *testing.T) {
 	rr := &RoutedRequest{Tenant: "a", Repo: "b", Op: OpUploadPack, RequiredAction: auth.ActionRead}
 	w := httptest.NewRecorder()
 	r := req(t, "POST", "/a/b.git/git-upload-pack", "", "alice", "bvts_OK")
-	if _, ok := RunAuth(w, r, st, rr); ok {
+	if _, ok := RunAuth(w, r, st, rr, nil, false, nil); ok {
 		t.Fatal("expected deny")
 	}
 	if w.Code != http.StatusInternalServerError {
@@ -210,7 +212,7 @@ func TestRunAuth_ScopeMismatch(t *testing.T) {
 	rr := &RoutedRequest{Tenant: "acme", Repo: "other", Op: OpReceivePack, RequiredAction: auth.ActionWrite}
 	w := httptest.NewRecorder()
 	r := req(t, "POST", "/acme/other.git/git-receive-pack", "", "alice", "anytoken")
-	if _, ok := RunAuth(w, r, st, rr); ok {
+	if _, ok := RunAuth(w, r, st, rr, nil, false, nil); ok {
 		t.Fatal("expected deny on scope mismatch")
 	}
 	if w.Code != http.StatusForbidden {
@@ -235,7 +237,7 @@ func TestRunAuth_ScopeMatch(t *testing.T) {
 	rr := &RoutedRequest{Tenant: "acme", Repo: "web", Op: OpReceivePack, RequiredAction: auth.ActionWrite}
 	w := httptest.NewRecorder()
 	r := req(t, "POST", "/acme/web.git/git-receive-pack", "", "deploy-key:ci", "bvsk_x")
-	got, ok := RunAuth(w, r, st, rr)
+	got, ok := RunAuth(w, r, st, rr, nil, false, nil)
 	if !ok {
 		t.Fatalf("expected allow on scope match, status=%d body=%q", w.Code, w.Body.String())
 	}
@@ -243,3 +245,197 @@ func TestRunAuth_ScopeMatch(t *testing.T) {
 		t.Fatalf("actor = %+v, want %+v", got, actor)
 	}
 }
+
+// --- M18 Task 3: rate-limit integration tests --------------------------------
+
+// TestRunAuth_RateLimitsRepeatedBadCreds verifies that after Burst credential
+// failures from the same IP, the next attempt returns 429 + Retry-After
+// before the auth store is even consulted.
+func TestRunAuth_RateLimitsRepeatedBadCreds(t *testing.T) {
+	st := &fakeStore{
+		flags:   auth.RepoFlags{PublicRead: false},
+		credErr: auth.ErrInvalidCredential,
+	}
+	limiter := ratelimit.NewLimiter(ratelimit.Config{
+		Burst:           3,
+		RefillPerMinute: 0,
+		SweepInterval:   24 * time.Hour,
+	})
+	defer limiter.Close()
+
+	rr := &RoutedRequest{Tenant: "acme", Repo: "site", Op: OpUploadPack, RequiredAction: auth.ActionRead}
+
+	// 3 bad-cred attempts: each returns 401, each MarkFailure increments
+	// the IP bucket. After the 3rd, failures == Burst.
+	for i := 0; i < 3; i++ {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/acme/site/info/refs", nil)
+		r.SetBasicAuth("alice", "wrongpass")
+		r.RemoteAddr = "1.2.3.4:54321"
+		_, ok := RunAuth(w, r, st, rr, limiter, false, nil)
+		if ok {
+			t.Fatalf("attempt %d: ok=true; expected 401", i)
+		}
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("attempt %d: code=%d, want 401", i, w.Code)
+		}
+	}
+
+	// 4th attempt: 429 BEFORE credential check (Check sees failures >= Burst).
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/acme/site/info/refs", nil)
+	r.SetBasicAuth("alice", "wrongpass")
+	r.RemoteAddr = "1.2.3.4:54321"
+	_, ok := RunAuth(w, r, st, rr, limiter, false, nil)
+	if ok {
+		t.Errorf("rate-limited attempt: ok=true; want false")
+	}
+	if w.Code != http.StatusTooManyRequests {
+		t.Errorf("code=%d, want 429", w.Code)
+	}
+	if w.Header().Get("Retry-After") == "" {
+		t.Errorf("Retry-After header missing")
+	}
+}
+
+// TestRunAuth_SuccessfulAuthResetsRateLimit verifies that a successful
+// credential check (MarkSuccess) clears prior failures so the client is not
+// rate-limited on subsequent attempts that go bad again.
+func TestRunAuth_SuccessfulAuthResetsRateLimit(t *testing.T) {
+	actor := &auth.Actor{UserID: "u1", Name: "alice"}
+	st := &fakeStore{
+		flags:     auth.RepoFlags{PublicRead: false},
+		credErr:   auth.ErrInvalidCredential,
+		credActor: actor,
+		perm:      auth.PermRead,
+	}
+	limiter := ratelimit.NewLimiter(ratelimit.Config{
+		Burst:           3,
+		RefillPerMinute: 0,
+		SweepInterval:   24 * time.Hour,
+	})
+	defer limiter.Close()
+	rr := &RoutedRequest{Tenant: "acme", Repo: "site", Op: OpUploadPack, RequiredAction: auth.ActionRead}
+
+	// Two failures (still under Burst=3, no 429 yet).
+	for i := 0; i < 2; i++ {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/acme/site/info/refs", nil)
+		r.SetBasicAuth("alice", "wrong")
+		r.RemoteAddr = "5.6.7.8:1111"
+		RunAuth(w, r, st, rr, limiter, false, nil)
+	}
+	// Successful attempt -> MarkSuccess resets the bucket.
+	st.credErr = nil
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/acme/site/info/refs", nil)
+	r.SetBasicAuth("alice", "right")
+	r.RemoteAddr = "5.6.7.8:1111"
+	if _, ok := RunAuth(w, r, st, rr, limiter, false, nil); !ok {
+		t.Fatalf("successful auth: ok=false; status=%d body=%q", w.Code, w.Body.String())
+	}
+
+	// 3 more failures should yield 3x 401, never 429 (bucket was reset).
+	st.credErr = auth.ErrInvalidCredential
+	for i := 0; i < 3; i++ {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/acme/site/info/refs", nil)
+		r.SetBasicAuth("alice", "wrong")
+		r.RemoteAddr = "5.6.7.8:1111"
+		_, ok := RunAuth(w, r, st, rr, limiter, false, nil)
+		if ok {
+			t.Fatalf("attempt %d: ok=true; expected 401", i)
+		}
+		if w.Code == http.StatusTooManyRequests {
+			t.Errorf("attempt %d: 429 (should have been reset by MarkSuccess)", i)
+		}
+	}
+}
+
+// TestRunAuth_NilLimiterIsNoop verifies that passing nil for the Limiter
+// disables rate limiting entirely — even 100 consecutive bad-cred attempts
+// keep returning 401, never 429.
+func TestRunAuth_NilLimiterIsNoop(t *testing.T) {
+	st := &fakeStore{flags: auth.RepoFlags{PublicRead: false}, credErr: auth.ErrInvalidCredential}
+	rr := &RoutedRequest{Tenant: "acme", Repo: "site", Op: OpUploadPack, RequiredAction: auth.ActionRead}
+	for i := 0; i < 100; i++ {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/acme/site/info/refs", nil)
+		r.SetBasicAuth("alice", "wrong")
+		r.RemoteAddr = "9.9.9.9:1111"
+		_, _ = RunAuth(w, r, st, rr, nil, false, nil)
+		if w.Code == http.StatusTooManyRequests {
+			t.Fatalf("attempt %d: 429 with nil Limiter; want 401 every time", i)
+		}
+	}
+}
+
+// TestRunAuth_ScopeMismatchNotCountedAsFailure pins that a credential
+// that verifies but has the wrong scope returns 403 and does NOT count
+// toward the rate-limit bucket. Scope denials are policy failures, not
+// brute-force signals — counting them would let a misconfigured CI bot
+// (right token, wrong tenant) trip itself off-net repeatedly.
+func TestRunAuth_ScopeMismatchNotCountedAsFailure(t *testing.T) {
+	actor := &auth.Actor{UserID: "u1", Name: "alice"}
+	st := &fakeStore{
+		flags:     auth.RepoFlags{PublicRead: false},
+		credActor: actor,
+		credToken: "tok-1",
+		credScope: &auth.Scope{Tenant: "OTHER", Repo: "other", Perm: auth.PermRead},
+	}
+	limiter := ratelimit.NewLimiter(ratelimit.Config{
+		Burst:           3,
+		RefillPerMinute: 0,
+		SweepInterval:   24 * time.Hour,
+	})
+	defer limiter.Close()
+	rr := &RoutedRequest{Tenant: "acme", Repo: "site", Op: OpUploadPack, RequiredAction: auth.ActionRead}
+
+	// 20 scope-mismatch (403) attempts must never produce 429.
+	for i := 0; i < 20; i++ {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/acme/site/info/refs", nil)
+		r.SetBasicAuth("alice", "right-but-wrong-scope")
+		r.RemoteAddr = "5.5.5.5:6789"
+		_, ok := RunAuth(w, r, st, rr, limiter, false, nil)
+		if ok {
+			t.Fatalf("attempt %d: ok=true; expected scope-mismatch 403", i)
+		}
+		if w.Code == http.StatusTooManyRequests {
+			t.Fatalf("attempt %d: 429 from scope mismatch; scope denials must not count", i)
+		}
+		if w.Code != http.StatusForbidden {
+			t.Errorf("attempt %d: code=%d, want 403", i, w.Code)
+		}
+	}
+}
+
+// TestRunAuth_AnonymousReadsDontTripLimiter pins that anonymous reads
+// (no Authorization header) on a public-read repo from a clean IP are
+// served normally and never produce 429. The IP bucket is checked but
+// is empty (anonymous requests carry no credential to fail), so Check
+// always returns allowed.
+func TestRunAuth_AnonymousReadsDontTripLimiter(t *testing.T) {
+	st := &fakeStore{flags: auth.RepoFlags{PublicRead: true}}
+	limiter := ratelimit.NewLimiter(ratelimit.Config{
+		Burst:           3,
+		RefillPerMinute: 0,
+		SweepInterval:   24 * time.Hour,
+	})
+	defer limiter.Close()
+	rr := &RoutedRequest{Tenant: "a", Repo: "b", Op: OpUploadPack, RequiredAction: auth.ActionRead}
+
+	for i := 0; i < 50; i++ {
+		w := httptest.NewRecorder()
+		r := req(t, "POST", "/a/b.git/git-upload-pack", "", "", "")
+		r.RemoteAddr = "7.7.7.7:9999"
+		_, ok := RunAuth(w, r, st, rr, limiter, false, nil)
+		if !ok {
+			t.Fatalf("attempt %d: anon read denied (code=%d)", i, w.Code)
+		}
+		if w.Code == http.StatusTooManyRequests {
+			t.Fatalf("attempt %d: 429 on anon read; must never throttle credential-less requests", i)
+		}
+	}
+}
+

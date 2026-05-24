@@ -41,3 +41,21 @@ func EmitScopeDenied(ctx context.Context, logger *slog.Logger,
 		slog.String("granted_scopes", FormatScopes(granted)),
 	)
 }
+
+// EmitRateLimitHit logs the auth.ratelimit.hit audit event when the rate
+// limiter rejects an auth attempt. bucket is "ip" or "user". user is
+// empty for SSH pre-resolution and anonymous HTTPS. transport is
+// "https" or "ssh".
+func EmitRateLimitHit(ctx context.Context, logger *slog.Logger,
+	ip, user, bucket string, retryAfterSec int, transport string) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.LogAttrs(ctx, slog.LevelWarn, "auth.ratelimit.hit",
+		slog.String("ip", ip),
+		slog.String("user", user),
+		slog.String("bucket", bucket),
+		slog.Int("retry_after_sec", retryAfterSec),
+		slog.String("transport", transport),
+	)
+}

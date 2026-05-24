@@ -44,3 +44,20 @@ func TestEmitScopeDenied(t *testing.T) {
 		}
 	}
 }
+
+func TestEmitRateLimitHit(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	auth.EmitRateLimitHit(context.Background(), logger,
+		"1.2.3.4", "alice", "ip", 60, "https")
+	out := buf.String()
+	if !strings.Contains(out, "auth.ratelimit.hit") {
+		t.Errorf("event name missing: %s", out)
+	}
+	for _, key := range []string{"ip=1.2.3.4", "user=alice", "bucket=ip",
+		"retry_after_sec=60", "transport=https"} {
+		if !strings.Contains(out, key) {
+			t.Errorf("missing %q in output: %s", key, out)
+		}
+	}
+}

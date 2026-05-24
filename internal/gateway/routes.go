@@ -111,7 +111,7 @@ func (s *Server) routeRepo(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if _, ok := RunAuth(w, r, s.opts.AuthStore, rr); !ok {
+	if _, ok := RunAuth(w, r, s.opts.AuthStore, rr, s.opts.Limiter, s.opts.TrustProxyHeaders, s.logger); !ok {
 		return
 	}
 	switch rr.Op {

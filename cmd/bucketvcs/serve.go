@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bucketvcs/bucketvcs/internal/auth/ratelimit"
 	"github.com/bucketvcs/bucketvcs/internal/gateway"
 	"github.com/bucketvcs/bucketvcs/internal/lfs"
 	"github.com/bucketvcs/bucketvcs/internal/lfs/locks"
@@ -74,6 +75,23 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	lfsEnabled := fs.Bool("lfs", true, "Enable the LFS Batch API (M13)")
 	lfsPresignTTL := fs.Duration("lfs-presign-ttl", 15*time.Minute, "TTL for LFS upload/download presigned URLs")
 	lfsSSHTokenTTL := fs.Duration("lfs-ssh-token-ttl", 15*time.Minute, "TTL for bearers issued via SSH git-lfs-authenticate")
+
+	// M18 auth rate-limiting. Defaults match ratelimit.DefaultConfig()
+	// (Burst=10, RefillPerMinute=1, SweepInterval=5m). The limiter is
+	// shared between the HTTPS gateway and the SSH server; --auth-rate-
+	// limit-disabled skips construction entirely (nil Limiter is a no-op
+	// on both transports).
+	authRateLimitBurst := fs.Int("auth-rate-limit-burst", 10,
+		"Max credential failures before throttling per (IP, user)")
+	authRateLimitRefillPerMin := fs.Float64("auth-rate-limit-refill-per-minute", 1,
+		"Failures cleared per minute when idle")
+	trustProxyHeaders := fs.Bool("trust-proxy-headers", false,
+		"Honor the rightmost X-Forwarded-For hop as client IP. REQUIRED when "+
+			"deployed behind a reverse proxy / load balancer — without this "+
+			"flag every request appears to originate from the proxy IP and "+
+			"a single attacker can fill the shared bucket and 429 every client.")
+	authRateLimitDisabled := fs.Bool("auth-rate-limit-disabled", false,
+		"Disable auth rate-limiting entirely")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -174,6 +192,32 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	// started below once HTTP and SSH listeners are configured.
 	webhookSvc := webhooks.New(authS.DB())
 
+	// M18 auth rate-limiter. Shared between the HTTPS gateway and the SSH
+	// server so a single attacker hitting both transports converges on the
+	// same per-IP bucket. Nil disables enforcement on both ends.
+	var rateLimiter *ratelimit.Limiter
+	if !*authRateLimitDisabled {
+		rateLimiter = ratelimit.NewLimiter(ratelimit.Config{
+			Burst:           *authRateLimitBurst,
+			RefillPerMinute: *authRateLimitRefillPerMin,
+			SweepInterval:   5 * time.Minute,
+			Now:             time.Now,
+		})
+		defer rateLimiter.Close()
+		if !*trustProxyHeaders {
+			// Common deployment foot-gun: gateway behind a reverse proxy /
+			// load balancer + trustProxyHeaders=false means every request
+			// is keyed on the single proxy IP. Burst credential failures
+			// from any attacker fill the shared bucket and 429 every
+			// client behind that proxy — a self-inflicted DoS. We can't
+			// detect "behind a proxy" automatically, so emit a one-time
+			// startup WARN that the operator can grep for.
+			logger.Warn(
+				"M18 rate-limit: --trust-proxy-headers=false. If bucketvcs runs behind a reverse proxy / load balancer, every request will be keyed on the single proxy IP and Burst credential failures from any attacker will 429 every other client behind that proxy. Enable --trust-proxy-headers when behind a trusted proxy; ignore this warning when listening on a public interface directly.",
+			)
+		}
+	}
+
 	// Build URLBuilder-backed closures once and share between the HTTP
 	// gateway and the SSH listener. Building here (rather than letting
 	// gateway construct them internally) keeps the wiring symmetric across
@@ -255,6 +299,8 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			LFSLocksStore:           lfsLocksStore,
 			Policy:                  policySvc,
 			Webhooks:                webhookSvc,
+			Limiter:                 rateLimiter,
+			TrustProxyHeaders:       *trustProxyHeaders,
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "serve: NewServer: %v\n", err)
@@ -338,6 +384,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			LFSSSHTokenTTL:    lfsSSHTTL,
 			Policy:            policySvc,
 			Webhooks:          webhookSvc,
+			Limiter:           rateLimiter,
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "serve: ssh new server: %v\n", err)
