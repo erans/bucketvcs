@@ -30,18 +30,21 @@ func (b *URLBuilder) now() time.Time {
 	return time.Now()
 }
 
-// BuildBundleURL returns (url, via) where via is "direct" or "proxied".
-// Returns error if Mode == URIModeOff or if Direct mode + no signing.
-func (b *URLBuilder) BuildBundleURL(ctx context.Context, hash, storageKey, expectedHash string) (string, string, error) {
-	return b.buildURL(ctx, "bundle", hash, storageKey, expectedHash, b.BundleTTL)
+// BuildBundleURL returns (url, via, error). url is the URL git will fetch;
+// via is "direct" (signed object-store URL) or "proxied" (URL through this
+// gateway's /_bundle/<t>/<r>/<h> handler). M19: tenant and repo are
+// embedded in the URL path and bound into the proxied token's hash field
+// so any path-segment tamper fails HMAC verify.
+func (b *URLBuilder) BuildBundleURL(ctx context.Context, tenant, repo, hash, storageKey, expectedHash string) (string, string, error) {
+	return b.buildURL(ctx, "bundle", tenant, repo, hash, storageKey, expectedHash, b.BundleTTL)
 }
 
-// BuildPackURL returns (url, via).
-func (b *URLBuilder) BuildPackURL(ctx context.Context, hash, storageKey, expectedHash string) (string, string, error) {
-	return b.buildURL(ctx, "pack", hash, storageKey, expectedHash, b.PackTTL)
+// BuildPackURL is the pack-uri analogue of BuildBundleURL.
+func (b *URLBuilder) BuildPackURL(ctx context.Context, tenant, repo, hash, storageKey, expectedHash string) (string, string, error) {
+	return b.buildURL(ctx, "pack", tenant, repo, hash, storageKey, expectedHash, b.PackTTL)
 }
 
-func (b *URLBuilder) buildURL(ctx context.Context, kind, hash, storageKey, expectedHash string, ttl time.Duration) (string, string, error) {
+func (b *URLBuilder) buildURL(ctx context.Context, kind, tenant, repo, hash, storageKey, expectedHash string, ttl time.Duration) (string, string, error) {
 	if b.Mode == URIModeOff {
 		return "", "", fmt.Errorf("gateway: URI mode is off")
 	}
@@ -82,8 +85,19 @@ func (b *URLBuilder) buildURL(ctx context.Context, kind, hash, storageKey, expec
 	if len(b.ProxiedKey) == 0 || b.ProxiedBaseURL == "" {
 		return "", "", fmt.Errorf("gateway: proxied URLs are not configured")
 	}
+	// M19: defensive — empty tenant/repo would mint a structurally-broken
+	// URL like /_bundle//site/<hash> that the handler silently 404s on, so
+	// the bundle-uri advertisement would vanish without error. Fail loudly
+	// instead so misconfiguration surfaces at mint time.
+	if tenant == "" || repo == "" {
+		return "", "", fmt.Errorf("gateway: empty tenant or repo in proxied URL request (tenant=%q, repo=%q)", tenant, repo)
+	}
 	exp := b.now().Add(ttl)
-	tok, err := proxiedurl.Mint(b.ProxiedKey, kind, hash, exp)
+	// M19: token hash field is the composite "<tenant>/<repo>/<hash>".
+	// Any tamper of the URL path segments (tenant, repo, or hash) produces
+	// a different composite on the verify side and fails HMAC.
+	composite := tenant + "/" + repo + "/" + hash
+	tok, err := proxiedurl.Mint(b.ProxiedKey, kind, composite, exp)
 	if err != nil {
 		return "", "", err
 	}
@@ -100,12 +114,15 @@ func (b *URLBuilder) buildURL(ctx context.Context, kind, hash, storageKey, expec
 		return "", "", fmt.Errorf("gateway: unsupported kind %q", kind)
 	}
 	// Canonicalize: trim a trailing slash from the operator-supplied base
-	// URL so the join doesn't double it. PathEscape the hash and
-	// QueryEscape the token even though both are charset-restricted by
-	// construction (sha256-hex / 40-hex / base64url-without-padding),
-	// because an unexpected character would silently produce a malformed
-	// URL otherwise. tok in particular contains '-' and '_' which are
-	// fine but illustrates the principle.
+	// URL so the join doesn't double it. Each path segment is escaped
+	// independently — tenant/repo already pass name validators with a
+	// safe charset, but PathEscape is belt-and-suspenders for any future
+	// validator widening. tok contains base64url chars; QueryEscape is
+	// likewise defensive.
 	base := strings.TrimRight(b.ProxiedBaseURL, "/")
-	return base + path + url.PathEscape(hash) + "?token=" + url.QueryEscape(tok), "proxied", nil
+	return base + path +
+		url.PathEscape(tenant) + "/" +
+		url.PathEscape(repo) + "/" +
+		url.PathEscape(hash) +
+		"?token=" + url.QueryEscape(tok), "proxied", nil
 }

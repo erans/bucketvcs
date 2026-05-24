@@ -30,7 +30,7 @@ func TestHandleBundleURI_Current_Advertises(t *testing.T) {
 		WarmCommits: 100, WarmAge: 24 * time.Hour,
 		IsAncestor: func(a, d string, max int) bool { return true },
 		WalkBack:   func(from, target string, max int) (int, error) { return 0, nil },
-		BuildURL: func(_ context.Context, hash, key, expected string) (string, error) {
+		BuildURL: func(_ context.Context, _, _, hash, key, expected string) (string, error) {
 			sawExpected = expected
 			return "https://example/u", nil
 		},
@@ -76,7 +76,7 @@ func TestHandleBundleURI_Stale_Omits(t *testing.T) {
 		WarmCommits: 100, WarmAge: 24 * time.Hour,
 		IsAncestor: func(a, d string, max int) bool { return true },
 		WalkBack:   func(from, target string, max int) (int, error) { return 5, nil },
-		BuildURL:   func(_ context.Context, hash, key, expected string) (string, error) { return "https://x", nil },
+		BuildURL:   func(_ context.Context, _, _, hash, key, expected string) (string, error) { return "https://x", nil },
 	})
 	if err != nil {
 		t.Fatalf("HandleBundleURI: %v", err)
@@ -112,7 +112,7 @@ func TestHandleBundleURI_RefDeleted_Omits(t *testing.T) {
 		WarmCommits: 100, WarmAge: 24 * time.Hour,
 		IsAncestor: func(a, d string, max int) bool { return true },
 		WalkBack:   func(from, target string, max int) (int, error) { return 0, nil },
-		BuildURL: func(_ context.Context, hash, key, expected string) (string, error) {
+		BuildURL: func(_ context.Context, _, _, hash, key, expected string) (string, error) {
 			t.Fatalf("BuildURL must not be invoked when ref is deleted")
 			return "", nil
 		},
@@ -146,7 +146,7 @@ func TestHandleBundleURI_BuildURLError_Omits(t *testing.T) {
 		WarmCommits: 100, WarmAge: 24 * time.Hour,
 		IsAncestor: func(a, d string, max int) bool { return true },
 		WalkBack:   func(from, target string, max int) (int, error) { return 0, nil },
-		BuildURL: func(_ context.Context, hash, key, expected string) (string, error) {
+		BuildURL: func(_ context.Context, _, _, hash, key, expected string) (string, error) {
 			return "", errors.New("signed URL backend unavailable")
 		},
 	})
@@ -183,7 +183,7 @@ func TestHandleBundleURI_BuildURLEmptyString_Omits(t *testing.T) {
 		WarmCommits: 100, WarmAge: 24 * time.Hour,
 		IsAncestor: func(a, d string, max int) bool { return true },
 		WalkBack:   func(from, target string, max int) (int, error) { return 0, nil },
-		BuildURL: func(_ context.Context, hash, key, expected string) (string, error) {
+		BuildURL: func(_ context.Context, _, _, hash, key, expected string) (string, error) {
 			return "", nil // misconfigured backend returns empty URL with no error
 		},
 	})

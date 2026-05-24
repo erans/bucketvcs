@@ -384,6 +384,8 @@ func serveFetch(req *EngineRequest, tokens []pktline.Token, body *manifest.Body)
 			// EvaluateFullPackRequested already ensured len(body.Packs)==1 && PackChecksum!="".
 			pe := body.Packs[0]
 			res, gerr := v2proto.EvaluatePackURIAdvertise(req.Ctx, v2proto.PackURIInputs{
+				Tenant:            req.Tenant,
+				Repo:              req.Repo,
 				ClientOptedIn:     true,
 				FullPackRequested: true,
 				PackChecksum:      pe.PackChecksum,
@@ -662,8 +664,8 @@ func doServeBundleURI(req *EngineRequest, body *manifest.Body) (v2proto.BundleUR
 	// the operator would see "bundle-uri advertised but every response
 	// is empty" with no signal pointing at the URL-build root cause.
 	logBuildURL := req.BundleURIBuildURL
-	wrappedBuildURL := func(ctx context.Context, hash, key, expected string) (string, error) {
-		url, err := logBuildURL(ctx, hash, key, expected)
+	wrappedBuildURL := func(ctx context.Context, tenant, repo, hash, key, expected string) (string, error) {
+		url, err := logBuildURL(ctx, tenant, repo, hash, key, expected)
 		if err != nil {
 			slog.WarnContext(ctx, "upload-pack: bundle-uri BuildURL error",
 				"tenant", req.Tenant, "repo", req.Repo, "err", err)
@@ -675,6 +677,8 @@ func doServeBundleURI(req *EngineRequest, body *manifest.Body) (v2proto.BundleUR
 	}
 
 	deps := v2proto.BundleURIDeps{
+		Tenant:      req.Tenant,
+		Repo:        req.Repo,
 		Body:        *body,
 		Now:         time.Now(),
 		WarmCommits: req.BundleWarmCommits,

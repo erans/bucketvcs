@@ -19,13 +19,18 @@ import (
 // closure rather than punching the value back up through the v2
 // dispatch.
 type BundleURIDeps struct {
+	// Tenant and Repo are the request-scope identifiers threaded through
+	// BuildURL (M19). The closure embeds them into the URL path + signature
+	// so the same gateway can serve many (tenant, repo) repos from one mount.
+	Tenant      string
+	Repo        string
 	Body        manifest.Body
 	Now         time.Time
 	WarmCommits int
 	WarmAge     time.Duration
 	IsAncestor  func(ancestor, descendant string, max int) bool
 	WalkBack    func(from, target string, max int) (int, error)
-	BuildURL    func(ctx context.Context, hash, storageKey, expectedHash string) (url string, err error)
+	BuildURL    func(ctx context.Context, tenant, repo, hash, storageKey, expectedHash string) (url string, err error)
 }
 
 // BundleURIOutcome reports what HandleBundleURI did, so callers can emit
@@ -140,7 +145,7 @@ func HandleBundleURI(ctx context.Context, w io.Writer, deps BundleURIDeps) (Bund
 	if hex := bundleHashHex(entry.BundleHash); hex != "" {
 		expectedHash = "sha256:" + hex
 	}
-	url, err := deps.BuildURL(ctx, entry.BundleHash, entry.BundleKey, expectedHash)
+	url, err := deps.BuildURL(ctx, deps.Tenant, deps.Repo, entry.BundleHash, entry.BundleKey, expectedHash)
 	if err != nil || url == "" {
 		// Non-fatal: omit the bundle, return empty response, client falls
 		// through. An empty URL with nil error indicates a misconfigured

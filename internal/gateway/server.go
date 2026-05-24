@@ -27,12 +27,11 @@ type Options struct {
 	MaxBodyBytes int64
 
 	// ProxiedURLSigningKey, when non-empty, enables the gateway-proxied
-	// bundle/pack URL endpoints (/_bundle/<hash>, /_pack/<hash>). M11.
-	// Must be at least 16 bytes when set (matches proxiedurl.Mint).
+	// bundle/pack URL endpoints (/_bundle/<tenant>/<repo>/<hash>,
+	// /_pack/<tenant>/<repo>/<hash>). M11/M19. Must be at least 16 bytes
+	// when set (matches proxiedurl.Mint). Storage keys are computed via
+	// internal/repo/keys directly; no resolver indirection.
 	ProxiedURLSigningKey []byte
-	// ProxiedKeyResolver maps URL-path hashes to storage keys. REQUIRED
-	// when ProxiedURLSigningKey is set; ignored otherwise.
-	ProxiedKeyResolver ProxiedKeyResolver
 
 	// BundleURIEnabled advertises the bundle-uri capability and serves
 	// command=bundle-uri. Default false: clients fall through to standard fetch.
@@ -71,7 +70,7 @@ type Options struct {
 	// true. Constructed by the operator (typically from a URLBuilder)
 	// rather than internally so the same closure can be shared with the
 	// SSH listener (sshd.Options.BundleURIBuildURL).
-	BundleURIBuildURL func(ctx context.Context, hash, storageKey, expectedHash string) (string, error)
+	BundleURIBuildURL func(ctx context.Context, tenant, repo, hash, storageKey, expectedHash string) (string, error)
 
 	// BundleURITTL is the URL lifetime applied to bundle URLs only; see
 	// PackURITTL for pack URLs. Defaults to 5 minutes when
@@ -99,7 +98,7 @@ type Options struct {
 
 	// PackURIBuildURL, when non-nil, mints pack URLs for the in-fetch
 	// packfile-uris response. Required when PackURIEnabled is true.
-	PackURIBuildURL func(ctx context.Context, hash, storageKey, expectedHash string) (string, error)
+	PackURIBuildURL func(ctx context.Context, tenant, repo, hash, storageKey, expectedHash string) (string, error)
 
 	// PackURIMode controls how pack URLs are minted by the legacy internal
 	// URLBuilder. Ignored when PackURIBuildURL is provided.
@@ -177,9 +176,9 @@ type Server struct {
 	logger            *slog.Logger
 	mux               *http.ServeMux
 	urlBuilder        *URLBuilder
-	bundleURIBuildURL func(ctx context.Context, hash, storageKey, expectedHash string) (string, error)
+	bundleURIBuildURL func(ctx context.Context, tenant, repo, hash, storageKey, expectedHash string) (string, error)
 	packURLBuilder    *URLBuilder
-	packURIBuildURL   func(ctx context.Context, hash, storageKey, expectedHash string) (string, error)
+	packURIBuildURL   func(ctx context.Context, tenant, repo, hash, storageKey, expectedHash string) (string, error)
 	lfsHandler        http.Handler
 	lfsObjectHandler  http.Handler
 }
@@ -204,9 +203,6 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 	if len(opts.ProxiedURLSigningKey) > 0 {
 		if len(opts.ProxiedURLSigningKey) < 16 {
 			return nil, fmt.Errorf("gateway: ProxiedURLSigningKey too short (%d bytes); need >= 16", len(opts.ProxiedURLSigningKey))
-		}
-		if opts.ProxiedKeyResolver == nil {
-			return nil, fmt.Errorf("gateway: ProxiedKeyResolver required when ProxiedURLSigningKey is set")
 		}
 	}
 	if len(opts.LFSProxiedURLSigningKey) > 0 {
@@ -298,8 +294,8 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 			// selection is still observable from the underlying SignedGetURL /
 			// ProxiedHandler counters; we don't bubble it up through v2proto.
 			ub := s.urlBuilder
-			s.bundleURIBuildURL = func(ctx context.Context, hash, storageKey, expectedHash string) (string, error) {
-				url, _, err := ub.BuildBundleURL(ctx, hash, storageKey, expectedHash)
+			s.bundleURIBuildURL = func(ctx context.Context, tenant, repo, hash, storageKey, expectedHash string) (string, error) {
+				url, _, err := ub.BuildBundleURL(ctx, tenant, repo, hash, storageKey, expectedHash)
 				return url, err
 			}
 		}
@@ -338,8 +334,8 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 				Mode:           opts.PackURIMode,
 			}
 			pub := s.packURLBuilder
-			s.packURIBuildURL = func(ctx context.Context, hash, storageKey, expectedHash string) (string, error) {
-				url, _, err := pub.BuildPackURL(ctx, hash, storageKey, expectedHash)
+			s.packURIBuildURL = func(ctx context.Context, tenant, repo, hash, storageKey, expectedHash string) (string, error) {
+				url, _, err := pub.BuildPackURL(ctx, tenant, repo, hash, storageKey, expectedHash)
 				return url, err
 			}
 		}
@@ -348,7 +344,7 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 	s.mux = http.NewServeMux()
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
 	if len(opts.ProxiedURLSigningKey) > 0 {
-		proxied := NewProxiedHandler(store, opts.ProxiedURLSigningKey, "/_bundle/", "/_pack/", opts.ProxiedKeyResolver, s.logger)
+		proxied := NewProxiedHandler(store, opts.ProxiedURLSigningKey, "/_bundle/", "/_pack/", s.logger)
 		s.mux.Handle("/_bundle/", proxied)
 		s.mux.Handle("/_pack/", proxied)
 	}

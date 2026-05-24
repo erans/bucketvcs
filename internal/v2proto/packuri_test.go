@@ -15,16 +15,18 @@ const validPackChecksum = "0123456789abcdef0123456789abcdef01234567"
 // fakeBuildURL returns a closure that records the args it was called
 // with and returns the configured (url, err) pair. Use to assert the
 // gate threads PackChecksum/PackKey through correctly.
-func fakeBuildURL(url string, err error) (func(context.Context, string, string, string) (string, error), *struct {
-	called             bool
-	hash, key, expHash string
+func fakeBuildURL(url string, err error) (func(context.Context, string, string, string, string, string) (string, error), *struct {
+	called                            bool
+	tenant, repo, hash, key, expHash string
 }) {
 	rec := &struct {
-		called             bool
-		hash, key, expHash string
+		called                            bool
+		tenant, repo, hash, key, expHash string
 	}{}
-	return func(_ context.Context, hash, key, expectedHash string) (string, error) {
+	return func(_ context.Context, tenant, repo, hash, key, expectedHash string) (string, error) {
 		rec.called = true
+		rec.tenant = tenant
+		rec.repo = repo
 		rec.hash = hash
 		rec.key = key
 		rec.expHash = expectedHash

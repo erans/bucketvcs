@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -19,33 +20,51 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 )
 
+// proxiedTestTenant / proxiedTestRepo are the canonical (tenant, repo)
+// pair used by the proxied-route tests in this file. They satisfy
+// routenames.ValidateName and keys.NewRepo and are short enough to keep
+// the test URLs readable.
+const (
+	proxiedTestTenant = "ten"
+	proxiedTestRepo   = "rep"
+)
+
+// proxiedTestComposite returns the composite hash string
+// "<tenant>/<repo>/<hash>" that proxiedurl.Mint binds the HMAC to. The
+// gateway must verify against the same composite — see
+// proxied_routes.go::ServeHTTP.
+func proxiedTestComposite(tenant, repo, hash string) string {
+	return tenant + "/" + repo + "/" + hash
+}
+
 func TestProxiedRoute_Bundle_OK(t *testing.T) {
 	dir := t.TempDir()
 	store, err := localfs.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rkeys, err := keys.NewRepo("ten", "rep")
+	rkeys, err := keys.NewRepo(proxiedTestTenant, proxiedTestRepo)
 	if err != nil {
 		t.Fatal(err)
 	}
 	body := []byte("BUNDLE BYTES")
-	bundleKey := rkeys.BundleKey("sha256-aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899")
+	hash := "sha256-aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+	bundleKey := rkeys.BundleKey(hash)
 	if _, err := store.PutIfAbsent(context.Background(), bundleKey, strings.NewReader(string(body)), nil); err != nil {
 		t.Fatal(err)
 	}
 
 	key := []byte("0123456789abcdef0123456789abcdef")
-	tok, err := proxiedurl.Mint(key, "bundle", "sha256-aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899", time.Now().Add(time.Minute))
+	tok, err := proxiedurl.Mint(key, "bundle", proxiedTestComposite(proxiedTestTenant, proxiedTestRepo, hash), time.Now().Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", proxiedKeyResolver{rkeys: rkeys}, nil)
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", nil)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/_bundle/sha256-aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899?token=" + tok)
+	resp, err := http.Get(srv.URL + "/_bundle/" + proxiedTestTenant + "/" + proxiedTestRepo + "/" + hash + "?token=" + tok)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,26 +85,27 @@ func TestProxiedRoute_Bundle_Expired_403(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rkeys, err := keys.NewRepo("ten", "rep")
+	rkeys, err := keys.NewRepo(proxiedTestTenant, proxiedTestRepo)
 	if err != nil {
 		t.Fatal(err)
 	}
-	bundleKey := rkeys.BundleKey("sha256-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+	hash := "sha256-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	bundleKey := rkeys.BundleKey(hash)
 	if _, err := store.PutIfAbsent(context.Background(), bundleKey, strings.NewReader("X"), nil); err != nil {
 		t.Fatal(err)
 	}
 
 	key := []byte("0123456789abcdef0123456789abcdef")
-	tok, err := proxiedurl.Mint(key, "bundle", "sha256-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", time.Now().Add(-time.Minute))
+	tok, err := proxiedurl.Mint(key, "bundle", proxiedTestComposite(proxiedTestTenant, proxiedTestRepo, hash), time.Now().Add(-time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", proxiedKeyResolver{rkeys: rkeys}, nil)
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", nil)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/_bundle/sha256-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc?token=" + tok)
+	resp, err := http.Get(srv.URL + "/_bundle/" + proxiedTestTenant + "/" + proxiedTestRepo + "/" + hash + "?token=" + tok)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,27 +121,28 @@ func TestProxiedRoute_Bundle_Range(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rkeys, err := keys.NewRepo("ten", "rep")
+	rkeys, err := keys.NewRepo(proxiedTestTenant, proxiedTestRepo)
 	if err != nil {
 		t.Fatal(err)
 	}
 	body := []byte("0123456789ABCDEF")
-	bundleKey := rkeys.BundleKey("sha256-1111111111111111111111111111111111111111111111111111111111111111")
+	hash := "sha256-1111111111111111111111111111111111111111111111111111111111111111"
+	bundleKey := rkeys.BundleKey(hash)
 	if _, err := store.PutIfAbsent(context.Background(), bundleKey, strings.NewReader(string(body)), nil); err != nil {
 		t.Fatal(err)
 	}
 
 	key := []byte("0123456789abcdef0123456789abcdef")
-	tok, err := proxiedurl.Mint(key, "bundle", "sha256-1111111111111111111111111111111111111111111111111111111111111111", time.Now().Add(time.Minute))
+	tok, err := proxiedurl.Mint(key, "bundle", proxiedTestComposite(proxiedTestTenant, proxiedTestRepo, hash), time.Now().Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", proxiedKeyResolver{rkeys: rkeys}, nil)
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", nil)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	req, _ := http.NewRequest("GET", srv.URL+"/_bundle/sha256-1111111111111111111111111111111111111111111111111111111111111111?token="+tok, nil)
+	req, _ := http.NewRequest("GET", srv.URL+"/_bundle/"+proxiedTestTenant+"/"+proxiedTestRepo+"/"+hash+"?token="+tok, nil)
 	req.Header.Set("Range", "bytes=4-7")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -147,17 +168,18 @@ func TestProxiedRoute_Bundle_TamperedToken_403(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rkeys, err := keys.NewRepo("ten", "rep")
+	rkeys, err := keys.NewRepo(proxiedTestTenant, proxiedTestRepo)
 	if err != nil {
 		t.Fatal(err)
 	}
-	bundleKey := rkeys.BundleKey("sha256-7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a")
+	hash := "sha256-7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+	bundleKey := rkeys.BundleKey(hash)
 	if _, err := store.PutIfAbsent(context.Background(), bundleKey, strings.NewReader("Y"), nil); err != nil {
 		t.Fatal(err)
 	}
 
 	key := []byte("0123456789abcdef0123456789abcdef")
-	tok, err := proxiedurl.Mint(key, "bundle", "sha256-7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a", time.Now().Add(time.Minute))
+	tok, err := proxiedurl.Mint(key, "bundle", proxiedTestComposite(proxiedTestTenant, proxiedTestRepo, hash), time.Now().Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,11 +207,11 @@ func TestProxiedRoute_Bundle_TamperedToken_403(t *testing.T) {
 	}
 	bad := tok[:mid] + string(swap) + tok[mid+1:]
 
-	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", proxiedKeyResolver{rkeys: rkeys}, nil)
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", nil)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/_bundle/sha256-7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a?token=" + bad)
+	resp, err := http.Get(srv.URL + "/_bundle/" + proxiedTestTenant + "/" + proxiedTestRepo + "/" + hash + "?token=" + bad)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,35 +221,13 @@ func TestProxiedRoute_Bundle_TamperedToken_403(t *testing.T) {
 	}
 }
 
-// proxiedKeyResolver is a test-side implementation of the resolver
-// interface that maps (kind, hash) -> storage key for a single repo.
-type proxiedKeyResolver struct {
-	rkeys *keys.Repo
-}
-
-func (p proxiedKeyResolver) BundleKey(hash string) (string, bool) {
-	return p.rkeys.BundleKey(hash), true
-}
-func (p proxiedKeyResolver) PackKey(hash string) (string, bool) {
-	return p.rkeys.CanonicalPackKey(hash), true
-}
-
-// rejectingResolver simulates a resolver that does not advertise the
-// requested hash (e.g., gateway scoped to a different repo). Both
-// methods return ok=false; the handler must respond 404 in both cases
-// without ever touching the store.
-type rejectingResolver struct{}
-
-func (rejectingResolver) BundleKey(string) (string, bool) { return "", false }
-func (rejectingResolver) PackKey(string) (string, bool)   { return "", false }
-
 func TestProxiedRoute_Pack_OK(t *testing.T) {
 	dir := t.TempDir()
 	store, err := localfs.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rkeys, err := keys.NewRepo("ten", "rep")
+	rkeys, err := keys.NewRepo(proxiedTestTenant, proxiedTestRepo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,13 +239,13 @@ func TestProxiedRoute_Pack_OK(t *testing.T) {
 	}
 
 	key := []byte("0123456789abcdef0123456789abcdef")
-	tok, _ := proxiedurl.Mint(key, "pack", packHash, time.Now().Add(time.Minute))
+	tok, _ := proxiedurl.Mint(key, "pack", proxiedTestComposite(proxiedTestTenant, proxiedTestRepo, packHash), time.Now().Add(time.Minute))
 
-	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", proxiedKeyResolver{rkeys: rkeys}, nil)
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", nil)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/_pack/" + packHash + "?token=" + tok)
+	resp, err := http.Get(srv.URL + "/_pack/" + proxiedTestTenant + "/" + proxiedTestRepo + "/" + packHash + "?token=" + tok)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,23 +260,28 @@ func TestProxiedRoute_Pack_OK(t *testing.T) {
 	}
 }
 
-func TestProxiedRoute_Bundle_UnadvertisedHash_404(t *testing.T) {
+// TestProxiedRoute_Bundle_UnstoredHash_404 — token verifies, but the
+// object was never written (or has been GC'd). The handler computes the
+// storage key and the store returns ErrNotFound -> 404. Replaces the
+// pre-M19 "unadvertised by resolver" test now that the key constructor
+// is direct (there is no resolver to refuse).
+func TestProxiedRoute_Bundle_UnstoredHash_404(t *testing.T) {
 	dir := t.TempDir()
 	store, err := localfs.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	hash := "sha256-deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 
 	key := []byte("0123456789abcdef0123456789abcdef")
-	tok, _ := proxiedurl.Mint(key, "bundle", "sha256-deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", time.Now().Add(time.Minute))
+	tok, _ := proxiedurl.Mint(key, "bundle", proxiedTestComposite(proxiedTestTenant, proxiedTestRepo, hash), time.Now().Add(time.Minute))
 
-	// Resolver refuses to map any hash; handler must 404 before any
-	// storage call — note we never seeded the object.
-	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", rejectingResolver{}, nil)
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", nil)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/_bundle/sha256-deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef?token=" + tok)
+	// We never seeded the object — Head returns ErrNotFound -> 404.
+	resp, err := http.Get(srv.URL + "/_bundle/" + proxiedTestTenant + "/" + proxiedTestRepo + "/" + hash + "?token=" + tok)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,18 +293,18 @@ func TestProxiedRoute_Bundle_UnadvertisedHash_404(t *testing.T) {
 
 // TestProxiedRoute_Post_405 — only GET and HEAD are advertised; POST and
 // other verbs return 405 Method Not Allowed without reaching the
-// resolver or the store.
+// store.
 func TestProxiedRoute_Post_405(t *testing.T) {
 	key := []byte("0123456789abcdef0123456789abcdef")
 	store, err := localfs.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", rejectingResolver{}, nil)
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", nil)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	resp, err := http.Post(srv.URL+"/_bundle/sha256-aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899", "application/octet-stream", strings.NewReader(""))
+	resp, err := http.Post(srv.URL+"/_bundle/"+proxiedTestTenant+"/"+proxiedTestRepo+"/sha256-aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899", "application/octet-stream", strings.NewReader(""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,16 +315,16 @@ func TestProxiedRoute_Post_405(t *testing.T) {
 }
 
 // TestProxiedRoute_MissingToken_403 — a request without ?token= is
-// rejected with 403 even when the hash format and resolver would both
-// otherwise pass. Required so an unauthenticated probe cannot tell
-// "advertised hash" from "unknown hash" by status code alone.
+// rejected with 403 even when the hash format passes. Required so an
+// unauthenticated probe cannot tell "advertised hash" from "unknown
+// hash" by status code alone.
 func TestProxiedRoute_MissingToken_403(t *testing.T) {
 	dir := t.TempDir()
 	store, err := localfs.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rkeys, _ := keys.NewRepo("ten", "rep")
+	rkeys, _ := keys.NewRepo(proxiedTestTenant, proxiedTestRepo)
 	hash := "sha256-aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
 	bundleKey := rkeys.BundleKey(hash)
 	if _, err := store.PutIfAbsent(context.Background(), bundleKey, strings.NewReader("X"), nil); err != nil {
@@ -327,11 +332,11 @@ func TestProxiedRoute_MissingToken_403(t *testing.T) {
 	}
 
 	key := []byte("0123456789abcdef0123456789abcdef")
-	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", proxiedKeyResolver{rkeys: rkeys}, nil)
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", nil)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/_bundle/" + hash)
+	resp, err := http.Get(srv.URL + "/_bundle/" + proxiedTestTenant + "/" + proxiedTestRepo + "/" + hash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,7 +355,7 @@ func TestProxiedRoute_HEAD_NoBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rkeys, _ := keys.NewRepo("ten", "rep")
+	rkeys, _ := keys.NewRepo(proxiedTestTenant, proxiedTestRepo)
 	body := []byte("HEAD BODY BYTES")
 	hash := "sha256-aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
 	bundleKey := rkeys.BundleKey(hash)
@@ -359,13 +364,13 @@ func TestProxiedRoute_HEAD_NoBody(t *testing.T) {
 	}
 
 	key := []byte("0123456789abcdef0123456789abcdef")
-	tok, _ := proxiedurl.Mint(key, "bundle", hash, time.Now().Add(time.Minute))
+	tok, _ := proxiedurl.Mint(key, "bundle", proxiedTestComposite(proxiedTestTenant, proxiedTestRepo, hash), time.Now().Add(time.Minute))
 
-	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", proxiedKeyResolver{rkeys: rkeys}, nil)
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", nil)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	req, _ := http.NewRequest(http.MethodHead, srv.URL+"/_bundle/"+hash+"?token="+tok, nil)
+	req, _ := http.NewRequest(http.MethodHead, srv.URL+"/_bundle/"+proxiedTestTenant+"/"+proxiedTestRepo+"/"+hash+"?token="+tok, nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -384,19 +389,16 @@ func TestProxiedRoute_HEAD_NoBody(t *testing.T) {
 }
 
 // TestProxiedRoute_CrossKindToken_403 — a token minted for kind="pack"
-// presented at /_bundle/<hash> with a matching hash is rejected with
-// 403 (proxiedurl.ErrKindMismatch). Stops a "swap the endpoint, reuse
-// the token" attack.
+// presented at /_bundle/<t>/<r>/<hash> with a matching hash is rejected
+// with 403 (proxiedurl.ErrKindMismatch). Stops a "swap the endpoint,
+// reuse the token" attack.
 func TestProxiedRoute_CrossKindToken_403(t *testing.T) {
 	dir := t.TempDir()
 	store, err := localfs.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rkeys, _ := keys.NewRepo("ten", "rep")
-	// 40-hex hash is valid for BOTH pack and bundle-after-prefix-strip,
-	// but the bundle handler requires "sha256-<64-hex>" so we use a
-	// distinct hash that passes the bundle handler's format check.
+	rkeys, _ := keys.NewRepo(proxiedTestTenant, proxiedTestRepo)
 	hash := "sha256-aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
 	bundleKey := rkeys.BundleKey(hash)
 	if _, err := store.PutIfAbsent(context.Background(), bundleKey, strings.NewReader("Z"), nil); err != nil {
@@ -404,17 +406,16 @@ func TestProxiedRoute_CrossKindToken_403(t *testing.T) {
 	}
 
 	key := []byte("0123456789abcdef0123456789abcdef")
-	// Mint a token with kind="pack" but for the bundle's hash. Note
-	// that Mint accepts any hash regardless of kind; verification at
-	// the bundle endpoint compares the path-derived kind to the
-	// token's kind.
-	tok, _ := proxiedurl.Mint(key, "pack", hash, time.Now().Add(time.Minute))
+	// Mint a token with kind="pack" but for the bundle's hash. Mint accepts
+	// any hash regardless of kind; verification at the bundle endpoint
+	// compares the path-derived kind to the token's kind.
+	tok, _ := proxiedurl.Mint(key, "pack", proxiedTestComposite(proxiedTestTenant, proxiedTestRepo, hash), time.Now().Add(time.Minute))
 
-	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", proxiedKeyResolver{rkeys: rkeys}, nil)
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", nil)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/_bundle/" + hash + "?token=" + tok)
+	resp, err := http.Get(srv.URL + "/_bundle/" + proxiedTestTenant + "/" + proxiedTestRepo + "/" + hash + "?token=" + tok)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -433,7 +434,7 @@ func TestProxiedRoute_RangeBeyondObject_416(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rkeys, _ := keys.NewRepo("ten", "rep")
+	rkeys, _ := keys.NewRepo(proxiedTestTenant, proxiedTestRepo)
 	hash := "sha256-aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
 	bundleKey := rkeys.BundleKey(hash)
 	// 16-byte object.
@@ -442,13 +443,13 @@ func TestProxiedRoute_RangeBeyondObject_416(t *testing.T) {
 	}
 
 	key := []byte("0123456789abcdef0123456789abcdef")
-	tok, _ := proxiedurl.Mint(key, "bundle", hash, time.Now().Add(time.Minute))
+	tok, _ := proxiedurl.Mint(key, "bundle", proxiedTestComposite(proxiedTestTenant, proxiedTestRepo, hash), time.Now().Add(time.Minute))
 
-	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", proxiedKeyResolver{rkeys: rkeys}, nil)
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", nil)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	req, _ := http.NewRequest("GET", srv.URL+"/_bundle/"+hash+"?token="+tok, nil)
+	req, _ := http.NewRequest("GET", srv.URL+"/_bundle/"+proxiedTestTenant+"/"+proxiedTestRepo+"/"+hash+"?token="+tok, nil)
 	// start=200 against a 16-byte object: the handler's Head-then-bound
 	// check (proxied_routes.go) fires BEFORE the storage adapter is
 	// consulted, so this test exercises the handler's preflight 416 path,
@@ -466,39 +467,17 @@ func TestProxiedRoute_RangeBeyondObject_416(t *testing.T) {
 	}
 }
 
-func TestNewServer_ProxiedURL_RejectsMissingResolver(t *testing.T) {
-	store, err := localfs.Open(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	_, err = NewServer(store, Options{
-		MirrorDir:            t.TempDir(),
-		Version:              "0.1-test",
-		AuthStore:            newAnonymousTestAuthStore(t, "acme", "demo", true),
-		ProxiedURLSigningKey: []byte("0123456789abcdef0123456789abcdef"),
-	})
-	if err == nil {
-		t.Fatal("want error; got nil")
-	}
-	if !strings.Contains(err.Error(), "ProxiedKeyResolver") {
-		t.Errorf("error = %q; want it to mention ProxiedKeyResolver", err)
-	}
-}
-
 func TestNewServer_ProxiedURL_RejectsShortKey(t *testing.T) {
 	store, err := localfs.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	rkeys, _ := keys.NewRepo("ten", "rep")
 	_, err = NewServer(store, Options{
 		MirrorDir:            t.TempDir(),
 		Version:              "0.1-test",
 		AuthStore:            newAnonymousTestAuthStore(t, "acme", "demo", true),
 		ProxiedURLSigningKey: []byte("short"),
-		ProxiedKeyResolver:   proxiedKeyResolver{rkeys: rkeys},
 	})
 	if err == nil {
 		t.Fatal("want error; got nil")
@@ -527,14 +506,6 @@ func (f *fakeRangeStore) GetRange(ctx context.Context, key string, start, end in
 	return nil, f.rangeError
 }
 
-// fakeBundleResolver always reports the same constant key, regardless of
-// hash, so we can use it with fakeRangeStore (which doesn't actually
-// store anything).
-type fakeBundleResolver struct{ key string }
-
-func (f fakeBundleResolver) BundleKey(string) (string, bool) { return f.key, true }
-func (f fakeBundleResolver) PackKey(string) (string, bool)   { return f.key, true }
-
 // TestProxiedRoute_RangeAdapterErrInvalidArg_416 covers the
 // writeStoreError mapping that the preflight bound check would
 // otherwise hide on real adapters. Inject a fake whose Head reports
@@ -545,13 +516,13 @@ func TestProxiedRoute_RangeAdapterErrInvalidArg_416(t *testing.T) {
 	store := &fakeRangeStore{size: 1000, rangeError: storage.ErrInvalidArgument}
 
 	key := []byte("0123456789abcdef0123456789abcdef")
-	tok, _ := proxiedurl.Mint(key, "bundle", hash, time.Now().Add(time.Minute))
+	tok, _ := proxiedurl.Mint(key, "bundle", proxiedTestComposite(proxiedTestTenant, proxiedTestRepo, hash), time.Now().Add(time.Minute))
 
-	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", fakeBundleResolver{key: "fake/key"}, nil)
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", nil)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	req, _ := http.NewRequest("GET", srv.URL+"/_bundle/"+hash+"?token="+tok, nil)
+	req, _ := http.NewRequest("GET", srv.URL+"/_bundle/"+proxiedTestTenant+"/"+proxiedTestRepo+"/"+hash+"?token="+tok, nil)
 	req.Header.Set("Range", "bytes=4-7")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -570,13 +541,13 @@ func TestProxiedRoute_RangeAdapterErrNotFound_404(t *testing.T) {
 	store := &fakeRangeStore{size: 1000, rangeError: storage.ErrNotFound}
 
 	key := []byte("0123456789abcdef0123456789abcdef")
-	tok, _ := proxiedurl.Mint(key, "bundle", hash, time.Now().Add(time.Minute))
+	tok, _ := proxiedurl.Mint(key, "bundle", proxiedTestComposite(proxiedTestTenant, proxiedTestRepo, hash), time.Now().Add(time.Minute))
 
-	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", fakeBundleResolver{key: "fake/key"}, nil)
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", nil)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	req, _ := http.NewRequest("GET", srv.URL+"/_bundle/"+hash+"?token="+tok, nil)
+	req, _ := http.NewRequest("GET", srv.URL+"/_bundle/"+proxiedTestTenant+"/"+proxiedTestRepo+"/"+hash+"?token="+tok, nil)
 	req.Header.Set("Range", "bytes=4-7")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -596,13 +567,13 @@ func TestProxiedRoute_RangeAdapterUnknownErr_500(t *testing.T) {
 	store := &fakeRangeStore{size: 1000, rangeError: errors.New("synthetic transient")}
 
 	key := []byte("0123456789abcdef0123456789abcdef")
-	tok, _ := proxiedurl.Mint(key, "bundle", hash, time.Now().Add(time.Minute))
+	tok, _ := proxiedurl.Mint(key, "bundle", proxiedTestComposite(proxiedTestTenant, proxiedTestRepo, hash), time.Now().Add(time.Minute))
 
-	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", fakeBundleResolver{key: "fake/key"}, nil)
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", nil)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	req, _ := http.NewRequest("GET", srv.URL+"/_bundle/"+hash+"?token="+tok, nil)
+	req, _ := http.NewRequest("GET", srv.URL+"/_bundle/"+proxiedTestTenant+"/"+proxiedTestRepo+"/"+hash+"?token="+tok, nil)
 	req.Header.Set("Range", "bytes=4-7")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -614,42 +585,32 @@ func TestProxiedRoute_RangeAdapterUnknownErr_500(t *testing.T) {
 	}
 }
 
-// TestProxiedRoute_MalformedHash_404 exercises validProxiedHash. Each
-// case must 404 without ever touching the resolver — the format gate
-// rejects before resolver dispatch. We use rejectingResolver so a
-// resolver bypass would 200/206 (because rejectingResolver's
-// PackKey/BundleKey return ok=false → 404 anyway; a 404 here doesn't
-// prove the format gate fired). To make the test definitive, we use a
-// resolver that PANICS on call so any leak past the format gate fails
-// loudly.
-type panickingResolver struct{}
-
-func (panickingResolver) BundleKey(string) (string, bool) {
-	panic("validProxiedHash should have rejected this hash before resolver")
-}
-func (panickingResolver) PackKey(string) (string, bool) {
-	panic("validProxiedHash should have rejected this hash before resolver")
-}
-
 func TestProxiedRoute_MalformedHash_404(t *testing.T) {
 	cases := []struct {
 		name, path string
 	}{
-		{"bundle_wrong_prefix", "/_bundle/blake3-aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"},
-		{"bundle_short_hash", "/_bundle/sha256-aabbcc"},
-		{"bundle_non_hex", "/_bundle/sha256-zzzzccddeeff00112233445566778899aabbccddeeff00112233445566778899"},
-		{"bundle_too_long", "/_bundle/sha256-aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899ff"},
-		{"pack_short", "/_pack/0123abc"},
-		{"pack_non_hex", "/_pack/zzzz456789abcdef0123456789abcdef01234567"},
-		{"pack_too_long", "/_pack/0123456789abcdef0123456789abcdef0123456789"},
-		{"pack_with_dotdot", "/_pack/..0123456789abcdef0123456789abcdef0123"},
+		{"bundle_wrong_prefix", "/_bundle/" + proxiedTestTenant + "/" + proxiedTestRepo + "/blake3-aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"},
+		{"bundle_short_hash", "/_bundle/" + proxiedTestTenant + "/" + proxiedTestRepo + "/sha256-aabbcc"},
+		{"bundle_non_hex", "/_bundle/" + proxiedTestTenant + "/" + proxiedTestRepo + "/sha256-zzzzccddeeff00112233445566778899aabbccddeeff00112233445566778899"},
+		{"bundle_too_long", "/_bundle/" + proxiedTestTenant + "/" + proxiedTestRepo + "/sha256-aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899ff"},
+		{"pack_short", "/_pack/" + proxiedTestTenant + "/" + proxiedTestRepo + "/0123abc"},
+		{"pack_non_hex", "/_pack/" + proxiedTestTenant + "/" + proxiedTestRepo + "/zzzz456789abcdef0123456789abcdef01234567"},
+		{"pack_too_long", "/_pack/" + proxiedTestTenant + "/" + proxiedTestRepo + "/0123456789abcdef0123456789abcdef0123456789"},
+		{"pack_dotdot_hash", "/_pack/" + proxiedTestTenant + "/" + proxiedTestRepo + "/..0123456789abcdef0123456789abcdef0123456789"},
 	}
 	store, err := localfs.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Wrap the store so the test fails if validProxiedHash fails to reject
+	// any of these inputs and dispatch escapes to a store lookup. Pre-M19
+	// the test used a panickingResolver for this purpose; with the resolver
+	// removed (M19 Task 4), key computation is pure and would silently
+	// return 404 from the store. The wrapping store gives us the ordering
+	// proof back.
+	storeFail := &failOnAccessStore{ObjectStore: store, t: t}
 	key := []byte("0123456789abcdef0123456789abcdef")
-	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", panickingResolver{}, nil)
+	h := NewProxiedHandler(storeFail, key, "/_bundle/", "/_pack/", nil)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -665,6 +626,32 @@ func TestProxiedRoute_MalformedHash_404(t *testing.T) {
 			}
 		})
 	}
+}
+
+// failOnAccessStore wraps a real ObjectStore and fails the test if any
+// access method (Head/Get/GetRange) is invoked. Used by
+// TestProxiedRoute_MalformedHash_404 to prove the validProxiedHash format
+// gate rejects requests BEFORE dispatch — without this wrapping a missing
+// gate would silently return 404-from-storage indistinguishably from
+// 404-from-format-rejection.
+type failOnAccessStore struct {
+	storage.ObjectStore
+	t *testing.T
+}
+
+func (f *failOnAccessStore) Head(ctx context.Context, key string) (*storage.ObjectMetadata, error) {
+	f.t.Errorf("store.Head(%q) called — malformed hash escaped the format gate", key)
+	return nil, storage.ErrNotFound
+}
+
+func (f *failOnAccessStore) Get(ctx context.Context, key string, opts *storage.GetOptions) (*storage.Object, error) {
+	f.t.Errorf("store.Get(%q) called — malformed hash escaped the format gate", key)
+	return nil, storage.ErrNotFound
+}
+
+func (f *failOnAccessStore) GetRange(ctx context.Context, key string, start, end int64) (io.ReadCloser, error) {
+	f.t.Errorf("store.GetRange(%q) called — malformed hash escaped the format gate", key)
+	return nil, storage.ErrNotFound
 }
 
 // --- observability helpers + tests ---
@@ -763,17 +750,17 @@ func TestProxiedHandler_BundleGetSuccess_EmitsServedMetricsAndAudit(t *testing.T
 	}
 
 	key := []byte("0123456789abcdef0123456789abcdef")
-	tok, err := proxiedurl.Mint(key, "bundle", hash, time.Now().Add(time.Minute))
+	tok, err := proxiedurl.Mint(key, "bundle", proxiedTestComposite(proxiedTestTenant, proxiedTestRepo, hash), time.Now().Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	buf, logger := captureLogBuf()
-	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", proxiedKeyResolver{rkeys: rkeys}, logger)
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", logger)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/_bundle/" + hash + "?token=" + tok)
+	resp, err := http.Get(srv.URL + "/_bundle/" + proxiedTestTenant + "/" + proxiedTestRepo + "/" + hash + "?token=" + tok)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -827,17 +814,17 @@ func TestProxiedHandler_PackRangeGetSuccess_EmitsServedMetricsAndAudit(t *testin
 	}
 
 	key := []byte("0123456789abcdef0123456789abcdef")
-	tok, err := proxiedurl.Mint(key, "pack", packHash, time.Now().Add(time.Minute))
+	tok, err := proxiedurl.Mint(key, "pack", proxiedTestComposite(proxiedTestTenant, proxiedTestRepo, packHash), time.Now().Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	buf, logger := captureLogBuf()
-	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", proxiedKeyResolver{rkeys: rkeys}, logger)
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", logger)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	req, _ := http.NewRequest("GET", srv.URL+"/_pack/"+packHash+"?token="+tok, nil)
+	req, _ := http.NewRequest("GET", srv.URL+"/_pack/"+proxiedTestTenant+"/"+proxiedTestRepo+"/"+packHash+"?token="+tok, nil)
 	req.Header.Set("Range", "bytes=10-99")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -882,14 +869,15 @@ func TestProxiedHandler_ErrorPath_DoesNotEmitServedMetrics(t *testing.T) {
 	key := []byte("0123456789abcdef0123456789abcdef")
 
 	buf, logger := captureLogBuf()
-	// Use a resolver that never maps anything, so we get 404 after token validation.
-	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", rejectingResolver{}, logger)
+	// The object is never written; a valid token passes verification and
+	// the storage Head returns ErrNotFound -> 404.
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", logger)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	// Mint a valid token so we pass token verification and reach the 404 resolver path.
-	tok, _ := proxiedurl.Mint(key, "bundle", hash, time.Now().Add(time.Minute))
-	resp, err := http.Get(srv.URL + "/_bundle/" + hash + "?token=" + tok)
+	// Mint a valid token so we pass token verification and reach the 404 store path.
+	tok, _ := proxiedurl.Mint(key, "bundle", proxiedTestComposite(proxiedTestTenant, proxiedTestRepo, hash), time.Now().Add(time.Minute))
+	resp, err := http.Get(srv.URL + "/_bundle/" + proxiedTestTenant + "/" + proxiedTestRepo + "/" + hash + "?token=" + tok)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -934,17 +922,17 @@ func TestProxiedHandler_TokenInvalid_EmitsMetric_Expired(t *testing.T) {
 
 	key := []byte("0123456789abcdef0123456789abcdef")
 	// Mint a token that expired one minute ago.
-	tok, err := proxiedurl.Mint(key, "bundle", hash, time.Now().Add(-time.Minute))
+	tok, err := proxiedurl.Mint(key, "bundle", proxiedTestComposite(proxiedTestTenant, proxiedTestRepo, hash), time.Now().Add(-time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	buf, logger := captureLogBuf()
-	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", proxiedKeyResolver{rkeys: rkeys}, logger)
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", logger)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/_bundle/" + hash + "?token=" + tok)
+	resp, err := http.Get(srv.URL + "/_bundle/" + proxiedTestTenant + "/" + proxiedTestRepo + "/" + hash + "?token=" + tok)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -985,17 +973,17 @@ func TestProxiedHandler_TokenInvalid_EmitsMetric_KindMismatch(t *testing.T) {
 
 	key := []byte("0123456789abcdef0123456789abcdef")
 	// Mint a token with kind="pack" but for the bundle's hash — mismatch at the bundle endpoint.
-	tok, err := proxiedurl.Mint(key, "pack", hash, time.Now().Add(time.Minute))
+	tok, err := proxiedurl.Mint(key, "pack", proxiedTestComposite(proxiedTestTenant, proxiedTestRepo, hash), time.Now().Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	buf, logger := captureLogBuf()
-	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", proxiedKeyResolver{rkeys: rkeys}, logger)
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", logger)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/_bundle/" + hash + "?token=" + tok)
+	resp, err := http.Get(srv.URL + "/_bundle/" + proxiedTestTenant + "/" + proxiedTestRepo + "/" + hash + "?token=" + tok)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1035,7 +1023,7 @@ func TestProxiedHandler_TokenInvalid_EmitsMetric_OtherInvalid(t *testing.T) {
 	}
 
 	key := []byte("0123456789abcdef0123456789abcdef")
-	tok, err := proxiedurl.Mint(key, "bundle", hash, time.Now().Add(time.Minute))
+	tok, err := proxiedurl.Mint(key, "bundle", proxiedTestComposite(proxiedTestTenant, proxiedTestRepo, hash), time.Now().Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1053,11 +1041,11 @@ func TestProxiedHandler_TokenInvalid_EmitsMetric_OtherInvalid(t *testing.T) {
 	bad := tok[:mid] + string(swap) + tok[mid+1:]
 
 	buf, logger := captureLogBuf()
-	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", proxiedKeyResolver{rkeys: rkeys}, logger)
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", logger)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/_bundle/" + hash + "?token=" + bad)
+	resp, err := http.Get(srv.URL + "/_bundle/" + proxiedTestTenant + "/" + proxiedTestRepo + "/" + hash + "?token=" + bad)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1101,12 +1089,12 @@ func TestProxiedHandler_TokenInvalid_EmitsMetric_Missing(t *testing.T) {
 	key := []byte("0123456789abcdef0123456789abcdef")
 
 	buf, logger := captureLogBuf()
-	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", proxiedKeyResolver{rkeys: rkeys}, logger)
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", logger)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
 	// No ?token= query param.
-	resp, err := http.Get(srv.URL + "/_bundle/" + hash)
+	resp, err := http.Get(srv.URL + "/_bundle/" + proxiedTestTenant + "/" + proxiedTestRepo + "/" + hash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1145,14 +1133,14 @@ func TestProxiedHandler_HeadRequest_DoesNotEmitServedMetrics(t *testing.T) {
 	}
 
 	key := []byte("0123456789abcdef0123456789abcdef")
-	tok, _ := proxiedurl.Mint(key, "bundle", hash, time.Now().Add(time.Minute))
+	tok, _ := proxiedurl.Mint(key, "bundle", proxiedTestComposite(proxiedTestTenant, proxiedTestRepo, hash), time.Now().Add(time.Minute))
 
 	buf, logger := captureLogBuf()
-	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", proxiedKeyResolver{rkeys: rkeys}, logger)
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", logger)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	req, _ := http.NewRequest(http.MethodHead, srv.URL+"/_bundle/"+hash+"?token="+tok, nil)
+	req, _ := http.NewRequest(http.MethodHead, srv.URL+"/_bundle/"+proxiedTestTenant+"/"+proxiedTestRepo+"/"+hash+"?token="+tok, nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -1173,5 +1161,274 @@ func TestProxiedHandler_HeadRequest_DoesNotEmitServedMetrics(t *testing.T) {
 	}
 	if rec := findLog(lines, "event", "proxied.url.served"); rec != nil {
 		t.Errorf("unexpected proxied.url.served audit on HEAD; got:\n%s", buf.String())
+	}
+}
+
+// --- M19 multi-tenant tests ---
+//
+// These pin the M19 URL shape /_<kind>/<tenant>/<repo>/<hash> and the
+// composite-hash HMAC binding. The handler must (a) parse exactly 3
+// non-empty path segments after the prefix, (b) run routenames.ValidateName
+// on tenant + repo BEFORE any token verify, (c) verify the token against
+// the composite "<tenant>/<repo>/<hash>", and (d) compute the storage key
+// directly via keys.NewRepo(tenant, repo).BundleKey/CanonicalPackKey.
+
+// TestProxiedHandler_BundleMultiTenantURL_OK pins that the M19 URL shape
+// /_bundle/<tenant>/<repo>/<hash> with a token bound to the composite
+// "<tenant>/<repo>/<hash>" serves the storage key
+// keys.NewRepo(tenant, repo).BundleKey(hash).
+func TestProxiedHandler_BundleMultiTenantURL_OK(t *testing.T) {
+	tenant, repo := "acme", "site"
+	hash := "sha256-" + strings.Repeat("ab", 32)
+	composite := tenant + "/" + repo + "/" + hash
+
+	key := bytes.Repeat([]byte{0x55}, 32)
+	exp := time.Now().Add(time.Hour)
+	tok, err := proxiedurl.Mint(key, "bundle", composite, exp)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rkeys, err := keys.NewRepo(tenant, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storageKey := rkeys.BundleKey(hash)
+	bodyBytes := []byte("bundle-payload")
+	store, err := localfs.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutIfAbsent(context.Background(), storageKey, bytes.NewReader(bodyBytes), nil); err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", nil)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/_bundle/"+tenant+"/"+repo+"/"+hash+"?token="+url.QueryEscape(tok), nil)
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d, body=%s", w.Code, w.Body.String())
+	}
+	if !bytes.Equal(w.Body.Bytes(), bodyBytes) {
+		t.Errorf("body mismatch: got %d bytes, want %d", w.Body.Len(), len(bodyBytes))
+	}
+}
+
+// TestProxiedHandler_PackMultiTenantURL_OK is the pack analogue.
+func TestProxiedHandler_PackMultiTenantURL_OK(t *testing.T) {
+	tenant, repo := "acme", "site"
+	hash := strings.Repeat("cd", 20) // 40 hex
+	composite := tenant + "/" + repo + "/" + hash
+
+	key := bytes.Repeat([]byte{0x56}, 32)
+	tok, _ := proxiedurl.Mint(key, "pack", composite, time.Now().Add(time.Hour))
+	rkeys, err := keys.NewRepo(tenant, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storageKey := rkeys.CanonicalPackKey(hash)
+	bodyBytes := []byte("pack-payload-bytes")
+	store, err := localfs.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutIfAbsent(context.Background(), storageKey, bytes.NewReader(bodyBytes), nil); err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", nil)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/_pack/"+tenant+"/"+repo+"/"+hash+"?token="+url.QueryEscape(tok), nil)
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d, body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestProxiedHandler_TamperedTenant_Rejected pins that a token minted
+// for (acme, site, hash) cannot be replayed against (other, site, hash) —
+// the HMAC binds the composite.
+func TestProxiedHandler_TamperedTenant_Rejected(t *testing.T) {
+	hash := "sha256-" + strings.Repeat("ab", 32)
+	composite := "acme/site/" + hash
+	key := bytes.Repeat([]byte{0x66}, 32)
+	tok, _ := proxiedurl.Mint(key, "bundle", composite, time.Now().Add(time.Hour))
+	store, err := localfs.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", nil)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/_bundle/other/site/"+hash+"?token="+url.QueryEscape(tok), nil)
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("code=%d, want 403 (HMAC binds tenant)", w.Code)
+	}
+}
+
+// TestProxiedHandler_TamperedRepo_Rejected — repo segment swap.
+func TestProxiedHandler_TamperedRepo_Rejected(t *testing.T) {
+	hash := "sha256-" + strings.Repeat("ab", 32)
+	composite := "acme/site/" + hash
+	key := bytes.Repeat([]byte{0x77}, 32)
+	tok, _ := proxiedurl.Mint(key, "bundle", composite, time.Now().Add(time.Hour))
+	store, err := localfs.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", nil)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/_bundle/acme/elsewhere/"+hash+"?token="+url.QueryEscape(tok), nil)
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("code=%d, want 403 (HMAC binds repo)", w.Code)
+	}
+}
+
+// TestProxiedHandler_PackTamperedTenant_Rejected — pack analogue of
+// TestProxiedHandler_TamperedTenant_Rejected. Token binding is kind-agnostic
+// (same Verify path) but the kind label is part of the HMAC input, so this
+// proves the same protection applies on the /_pack/ endpoint.
+func TestProxiedHandler_PackTamperedTenant_Rejected(t *testing.T) {
+	hash := strings.Repeat("ab", 20) // 40 hex
+	composite := "acme/site/" + hash
+	key := bytes.Repeat([]byte{0xA1}, 32)
+	tok, _ := proxiedurl.Mint(key, "pack", composite, time.Now().Add(time.Hour))
+	store, err := localfs.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", nil)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/_pack/other/site/"+hash+"?token="+url.QueryEscape(tok), nil)
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("code=%d, want 403 (HMAC binds tenant on pack endpoint)", w.Code)
+	}
+}
+
+// TestProxiedHandler_PackTamperedRepo_Rejected — repo swap, pack endpoint.
+func TestProxiedHandler_PackTamperedRepo_Rejected(t *testing.T) {
+	hash := strings.Repeat("cd", 20)
+	composite := "acme/site/" + hash
+	key := bytes.Repeat([]byte{0xA2}, 32)
+	tok, _ := proxiedurl.Mint(key, "pack", composite, time.Now().Add(time.Hour))
+	store, err := localfs.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", nil)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/_pack/acme/elsewhere/"+hash+"?token="+url.QueryEscape(tok), nil)
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("code=%d, want 403 (HMAC binds repo on pack endpoint)", w.Code)
+	}
+}
+
+// TestProxiedHandler_BadTenantName_Rejected — routenames.ValidateName must
+// filter ".." etc. before any store lookup. Even a HMAC-valid token is
+// irrelevant because the name validation runs BEFORE token verify; we
+// expect a non-200 (typically 404 from http.NotFound).
+func TestProxiedHandler_BadTenantName_Rejected(t *testing.T) {
+	hash := "sha256-" + strings.Repeat("ab", 32)
+	key := bytes.Repeat([]byte{0x88}, 32)
+	store, err := localfs.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", nil)
+	// Token doesn't matter; we just want to confirm the bad name is rejected.
+	tok, _ := proxiedurl.Mint(key, "bundle", "../site/"+hash, time.Now().Add(time.Hour))
+	// We send the literal ".." segment in the URL — but ServeMux/RequestURI
+	// will normalize on the net/http server side. Use http.NewRequest with
+	// a raw path so the handler sees the literal value.
+	r := httptest.NewRequest("GET", "/_bundle/dummy/dummy/dummy", nil)
+	r.URL.Path = "/_bundle/../site/" + hash
+	r.URL.RawQuery = "token=" + url.QueryEscape(tok)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code == http.StatusOK {
+		t.Errorf("bad tenant should be rejected, got 200")
+	}
+}
+
+// TestProxiedHandler_MissingPathSegments — /_bundle/<just-tenant>/<just-repo>
+// has only 2 of 3 required segments. The handler must reject with non-200.
+func TestProxiedHandler_MissingPathSegments(t *testing.T) {
+	key := bytes.Repeat([]byte{0x99}, 32)
+	store, err := localfs.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", nil)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/_bundle/acme/site", nil) // no hash segment
+	h.ServeHTTP(w, r)
+	if w.Code == http.StatusOK {
+		t.Errorf("missing hash segment should reject; got 200")
+	}
+}
+
+// TestProxiedHandler_AuditIncludesTenantRepo asserts the proxied.url.served
+// audit event AND the bundle_uri_served_total / bundle_uri_served_bytes
+// metrics carry tenant + repo labels (M19 Task 6 multi-tenant observability).
+// Without these labels operators cannot attribute serve volume to a specific
+// (tenant, repo); the labels gain meaning now that the multi-tenant URL shape
+// allows one gateway to serve many tenants.
+func TestProxiedHandler_AuditIncludesTenantRepo(t *testing.T) {
+	tenant, repo := "acme", "site"
+	dir := t.TempDir()
+	store, err := localfs.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rkeys, err := keys.NewRepo(tenant, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := "sha256-aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+	bundleKey := rkeys.BundleKey(hash)
+	body := []byte("data")
+	if _, err := store.PutIfAbsent(context.Background(), bundleKey, bytes.NewReader(body), nil); err != nil {
+		t.Fatal(err)
+	}
+
+	key := []byte("0123456789abcdef0123456789abcdef")
+	tok, err := proxiedurl.Mint(key, "bundle", proxiedTestComposite(tenant, repo, hash), time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	buf, logger := captureLogBuf()
+	h := NewProxiedHandler(store, key, "/_bundle/", "/_pack/", logger)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/_bundle/"+tenant+"/"+repo+"/"+hash+"?token="+url.QueryEscape(tok), nil)
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("setup: code=%d body=%s", w.Code, w.Body.String())
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, `"tenant":"acme"`) {
+		t.Errorf("logs missing tenant=acme. Output:\n%s", logged)
+	}
+	if !strings.Contains(logged, `"repo":"site"`) {
+		t.Errorf("logs missing repo=site. Output:\n%s", logged)
+	}
+
+	// Verify the audit event specifically carries tenant + repo.
+	lines := logLines(buf)
+	if rec := findLog(lines, "event", "proxied.url.served", "tenant", "acme", "repo", "site"); rec == nil {
+		t.Errorf("proxied.url.served audit missing tenant/repo attrs; got:\n%s", logged)
+	}
+	// Verify served-total metric carries tenant + repo.
+	if rec := findLog(lines, "msg", "metric", "metric_name", "bundle_uri_served_total", "tenant", "acme", "repo", "site"); rec == nil {
+		t.Errorf("bundle_uri_served_total metric missing tenant/repo labels; got:\n%s", logged)
+	}
+	// Verify served-bytes metric carries tenant + repo.
+	if rec := findLog(lines, "msg", "metric", "metric_name", "bundle_uri_served_bytes", "tenant", "acme", "repo", "site"); rec == nil {
+		t.Errorf("bundle_uri_served_bytes metric missing tenant/repo labels; got:\n%s", logged)
 	}
 }

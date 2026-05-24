@@ -219,20 +219,12 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	}
 
 	// Build URLBuilder-backed closures once and share between the HTTP
-	// gateway and the SSH listener. Building here (rather than letting
-	// gateway construct them internally) keeps the wiring symmetric across
-	// transports — both ends mint identical URLs from the same builder
-	// state — and avoids exposing gateway internals to sshd.
-	//
-	// NOTE: This task wires URL minting only; the gateway-proxied
-	// /_bundle/ and /_pack/ inbound routes are NOT mounted because the
-	// production ProxiedKeyResolver implementation is a separate task.
-	// As a consequence, "proxied" mode URLs minted here will fail to be
-	// servable from this gateway in M11 — operators should pair these
-	// modes with an external HTTP layer that resolves hashes to storage
-	// keys, or use "direct" mode against signed-URL-capable backends
-	// (S3, GCS, AzureBlob).
-	var bundleBuildURL, packBuildURL func(ctx context.Context, hash, storageKey, expectedHash string) (string, error)
+	// gateway and the SSH listener; minting and serving use the same key.
+	// Building here (rather than letting gateway construct them internally)
+	// keeps the wiring symmetric across transports — both ends mint
+	// identical URLs from the same builder state — and avoids exposing
+	// gateway internals to sshd.
+	var bundleBuildURL, packBuildURL func(ctx context.Context, tenant, repo, hash, storageKey, expectedHash string) (string, error)
 	if bMode != gateway.URIModeOff {
 		bub := &gateway.URLBuilder{
 			Store:          store,
@@ -241,8 +233,8 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			BundleTTL:      *proxiedBundleTTL,
 			Mode:           bMode,
 		}
-		bundleBuildURL = func(ctx context.Context, hash, key, expected string) (string, error) {
-			u, _, err := bub.BuildBundleURL(ctx, hash, key, expected)
+		bundleBuildURL = func(ctx context.Context, tenant, repo, hash, key, expected string) (string, error) {
+			u, _, err := bub.BuildBundleURL(ctx, tenant, repo, hash, key, expected)
 			return u, err
 		}
 	}
@@ -254,8 +246,8 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			PackTTL:        *proxiedPackTTL,
 			Mode:           pMode,
 		}
-		packBuildURL = func(ctx context.Context, hash, key, expected string) (string, error) {
-			u, _, err := pub.BuildPackURL(ctx, hash, key, expected)
+		packBuildURL = func(ctx context.Context, tenant, repo, hash, key, expected string) (string, error) {
+			u, _, err := pub.BuildPackURL(ctx, tenant, repo, hash, key, expected)
 			return u, err
 		}
 	}
@@ -292,6 +284,8 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			BundleWarmAge:           *warmAge,
 			PackURIEnabled:          packBuildURL != nil,
 			PackURIBuildURL:         packBuildURL,
+			ProxiedURLSigningKey:    signingKey,
+			ProxiedBaseURL:          *proxiedBaseURL,
 			LFSEnabled:              *lfsEnabled,
 			LFSPresignTTL:           *lfsPresignTTL,
 			LFSProxiedURLSigningKey: signingKey,

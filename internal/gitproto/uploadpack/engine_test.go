@@ -383,7 +383,7 @@ func TestService_BundleURI_NoBundles(t *testing.T) {
 		BundleURIEnabled:  true,
 		BundleWarmCommits: 5000,
 		BundleWarmAge:     24 * time.Hour,
-		BundleURIBuildURL: func(_ context.Context, _, _, _ string) (string, error) {
+		BundleURIBuildURL: func(_ context.Context, _, _, _, _, _ string) (string, error) {
 			buildURLCalled = true
 			return "https://example.com/bundle", nil
 		},
@@ -475,7 +475,7 @@ func TestService_BundleURI_Advertises(t *testing.T) {
 		BundleURIEnabled:  true,
 		BundleWarmCommits: 5000,
 		BundleWarmAge:     24 * time.Hour,
-		BundleURIBuildURL: func(_ context.Context, hash, key, expected string) (string, error) {
+		BundleURIBuildURL: func(_ context.Context, _, _, hash, key, expected string) (string, error) {
 			if want := "sha256:" + bundleHashHex; expected != want {
 				t.Errorf("BuildURL got expectedHash=%q, want %q", expected, want)
 			}
@@ -664,7 +664,7 @@ func TestService_PackURI_AdvertisedInFetchResponse(t *testing.T) {
 		Mirror:          mgr,
 		AgentVersion:    "test",
 		PackURIEnabled:  true,
-		PackURIBuildURL: func(_ context.Context, hash, key, expected string) (string, error) {
+		PackURIBuildURL: func(_ context.Context, _, _, hash, key, expected string) (string, error) {
 			buildCalled = true
 			if hash != fakeSha1 {
 				t.Errorf("BuildURL hash arg: got %q, want %q", hash, fakeSha1)
@@ -786,7 +786,7 @@ func TestService_PackURI_NotAdvertisedWhenClientSilent(t *testing.T) {
 		Mirror:          mgr,
 		AgentVersion:    "test",
 		PackURIEnabled:  true,
-		PackURIBuildURL: func(_ context.Context, _, _, _ string) (string, error) {
+		PackURIBuildURL: func(_ context.Context, _, _, _, _, _ string) (string, error) {
 			buildCalled = true
 			return "https://cdn.example.com/pack.pack", nil
 		},
@@ -907,7 +907,7 @@ func TestServeBundleURI_EmitsAdvertisedMetric_NoEntry(t *testing.T) {
 		BundleURIEnabled:  true,
 		BundleWarmCommits: 5000,
 		BundleWarmAge:     24 * time.Hour,
-		BundleURIBuildURL: func(_ context.Context, _, _, _ string) (string, error) {
+		BundleURIBuildURL: func(_ context.Context, _, _, _, _, _ string) (string, error) {
 			t.Fatalf("BuildURL must not be called when no bundles exist")
 			return "", nil
 		},
@@ -1002,7 +1002,7 @@ func TestServeBundleURI_EmitsAdvertisedMetricAndAudit_Current(t *testing.T) {
 		BundleURIEnabled:  true,
 		BundleWarmCommits: 5000,
 		BundleWarmAge:     24 * time.Hour,
-		BundleURIBuildURL: func(_ context.Context, _, _, _ string) (string, error) {
+		BundleURIBuildURL: func(_ context.Context, _, _, _, _, _ string) (string, error) {
 			// Proxied URL shape: contains /_bundle/
 			return "https://gw.example.com/_bundle/b1?token=abc", nil
 		},
@@ -1098,7 +1098,7 @@ func TestServeBundleURI_EmitsAdvertisedMetric_OnlyWhen_BuildURLEmpty(t *testing.
 		BundleURIEnabled:  true,
 		BundleWarmCommits: 5000,
 		BundleWarmAge:     24 * time.Hour,
-		BundleURIBuildURL: func(_ context.Context, _, _, _ string) (string, error) {
+		BundleURIBuildURL: func(_ context.Context, _, _, _, _, _ string) (string, error) {
 			return "", nil // misconfigured backend: empty URL, nil error
 		},
 	}
@@ -1212,7 +1212,7 @@ func TestServeFetch_EmitsPackURIAdvertisedMetric_WhenStanzaFires(t *testing.T) {
 		AgentVersion:    "test",
 		Logger:          captureLogger(&logBuf),
 		PackURIEnabled:  true,
-		PackURIBuildURL: func(_ context.Context, _, _, _ string) (string, error) {
+		PackURIBuildURL: func(_ context.Context, _, _, _, _, _ string) (string, error) {
 			// Proxied URL shape: path contains /_pack/
 			return "https://gw.example.com/_pack/" + fakeSha1 + "?token=abc", nil
 		},
@@ -1317,7 +1317,7 @@ func TestServeFetch_NoPackURIMetric_WhenGateClosed(t *testing.T) {
 		AgentVersion:    "test",
 		Logger:          captureLogger(&logBuf),
 		PackURIEnabled:  false, // gate closed
-		PackURIBuildURL: func(_ context.Context, _, _, _ string) (string, error) {
+		PackURIBuildURL: func(_ context.Context, _, _, _, _, _ string) (string, error) {
 			t.Fatalf("BuildURL must not be called when PackURIEnabled=false")
 			return "", nil
 		},
@@ -1477,7 +1477,7 @@ func TestServeBundleURI_EmitsAdvertisedMetricAndAudit_DirectURL(t *testing.T) {
 		BundleURIEnabled:  true,
 		BundleWarmCommits: 5000,
 		BundleWarmAge:     24 * time.Hour,
-		BundleURIBuildURL: func(_ context.Context, _, _, _ string) (string, error) {
+		BundleURIBuildURL: func(_ context.Context, _, _, _, _, _ string) (string, error) {
 			return directURL, nil
 		},
 	}
@@ -1591,7 +1591,7 @@ func TestServeFetch_EmitsPackURIAdvertisedMetric_DirectURL(t *testing.T) {
 		AgentVersion:    "test",
 		Logger:          captureLogger(&logBuf),
 		PackURIEnabled:  true,
-		PackURIBuildURL: func(_ context.Context, hash, key, expected string) (string, error) {
+		PackURIBuildURL: func(_ context.Context, _, _, hash, key, expected string) (string, error) {
 			return directPackURL, nil
 		},
 	}

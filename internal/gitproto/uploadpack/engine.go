@@ -52,7 +52,10 @@ type EngineRequest struct {
 	// Required when BundleURIEnabled is true; nil disables the feature
 	// (HandleBundleURI returns an empty response and the client falls
 	// through to standard fetch).
-	BundleURIBuildURL func(ctx context.Context, hash, storageKey, expectedHash string) (string, error)
+	// M19: (tenant, repo) are the request-scope identifiers; the URL embeds
+	// them as the first two path segments so the same gateway can serve
+	// many (tenant, repo) repos from one mount.
+	BundleURIBuildURL func(ctx context.Context, tenant, repo, hash, storageKey, expectedHash string) (string, error)
 
 	// BundleWarmCommits and BundleWarmAge bound the freshness window. A
 	// bundle whose tip is more than BundleWarmCommits commits behind the
@@ -74,7 +77,8 @@ type EngineRequest struct {
 	// Required when PackURIEnabled is true; nil disables the feature
 	// (the in-fetch gate returns an empty stanza, the response falls
 	// through to the inline packfile section).
-	PackURIBuildURL func(ctx context.Context, hash, storageKey, expectedHash string) (string, error)
+	// M19: (tenant, repo) bind into the URL path + token; see BundleURIBuildURL.
+	PackURIBuildURL func(ctx context.Context, tenant, repo, hash, storageKey, expectedHash string) (string, error)
 
 	// Logger is used by the engine to emit advertise-time metrics + audit events
 	// from internal/gitproto/uploadpack/service.go::serveFetch and serveBundleURI.

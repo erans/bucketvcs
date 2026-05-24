@@ -56,7 +56,13 @@ func emitBundleURIAdvertised(ctx context.Context, logger *slog.Logger, repoID, f
 // successful 200/206 reply from the proxied URL endpoint. Emitted from
 // proxiedHandler post-io.Copy; the bytes_served value is the actual bytes
 // written (via countingWriter), not the Content-Length header.
-func emitProxiedURLServed(ctx context.Context, logger *slog.Logger, kind, hash string, bytesServed int64, statusCode int, rangeRequest bool) {
+//
+// tenant and repo are the M19 multi-tenant attribution attrs — they
+// identify which (tenant, repo) pair this served object belonged to so
+// operators running a shared gateway can attribute serve volume per
+// repository. Both are validated by the URL parser before reaching this
+// call site, so values here are safe to log verbatim.
+func emitProxiedURLServed(ctx context.Context, logger *slog.Logger, kind, hash, tenant, repo string, bytesServed int64, statusCode int, rangeRequest bool) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -65,6 +71,8 @@ func emitProxiedURLServed(ctx context.Context, logger *slog.Logger, kind, hash s
 		slog.String("event", "proxied.url.served"),
 		slog.String("kind", kind),
 		slog.String("hash", hash),
+		slog.String("tenant", tenant),
+		slog.String("repo", repo),
 		slog.Int64("bytes_served", bytesServed),
 		slog.Int("status_code", statusCode),
 		slog.Bool("range_request", rangeRequest),

@@ -10,30 +10,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bucketvcs/bucketvcs/internal/gateway/routenames"
 	"github.com/bucketvcs/bucketvcs/internal/proxiedurl"
+	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
 
-// ProxiedKeyResolver maps a hash advertised on the URL path to the
-// storage key the gateway should fetch. Implementations decide how to
-// scope hash -> repo (typically via a single-repo gateway, or a
-// multi-repo gateway with the repo embedded in the URL prefix).
-//
-// For M11 the simplest production deployment is one gateway per
-// (tenant, repo); a multi-repo deployment can extend the URL pattern
-// to include a tenant/repo segment in a successor milestone.
-type ProxiedKeyResolver interface {
-	// BundleKey returns the durable storage key for a bundle whose
-	// content-addressed hash is `hash` (e.g., "sha256-aabbcc...").
-	// ok=false means the hash is not advertised by this gateway.
-	BundleKey(hash string) (string, bool)
-	// PackKey returns the durable storage key for a canonical pack whose
-	// pack-checksum is `hash` (40-hex SHA-1).
-	PackKey(hash string) (string, bool)
-}
-
-// NewProxiedHandler returns an http.Handler serving /_bundle/<hash> and
-// /_pack/<hash> from store, gated by HMAC tokens minted with key.
+// NewProxiedHandler returns an http.Handler serving
+// /_bundle/<tenant>/<repo>/<hash> and /_pack/<tenant>/<repo>/<hash>
+// from store, gated by HMAC tokens minted with key. Storage keys are
+// computed via internal/repo/keys; there is no resolver indirection.
 //
 // The handler is mounted at root; the prefix arguments determine which
 // path segment it serves. Pass "/_bundle/" and "/_pack/" for the M11
@@ -41,7 +27,7 @@ type ProxiedKeyResolver interface {
 //
 // logger is used for served-* metrics and the proxied.url.served audit
 // event. If nil, slog.Default() is used.
-func NewProxiedHandler(store storage.ObjectStore, key []byte, bundlePrefix, packPrefix string, resolver ProxiedKeyResolver, logger *slog.Logger) http.Handler {
+func NewProxiedHandler(store storage.ObjectStore, key []byte, bundlePrefix, packPrefix string, logger *slog.Logger) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -50,7 +36,6 @@ func NewProxiedHandler(store storage.ObjectStore, key []byte, bundlePrefix, pack
 		key:          key,
 		bundlePrefix: bundlePrefix,
 		packPrefix:   packPrefix,
-		resolver:     resolver,
 		now:          time.Now,
 		logger:       logger,
 	}
@@ -61,7 +46,6 @@ type proxiedHandler struct {
 	key          []byte
 	bundlePrefix string
 	packPrefix   string
-	resolver     ProxiedKeyResolver
 	now          func() time.Time
 	logger       *slog.Logger
 }
@@ -78,36 +62,55 @@ func (h *proxiedHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// reaching the emitServed call sites, so served-* metrics fire only
 	// on successful GET (200/206) paths regardless of HEAD's traversal.
 	cw := &countingWriter{ResponseWriter: w}
-	var kind, hash string
+	var kind, rest string
 	switch {
 	case strings.HasPrefix(r.URL.Path, h.bundlePrefix):
 		kind = "bundle"
-		hash = strings.TrimPrefix(r.URL.Path, h.bundlePrefix)
+		rest = strings.TrimPrefix(r.URL.Path, h.bundlePrefix)
 	case strings.HasPrefix(r.URL.Path, h.packPrefix):
 		kind = "pack"
-		hash = strings.TrimPrefix(r.URL.Path, h.packPrefix)
+		rest = strings.TrimPrefix(r.URL.Path, h.packPrefix)
 	default:
 		http.NotFound(cw, r)
 		return
 	}
-	if hash == "" {
+	// M19: parse <tenant>/<repo>/<hash> — exactly 3 non-empty segments.
+	// Pre-M19 the path was /_<kind>/<hash> (1 segment); the multi-tenant
+	// URL shape is /_<kind>/<tenant>/<repo>/<hash> so tokens minted for
+	// one (tenant, repo) cannot be replayed against another.
+	segs := strings.Split(rest, "/")
+	if len(segs) != 3 || segs[0] == "" || segs[1] == "" || segs[2] == "" {
+		http.NotFound(cw, r)
+		return
+	}
+	tenant, repo, hash := segs[0], segs[1], segs[2]
+	// Validate tenant and repo against the same charset the normal git
+	// router uses. routenames.ValidateName returns BOOL (not error).
+	// Reject ".." and other path-tricky values BEFORE any store lookup.
+	if !routenames.ValidateName(tenant) {
+		http.NotFound(cw, r)
+		return
+	}
+	if !routenames.ValidateName(repo) {
 		http.NotFound(cw, r)
 		return
 	}
 	// Defense-in-depth: reject hashes that don't match the documented
-	// charset before they reach the resolver. URL-decoded path segments
-	// can contain "/" or ".." which would otherwise be passed verbatim
-	// to a resolver that trusts callers to validate. We accept only
+	// charset before they reach the key constructor. We accept only
 	// "sha256-<64-hex>" for bundles and 40-hex for packs; everything
 	// else 404s indistinguishably from an unadvertised hash.
 	if !validProxiedHash(kind, hash) {
 		http.NotFound(cw, r)
 		return
 	}
-	// Token verification BEFORE resolver dispatch: a probe with no/bad
-	// token gets a uniform 403 regardless of whether the hash is
-	// advertised, so an unauthenticated attacker can't enumerate which
-	// hashes this gateway serves by toggling between 403 and 404.
+	// Token verification BEFORE store dispatch: a probe with no/bad
+	// token gets a uniform 403 regardless of whether the (tenant, repo)
+	// or hash exist, so an unauthenticated attacker can't enumerate
+	// which objects this gateway serves by toggling between 403 and 404.
+	//
+	// The HMAC binds the composite "<tenant>/<repo>/<hash>" — a token
+	// minted for (acme, site, h) cannot be replayed against (other,
+	// site, h) or (acme, elsewhere, h). See proxiedurl.Verify.
 	//
 	// The metric's reason label is a 4-value bounded vocabulary:
 	// "missing" (no token query param), "expired" (exp time passed),
@@ -123,7 +126,8 @@ func (h *proxiedHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(cw, "missing token", http.StatusForbidden)
 		return
 	}
-	if _, err := proxiedurl.Verify(h.key, tok, kind, hash, h.now()); err != nil {
+	composite := tenant + "/" + repo + "/" + hash
+	if _, err := proxiedurl.Verify(h.key, tok, kind, composite, h.now()); err != nil {
 		reason := "invalid"
 		msg := "invalid token"
 		switch {
@@ -136,26 +140,24 @@ func (h *proxiedHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(cw, msg, http.StatusForbidden)
 		return
 	}
-	// Only after the token validates do we ask the resolver to map
-	// hash -> storage key. An unadvertised hash here means the operator
-	// minted a token for a hash this gateway no longer (or never)
-	// serves; surface that as 404 to match content-addressed semantics.
-	var storageKey string
-	switch kind {
-	case "bundle":
-		if k, ok := h.resolver.BundleKey(hash); ok {
-			storageKey = k
-		}
-	case "pack":
-		if k, ok := h.resolver.PackKey(hash); ok {
-			storageKey = k
-		}
-	}
-	if storageKey == "" {
+	// Compute the storage key directly via keys.Repo methods. NewRepo
+	// re-validates names (defense-in-depth after routenames). If
+	// NewRepo rejects, we 404 (not 500) — the names already passed
+	// routenames so this branch is essentially unreachable, but the
+	// belt-and-suspenders guard keeps the failure mode uniform.
+	rkeys, err := keys.NewRepo(tenant, repo)
+	if err != nil {
 		http.NotFound(cw, r)
 		return
 	}
-	h.serveObject(r.Context(), cw, r, kind, hash, storageKey)
+	var storageKey string
+	switch kind {
+	case "bundle":
+		storageKey = rkeys.BundleKey(hash)
+	case "pack":
+		storageKey = rkeys.CanonicalPackKey(hash)
+	}
+	h.serveObject(r.Context(), cw, r, kind, hash, tenant, repo, storageKey)
 }
 
 // validProxiedHash returns true if hash matches the on-the-wire charset
@@ -194,7 +196,7 @@ func isHex(s string, n int) bool {
 	return true
 }
 
-func (h *proxiedHandler) serveObject(ctx context.Context, w *countingWriter, r *http.Request, kind, hash, key string) {
+func (h *proxiedHandler) serveObject(ctx context.Context, w *countingWriter, r *http.Request, kind, hash, tenant, repo, key string) {
 	rangeHdr := r.Header.Get("Range")
 	if rangeHdr == "" {
 		// Full object.
@@ -220,7 +222,7 @@ func (h *proxiedHandler) serveObject(ctx context.Context, w *countingWriter, r *
 		}
 		defer obj.Body.Close()
 		_, _ = io.Copy(w, obj.Body)
-		h.emitServed(ctx, kind, hash, w.bytes, http.StatusOK, false)
+		h.emitServed(ctx, kind, hash, tenant, repo, w.bytes, http.StatusOK, false)
 		return
 	}
 	// Range: bytes=<start>-<end>
@@ -276,7 +278,7 @@ func (h *proxiedHandler) serveObject(ctx context.Context, w *countingWriter, r *
 	defer rc.Close()
 	w.WriteHeader(http.StatusPartialContent)
 	_, _ = io.Copy(w, rc)
-	h.emitServed(ctx, kind, hash, w.bytes, http.StatusPartialContent, true)
+	h.emitServed(ctx, kind, hash, tenant, repo, w.bytes, http.StatusPartialContent, true)
 }
 
 // writeStoreError maps storage sentinel errors to HTTP status codes.
@@ -332,13 +334,13 @@ func parseSimpleByteRange(h string) (start, end int64, ok bool) {
 // of "completed downloads" should compare bytes_served against the object
 // size to distinguish full from truncated serves; the metric pair does not
 // surface the boolean separately.
-func (h *proxiedHandler) emitServed(ctx context.Context, kind, hash string, bytesServed int64, statusCode int, rangeRequest bool) {
+func (h *proxiedHandler) emitServed(ctx context.Context, kind, hash, tenant, repo string, bytesServed int64, statusCode int, rangeRequest bool) {
 	// Metric: bundle_uri_served_total / pack_uri_served_total
-	emitMetric(ctx, h.logger, kind+"_uri_served_total", 1, "via", "proxied")
+	emitMetric(ctx, h.logger, kind+"_uri_served_total", 1, "via", "proxied", "tenant", tenant, "repo", repo)
 	// Metric: bundle_uri_served_bytes / pack_uri_served_bytes
-	emitMetric(ctx, h.logger, kind+"_uri_served_bytes", bytesServed, "via", "proxied")
+	emitMetric(ctx, h.logger, kind+"_uri_served_bytes", bytesServed, "via", "proxied", "tenant", tenant, "repo", repo)
 	// Audit event
-	emitProxiedURLServed(ctx, h.logger, kind, hash, bytesServed, statusCode, rangeRequest)
+	emitProxiedURLServed(ctx, h.logger, kind, hash, tenant, repo, bytesServed, statusCode, rangeRequest)
 }
 
 // countingWriter wraps an http.ResponseWriter to record the number of body

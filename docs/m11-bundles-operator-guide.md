@@ -17,11 +17,11 @@ so operators can plan around what is not yet production-ready.
 | Mode | `--bundle-uri-mode` | `--pack-uri-mode` |
 |------|---------------------|-------------------|
 | `direct` | **GA** | **GA** |
-| `proxied` | **Single-repo deployments only.** Multi-tenant deployments must use `direct` or `off`. The proxied handler resolves objects by hash alone (`ProxiedKeyResolver` is single-repo today); a multi-tenant `ProxiedKeyResolver` is deferred work. | Same caveat as bundle. |
-| `auto` | **GA on direct-capable backends** (S3, R2, GCS, Azure Blob). On localfs, `auto` falls back to proxied behavior — same single-repo caveat applies. | Same as bundle. |
+| `proxied` | **GA (multi-tenant since M19).** The proxied handler keys URLs as `/_bundle/<tenant>/<repo>/<hash>?token=...` and the HMAC binds the composite `(tenant, repo, hash)` so cross-tenant URL tampering is rejected. One `bucketvcs serve` may host many tenants. | Same — `/_pack/<tenant>/<repo>/<hash>?token=...` with the same composite binding. |
+| `auto` | **GA on direct-capable backends** (S3, R2, GCS, Azure Blob). On localfs, `auto` falls back to proxied behavior — multi-tenant safe since M19. | Same as bundle. |
 | `off` | **GA.** Behavior reverts to pre-M11 (standard `upload-pack`); M9/M10 paths unchanged. | Same. |
 
-If you operate more than one bucketvcs repository through a single `bucketvcs serve`, do not enable `--bundle-uri-mode=proxied` or `--pack-uri-mode=proxied` yet. Use `direct` (signed URLs to cloud storage) or `off`. See §4 for the full tradeoff and §9 for troubleshooting.
+Proxied mode in M11 was single-repo only because the original `ProxiedKeyResolver` looked up objects by hash alone, so two repos with the same hash (or a forged hash request) could not be safely distinguished. M19 closed that gap: URLs now embed `<tenant>/<repo>` segments and the HMAC is computed over the composite `tenant/repo/hash`, so any segment swap fails token verification with HTTP 403. See §4 for the full tradeoff and §9 for troubleshooting.
 
 ---
 
@@ -255,8 +255,8 @@ Useful for single-host deployments that may reboot mid-window.
 | Mode | Backend | Bandwidth path | Audit visibility | Multi-tenant ready? | When |
 |------|---------|----------------|------------------|---------------------|------|
 | `direct` | cloud (S3, R2, GCS, Azure Blob) | client → bucket | none at gateway | yes | public-internet repos; lowest gateway cost; egress charged to bucket |
-| `proxied` | localfs OR cloud | client → gateway → bucket | full (every serve emits `proxied.url.served` audit event) | **NO — single-repo deployments only** | audit-strict single-repo deployments; localfs deployments (no signed URLs available) |
-| `auto` | any | direct if backend supports signed URLs; proxied otherwise | partial (direct serves are invisible to gateway audit) | yes for direct-capable backends; NO for localfs | default for most operators; covers both backends without per-deploy config |
+| `proxied` | localfs OR cloud | client → gateway → bucket | full (every serve emits `proxied.url.served` audit event with `tenant`+`repo` labels) | **yes (since M19)** — URLs embed `<tenant>/<repo>` and HMAC binds the composite | audit-strict deployments; localfs deployments (no signed URLs available); multi-tenant gateways that want one mount per cluster |
+| `auto` | any | direct if backend supports signed URLs; proxied otherwise | partial (direct serves are invisible to gateway audit) | yes (direct-capable backends always; localfs since M19) | default for most operators; covers both backends without per-deploy config |
 | `off` | any | n/a (capability disabled) | n/a | yes | fall back to standard fetch; useful for rollback or known-incompatible clients |
 
 ### 4.2 Direct mode
@@ -271,12 +271,14 @@ default). The TTL must also satisfy the M8 retention rule:
 ### 4.3 Proxied mode
 
 Proxied mode mints a gateway URL of the form
-`https://<gateway>/_bundle/<hash>?token=<HMAC>` (or `/_pack/<hash>`). The
-client downloads from the gateway, which streams from the bucket. Every serve
-emits `proxied.url.served`. The `ProxiedKeyResolver` that maps `<hash>` to a
-storage key is single-repo today; a multi-tenant resolver is deferred work. Do
-not use proxied mode if you serve more than one bucketvcs repository through a
-single gateway.
+`https://<gateway>/_bundle/<tenant>/<repo>/<hash>?token=<HMAC>` (or
+`/_pack/<tenant>/<repo>/<hash>`). The HMAC token is computed over the
+composite `tenant/repo/hash`, so any segment swap (different tenant,
+different repo, or different hash) on a stolen URL fails verification with
+HTTP 403. The client downloads from the gateway, which streams from the
+bucket. Every serve emits `proxied.url.served` with `tenant` + `repo`
+attribution labels. Since M19 a single `bucketvcs serve` may host many
+tenants under one mount; the earlier single-repo restriction is retired.
 
 ### 4.4 Auto mode
 
@@ -406,8 +408,10 @@ stays small.
 
 For air-gapped or audit-strict OSS deployments, `proxied` is the only option
 that gives you a `proxied.url.served` audit event per clone. Accept the 2×
-bandwidth cost for the audit benefit. Remember: single-repo only until the
-multi-tenant `ProxiedKeyResolver` lands — see §12.
+bandwidth cost for the audit benefit. Since M19, proxied mode is multi-tenant
+safe — a single gateway may host many tenants and the `proxied.url.served`
+events carry `tenant` + `repo` labels so operators can attribute serve volume
+per repository.
 
 ---
 
@@ -476,19 +480,22 @@ paths reach the same metric names; operators do not need to distinguish them.
 |--------|--------|--------------------------------|
 | `bundle_advertised_total` | `repo_id`, `freshness` ∈ {`disabled`, `no_bundle`, `no_ref`, `current`, `warm`, `stale`} | Per `command=bundle-uri` dispatch. **Includes the encode-error path** — this counts dispatch attempts, not successful encodes. **Rate-amplification: rogue or misconfigured clients can pump this at arbitrary rate.** Alert on the per-freshness rates for legitimate advertise traffic (`current` + `warm`); do not alert on the raw total. |
 | `bundle_uri_advertised_total` | `repo_id`, `via` ∈ {`proxied`, `direct`} | Only emitted when the bundle-uri response actually contains URLs (`freshness ∈ {current, warm}`). The `via` label is derived from the URL path (`/_bundle/` → `proxied`, otherwise → `direct`). |
-| `bundle_uri_served_total` | `via` | Per successful proxied bundle serve. **Counts truncated serves too** — `io.Copy` mid-stream errors still emit. Pair with `bundle_uri_served_bytes` and the `proxied.url.served` audit event's `status_code` field to distinguish full from truncated. |
-| `bundle_uri_served_bytes` | `via` | Actual bytes written via `countingWriter`. May be less than the bundle's full size on client disconnect. |
+| `bundle_uri_served_total` | `via`, `tenant`, `repo` | Per successful proxied bundle serve. **Counts truncated serves too** — `io.Copy` mid-stream errors still emit. Pair with `bundle_uri_served_bytes` and the `proxied.url.served` audit event's `status_code` field to distinguish full from truncated. The `tenant` + `repo` labels (added M19) carry the URL's `/_bundle/<tenant>/<repo>/<hash>` segments. |
+| `bundle_uri_served_bytes` | `via`, `tenant`, `repo` | Actual bytes written via `countingWriter`. May be less than the bundle's full size on client disconnect. `tenant` + `repo` added M19. |
 | `pack_uri_advertised_total` | `repo_id`, `via` | Emitted when the `packfile-uris` stanza fires. |
-| `pack_uri_served_total` | `via` | Per successful proxied pack serve. Truncation semantics same as `bundle_uri_served_total`. |
-| `pack_uri_served_bytes` | `via` | Same shape as `bundle_uri_served_bytes`. |
-| `proxied_url_token_invalid_total` | `reason` ∈ {`missing`, `expired`, `kind_mismatch`, `invalid`} | Per token-validation failure on `/_bundle/` or `/_pack/`. `missing` = no `token` query parameter. `expired` = signature past TTL. `kind_mismatch` = bundle token presented to `/_pack/` (or vice versa). `invalid` = signature failure. The user-facing 403 body collapses `kind_mismatch` to "invalid token" — do not rely on the response body to distinguish; use this metric. |
+| `pack_uri_served_total` | `via`, `tenant`, `repo` | Per successful proxied pack serve. Truncation semantics same as `bundle_uri_served_total`. `tenant` + `repo` added M19. |
+| `pack_uri_served_bytes` | `via`, `tenant`, `repo` | Same shape as `bundle_uri_served_bytes`. `tenant` + `repo` added M19. |
+| `proxied_url_token_invalid_total` | `reason` ∈ {`missing`, `expired`, `kind_mismatch`, `invalid`} | Per token-validation failure on `/_bundle/` or `/_pack/`. `missing` = no `token` query parameter. `expired` = signature past TTL. `kind_mismatch` = bundle token presented to `/_pack/` (or vice versa). `invalid` = signature failure (including M19 cross-tenant URL tamper — the composite HMAC mismatches when any segment is swapped). The user-facing 403 body collapses `kind_mismatch` to "invalid token" — do not rely on the response body to distinguish; use this metric. |
 
-**Cardinality note.** `repo_id` is intentionally absent from all served-*
-metrics (`bundle_uri_served_*`, `pack_uri_served_*`,
-`proxied_url_token_invalid_total`). The proxied handler is hash-keyed via the
-single-repo `ProxiedKeyResolver`; there is no repo dimension at request time.
-When the multi-tenant `ProxiedKeyResolver` lands (see §12), this label will be
-added.
+**Cardinality note.** Since M19 the served-* metrics (`bundle_uri_served_*`,
+`pack_uri_served_*`) carry `tenant` + `repo` labels — both values are
+validated by the URL parser before reaching the metric emit, so values are
+safe and bounded by the registered-repos set. Operators with thousands of
+repos should size their Prometheus storage accordingly.
+`proxied_url_token_invalid_total` deliberately has no `tenant` or `repo`
+label: the failure path fires _before_ the URL has been verified, so
+attributing a forged URL to its claimed tenant would leak the existence of
+that (tenant, repo) pair to anonymous probers.
 
 ### 8.2 Audit events
 
@@ -560,11 +567,12 @@ into alerting:
    `proxied.url.served` audit event's `status_code` and `bytes_served`
    fields).
 
-3. All served-* metrics lack a `repo_id` label. Multi-repo proxied deployments
-   cannot be observed per-repo until the multi-tenant `ProxiedKeyResolver`
-   lands. If you operate multiple repositories through a single gateway in
-   proxied mode, you are in unsupported territory regardless of label
-   cardinality (see §1 production-readiness matrix).
+3. All served-* metrics carry `tenant` + `repo` labels since M19. Multi-repo
+   proxied deployments can be observed per-repo by selecting on
+   `tenant=...,repo=...`. Pre-M19 deployments lacked these labels; if you are
+   parsing historical metrics, join via the `proxied.url.served` audit event
+   (which carries the same fields in both eras: the labels and the audit-event
+   attribute names match).
 
 ### 8.4 Example slog grep recipes
 
@@ -748,26 +756,29 @@ Note that raising the warm threshold widens the gap clients must bridge with
 an incremental fetch; there is a tradeoff between metric noise and actual
 clone performance.
 
-### 9.8 Multi-repo deployment, proxied mode, intermittent wrong-repo serves
+### 9.8 Multi-repo deployment, proxied mode, intermittent wrong-repo serves (historical, pre-M19)
 
-**Symptom.** In a multi-repository deployment with `--bundle-uri-mode=proxied`,
-some clients receive bundle or pack content that does not match the repository
-they cloned. The symptom is typically a Git object consistency error on the
-client after the bundle download.
+**Status.** Closed by M19. This section is retained for operators upgrading
+from pre-M19 binaries who may have seen the symptom historically.
 
-**Cause.** The proxied handler is hash-keyed via the single-repo
-`ProxiedKeyResolver`. The resolver maps `/_bundle/<hash>` to a storage key
-without per-repo discrimination. If two repositories happen to produce a bundle
-with the same content hash (rare in practice — only canonical bundle/pack
-hashes are eligible), the resolver picks one deterministically; that may not
-be the requested repository.
+**Symptom (pre-M19).** In a multi-repository deployment with
+`--bundle-uri-mode=proxied`, some clients received bundle or pack content that
+did not match the repository they cloned. The symptom was typically a Git
+object consistency error on the client after the bundle download.
 
-**Operator action.** Switch to `--bundle-uri-mode=direct` immediately. Do not
-run proxied mode in multi-tenant deployments until the multi-tenant
-`ProxiedKeyResolver` lands (see §12). This is the most critical correctness
-constraint in M11: the production-readiness matrix at the top of this document
-calls it out explicitly. If you reached this troubleshooting entry, your
-deployment was already in an unsupported configuration.
+**Cause (pre-M19).** The proxied handler was hash-keyed via a single-repo
+`ProxiedKeyResolver` that mapped `/_bundle/<hash>` to a storage key without
+per-repo discrimination. If two repositories produced a bundle with the same
+content hash, the resolver picked one deterministically — which might not be
+the requested repository.
+
+**M19 fix.** URLs now embed `<tenant>/<repo>` segments (`/_bundle/<t>/<r>/<h>`,
+`/_pack/<t>/<r>/<h>`), the proxied handler resolves the storage key from the
+URL path directly (no hash-only lookup), and the HMAC token is bound to the
+composite `tenant/repo/hash` so segment swaps fail token verification with
+HTTP 403. No operator action required after upgrade — restart of
+`bucketvcs serve` is sufficient. Verify with the M19 smoke
+(`scripts/m19-multitenant-proxied-smoke.sh`).
 
 ---
 
@@ -853,7 +864,8 @@ Example output:
 - `Kind` — `"full_default"` in M11. Other kinds (e.g. release-tag bundles)
   are out of scope.
 - `BundleHash` — content hash of the bundle file; appears in proxied URLs as
-  `/_bundle/<BundleHash>`.
+  `/_bundle/<tenant>/<repo>/<BundleHash>` (URL also embeds the
+  `<tenant>/<repo>` segments since M19).
 - `BundleKey` — storage key of the bundle blob.
 - `SidecarKey` — storage key of the JSON sidecar with per-OID bundle metadata.
 - `TipOID` — Git OID of the ref tip the bundle was generated against; matches
@@ -903,13 +915,13 @@ M11 ships the bundle-uri + packfile-uri minimum viable acceleration. Several
 follow-up items are deferred to successor milestones; operators should plan
 around them:
 
-- **Multi-tenant `ProxiedKeyResolver`.** Today's `ProxiedKeyResolver` resolves
-  `/_bundle/<hash>` and `/_pack/<hash>` requests by hash alone, without
-  per-repo discrimination. Multi-tenant deployments must use
-  `--bundle-uri-mode=direct` or `=off`. When the multi-tenant resolver lands,
-  `repo_id` will be added to the served-* metric labels and proxied mode will
-  be GA for multi-tenant. **Until then, do not run proxied mode in multi-repo
-  deployments.**
+- **Multi-tenant proxied mode.** _Shipped in M19._ URLs now embed
+  `/_bundle/<tenant>/<repo>/<hash>` (and `/_pack/<tenant>/<repo>/<hash>`); the
+  HMAC token is bound to the composite `tenant/repo/hash`, so cross-tenant URL
+  tampering is rejected with HTTP 403. `bundle_uri_served_*` and
+  `pack_uri_served_*` metrics gained `tenant` + `repo` labels; the
+  `proxied.url.served` audit event gained `tenant` + `repo` attribute fields.
+  Proxied mode is now GA for multi-tenant deployments.
 
 - **Full bundle GC pipeline.** `bucketvcs gc` does not yet sweep retired bundle
   blobs. Retired bundles linger in object storage at zero serve cost but nonzero
@@ -927,7 +939,7 @@ around them:
   (`BundleURIBuildURL`, `PackURIBuildURL`) coexists with the legacy fields
   (`BundleURIMode`, `BundleURITTL`, `ProxiedURLSigningKey`, etc.). The legacy
   fields are deprecated and will be removed once the closure pattern has soaked
-  AND the multi-tenant `ProxiedKeyResolver` follow-up lands.
+  in production.
 
 - **Concurrent bundle-safety conformance.** The `RunPropertyBundleSafety`
   factory ships solo localfs green; three concurrent sub-cases

@@ -161,3 +161,35 @@ func TestVerify_LFSVerifyRejectsCrossKind(t *testing.T) {
 		t.Fatal("expected kind-mismatch error")
 	}
 }
+
+// TestMintVerify_CompositeHashWithSlashes pins that the hash field round-trips
+// when it carries embedded slashes — the format M19 uses for kind=1/2
+// bundle/pack tokens, where hash = "<tenant>/<repo>/<sha>". The mint+verify
+// pair must be byte-exact on the composite string; any difference (extra
+// slash, different tenant, swapped order) must fail Verify.
+func TestMintVerify_CompositeHashWithSlashes(t *testing.T) {
+	key := bytes.Repeat([]byte{0x42}, 32)
+	exp := time.Now().Add(time.Hour)
+	for _, kind := range []string{"bundle", "pack"} {
+		composite := "acme/site/sha256-" + strings.Repeat("ab", 32)
+		tok, err := Mint(key, kind, composite, exp)
+		if err != nil {
+			t.Fatalf("mint %s: %v", kind, err)
+		}
+		if _, err := Verify(key, tok, kind, composite, time.Now()); err != nil {
+			t.Errorf("verify %s with same composite: %v", kind, err)
+		}
+		// Tampered tenant
+		if _, err := Verify(key, tok, kind, "other/site/sha256-"+strings.Repeat("ab", 32), time.Now()); err == nil {
+			t.Errorf("verify %s with swapped tenant: expected error, got nil", kind)
+		}
+		// Tampered repo
+		if _, err := Verify(key, tok, kind, "acme/elsewhere/sha256-"+strings.Repeat("ab", 32), time.Now()); err == nil {
+			t.Errorf("verify %s with swapped repo: expected error, got nil", kind)
+		}
+		// Tampered hash
+		if _, err := Verify(key, tok, kind, "acme/site/sha256-"+strings.Repeat("cd", 32), time.Now()); err == nil {
+			t.Errorf("verify %s with swapped hash: expected error, got nil", kind)
+		}
+	}
+}

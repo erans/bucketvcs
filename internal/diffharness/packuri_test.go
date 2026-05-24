@@ -55,10 +55,12 @@ const packURITestTimeout = 60 * time.Second
 // enabled (auto mode, proxied-URL fallback wired) and bundle-uri
 // disabled, so the only acceleration exercised is pack-uri. Uses the
 // same preallocated-listener trick as startBundleURIGateway so
-// ProxiedBaseURL can be set before NewServer is called. Reuses
-// bundleURIResolver, whose PackKey method returns the canonical-pack
-// key for any advertised SHA-1.
-func startPackURIGateway(t *testing.T, store storage.ObjectStore, authStore auth.Store, rkeys *keys.Repo) *httptest.Server {
+// ProxiedBaseURL can be set before NewServer is called.
+//
+// As of M19 the gateway computes storage keys directly via
+// internal/repo/keys (no ProxiedKeyResolver indirection); the (tenant,
+// repo) the URLBuilder embeds in each minted URL identifies the repo.
+func startPackURIGateway(t *testing.T, store storage.ObjectStore, authStore auth.Store) *httptest.Server {
 	t.Helper()
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -76,7 +78,6 @@ func startPackURIGateway(t *testing.T, store storage.ObjectStore, authStore auth
 		PackURIEnabled:       true,
 		PackURIMode:          gateway.URIModeAuto,
 		ProxiedURLSigningKey: signingKey,
-		ProxiedKeyResolver:   bundleURIResolver{rkeys: rkeys},
 		ProxiedBaseURL:       baseURL,
 		PackURITTL:           time.Hour,
 	})
@@ -172,7 +173,7 @@ func TestPackURI_ClientUsesPackURI(t *testing.T) {
 		t.Fatalf("want PackChecksum non-empty after Force repack, got empty: %+v", body.Packs[0])
 	}
 
-	ts := startPackURIGateway(t, store, newDiffharnessAuthStore(t, tenant, repoID), k)
+	ts := startPackURIGateway(t, store, newDiffharnessAuthStore(t, tenant, repoID))
 
 	// Clone with packfile-uri enabled. Both protocol.version=2 and
 	// fetch.uriProtocols=https are required: protocol-v2 is where the

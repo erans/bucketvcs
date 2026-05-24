@@ -13,6 +13,11 @@ import (
 // the BuildURL closure rather than being threaded back through this
 // result.
 type PackURIInputs struct {
+	// Tenant and Repo are the request-scope identifiers threaded through
+	// BuildURL (M19). The closure embeds them into the URL path + signature
+	// so the same gateway can serve many (tenant, repo) repos from one mount.
+	Tenant string
+	Repo   string
 	// ClientOptedIn is true when fetchReq.PackfileURIs is non-empty
 	// (the client advertised at least one accepted protocol scheme).
 	ClientOptedIn bool
@@ -39,7 +44,7 @@ type PackURIInputs struct {
 	// hash hint (currently empty). On error or empty URL the gate
 	// treats the result as "skip advertisement" (soft failure) so the
 	// client falls through to the inline packfile section.
-	BuildURL func(ctx context.Context, hash, storageKey, expectedHash string) (string, error)
+	BuildURL func(ctx context.Context, tenant, repo, hash, storageKey, expectedHash string) (string, error)
 }
 
 // PackURIResult is the gate's verdict.
@@ -92,7 +97,7 @@ func EvaluatePackURIAdvertise(ctx context.Context, in PackURIInputs) (PackURIRes
 	}
 
 	// Gate 3: mint the URL. Errors and empty URLs are both soft skips.
-	url, err := in.BuildURL(ctx, in.PackChecksum, in.PackKey, "")
+	url, err := in.BuildURL(ctx, in.Tenant, in.Repo, in.PackChecksum, in.PackKey, "")
 	if err != nil || url == "" {
 		return PackURIResult{}, nil
 	}

@@ -51,13 +51,13 @@ type Options struct {
 	BundleWarmAge     time.Duration
 	// BundleURIBuildURL mints the URL advertised in command=bundle-uri
 	// responses. nil disables the feature (empty response).
-	BundleURIBuildURL func(ctx context.Context, hash, storageKey, expectedHash string) (string, error)
+	BundleURIBuildURL func(ctx context.Context, tenant, repo, hash, storageKey, expectedHash string) (string, error)
 
 	// PackURIEnabled and PackURIBuildURL gate the packfile-uris capability
 	// for SSH; semantics mirror BundleURI*. PackURIBuildURL is required
 	// when PackURIEnabled is true.
 	PackURIEnabled  bool
-	PackURIBuildURL func(ctx context.Context, hash, storageKey, expectedHash string) (string, error)
+	PackURIBuildURL func(ctx context.Context, tenant, repo, hash, storageKey, expectedHash string) (string, error)
 
 	// LFSTokenIssuer mints short-TTL HTTP bearers for the
 	// git-lfs-authenticate command. When nil, the command is rejected

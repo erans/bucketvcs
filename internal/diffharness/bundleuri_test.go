@@ -52,30 +52,17 @@ import (
 // timeout fires. 60s is generous for these tiny fixtures.
 const bundleURITestTimeout = 60 * time.Second
 
-// bundleURIResolver is the single-repo ProxiedKeyResolver wired into the
-// gateway under test. The diffharness builds one (tenant, repo) per test;
-// every advertised hash maps unconditionally to that repo's key prefix.
-//
-// BundleKey returns the durable bundle key for any advertised hash
-// (single bundle per repo). PackKey returns the canonical-pack key
-// derived from the hash; both methods assume the hash is one advertised
-// by this gateway's repo. Phase 10.2 will exercise the PackKey path.
-type bundleURIResolver struct{ rkeys *keys.Repo }
-
-func (r bundleURIResolver) BundleKey(hash string) (string, bool) {
-	return r.rkeys.BundleKey(hash), true
-}
-func (r bundleURIResolver) PackKey(hash string) (string, bool) {
-	return r.rkeys.CanonicalPackKey(hash), true
-}
-
 // startBundleURIGateway constructs an in-process gateway with bundle-uri
 // enabled (auto mode, proxied-URL fallback wired) and a preallocated
 // listener so ProxiedBaseURL can be set before NewServer is called.
 // Returns the started httptest.Server; both server-close and listener-
 // close are registered via t.Cleanup. The test should reference ts.URL
 // only — baseURL is asserted equal internally.
-func startBundleURIGateway(t *testing.T, store storage.ObjectStore, authStore auth.Store, rkeys *keys.Repo) *httptest.Server {
+//
+// As of M19 the gateway computes storage keys directly via
+// internal/repo/keys (no ProxiedKeyResolver indirection); the (tenant,
+// repo) the URLBuilder embeds in each minted URL identifies the repo.
+func startBundleURIGateway(t *testing.T, store storage.ObjectStore, authStore auth.Store) *httptest.Server {
 	t.Helper()
 
 	// Preallocate the listener so we know ProxiedBaseURL before
@@ -94,7 +81,6 @@ func startBundleURIGateway(t *testing.T, store storage.ObjectStore, authStore au
 		BundleURIEnabled:     true,
 		BundleURIMode:        gateway.URIModeAuto,
 		ProxiedURLSigningKey: signingKey,
-		ProxiedKeyResolver:   bundleURIResolver{rkeys: rkeys},
 		ProxiedBaseURL:       baseURL,
 		BundleURITTL:         4 * time.Hour,
 		BundleWarmCommits:    100,
@@ -259,7 +245,7 @@ func TestBundleURI_ClientUsesBundle(t *testing.T) {
 			report.BundleResult.TriggerReason, report.BundleResult.ErrorMessage)
 	}
 
-	ts := startBundleURIGateway(t, store, newDiffharnessAuthStore(t, tenant, repoID), k)
+	ts := startBundleURIGateway(t, store, newDiffharnessAuthStore(t, tenant, repoID))
 
 	// Clone with bundle-uri enabled, capturing both GIT_TRACE2 (which
 	// records subprocess child_start events including their argv) and
@@ -403,7 +389,7 @@ func TestBundleURI_ForcePushDropsBundle(t *testing.T) {
 		t.Fatalf("SetRepoPublic: %v", err)
 	}
 
-	ts := startBundleURIGateway(t, store, authStore, k)
+	ts := startBundleURIGateway(t, store, authStore)
 
 	repoURL := ts.URL + "/" + tenant + "/" + repoID + ".git"
 	pushURL := withDiffharnessBasicAuth(repoURL, adminUser, adminToken)

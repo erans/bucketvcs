@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -45,7 +46,7 @@ func TestBuildBundleURL_Auto_DirectFirst(t *testing.T) {
 		ProxiedBaseURL: "https://gw.example", BundleTTL: 4 * time.Hour, PackTTL: time.Hour,
 		Mode: URIModeAuto,
 	}
-	got, via, err := b.BuildBundleURL(context.Background(), "sha256-aa", "kk", "sha256:hex")
+	got, via, err := b.BuildBundleURL(context.Background(), "acme", "site", "sha256-aa", "kk", "sha256:hex")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -60,20 +61,20 @@ func TestBuildBundleURL_Auto_FallsBackToProxied(t *testing.T) {
 		ProxiedBaseURL: "https://gw.example", BundleTTL: 4 * time.Hour, PackTTL: time.Hour,
 		Mode: URIModeAuto,
 	}
-	got, via, err := b.BuildBundleURL(context.Background(), "sha256-aa", "kk", "")
+	got, via, err := b.BuildBundleURL(context.Background(), "acme", "site", "sha256-aa", "kk", "")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if !strings.HasPrefix(got, "https://gw.example/_bundle/sha256-aa?token=") || via != "proxied" {
+	if !strings.HasPrefix(got, "https://gw.example/_bundle/acme/site/sha256-aa?token=") || via != "proxied" {
 		t.Errorf("got=%q via=%q", got, via)
 	}
-	// verify the proxied URL's token round-trips with the same key/kind/hash.
+	// verify the proxied URL's token round-trips with the same key/kind/composite hash.
 	u, err := url.Parse(got)
 	if err != nil {
 		t.Fatalf("url.Parse: %v", err)
 	}
 	tok := u.Query().Get("token")
-	if _, verr := proxiedurl.Verify(b.ProxiedKey, tok, "bundle", "sha256-aa", time.Now()); verr != nil {
+	if _, verr := proxiedurl.Verify(b.ProxiedKey, tok, "bundle", "acme/site/sha256-aa", time.Now()); verr != nil {
 		t.Errorf("Verify proxied token: %v", verr)
 	}
 }
@@ -85,7 +86,7 @@ func TestBuildBundleURL_Direct_Required_ErrorsOnNoSupport(t *testing.T) {
 		ProxiedBaseURL: "https://gw.example",
 		Mode:           URIModeDirect,
 	}
-	_, _, err := b.BuildBundleURL(context.Background(), "sha256-aa", "kk", "")
+	_, _, err := b.BuildBundleURL(context.Background(), "acme", "site", "sha256-aa", "kk", "")
 	if !errors.Is(err, storage.ErrNotSupported) {
 		t.Fatalf("err = %v, want ErrNotSupported", err)
 	}
@@ -93,7 +94,7 @@ func TestBuildBundleURL_Direct_Required_ErrorsOnNoSupport(t *testing.T) {
 
 func TestBuildBundleURL_Off_ReturnsErr(t *testing.T) {
 	b := URLBuilder{Mode: URIModeOff}
-	_, _, err := b.BuildBundleURL(context.Background(), "sha256-aa", "kk", "")
+	_, _, err := b.BuildBundleURL(context.Background(), "acme", "site", "sha256-aa", "kk", "")
 	if err == nil {
 		t.Fatalf("expected error in Off mode")
 	}
@@ -116,14 +117,96 @@ func TestBuildBundleURL_Proxied_DirectMode(t *testing.T) {
 		PackTTL:        time.Hour,
 		Mode:           URIModeProxied,
 	}
-	got, via, err := b.BuildBundleURL(context.Background(), "sha256-aa", "kk", "")
+	got, via, err := b.BuildBundleURL(context.Background(), "acme", "site", "sha256-aa", "kk", "")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	if via != "proxied" {
 		t.Errorf("via = %q, want proxied", via)
 	}
-	if !strings.HasPrefix(got, "https://gw.example/_bundle/sha256-aa?token=") {
+	if !strings.HasPrefix(got, "https://gw.example/_bundle/acme/site/sha256-aa?token=") {
 		t.Errorf("got = %q", got)
+	}
+}
+
+// TestBuildBundleURL_MultiTenantURLShape pins that proxied URLs embed
+// (tenant, repo) as the first two path segments after /_bundle/ — the
+// shape introduced in M19 that mirrors /_lfs/<t>/<r>/<oid> from M13.
+func TestBuildBundleURL_MultiTenantURLShape(t *testing.T) {
+	b := &URLBuilder{
+		Store:          fakeStoreNoSign{},
+		ProxiedKey:     bytes.Repeat([]byte{0x11}, 32),
+		ProxiedBaseURL: "https://gw.example.com",
+		BundleTTL:      time.Hour,
+		Mode:           URIModeProxied,
+	}
+	hash := "sha256-" + strings.Repeat("a", 64)
+	got, via, err := b.BuildBundleURL(context.Background(), "acme", "site", hash, "irrelevant-key", "")
+	if err != nil {
+		t.Fatalf("BuildBundleURL: %v", err)
+	}
+	if via != "proxied" {
+		t.Errorf("via=%q, want proxied", via)
+	}
+	wantPrefix := "https://gw.example.com/_bundle/acme/site/" + hash + "?token="
+	if !strings.HasPrefix(got, wantPrefix) {
+		t.Errorf("URL=%q, want prefix %q", got, wantPrefix)
+	}
+}
+
+// TestBuildPackURL_MultiTenantURLShape mirrors the above for packs.
+func TestBuildPackURL_MultiTenantURLShape(t *testing.T) {
+	b := &URLBuilder{
+		Store:          fakeStoreNoSign{},
+		ProxiedKey:     bytes.Repeat([]byte{0x22}, 32),
+		ProxiedBaseURL: "https://gw.example.com",
+		PackTTL:        time.Hour,
+		Mode:           URIModeProxied,
+	}
+	hash := strings.Repeat("c", 40)
+	got, via, err := b.BuildPackURL(context.Background(), "acme", "site", hash, "irrelevant-key", "")
+	if err != nil {
+		t.Fatalf("BuildPackURL: %v", err)
+	}
+	if via != "proxied" {
+		t.Errorf("via=%q, want proxied", via)
+	}
+	wantPrefix := "https://gw.example.com/_pack/acme/site/" + hash + "?token="
+	if !strings.HasPrefix(got, wantPrefix) {
+		t.Errorf("URL=%q, want prefix %q", got, wantPrefix)
+	}
+}
+
+// TestBuildBundleURL_TokenBindsTenantRepoHash mints a URL, extracts the token,
+// and verifies it ONLY round-trips against the same composite "<t>/<r>/<h>".
+// Tamper of tenant in the composite must fail verify.
+func TestBuildBundleURL_TokenBindsTenantRepoHash(t *testing.T) {
+	key := bytes.Repeat([]byte{0x33}, 32)
+	b := &URLBuilder{
+		Store:          fakeStoreNoSign{},
+		ProxiedKey:     key,
+		ProxiedBaseURL: "https://gw.example.com",
+		BundleTTL:      time.Hour,
+		Mode:           URIModeProxied,
+	}
+	hash := "sha256-" + strings.Repeat("e", 64)
+	u, _, err := b.BuildBundleURL(context.Background(), "acme", "site", hash, "k", "")
+	if err != nil {
+		t.Fatalf("BuildBundleURL: %v", err)
+	}
+	parsed, perr := url.Parse(u)
+	if perr != nil {
+		t.Fatalf("url.Parse: %v", perr)
+	}
+	tok := parsed.Query().Get("token")
+	if tok == "" {
+		t.Fatalf("no token in %q", u)
+	}
+	composite := "acme/site/" + hash
+	if _, vErr := proxiedurl.Verify(key, tok, "bundle", composite, time.Now()); vErr != nil {
+		t.Errorf("verify with correct composite: %v", vErr)
+	}
+	if _, vErr := proxiedurl.Verify(key, tok, "bundle", "other/site/"+hash, time.Now()); vErr == nil {
+		t.Errorf("verify with swapped tenant: expected error, got nil")
 	}
 }

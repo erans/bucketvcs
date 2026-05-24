@@ -21,6 +21,11 @@ type Token struct {
 // URL-path hash (sha256-... for bundles, 40-hex sha1 for packs, or
 // <tenant>/<repo>/<oid> for LFS). The signing key MUST be at least
 // 16 bytes; 32 bytes is recommended.
+//
+// For kinds 1 (bundle) and 2 (pack), M19 callers use a composite
+// hash string "<tenant>/<repo>/<hash>"; the payload contains the
+// composite byte-for-byte and Verify compares with constant-time
+// equality, so any tenant/repo/hash swap fails verification.
 func Mint(key []byte, kind, hash string, exp time.Time) (string, error) {
 	if len(key) < 16 {
 		return "", fmt.Errorf("proxiedurl: signing key too short (%d bytes); need >= 16", len(key))
@@ -45,6 +50,11 @@ func Mint(key []byte, kind, hash string, exp time.Time) (string, error) {
 // "tampered" (log + metric).
 //
 // now is parameterised for testability.
+//
+// For kinds 1 (bundle) and 2 (pack), M19 callers use a composite
+// hash string "<tenant>/<repo>/<hash>"; the payload contains the
+// composite byte-for-byte and Verify compares with constant-time
+// equality, so any tenant/repo/hash swap fails verification.
 func Verify(key []byte, token, expectKind, expectHash string, now time.Time) (Token, error) {
 	raw, err := base64.RawURLEncoding.DecodeString(token)
 	if err != nil {

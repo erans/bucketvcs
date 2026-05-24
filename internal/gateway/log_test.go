@@ -72,7 +72,7 @@ func TestEmitBundleURIAdvertised_AuditFields(t *testing.T) {
 func TestEmitProxiedURLServed_AuditFields(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
-	emitProxiedURLServed(context.Background(), logger, "bundle", "sha256-aa", 12345, 206, true)
+	emitProxiedURLServed(context.Background(), logger, "bundle", "sha256-aa", "acme", "site", 12345, 206, true)
 	var entry map[string]any
 	if err := json.Unmarshal(buf.Bytes(), &entry); err != nil {
 		t.Fatalf("parse: %v", err)
@@ -88,6 +88,12 @@ func TestEmitProxiedURLServed_AuditFields(t *testing.T) {
 	}
 	if entry["hash"] != "sha256-aa" {
 		t.Errorf("hash = %v", entry["hash"])
+	}
+	if entry["tenant"] != "acme" {
+		t.Errorf("tenant = %v, want acme", entry["tenant"])
+	}
+	if entry["repo"] != "site" {
+		t.Errorf("repo = %v, want site", entry["repo"])
 	}
 	if int64(entry["bytes_served"].(float64)) != 12345 {
 		t.Errorf("bytes_served = %v", entry["bytes_served"])
