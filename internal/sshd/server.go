@@ -14,6 +14,7 @@ import (
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/auth/ratelimit"
+	"github.com/bucketvcs/bucketvcs/internal/hooks"
 	"github.com/bucketvcs/bucketvcs/internal/lfs"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/policy"
@@ -82,6 +83,12 @@ type Options struct {
 	// Webhooks enables M15 webhook emission for SSH receive-pack.
 	// Mirrors gateway.Options.Webhooks. nil disables all enqueues.
 	Webhooks *webhooks.Service
+
+	// Hooks is OPTIONAL. When non-nil, EngineRequest.Hooks is populated
+	// for receive-pack and pre-receive/post-receive subprocess execution
+	// runs on the SSH transport. Mirrors gateway.Options.Hooks. nil means
+	// hooks disabled (M20).
+	Hooks *hooks.Service
 
 	// Limiter throttles repeated key-rejections from a single IP. Nil
 	// disables rate limiting entirely (Check / MarkFailure / MarkSuccess

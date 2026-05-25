@@ -11,14 +11,17 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth/ratelimit"
 	"github.com/bucketvcs/bucketvcs/internal/gateway"
+	"github.com/bucketvcs/bucketvcs/internal/hooks"
 	"github.com/bucketvcs/bucketvcs/internal/lfs"
 	"github.com/bucketvcs/bucketvcs/internal/lfs/locks"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
@@ -92,6 +95,36 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			"a single attacker can fill the shared bucket and 429 every client.")
 	authRateLimitDisabled := fs.Bool("auth-rate-limit-disabled", false,
 		"Disable auth rate-limiting entirely")
+
+	// M20 Tier 3 hooks. Default disabled; flip with --hooks-enabled=true and
+	// pass --hooks-root=<abs-dir>. On Linux the binary requires `bwrap` on
+	// PATH unless --hooks-unsafe-no-sandbox=true is also set. On non-Linux
+	// platforms --hooks-unsafe-no-sandbox=true is required (bwrap is Linux-
+	// only); enabling unsafe mode logs an ERROR-level slog line at startup.
+	hooksEnabled := fs.Bool("hooks-enabled", false,
+		"enable Tier 3 custom subprocess hooks (pre-receive + post-receive)")
+	hooksRoot := fs.String("hooks-root", "",
+		"absolute directory containing hook script files (required when --hooks-enabled=true)")
+	hooksUnsafeNoSandbox := fs.Bool("hooks-unsafe-no-sandbox", false,
+		"run hooks without bwrap namespace isolation. REQUIRED on macOS/non-Linux. NOT multi-tenant safe.")
+	hooksOnInternalError := fs.String("hooks-on-internal-error", "reject",
+		"behavior when a hook subprocess fails for non-rejection reasons: reject | allow")
+	hooksTimeoutSec := fs.Int("hooks-timeout-sec", 30,
+		"wall-clock timeout per hook subprocess")
+	hooksCPUSec := fs.Int("hooks-cpu-sec", 10,
+		"RLIMIT_CPU per hook subprocess (sandbox mode only)")
+	hooksMemoryMB := fs.Int("hooks-memory-mb", 256,
+		"RLIMIT_AS per hook subprocess in MiB (sandbox mode only)")
+	hooksOutputMaxKB := fs.Int("hooks-output-max-kb", 64,
+		"stdout+stderr cap per hook (bytes beyond are dropped)")
+	hooksAllowNetwork := fs.String("hooks-allow-network", "",
+		"comma-separated script_name list that gets --share-net; default empty (no network)")
+	hooksEnv := fs.String("hooks-env", "",
+		"comma-separated KEY=VALUE list passed to every hook (each entry must contain '='; values may not contain ',')")
+	hooksPostReceiveConcurrency := fs.Int("hooks-postreceive-concurrency", 8,
+		"worker pool size for post-receive hook execution")
+	hooksPostReceiveQueue := fs.Int("hooks-postreceive-queue", 256,
+		"queue capacity for post-receive jobs; full queue drops with a metric")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -191,6 +224,90 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	// webhook_deliveries tables added by migration 0006). The worker is
 	// started below once HTTP and SSH listeners are configured.
 	webhookSvc := webhooks.New(authS.DB())
+
+	// M20 Tier 3 hooks service (optional). Constructed only when
+	// --hooks-enabled=true. bwrap detection: on Linux, the binary must
+	// be on PATH unless --hooks-unsafe-no-sandbox=true is also set. On
+	// non-Linux, --hooks-unsafe-no-sandbox=true is required (we refuse
+	// to start otherwise). When nil, EngineRequest.Hooks stays nil and
+	// receivepack's Step 8c is a no-op.
+	var hooksSvc *hooks.Service
+	if *hooksEnabled {
+		if *hooksRoot == "" {
+			fmt.Fprintln(stderr, "serve: --hooks-enabled requires --hooks-root")
+			return 2
+		}
+		if !filepath.IsAbs(*hooksRoot) {
+			fmt.Fprintf(stderr, "serve: --hooks-root must be an absolute path: %s\n", *hooksRoot)
+			return 2
+		}
+		if st, err := os.Stat(*hooksRoot); err != nil || !st.IsDir() {
+			fmt.Fprintf(stderr, "serve: --hooks-root must be an existing directory: %s\n", *hooksRoot)
+			return 2
+		}
+		useSandbox := !*hooksUnsafeNoSandbox
+		var bwrapPath string
+		if useSandbox {
+			if runtime.GOOS != "linux" {
+				fmt.Fprintf(stderr, "serve: --hooks-enabled on %s requires --hooks-unsafe-no-sandbox=true (bwrap is Linux-only)\n", runtime.GOOS)
+				return 2
+			}
+			p, err := exec.LookPath("bwrap")
+			if err != nil {
+				fmt.Fprintf(stderr, "serve: --hooks-enabled requires bwrap on PATH (install bubblewrap) or set --hooks-unsafe-no-sandbox=true: %v\n", err)
+				return 2
+			}
+			bwrapPath = p
+		} else {
+			logger.Error("hooks: running without sandbox; NOT multi-tenant safe; for single-tenant local development only")
+		}
+		allowNet := make(map[string]struct{})
+		for _, n := range splitCSV(*hooksAllowNetwork) {
+			allowNet[n] = struct{}{}
+		}
+		// --hooks-env entries must be KEY=VALUE. Reject entries without an
+		// `=` (would otherwise become a malformed env entry that confuses
+		// downstream processes). Values containing `,` are not supported
+		// because the flag is comma-split; document this limit in --help.
+		var extraEnv []string
+		for _, kv := range splitCSV(*hooksEnv) {
+			if !strings.Contains(kv, "=") {
+				fmt.Fprintf(stderr, "serve: --hooks-env entry %q is not KEY=VALUE\n", kv)
+				return 2
+			}
+			extraEnv = append(extraEnv, kv)
+		}
+		var onErr hooks.InternalErrorBehavior
+		switch *hooksOnInternalError {
+		case "reject":
+			onErr = hooks.InternalErrorReject
+		case "allow":
+			onErr = hooks.InternalErrorAllow
+		default:
+			fmt.Fprintf(stderr, "serve: --hooks-on-internal-error must be reject|allow, got %q\n", *hooksOnInternalError)
+			return 2
+		}
+		runnerCfg := hooks.RunnerConfig{
+			HooksRoot:       *hooksRoot,
+			UseSandbox:      useSandbox,
+			BwrapPath:       bwrapPath,
+			TimeoutSec:      *hooksTimeoutSec,
+			CPUSec:          *hooksCPUSec,
+			MemoryMB:        *hooksMemoryMB,
+			OutputMaxKB:     *hooksOutputMaxKB,
+			AllowNetworkSet: allowNet,
+			ExtraEnv:        extraEnv,
+			Logger:          logger,
+		}
+		svcCfg := hooks.ServiceConfig{
+			PostReceiveConcurrency: *hooksPostReceiveConcurrency,
+			PostReceiveQueueSize:   *hooksPostReceiveQueue,
+			OnInternalError:        onErr,
+			Logger:                 logger,
+		}
+		hooksSvc = hooks.NewService(hooks.NewStore(authS.DB()), runnerCfg, svcCfg)
+		defer hooksSvc.Close()
+	}
 
 	// M18 auth rate-limiter. Shared between the HTTPS gateway and the SSH
 	// server so a single attacker hitting both transports converges on the
@@ -293,6 +410,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			LFSLocksStore:           lfsLocksStore,
 			Policy:                  policySvc,
 			Webhooks:                webhookSvc,
+			Hooks:                   hooksSvc,
 			Limiter:                 rateLimiter,
 			TrustProxyHeaders:       *trustProxyHeaders,
 		})
@@ -378,6 +496,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			LFSSSHTokenTTL:    lfsSSHTTL,
 			Policy:            policySvc,
 			Webhooks:          webhookSvc,
+			Hooks:             hooksSvc,
 			Limiter:           rateLimiter,
 		})
 		if err != nil {
@@ -477,4 +596,21 @@ func defaultMirrorDir() string {
 		return filepath.Join(h, ".cache", defaultMirrorSubdir)
 	}
 	return filepath.Join(os.TempDir(), "bucketvcs-mirrors")
+}
+
+// splitCSV splits a comma-separated string, trimming whitespace and dropping
+// empty entries. Returns nil for the empty input. Used by M20 hooks flags
+// (--hooks-allow-network, --hooks-env).
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

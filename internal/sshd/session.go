@@ -218,6 +218,7 @@ run:
 			AgentVersion:    s.opts.AgentVersion,
 			Policy:          s.opts.Policy,
 			Webhooks:        s.opts.Webhooks,
+			Hooks:           s.opts.Hooks,
 			Logger:          s.opts.Logger,
 		}
 		serveErr = receivepack.Serve(req)

@@ -2,6 +2,8 @@ package receivepack
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/bucketvcs/bucketvcs/internal/gitcli"
+	"github.com/bucketvcs/bucketvcs/internal/hooks"
 	"github.com/bucketvcs/bucketvcs/internal/importer"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/pack"
@@ -84,6 +87,12 @@ func completeReceivePack(eng *EngineRequest, w io.Writer, m *mirror.Mirror, rp *
 	ctx := eng.Ctx
 	tenant := eng.Tenant
 	repoID := eng.Repo
+
+	// ctxPushID is generated at Step 8c (pre-receive) and threaded to the
+	// post-receive enqueue at Step 14. Empty string means hooks are disabled
+	// (eng.Hooks == nil) OR the all-rejected fast path short-circuited before
+	// Step 8c ran.
+	var ctxPushID string
 
 	// Read the current manifest body under our write lock so old-OID
 	// validation sees a snapshot consistent with the BuildAndCommit CAS
@@ -268,6 +277,57 @@ func completeReceivePack(eng *EngineRequest, w io.Writer, m *mirror.Mirror, rp *
 		}
 	}
 
+	// Step 8c: M20 pre-receive hooks. For each accepted update, build the
+	// hooks.RefUpdate list and run pre-receive scripts in sort_order.
+	// Fail-fast on first non-zero exit (HookRejection). Internal errors
+	// map to HookRejection by default per Service config. Opt-in via
+	// eng.Hooks=nil.
+	if eng.Hooks != nil {
+		accepted := make([]hooks.RefUpdate, 0, len(rp.Updates))
+		for i, u := range rp.Updates {
+			if statuses[i] != "" {
+				continue
+			}
+			accepted = append(accepted, hooks.RefUpdate{
+				Refname: u.Refname,
+				OldOID:  u.OldOID,
+				NewOID:  u.NewOID,
+			})
+		}
+		if len(accepted) > 0 {
+			pushID := generatePushID()
+			err := eng.Hooks.RunPreReceive(ctx, hooks.PreReceivePayload{
+				Tenant:  tenant,
+				Repo:    repoID,
+				BareDir: m.BareDir(),
+				PushID:  pushID,
+				Actor:   actorNameFromEng(eng),
+				Updates: accepted,
+			})
+			if err != nil {
+				var hr *hooks.HookRejection
+				var reason string
+				if errors.As(err, &hr) {
+					// Single-line short reason for the report-status pkt-line.
+					// Full multi-line stderr is in the policy.hook.rejected
+					// audit event (emitted by Service.RunPreReceive).
+					reason = hr.StatusLineReason()
+				} else {
+					reason = "hook internal error"
+				}
+				for i, u := range rp.Updates {
+					if statuses[i] == "" {
+						statuses[i] = "ng " + u.Refname + " " + reason
+					}
+				}
+				writeReceiveReport(w, "ok", statuses, rp.Caps)
+				return
+			}
+			// Pre-receive accepted; propagate PushID to post-receive enqueue.
+			ctxPushID = pushID
+		}
+	}
+
 	// Step 9: build the refUpdates map for accepted commands.
 	refUpdates := map[string]string{}
 	for i, u := range rp.Updates {
@@ -445,6 +505,44 @@ func completeReceivePack(eng *EngineRequest, w io.Writer, m *mirror.Mirror, rp *
 	// (which would require an importer-package change).
 	markMirrorStale(m)
 
+	// M20 post-receive enqueue: best-effort, in-memory queue, fire-and-forget.
+	// Mirrors the M15 webhook block below: only enqueues if at least one ref
+	// was accepted (refUpdates non-empty). PushID is the same UUID minted in
+	// Step 8c so post-receive scripts can correlate with pre-receive.
+	if eng.Hooks != nil && ctxPushID != "" && len(refUpdates) > 0 {
+		// Iterate rp.Updates (not the refUpdates map) so post-receive scripts
+		// see the same ordering as pre-receive — matches native git semantics
+		// where post-receive lines mirror pre-receive line order.
+		accepted := make([]hooks.RefUpdate, 0, len(refUpdates))
+		for i, u := range rp.Updates {
+			if statuses[i] != "" {
+				continue
+			}
+			accepted = append(accepted, hooks.RefUpdate{
+				Refname: u.Refname,
+				OldOID:  u.OldOID,
+				NewOID:  u.NewOID,
+			})
+		}
+		storageBackend := ""
+		if eng.Store != nil {
+			storageBackend = eng.Store.Name()
+		}
+		eng.Hooks.EnqueuePostReceive(hooks.PostReceivePayload{
+			PreReceivePayload: hooks.PreReceivePayload{
+				Tenant:  tenant,
+				Repo:    repoID,
+				BareDir: m.BareDir(),
+				PushID:  ctxPushID,
+				Actor:   actorNameFromEng(eng),
+				Updates: accepted,
+			},
+			TxID:            viewAfter.Header.LatestTx,
+			ManifestVersion: int64(viewAfter.Header.ManifestVersion),
+			StorageBackend:  storageBackend,
+		})
+	}
+
 	// M15 webhook: one push event per receive that mutated at least one
 	// ref. Fail-open — enqueue errors do not affect receive outcome.
 	if eng.Webhooks != nil {
@@ -594,6 +692,15 @@ func actorNameFromEng(eng *EngineRequest) string {
 		}
 	}
 	return "anonymous"
+}
+
+// generatePushID returns a 32-char hex-encoded random ID (16 random bytes).
+// Used as the BUCKETVCS_PUSH_ID env var for pre-receive + post-receive scripts
+// so they can correlate a single push across both phases.
+func generatePushID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
 }
 
 // checkPathsForUpdate runs the M16 path-rule check for one accepted ref

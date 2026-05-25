@@ -48,6 +48,7 @@ func (s *Server) handleReceivePack(w http.ResponseWriter, r *http.Request, tenan
 		AgentVersion: s.opts.Version,
 		Policy:       s.opts.Policy,
 		Webhooks:     s.opts.Webhooks,
+		Hooks:        s.opts.Hooks,
 		Logger:       s.logger,
 	}
 	err := receivepack.Service(req)

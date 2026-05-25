@@ -6,10 +6,11 @@ The companion design document is `docs/superpowers/specs/2026-05-21-m14-hooks-po
 
 Production readiness summary:
 
-- Tier 1 protected refs (deletion + force-push blocking on glob-matched refnames) — **shipped**.
-- Tier 2 size / path / commit-metadata rules — **deferred**.
-- Tier 3 external hooks (shell-script pre-receive / webhooks) — **deferred**.
-- Schema 4 → 5 (`0005_protected_refs.sql`) is forward-only and applied by the existing `RunMigrations`.
+- Tier 1 protected refs (deletion + force-push blocking on glob-matched refnames) — **shipped** (M14).
+- Tier 2 path restrictions (`**`-aware glob matching against the diff-tree) — **shipped** (M16).
+- Tier 3 external hooks (shell-script `pre-receive` + `post-receive` under a `bwrap` namespace sandbox) — **shipped** (M20, see §11).
+- Tier 2 file-size / commit-metadata / signing rules — **deferred**.
+- Schema 4 → 9 (`0005_protected_refs.sql` ... `0009_hooks.sql`) are forward-only and applied by the existing `RunMigrations`.
 
 ---
 
@@ -371,8 +372,7 @@ Option 2 is the recommended approach for ops who want the M14 binary but no enfo
 The MVP shipped Tier 1 only. The following items are explicitly scoped out:
 
 - **Tier 2 rule families** — file-size limits, path restrictions, commit-author email regex, commit-message regex, signed-commit verification. Each is a new policy type under the same `internal/policy` package + a new CLI subcommand.
-- **Tier 3 external hooks** — shell-script pre-receive / update / post-receive. Requires sandboxing, time limits, output capture.
-- **HTTP webhook hooks** — overlaps with the original spec §24 webhooks; both deferred together.
+- **HTTP webhook hooks** — shipped in M15; see the M15 operator guide.
 - **Post-receive infrastructure** — natural extension point for webhooks; nothing in Tier 1 needs it.
 - **Tenant-level default rules** — auto-apply a default ruleset to all repos under a tenant.
 - **`block_create` toggle** — gates new ref creation; depends on identity to be useful.
@@ -384,7 +384,210 @@ The MVP shipped Tier 1 only. The following items are explicitly scoped out:
 
 ---
 
-## 10. FAQ
+## 11. Tier 3 — custom hooks (M20)
+
+Tier 3 ships in M20: per-`(tenant, repo, trigger)` shell-script hooks for `pre-receive` (gate the push) and `post-receive` (run after a successful push). Scripts execute in a `bwrap` namespace sandbox with read-only `/repo`, no network by default, no `$HOOME`, no `/etc`, and a fresh `/tmp`. The design spec is `docs/superpowers/specs/2026-05-23-m20-hooks-tier3-design.md`; the schema is migration `0009_hooks.sql`.
+
+### 11.1 Install `bwrap`
+
+Sandboxed mode is the default. The gateway requires the [`bubblewrap`](https://github.com/containers/bubblewrap) binary on `PATH`:
+
+```bash
+# Debian / Ubuntu
+sudo apt install bubblewrap
+
+# Fedora / RHEL / Rocky / Alma
+sudo dnf install bubblewrap
+
+# Alpine
+sudo apk add bubblewrap
+
+# Arch
+sudo pacman -S bubblewrap
+
+# macOS / Windows-native
+# bwrap is Linux-only. See §11.8 for the --hooks-unsafe-no-sandbox escape hatch.
+```
+
+Bubblewrap **0.12 or newer** is required because the runner passes `--rlimit-cpu` and `--rlimit-as`. Older 0.11.x packages will fail with `bwrap: Unknown option --rlimit-cpu`; upgrade or switch to `--hooks-unsafe-no-sandbox=true`.
+
+### 11.2 Hook layout under `--hooks-root`
+
+A single flat directory containing one executable file per hook script:
+
+```
+/var/lib/bucketvcs/hooks/
+├── reject-secrets.sh          # chmod +x; referenced by --script=reject-secrets.sh
+├── enforce-ticket-link.sh
+├── notify-slack.sh
+└── audit-to-syslog.sh
+```
+
+Rules:
+
+- Filenames must match `[A-Za-z0-9._-]+` (no slashes, no spaces). The CLI rejects invalid names at registration time.
+- Each script needs the executable bit (`chmod +x`). The runner does not `chmod`.
+- One file per hook. Bash, POSIX shell, Python, compiled binaries — anything with a valid shebang works. `/usr/bin/python3` and friends are mounted into the sandbox by default.
+
+### 11.3 Register a hook
+
+```bash
+# Pre-receive hook: reject commits that touch secrets/
+bucketvcs policy hooks add \
+    --auth-db=/var/lib/bucketvcs/auth.db \
+    --tenant=acme --repo=site \
+    --trigger=pre-receive \
+    --script=reject-secrets.sh
+
+# Post-receive hook: notify Slack on push (runs async, doesn't block)
+bucketvcs policy hooks add \
+    --auth-db=/var/lib/bucketvcs/auth.db \
+    --tenant=acme --repo=site \
+    --trigger=post-receive \
+    --script=notify-slack.sh \
+    --order=10
+```
+
+`--order` controls execution sequence (ascending) when multiple hooks are registered for the same trigger. Use `bucketvcs policy hooks list`, `... remove`, `... disable`, `... enable` to manage the row. A disabled hook stays in the DB but skips execution; this is the recommended "feature flag" path.
+
+### 11.4 Hook stdin contract
+
+**pre-receive** receives the native git pre-receive format, one ref update per line:
+
+```
+<oldoid> <newoid> <refname>
+<oldoid> <newoid> <refname>
+...
+```
+
+`<oldoid>` is 40 zeros for ref creation; `<newoid>` is 40 zeros for ref deletion. Existing pre-receive scripts written for stock git work unchanged.
+
+**post-receive** receives the same native lines followed by a blank line and a JSON envelope on the last logical block:
+
+```
+<oldoid> <newoid> <refname>
+\n
+{"tenant":"acme","repo":"site","push_id":"…","actor":"alice","tx_id":"…","manifest_version":42,"storage_backend":"localfs","updates":[…]}
+```
+
+Native git scripts that read until EOF and ignore the JSON envelope still work; M20-aware scripts can `awk` past the blank line for the richer payload.
+
+### 11.5 Environment variables
+
+Every hook (pre and post) inherits:
+
+| Variable | Description |
+|---|---|
+| `BUCKETVCS_TENANT` | Tenant ID, e.g. `acme` |
+| `BUCKETVCS_REPO` | Repo ID, e.g. `site` |
+| `BUCKETVCS_TRIGGER` | `pre-receive` or `post-receive` |
+| `BUCKETVCS_PUSH_ID` | Per-push UUID, correlates pre+post |
+| `BUCKETVCS_ACTOR` | Authenticated user (empty for anonymous) |
+
+post-receive hooks additionally see:
+
+| Variable | Description |
+|---|---|
+| `BUCKETVCS_TX_ID` | Manifest commit transaction ID |
+| `BUCKETVCS_STORAGE_BACKEND` | Storage backend name (e.g. `localfs`, `s3compat`) |
+
+Custom env entries supplied via `--hooks-env=KEY=VALUE,KEY2=VALUE2` on `bucketvcs serve` are merged on top.
+
+### 11.6 Sandbox guarantees
+
+Default sandbox (`bwrap` enabled):
+
+- `/repo` is a **read-only bind mount** of the canonical bare repo. Scripts can `git --git-dir=/repo ...` to read history but cannot mutate refs or objects.
+- `/usr`, `/lib`, `/lib64`, `/bin` are read-only mounts — system binaries work.
+- `/tmp` is a fresh tmpfs per invocation; nothing leaks between hooks or between pushes.
+- `/proc` and `/dev` are minimal namespace mounts.
+- **No `$HOME`, no `/etc`** — scripts cannot read user credentials or system config from the host.
+- **No network**: `--unshare-net` is unconditional unless the script appears in `--hooks-allow-network=<comma-list>`. Use that opt-in for hooks that must talk to Slack, PagerDuty, JIRA, etc.
+
+### 11.7 Resource limits
+
+Four caps apply per hook invocation:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--hooks-cpu-sec` | 10 | `RLIMIT_CPU` — CPU-seconds budget |
+| `--hooks-memory-mb` | 256 | `RLIMIT_AS` — virtual memory cap (MiB) |
+| `--hooks-timeout-sec` | 30 | Wall-clock timeout (kills the process group) |
+| `--hooks-output-max-kb` | 64 | Combined stdout+stderr cap; excess is dropped |
+
+Hitting a CPU/memory limit makes the kernel kill the script (non-zero exit → pre-receive rejects the push or post-receive logs an error). Hitting the wall-clock timeout sends `SIGTERM`, waits 1s, then `SIGKILL`s the whole process group.
+
+### 11.8 macOS / Windows-native: `--hooks-unsafe-no-sandbox`
+
+`bwrap` is Linux-only. On macOS, Windows, or any host where bwrap isn't viable, set `--hooks-unsafe-no-sandbox=true`. The gateway emits an `ERROR` log on startup:
+
+```
+hooks: running without sandbox; NOT multi-tenant safe; for single-tenant local development only
+```
+
+In this mode hook scripts run with the same uid/gid as `bucketvcs serve`, with full filesystem access. Use this **only** for single-tenant dev hosts. Production multi-tenant deployments must run Linux with `bwrap >= 0.12`.
+
+### 11.9 Failure modes
+
+| Scenario | Push outcome | Operator-visible signal |
+|---|---|---|
+| pre-receive exit 0 | accepted | metric `hooks_pre_receive_total{outcome=accepted}` |
+| pre-receive exit ≠ 0 | rejected; stderr (capped) sent to git client | audit `policy.hook.rejected`, metric `hooks_pre_receive_total{outcome=rejected}` |
+| pre-receive timeout | rejected | audit `policy.hook.internal_error`, metric `hooks_pre_receive_total{outcome=error}` |
+| pre-receive script missing / chmod | rejected (default) or allowed (with `--hooks-on-internal-error=allow`) | audit `policy.hook.internal_error` |
+| post-receive exit 0 | (already accepted) | metric `hooks_post_receive_total{outcome=ok}` |
+| post-receive exit ≠ 0 / timeout | (already accepted) | audit `policy.hook.rejected` at WARN, metric `hooks_post_receive_total{outcome=rejected,error}` — push does NOT roll back |
+
+Critical distinction: **post-receive failures cannot abort the push**. The push has already committed (manifest is written, sentinel is updated). Use pre-receive for guard rails; reserve post-receive for notifications, analytics, mirroring.
+
+### 11.10 Worked example: enforce a ticket link in every commit
+
+`/var/lib/bucketvcs/hooks/enforce-ticket-link.sh`:
+
+```sh
+#!/bin/sh
+# Reject any push that includes a commit whose message lacks a JIRA-style
+# ticket reference. The git binary is provided by the sandbox; /repo is the
+# read-only canonical bare.
+exit_code=0
+while read -r oldoid newoid refname; do
+    # Skip deletions.
+    [ "$newoid" = "0000000000000000000000000000000000000000" ] && continue
+    if [ "$oldoid" = "0000000000000000000000000000000000000000" ]; then
+        # New branch — check every reachable commit.
+        range="$newoid"
+    else
+        range="${oldoid}..${newoid}"
+    fi
+    git --git-dir=/repo log --format=%B "$range" | while read -r line; do
+        # PROJ-1234 anywhere in the commit message body satisfies the rule.
+        if echo "$line" | grep -Eq "[A-Z]{2,}-[0-9]+"; then
+            continue
+        fi
+    done || exit_code=1
+done
+if [ "$exit_code" -ne 0 ]; then
+    echo "rejected: every commit must reference a JIRA ticket (e.g. PROJ-1234) in its message" >&2
+    exit 1
+fi
+exit 0
+```
+
+Register:
+
+```bash
+bucketvcs policy hooks add \
+    --auth-db=/var/lib/bucketvcs/auth.db \
+    --tenant=acme --repo=site \
+    --trigger=pre-receive \
+    --script=enforce-ticket-link.sh
+```
+
+A push with a non-conforming commit is rejected client-side with the script's stderr embedded in the git error.
+
+---
+
+## 12. FAQ
 
 ### Q: Why doesn't `*` cross `/`?
 

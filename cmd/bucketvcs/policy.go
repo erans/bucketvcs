@@ -16,6 +16,11 @@ import (
 
 const policyUsage = `Usage: bucketvcs policy <object> <action> [flags]
 
+Objects:
+  refs   Tier 1: protected refs (block deletion / non-fast-forward)
+  paths  Tier 2: protected paths (block changes to matching paths)
+  hooks  Tier 3: custom subprocess hooks (pre-receive, post-receive)
+
 Objects + actions:
   refs add    --auth-db=<path> --tenant=<t> --repo=<r> --pattern=<glob>
               [--allow-deletion] [--allow-force-push]
@@ -26,6 +31,16 @@ Objects + actions:
   paths list   --auth-db=<path> --tenant=<t> --repo=<r> [--format=text|json]
   paths remove --auth-db=<path> --tenant=<t> --repo=<r>
                --refname-pattern=<glob> --path-pattern=<glob>
+  hooks add     --auth-db=<path> --tenant=<t> --repo=<r>
+                --trigger=pre-receive|post-receive --script=<name>
+                [--order=<n>] [--actor=<who>]
+  hooks list    --auth-db=<path> --tenant=<t> --repo=<r> [--trigger=<...>]
+  hooks remove  --auth-db=<path> --tenant=<t> --repo=<r>
+                --trigger=<...> --script=<name>
+  hooks enable  --auth-db=<path> --tenant=<t> --repo=<r>
+                --trigger=<...> --script=<name>
+  hooks disable --auth-db=<path> --tenant=<t> --repo=<r>
+                --trigger=<...> --script=<name>
 
 Output formats:
   text  one record per line, key=value style.
@@ -59,6 +74,8 @@ func runPolicy(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return runPolicyRefs(ctx, args[1:], stdout, stderr)
 	case "paths":
 		return runPolicyPaths(ctx, args[1:], stdout, stderr)
+	case "hooks":
+		return runPolicyHooks(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "policy: unknown object %q\n%s", args[0], policyUsage)
 		return 2

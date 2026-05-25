@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
+	"github.com/bucketvcs/bucketvcs/internal/hooks"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/policy"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
@@ -37,6 +38,12 @@ type EngineRequest struct {
 	// check and refUpdates map build. nil means no enforcement
 	// (pre-M14 behavior).
 	Policy *policy.Service
+
+	// Hooks is OPTIONAL. When non-nil, completeReceivePack runs pre-receive
+	// hooks at Step 8c (after M14/M16 policy succeeds) and enqueues
+	// post-receive hooks after Step 14 (markMirrorStale). nil means no hook
+	// execution (pre-M20 behavior).
+	Hooks *hooks.Service
 
 	// Webhooks is OPTIONAL. When non-nil, completeReceivePack enqueues
 	// EventPush after a successful BuildAndCommit (and EventPolicyRefRejected
