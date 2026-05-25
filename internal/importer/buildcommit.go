@@ -220,12 +220,17 @@ func BuildAndCommit(
 		return commitEmptyBody(ctx, r, currentBody, startVersion, actor, stage, store)
 	}
 
-	// Repack bareDir to a single canonical pack covering all reachable
-	// objects. Place output in a temp dir OUTSIDE bareDir so we don't
-	// pollute the mirror with the canonical pack — the mirror's pack
-	// lives at <bare>/objects/pack/, which is the inbound pack that
-	// IngestPack copied; the canonical we upload is a separate artifact.
-	tmpRepackDir, err := os.MkdirTemp("", "bucketvcs-repack-")
+	// Repack bareDir to a single canonical pack. The output lives in a temp
+	// dir that is SIBLING TO bareDir — outside bareDir (so we don't pollute
+	// the mirror's objects/pack/ with the canonical) but on the SAME
+	// FILESYSTEM (so git's pack-objects internal rename(2) from
+	// <bareDir>/objects/pack/tmp_pack_XXX to our output prefix doesn't fail
+	// with EXDEV on a cross-mount layout — e.g. bareDir on btrfs/ext4 and
+	// os.TempDir() on tmpfs is a common dev/prod combination). Previously
+	// os.MkdirTemp("", ...) defaulted to os.TempDir(), which silently fell
+	// back to a per-ref "ng <ref> internal-storage-error" report whenever
+	// the two paths landed on different mounts.
+	tmpRepackDir, err := os.MkdirTemp(filepath.Dir(bareDir), "bucketvcs-repack-")
 	if err != nil {
 		return nil, fmt.Errorf("importer: BuildAndCommit: tmpdir: %w", err)
 	}

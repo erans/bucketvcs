@@ -1019,3 +1019,36 @@ func TestBuildAndCommit_ShardedBody_RefnameValidation(t *testing.T) {
 		t.Fatalf("expected error on malformed refname through sharded path")
 	}
 }
+
+// TestBuildAndCommit_RepackTmpDirIsSiblingOfBareDir is a regression guard
+// for the M20.1 EXDEV bug. The canonical-repack staging directory MUST be
+// allocated as a sibling of bareDir (not under os.TempDir()) so git's
+// pack-objects internal rename(2) — from <bareDir>/objects/pack/tmp_pack_XXX
+// to our output prefix — stays on the same filesystem. On a cross-mount
+// layout (bareDir on btrfs/ext4 + os.TempDir() on tmpfs is common in
+// production) the rename otherwise fails with EXDEV and BuildAndCommit
+// reports the push as "ng <ref> internal-storage-error".
+//
+// We test via source inspection because behavior-level testing requires
+// either two filesystems (non-portable) or invasive production-code hooks.
+// If you change the os.MkdirTemp invocation in buildcommit.go and this
+// test fails, re-read the comment above that line — the same-fs guarantee
+// is load-bearing.
+func TestBuildAndCommit_RepackTmpDirIsSiblingOfBareDir(t *testing.T) {
+	src, err := os.ReadFile("buildcommit.go")
+	if err != nil {
+		t.Fatalf("read buildcommit.go: %v", err)
+	}
+	body := string(src)
+	const wantPattern = `os.MkdirTemp(filepath.Dir(bareDir), "bucketvcs-repack-")`
+	const banned = `os.MkdirTemp("", "bucketvcs-repack-")`
+	if !strings.Contains(body, wantPattern) {
+		t.Errorf("buildcommit.go does not allocate the repack tmp dir as a sibling of bareDir.\n"+
+			"Expected substring: %q\nRationale: cross-mount EXDEV (M20.1). bareDir + os.TempDir() may be different filesystems.",
+			wantPattern)
+	}
+	if strings.Contains(body, banned) {
+		t.Errorf("buildcommit.go contains banned pattern %q which defaults to os.TempDir() and breaks cross-mount setups (M20.1 regression).",
+			banned)
+	}
+}

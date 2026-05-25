@@ -77,6 +77,12 @@ func (s *Server) handleReceivePack(w http.ResponseWriter, r *http.Request, tenan
 		// Important: bytes may already be on the wire if the engine
 		// started writing. http.Error then produces a malformed response.
 		// M3 has the same limitation; preserve.
+		//
+		// Emit the underlying error to the logger BEFORE collapsing it to
+		// the generic 500 — otherwise the cause vanishes (this swallow
+		// hid the importer EXDEV bug for several milestones until M20.1).
+		s.logger.Error("receivepack: internal error",
+			"err", err, "tenant", tenant, "repo", repoID)
 		http.Error(w, "internal storage error", http.StatusInternalServerError)
 	}
 }

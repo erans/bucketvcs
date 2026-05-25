@@ -418,6 +418,19 @@ func completeReceivePack(eng *EngineRequest, w io.Writer, m *mirror.Mirror, rp *
 		if strings.Contains(emsg, "stale manifest") || strings.Contains(emsg, "lost the CAS race") {
 			reason = "stale-manifest"
 		}
+		// Log the underlying error BEFORE collapsing it into the per-ref
+		// "ng" status — otherwise the cause vanishes. The wire response
+		// surfaces only the short "reason" word; without this logger the
+		// importer's actual error (EXDEV, sqlite disk full, S3 5xx, etc.)
+		// would silently disappear. Stale-manifest is a benign CAS retry
+		// path so it stays at INFO; everything else is at ERROR.
+		level := slog.LevelError
+		if reason == "stale-manifest" {
+			level = slog.LevelInfo
+		}
+		eng.loggerOrDefault().LogAttrs(ctx, level, "receivepack: BuildAndCommit failed",
+			slog.String("tenant", tenant), slog.String("repo", repoID),
+			slog.String("reason", reason), slog.String("err", emsg))
 		for i, u := range rp.Updates {
 			if statuses[i] == "" {
 				statuses[i] = "ng " + u.Refname + " " + reason
