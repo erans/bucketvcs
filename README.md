@@ -54,8 +54,9 @@ Runs on **S3, R2, GCS, and Azure Blob** (all first-class), plus a local-filesyst
 
 ## Get started
 
-A complete end-to-end walkthrough — bucket setup, first push, clone — lives in the
-**[Cloudflare R2 quickstart](docs/m5-cloud-quickstart.md)**.
+A complete end-to-end walkthrough — install, a repository, access control, the
+gateway, and your first push (on local disk or any cloud backend) — lives in the
+**[Quickstart](docs/quickstart.md)**.
 
 The short version:
 
