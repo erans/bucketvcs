@@ -34,7 +34,11 @@ import (
 )
 
 const defaultMirrorSubdir = "bucketvcs/mirrors"
-const buildVersion = "0.1-dev" // matches gateway agent= advertisement
+
+// buildVersion is the version advertised by the gateway (agent=) and reported
+// by the CLI. Defaults to a dev marker; overridden at release time via
+// -ldflags "-X main.buildVersion=<tag>".
+var buildVersion = "0.1-dev" // matches gateway agent= advertisement
 
 // runServe is the M4 serve entry point. The legacy M3-era
 // --auth-token / --auth-scope / --auth-mode flags were removed; auth is

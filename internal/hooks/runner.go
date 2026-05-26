@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
-	"syscall"
 	"time"
 )
 
@@ -120,20 +119,12 @@ func (r *Runner) Run(ctx context.Context, bareDir, scriptName string, stdin []by
 	// --rlimit-as inside buildArgv.
 	cmd.SysProcAttr = sysProcAttrForRunner(r.cfg)
 
-	// On context cancel: send SIGTERM to the whole process group (Setpgid is
-	// set in sysProcAttrForRunner on Linux), so a script that spawned children
-	// like `sleep` can be killed cleanly. After WaitDelay grace, exec will
-	// SIGKILL whatever's still alive and close the I/O pipes.
+	// On context cancel: terminate the running hook. On Unix this signals the
+	// whole process group (Setpgid is set in sysProcAttrForRunner on Linux) so
+	// children spawned by the script are killed too; on Windows it kills the
+	// process directly. After WaitDelay grace, exec SIGKILLs/closes the pipes.
 	cmd.Cancel = func() error {
-		if cmd.Process != nil {
-			// Negative PID = signal the process group on Unix. On platforms
-			// without Setpgid support this falls back to signaling just the
-			// leader, which is still better than nothing.
-			if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil {
-				_ = cmd.Process.Signal(syscall.SIGTERM)
-			}
-		}
-		return nil
+		return cancelHookProcess(cmd)
 	}
 	cmd.WaitDelay = time.Second
 

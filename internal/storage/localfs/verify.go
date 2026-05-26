@@ -12,7 +12,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"syscall"
 )
 
 // ErrLockedByLiveProcess is returned by package-level Verify when the
@@ -168,20 +167,9 @@ func isLockHolderAlive(lc lockfileContent) (bool, error) {
 	if lc.PID <= 0 {
 		return false, nil
 	}
-	// POSIX kill(pid, 0) returns nil if the process exists and we have
-	// permission to signal it; ESRCH if the PID is dead; EPERM if
-	// alive but we can't signal. Treat EPERM as alive (conservative).
-	err := syscall.Kill(lc.PID, 0)
-	if err == nil {
-		return true, nil
-	}
-	if errors.Is(err, syscall.ESRCH) {
-		return false, nil
-	}
-	if errors.Is(err, syscall.EPERM) {
-		return true, nil
-	}
-	return false, err
+	// Liveness probe is platform-specific (see liveness_unix.go /
+	// liveness_windows.go).
+	return processAlive(lc.PID)
 }
 
 // walkAndReconcile walks objects/ and calls reconcile for each non-
