@@ -23,6 +23,13 @@ jobs:
           go-version: "1.25"
           cache: true
 
+      # Several test fixtures shell out to `git commit` / `--amend`, which
+      # need a committer identity the bare runner doesn't have.
+      - name: Configure git identity
+        run: |
+          git config --global user.email "ci@bucketvcs.invalid"
+          git config --global user.name "bucketvcs CI"
+
       - name: go vet
         run: go vet ./...
 

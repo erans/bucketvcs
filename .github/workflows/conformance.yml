@@ -27,6 +27,15 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # The `secrets` context cannot be referenced in a step `if:` — doing so is a
+    # workflow-validation error that fails the entire file to start (taking the
+    # push-triggered emulators job down with it). Map the gating secrets to
+    # job-level env and gate the steps on env instead.
+    env:
+      HAS_S3: ${{ secrets.AWS_S3_BUCKET }}
+      HAS_R2: ${{ secrets.R2_BUCKET }}
+      HAS_GCS: ${{ secrets.GCS_BUCKET }}
+      HAS_AZURE: ${{ secrets.AZURE_CONTAINER }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -35,7 +44,7 @@ jobs:
           cache: true
 
       - name: AWS S3 conformance
-        if: ${{ secrets.AWS_S3_BUCKET != '' }}
+        if: ${{ env.HAS_S3 != '' }}
         env:
           BUCKETVCS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
           BUCKETVCS_S3_REGION: ${{ secrets.AWS_S3_REGION }}
@@ -44,7 +53,7 @@ jobs:
         run: go test -count=1 -timeout=15m ./internal/storage/s3compat
 
       - name: Cloudflare R2 conformance
-        if: ${{ secrets.R2_BUCKET != '' }}
+        if: ${{ env.HAS_R2 != '' }}
         env:
           BUCKETVCS_R2_BUCKET: ${{ secrets.R2_BUCKET }}
           BUCKETVCS_R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
@@ -54,7 +63,7 @@ jobs:
         run: go test -count=1 -timeout=15m ./internal/storage/s3compat
 
       - name: GCS conformance
-        if: ${{ secrets.GCS_BUCKET != '' }}
+        if: ${{ env.HAS_GCS != '' }}
         env:
           BUCKETVCS_GCS_BUCKET: ${{ secrets.GCS_BUCKET }}
           GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/gcs-creds.json
@@ -63,7 +72,7 @@ jobs:
           go test -count=1 -timeout=15m ./internal/storage/gcs
 
       - name: Azure Blob conformance
-        if: ${{ secrets.AZURE_CONTAINER != '' }}
+        if: ${{ env.HAS_AZURE != '' }}
         env:
           BUCKETVCS_AZURE_CONTAINER: ${{ secrets.AZURE_CONTAINER }}
           BUCKETVCS_AZURE_ACCOUNT: ${{ secrets.AZURE_ACCOUNT }}

@@ -16,6 +16,11 @@ jobs:
         with:
           go-version: "1.25"
           cache: true
+      # Test fixtures shell out to `git commit`; the runner needs an identity.
+      - name: Configure git identity
+        run: |
+          git config --global user.email "ci@bucketvcs.invalid"
+          git config --global user.name "bucketvcs CI"
       - run: go vet ./...
       - run: go test -count=1 ./...
 
