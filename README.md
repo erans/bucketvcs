@@ -1,48 +1,74 @@
 # bucketvcs
 
-A Git-protocol-compatible version-control server backed by cloud object storage.
+### Your repositories live in your bucket.
 
-## Canonical storage backends
+**bucketvcs is a Git server backed directly by cloud object storage** — Amazon S3, Cloudflare R2, Google Cloud Storage, or Azure Blob. No database cluster holding your Git objects. No ever-growing block-storage volume to snapshot and babysit. The bucket *is* the repository.
 
-All four backends implement the `internal/storage.ObjectStore` interface and
-pass the full §29 conformance suite.
+Point stock `git` at it over HTTPS or SSH, push, and your history lands in object storage that's effectively infinite, eleven-nines durable, and priced by the gigabyte.
 
-| URL scheme      | Provider               | Status   |
-|-----------------|------------------------|----------|
-| `s3://`         | AWS S3                 | canonical (§11.1, M7) |
-| `r2://`         | Cloudflare R2          | canonical (§11.1, M5) |
-| `gcs://`        | Google Cloud Storage   | canonical (§11.1, M7) |
-| `azureblob://`  | Azure Blob Storage     | canonical (§11.1, M7) |
+---
 
-Local filesystem (`localfs`) is available for development and testing.
-It does not require credentials and passes the same conformance suite.
+## Why bucketvcs
 
-## Quick start
+### 💸 Object-storage economics
+Version control at the price of a bucket. Pay per-GB at S3/R2/GCS/Azure rates instead of provisioning, growing, and backing up block volumes. On Cloudflare R2 there are **no egress fees** — clone and fetch all day. Durability and scale are your provider's problem, not yours.
 
-See [`docs/m5-cloud-quickstart.md`](docs/m5-cloud-quickstart.md) for an
-end-to-end walkthrough using Cloudflare R2.
+### 🔐 Your data, your account
+Bring your own bucket. Your code sits in **your** cloud account, under **your** encryption keys and **your** access policies — not on a vendor's servers. Delete the deployment tomorrow and your repositories are still right where you left them.
 
-## CLI subcommands
+### 🧩 Real Git, no special client
+Native **HTTPS and SSH**, Git **protocol v2**, and full compatibility with stock `git` and standard credential helpers. Nothing to install on developer machines. It behaves like the Git remote your team already knows.
 
-- `bucketvcs export` — export a repository to a Git pack bundle
-- `bucketvcs gc` — operator-driven garbage collection (orphan packs, unreachable packs, stale indexes, orphan tx records) per spec §25 / §43.6
-- `bucketvcs import` — import a Git pack bundle into a repository
-- `bucketvcs init` — initialize a new repository
-- `bucketvcs inspect-manifest` — dump the current root manifest (includes `reachability` block in `--json` mode for M10 repos)
-- `bucketvcs maintenance` — operator-driven repack + commit-graph / object-map refresh + reachability compaction + bundle generation per spec §15.3 / §16.3 (M9/M10/M11)
-- `bucketvcs negotiate` — ad-hoc debug tool for upload-pack negotiation via the M10 reachability index
-- `bucketvcs serve` — start the Git-protocol HTTPS/SSH gateway; advertises M11 bundle-URI (§16.3) and packfile-URI (§16.4) to v2-capable clients via direct signed URLs (cloud backends) or HMAC-gated gateway-proxied endpoints (localfs and audit-strict single-repo deployments); serves the M13 Git LFS Batch + Verify + SSH `git-lfs-authenticate` surface
+### ⚡ Fast clones at scale
+Protocol-v2 **bundle-URI** and **packfile-URI** acceleration offload heavy initial clones to signed object-storage URLs (CDN-frontable on cloud backends), so the gateway isn't streaming gigabytes on every onboarding.
 
-## Documentation
+### 🔋 Batteries included
+Not a toy. bucketvcs ships the things a real Git host needs:
 
-- [`docs/`](docs/) — design specs, quickstart guides, milestone plans
-- [`docs/m10-reachability-operator-guide.md`](docs/m10-reachability-operator-guide.md) — M10 reachability index and delta-chain compaction
-- [`docs/m11-bundles-operator-guide.md`](docs/m11-bundles-operator-guide.md) — M11 bundle-URI and packfile-URI acceleration
-- [`docs/m13-lfs-operator-guide.md`](docs/m13-lfs-operator-guide.md) — M13 Git LFS: direct/proxied transfer, observability, runbook, deferred work
-- [`internal/gc/README.md`](internal/gc/README.md) — garbage-collection package overview
-- [`internal/reachability/`](internal/reachability/) — reachability index (`.bvom` + `.bvcg` + `.bvrd` delta chain); `Set`, `Load`, `WalkAncestors`, `GenLookup`
-- [`internal/storage/README.md`](internal/storage/README.md) — storage
-  interface contract and conformance suite
-- [`internal/storage/s3compat/README.md`](internal/storage/s3compat/README.md) — AWS S3 / R2 adapter
-- [`internal/storage/gcs/README.md`](internal/storage/gcs/README.md) — GCS adapter
-- [`internal/storage/azureblob/README.md`](internal/storage/azureblob/README.md) — Azure Blob adapter
+- **Git LFS** — batch transfer, file locks, per-tenant quotas, and LFS garbage collection
+- **Keyless CI** — OIDC token exchange (RFC 8693): your pipeline trades its IdP identity for a short-lived, repo-scoped token, so there are no long-lived secrets to leak
+- **Fine-grained auth** — scoped access tokens with rotation, SSH user & deploy keys, and per-IP rate-limiting on credential failures
+- **Policy & governance** — protected refs, protected paths, custom pre/post-receive hooks, and signed, retryable **webhooks**
+- **Self-maintaining** — background repack, commit-graph/reachability maintenance, and operator-driven garbage collection keep storage tight
+
+### 🛠️ Operationally boring (the good kind)
+A single pure-Go binary. The only local state is a small SQLite file for auth and metadata — your **Git data never touches a database**. The gateway is easy to run, easy to scale out, and has nothing stateful to lose.
+
+---
+
+## How it compares
+
+Traditional self-hosted Git (GitHub Enterprise, GitLab, Gitea) keeps your repositories on a database and a block-storage filesystem you have to size, monitor, snapshot, and migrate. bucketvcs makes the object store the source of truth instead:
+
+|                        | Traditional Git host        | bucketvcs                          |
+|------------------------|-----------------------------|------------------------------------|
+| Repo storage           | Block volume + database     | Object storage (the bucket *is* it) |
+| Scaling storage        | Resize/migrate volumes      | Unbounded, automatic                |
+| Durability & backup    | Your snapshots & ops        | Provider's (eleven 9s)              |
+| Data ownership         | Vendor-managed              | Your cloud account, your keys       |
+| Footprint              | Services + DB + storage     | One Go binary + a bucket            |
+
+Runs on **S3, R2, GCS, and Azure Blob** (all first-class), plus a local-filesystem backend for development that needs no credentials.
+
+---
+
+## Get started
+
+A complete end-to-end walkthrough — bucket setup, first push, clone — lives in the
+**[Cloudflare R2 quickstart](docs/m5-cloud-quickstart.md)**.
+
+The short version:
+
+```bash
+bucketvcs init   --store s3://my-bucket my-org my-repo
+bucketvcs serve  --store s3://my-bucket --addr :8080
+git push https://my-host/my-org/my-repo main
+```
+
+---
+
+## Status
+
+bucketvcs is open-source and built for production use as a **Git-protocol server and CLI**. It is a backend — there is **no web UI yet**; you administer it through the `bucketvcs` command and drive Git over HTTPS/SSH.
+
+Run `bucketvcs <command> --help` for the full command surface, and browse **[`docs/`](docs/)** for design specs, operator guides, and quickstarts.
