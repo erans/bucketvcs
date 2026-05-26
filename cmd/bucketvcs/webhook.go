@@ -31,6 +31,10 @@ Objects + actions:
   delivery show    --auth-db=<path> --id=<uuid>
   delivery replay  --auth-db=<path> --id=<uuid>
 
+  prune            --auth-db=<path> [--delivered-older-than=<dur>]
+                   [--dead-letter-older-than=<dur>] [--dry-run]
+                   [--actor=<string>]
+
 Output formats:
   text  one record per line, key=value style.
   json  NDJSON — one JSON object per line (no enclosing array). Empty
@@ -61,6 +65,8 @@ func runWebhook(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return runWebhookEndpoint(ctx, args[1:], stdout, stderr)
 	case "delivery":
 		return runWebhookDelivery(ctx, args[1:], stdout, stderr)
+	case "prune":
+		return runWebhookPrune(ctx, args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "webhook: unknown object %q\n%s", args[0], webhookUsage)
 		return 2

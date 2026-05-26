@@ -18,7 +18,7 @@ import (
 
 func runRepo(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: bucketvcs repo <register|grant|revoke|public|list|delete|deploy-key>")
+		fmt.Fprintln(stderr, "usage: bucketvcs repo <register|grant|revoke|public|list|delete|rename|deploy-key>")
 		return 2
 	}
 	sub, rest := args[0], args[1:]
@@ -35,6 +35,8 @@ func runRepo(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return repoList(ctx, rest, stdout, stderr)
 	case "delete":
 		return repoDelete(ctx, rest, stdout, stderr)
+	case "rename":
+		return repoRename(ctx, rest, stdout, stderr)
 	case "deploy-key":
 		return runRepoDeployKey(ctx, rest, stdout, stderr)
 	default:

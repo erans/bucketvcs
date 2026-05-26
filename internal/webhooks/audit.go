@@ -3,6 +3,7 @@ package webhooks
 import (
 	"context"
 	"log/slog"
+	"time"
 )
 
 // EmitDelivered logs the webhooks.delivered audit event after a 2xx response.
@@ -111,6 +112,25 @@ func EmitEndpointSecretRotated(ctx context.Context, logger *slog.Logger,
 		slog.Int64("endpoint_id", endpointID),
 		slog.String("tenant", tenant),
 		slog.String("repo", repo),
+		slog.String("actor", actor),
+	)
+}
+
+// EmitWebhookPruned logs the webhooks.pruned audit event after a Prune
+// sweep. dryRun=true indicates no rows were actually deleted.
+func EmitWebhookPruned(ctx context.Context, logger *slog.Logger,
+	deliveredRows, deadLetterRows int64,
+	deliveredCutoff, deadLetterCutoff time.Time,
+	dryRun bool, actor string) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.LogAttrs(ctx, slog.LevelInfo, "webhooks.pruned",
+		slog.Int64("delivered_rows", deliveredRows),
+		slog.Int64("dead_letter_rows", deadLetterRows),
+		slog.Int64("delivered_cutoff_unix", deliveredCutoff.Unix()),
+		slog.Int64("dead_letter_cutoff_unix", deadLetterCutoff.Unix()),
+		slog.Bool("dry_run", dryRun),
 		slog.String("actor", actor),
 	)
 }

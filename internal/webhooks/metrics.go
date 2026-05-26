@@ -52,3 +52,35 @@ func EmitEndpointsActiveGauge(ctx context.Context, logger *slog.Logger, count in
 		slog.Int64("value", count),
 	)
 }
+
+// EmitWebhookPrunedMetric counts pruned-rows per outcome. Outcomes:
+// delivered, dead_letter. Emitted once per outcome per Prune call (callers
+// emit both even when the count is zero).
+func EmitWebhookPrunedMetric(ctx context.Context, logger *slog.Logger, outcome string, count int64) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.LogAttrs(ctx, slog.LevelInfo, "metric",
+		slog.String("name", "webhook_deliveries_pruned_total"),
+		slog.String("outcome", outcome),
+		slog.Int64("value", count),
+	)
+}
+
+// EmitRepoRenamedMetric counts repo-rename outcomes. Emitted once per
+// `bucketvcs repo rename` invocation. Outcomes:
+//   - ok                  : rename succeeded
+//   - collision_auth      : destination row already present in auth.db
+//   - collision_storage   : storage already has keys under the new prefix
+//   - not_found           : source repo not registered (or vanished mid-rename)
+//   - cross_tenant        : rejected at CLI surface (slash in <new-name>)
+func EmitRepoRenamedMetric(ctx context.Context, logger *slog.Logger, outcome string) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.LogAttrs(ctx, slog.LevelInfo, "metric",
+		slog.String("name", "repo_renamed_total"),
+		slog.String("outcome", outcome),
+		slog.Int("value", 1),
+	)
+}
