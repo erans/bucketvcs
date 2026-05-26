@@ -172,6 +172,14 @@ type Options struct {
 	// when the gateway sits behind a trusted reverse proxy that overwrites
 	// the header on ingress; otherwise clients can spoof their IP. M18.
 	TrustProxyHeaders bool
+
+	// OIDCEnabled mounts POST /_oidc/token (M22). Requires OIDCStore and
+	// OIDCVerifier when true.
+	OIDCEnabled bool
+	// OIDCStore resolves issuers/rules and mints repo-bound tokens.
+	OIDCStore OIDCExchangeStore
+	// OIDCVerifier verifies id_token signatures + standard claims.
+	OIDCVerifier OIDCVerifier
 }
 
 // Server implements http.Handler.
@@ -402,6 +410,12 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 	}
 	if s.lfsObjectHandler != nil {
 		s.mux.Handle("/_lfs/", s.lfsObjectHandler)
+	}
+	if opts.OIDCEnabled {
+		if opts.OIDCStore == nil || opts.OIDCVerifier == nil {
+			return nil, fmt.Errorf("gateway: OIDCEnabled requires OIDCStore and OIDCVerifier")
+		}
+		s.mux.HandleFunc("/_oidc/token", s.handleOIDCExchange)
 	}
 	s.mux.HandleFunc("/", s.routeRoot)
 	return s, nil

@@ -78,7 +78,7 @@ func newDiffharnessAuthStoreWithAdminToken(t *testing.T, tenant, repo string) (s
 	if err != nil {
 		t.Fatalf("HashSecret: %v", err)
 	}
-	if err := s.CreateToken(ctx, id, uid, hash, "diffharness", nil, auth.ScopeLegacy); err != nil {
+	if err := s.CreateToken(ctx, id, uid, hash, "diffharness", nil, auth.ScopeLegacy, "", "", ""); err != nil {
 		t.Fatalf("CreateToken: %v", err)
 	}
 	return s, adminName, tokStr

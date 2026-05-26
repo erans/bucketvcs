@@ -40,8 +40,8 @@ func TestOpen_CreatesFileAndAppliesMigrations(t *testing.T) {
 	if err := s.db.QueryRow("SELECT MAX(version) FROM schema_version").Scan(&v); err != nil {
 		t.Fatalf("schema_version: %v", err)
 	}
-	if v != 9 {
-		t.Errorf("schema_version = %d, want 9", v)
+	if v != 10 {
+		t.Errorf("schema_version = %d, want 10", v)
 	}
 }
 
@@ -201,8 +201,10 @@ func TestListUsers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListUsers: %v", err)
 	}
+	// 2 = alice + bob. The _oidc system user (seeded by migration 0010) is
+	// filtered from ListUsers and must not appear here.
 	if len(got) != 2 {
-		t.Fatalf("len = %d, want 2", len(got))
+		t.Fatalf("len = %d, want 2 (alice + bob; _oidc is hidden from list)", len(got))
 	}
 }
 
@@ -214,7 +216,7 @@ func TestCreateToken_AndGet(t *testing.T) {
 
 	exp := time.Now().Add(24 * time.Hour).Unix()
 	err := s.CreateToken(ctx, "tokid001AAAAAAAAAAAAAAAA", uid, "$argon2id$v=19$m=65536,t=3,p=4$AAAA$BBBB",
-		"laptop", &exp, auth.ScopeLegacy)
+		"laptop", &exp, auth.ScopeLegacy, "", "", "")
 	if err != nil {
 		t.Fatalf("CreateToken: %v", err)
 	}
@@ -235,7 +237,7 @@ func TestRevokeToken(t *testing.T) {
 	defer s.Close()
 	ctx := context.Background()
 	uid, _ := s.CreateUser(ctx, "alice", false)
-	_ = s.CreateToken(ctx, "tokid001AAAAAAAAAAAAAAAA", uid, "$argon2id$x", "", nil, auth.ScopeLegacy)
+	_ = s.CreateToken(ctx, "tokid001AAAAAAAAAAAAAAAA", uid, "$argon2id$x", "", nil, auth.ScopeLegacy, "", "", "")
 	if err := s.RevokeToken(ctx, "tokid001AAAAAAAAAAAAAAAA"); err != nil {
 		t.Fatalf("RevokeToken: %v", err)
 	}
@@ -250,8 +252,8 @@ func TestListTokensForUser(t *testing.T) {
 	defer s.Close()
 	ctx := context.Background()
 	uid, _ := s.CreateUser(ctx, "alice", false)
-	_ = s.CreateToken(ctx, "tok1AAAAAAAAAAAAAAAAAAAA", uid, "$argon2id$1", "a", nil, auth.ScopeLegacy)
-	_ = s.CreateToken(ctx, "tok2AAAAAAAAAAAAAAAAAAAA", uid, "$argon2id$2", "b", nil, auth.ScopeLegacy)
+	_ = s.CreateToken(ctx, "tok1AAAAAAAAAAAAAAAAAAAA", uid, "$argon2id$1", "a", nil, auth.ScopeLegacy, "", "", "")
+	_ = s.CreateToken(ctx, "tok2AAAAAAAAAAAAAAAAAAAA", uid, "$argon2id$2", "b", nil, auth.ScopeLegacy, "", "", "")
 	rows, err := s.ListTokensForUser(ctx, "alice")
 	if err != nil {
 		t.Fatalf("ListTokensForUser: %v", err)
@@ -267,7 +269,7 @@ func TestResolveTokenIDPrefix(t *testing.T) {
 	ctx := context.Background()
 	uid, _ := s.CreateUser(ctx, "alice", false)
 	full := "tokABCDE0000000000000000"
-	_ = s.CreateToken(ctx, full, uid, "$argon2id$1", "", nil, auth.ScopeLegacy)
+	_ = s.CreateToken(ctx, full, uid, "$argon2id$1", "", nil, auth.ScopeLegacy, "", "", "")
 	got, err := s.ResolveTokenIDPrefix(ctx, "tokABCDE")
 	if err != nil {
 		t.Fatalf("ResolveTokenIDPrefix: %v", err)
@@ -277,7 +279,7 @@ func TestResolveTokenIDPrefix(t *testing.T) {
 	}
 
 	// Unique-prefix violation: add a second token whose id shares the prefix.
-	_ = s.CreateToken(ctx, "tokABCDE9999999999999999", uid, "$argon2id$2", "", nil, auth.ScopeLegacy)
+	_ = s.CreateToken(ctx, "tokABCDE9999999999999999", uid, "$argon2id$2", "", nil, auth.ScopeLegacy, "", "", "")
 	if _, err := s.ResolveTokenIDPrefix(ctx, "tokABC"); !errors.Is(err, ErrAmbiguousPrefix) {
 		t.Fatalf("want ErrAmbiguousPrefix, got %v", err)
 	}
@@ -290,7 +292,7 @@ func TestDeleteUser_CascadesTokens(t *testing.T) {
 	// Create another admin so the user-delete is allowed.
 	_, _ = s.CreateUser(ctx, "root", true)
 	uid, _ := s.CreateUser(ctx, "alice", false)
-	_ = s.CreateToken(ctx, "tok1AAAAAAAAAAAAAAAAAAAA", uid, "$argon2id$1", "", nil, auth.ScopeLegacy)
+	_ = s.CreateToken(ctx, "tok1AAAAAAAAAAAAAAAAAAAA", uid, "$argon2id$1", "", nil, auth.ScopeLegacy, "", "", "")
 	if err := s.DeleteUser(ctx, "alice"); err != nil {
 		t.Fatalf("DeleteUser: %v", err)
 	}
@@ -459,7 +461,7 @@ func TestVerifyCredential_HappyPath(t *testing.T) {
 	uid, _ := s.CreateUser(ctx, "alice", false)
 	tok, id, secret, _ := auth.GenerateToken()
 	hash, _ := auth.HashSecret(secret)
-	_ = s.CreateToken(ctx, id, uid, hash, "laptop", nil, auth.ScopeLegacy)
+	_ = s.CreateToken(ctx, id, uid, hash, "laptop", nil, auth.ScopeLegacy, "", "", "")
 
 	got, gotID, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
 	if err != nil {
@@ -480,7 +482,7 @@ func TestVerifyCredential_BadPassword(t *testing.T) {
 	uid, _ := s.CreateUser(ctx, "alice", false)
 	_, id, _, _ := auth.GenerateToken()
 	hash, _ := auth.HashSecret("real-secret-string")
-	_ = s.CreateToken(ctx, id, uid, hash, "", nil, auth.ScopeLegacy)
+	_ = s.CreateToken(ctx, id, uid, hash, "", nil, auth.ScopeLegacy, "", "", "")
 
 	_, _, _, err := s.VerifyCredential(ctx, auth.BasicPassword{
 		Username: "alice",
@@ -510,7 +512,7 @@ func TestVerifyCredential_Expired(t *testing.T) {
 	tok, id, secret, _ := auth.GenerateToken()
 	hash, _ := auth.HashSecret(secret)
 	past := time.Now().Add(-time.Hour).Unix()
-	_ = s.CreateToken(ctx, id, uid, hash, "", &past, auth.ScopeLegacy)
+	_ = s.CreateToken(ctx, id, uid, hash, "", &past, auth.ScopeLegacy, "", "", "")
 	_, _, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
 	if !errors.Is(err, auth.ErrTokenExpired) {
 		t.Fatalf("want ErrTokenExpired, got %v", err)
@@ -524,7 +526,7 @@ func TestVerifyCredential_Revoked(t *testing.T) {
 	uid, _ := s.CreateUser(ctx, "alice", false)
 	tok, id, secret, _ := auth.GenerateToken()
 	hash, _ := auth.HashSecret(secret)
-	_ = s.CreateToken(ctx, id, uid, hash, "", nil, auth.ScopeLegacy)
+	_ = s.CreateToken(ctx, id, uid, hash, "", nil, auth.ScopeLegacy, "", "", "")
 	_ = s.RevokeToken(ctx, id)
 	_, _, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
 	if !errors.Is(err, auth.ErrTokenRevoked) {
@@ -539,7 +541,7 @@ func TestVerifyCredential_Disabled(t *testing.T) {
 	uid, _ := s.CreateUser(ctx, "alice", false)
 	tok, id, secret, _ := auth.GenerateToken()
 	hash, _ := auth.HashSecret(secret)
-	_ = s.CreateToken(ctx, id, uid, hash, "", nil, auth.ScopeLegacy)
+	_ = s.CreateToken(ctx, id, uid, hash, "", nil, auth.ScopeLegacy, "", "", "")
 	_ = s.SetUserDisabled(ctx, "alice", true)
 	_, _, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "alice", Password: tok})
 	if !errors.Is(err, auth.ErrUserDisabled) {
@@ -555,7 +557,7 @@ func TestVerifyCredential_UsernameMustMatch(t *testing.T) {
 	uid, _ := s.CreateUser(ctx, "alice", false)
 	tok, id, secret, _ := auth.GenerateToken()
 	hash, _ := auth.HashSecret(secret)
-	_ = s.CreateToken(ctx, id, uid, hash, "", nil, auth.ScopeLegacy)
+	_ = s.CreateToken(ctx, id, uid, hash, "", nil, auth.ScopeLegacy, "", "", "")
 	// Wrong username, valid token: reject. (Spec §30.1: username + token-as-password.)
 	_, _, _, err := s.VerifyCredential(ctx, auth.BasicPassword{Username: "bob", Password: tok})
 	if !errors.Is(err, auth.ErrInvalidCredential) {
@@ -570,7 +572,7 @@ func TestTouchTokenUsage(t *testing.T) {
 	uid, _ := s.CreateUser(ctx, "alice", false)
 	_, id, secret, _ := auth.GenerateToken()
 	hash, _ := auth.HashSecret(secret)
-	_ = s.CreateToken(ctx, id, uid, hash, "", nil, auth.ScopeLegacy)
+	_ = s.CreateToken(ctx, id, uid, hash, "", nil, auth.ScopeLegacy, "", "", "")
 	if err := s.TouchTokenUsage(ctx, id); err != nil {
 		t.Fatalf("TouchTokenUsage: %v", err)
 	}

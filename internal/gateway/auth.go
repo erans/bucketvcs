@@ -119,9 +119,9 @@ func RunAuth(w http.ResponseWriter, r *http.Request, store auth.Store, rr *Route
 
 	var perm auth.Perm
 	if scope != nil {
-		// Scoped credential (currently only deploy-key SSH; M4 BasicPassword
-		// never sets this). The credential is only valid for one specific
-		// (tenant, repo). Use the pre-authorized permission from the scope.
+		// Scoped credential: deploy-key SSH (M6) or an OIDC-minted token (M22)
+		// on the BasicPassword path. The credential is valid for exactly one
+		// (tenant, repo); use the pre-authorized permission from the scope.
 		perm = scope.Perm
 	} else {
 		perm, err = store.LookupRepoPerm(ctx, actor, rr.Tenant, rr.Repo)

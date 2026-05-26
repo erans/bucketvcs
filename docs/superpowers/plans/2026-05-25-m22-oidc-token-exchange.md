@@ -77,18 +77,18 @@ Create `internal/oidc/doc.go`:
 package oidc
 ```
 
-- [ ] **Step 2: Promote go-jose to the direct require block**
+- [ ] **Step 2: Confirm go-jose is available (promotion is automatic at Task 2)**
 
-In `go.mod`, move `github.com/go-jose/go-jose/v4 v4.1.4` out of the `// indirect` require block into the first (direct) `require (...)` block. Then run:
+`github.com/go-jose/go-jose/v4` is already in `go.sum` (pulled in transitively). It becomes a *direct* dependency automatically when `go mod tidy` runs after Task 2 adds the first direct import — a manual move into the direct `require` block now would just be reverted by tidy, because nothing imports it yet. So do NOT hand-edit go.mod here; only confirm the build is green:
 
-Run: `cd /home/eran/work/bucketvcs && go mod tidy && go build ./...`
-Expected: builds clean; `go-jose/go-jose/v4` no longer has `// indirect` comment in go.mod.
+Run: `go build ./...` (from the repo/worktree root)
+Expected: builds clean. (go.mod is unchanged by this task.)
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add go.mod go.sum internal/oidc/doc.go
-git commit -m "M22: promote go-jose/v4 to direct dep; add internal/oidc skeleton"
+git add internal/oidc/doc.go
+git commit -m "M22: add internal/oidc package skeleton"
 ```
 
 ---
@@ -429,10 +429,15 @@ Note: `(*jose.JSONWebKeySet).Verify` accepts a `*JSONWebKeySet` and tries the ke
 Run: `go test ./internal/oidc/ -run TestVerifySignature`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Tidy modules (promotes go-jose to direct) + commit**
+
+Now that `verify.go` imports `go-jose/v4` directly, run `go mod tidy` — it drops the `// indirect` marker on `github.com/go-jose/go-jose/v4`, making it a direct dependency (no new module is downloaded; it was already in go.sum).
+
+Run: `go mod tidy && go build ./...`
+Expected: builds clean; `go-jose/go-jose/v4` now appears without `// indirect` in go.mod.
 
 ```bash
-git add internal/oidc/verify.go internal/oidc/verify_test.go internal/oidc/testkeys_test.go
+git add internal/oidc/verify.go internal/oidc/verify_test.go internal/oidc/testkeys_test.go go.mod go.sum
 git commit -m "M22: oidc JWS signature verification with asymmetric alg allowlist"
 ```
 

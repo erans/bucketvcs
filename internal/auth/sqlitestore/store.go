@@ -66,6 +66,11 @@ func (s *Store) DB() *sql.DB { return s.db }
 // leave the system with zero admins.
 var ErrLastAdmin = errors.New("sqlitestore: refusing to delete the last admin")
 
+// ErrReservedUser is returned when an operation targets a reserved system
+// user (e.g. the OIDC minting principal "_oidc") that must not be disabled
+// or deleted.
+var ErrReservedUser = errors.New("sqlitestore: cannot modify reserved system user")
+
 // User is the row shape returned by user-lookup methods.
 type User struct {
 	ID         string
@@ -133,10 +138,13 @@ func (s *Store) GetUserByName(ctx context.Context, name string) (*auth.User, err
 	return u, nil
 }
 
-// ListUsers returns all users ordered by name.
+// ListUsers returns all non-reserved users ordered by name. The reserved
+// system user "_oidc" is excluded so it does not appear in operator-facing
+// output or CLI listings.
 func (s *Store) ListUsers(ctx context.Context) ([]*User, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, is_admin, created_at, disabled_at FROM users ORDER BY name`,
+		`SELECT id, name, is_admin, created_at, disabled_at FROM users WHERE name != ? ORDER BY name`,
+		oidcSystemUserID,
 	)
 	if err != nil {
 		return nil, err
@@ -172,6 +180,9 @@ func (s *Store) ListUsers(ctx context.Context) ([]*User, error) {
 // admin" means. Re-enabling has no such guard: re-enabling can only
 // strictly increase the count of enabled admins.
 func (s *Store) SetUserDisabled(ctx context.Context, name string, disabled bool) error {
+	if name == oidcSystemUserID {
+		return ErrReservedUser
+	}
 	if disabled {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
@@ -232,6 +243,9 @@ func (s *Store) SetUserDisabled(ctx context.Context, name string, disabled bool)
 // can't authenticate, so leaving "the last admin disabled" would lock
 // every operator out.
 func (s *Store) DeleteUser(ctx context.Context, name string) error {
+	if name == oidcSystemUserID {
+		return ErrReservedUser
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -314,6 +328,12 @@ type Token struct {
 	LastUsedAt *int64
 	RevokedAt  *int64
 	Scopes     auth.TokenScope // M17
+
+	// Repo binding (M22). All three set together for OIDC-minted tokens; all
+	// empty for ordinary user tokens.
+	ScopeTenant string
+	ScopeRepo   string
+	ScopePerm   string // "read" | "write" | ""
 }
 
 // CreateToken inserts a token row. The caller supplies the token-id segment
@@ -324,7 +344,12 @@ type Token struct {
 // (M4-era CLI, SSH-issued LFS tokens, and the M4 conformance seeder) pass
 // auth.ScopeLegacy (=0) to preserve grant-table-only semantics; new HTTPS-
 // token paths pass a non-zero mask.
-func (s *Store) CreateToken(ctx context.Context, id, userID, secretHash, label string, expiresAt *int64, scopes auth.TokenScope) error {
+//
+// scopeTenant, scopeRepo, scopePerm are the M22 repo-binding fields. All
+// three must be set together for OIDC-minted tokens; all three must be empty
+// for ordinary user tokens. scopePerm is "read" or "write".
+func (s *Store) CreateToken(ctx context.Context, id, userID, secretHash, label string,
+	expiresAt *int64, scopes auth.TokenScope, scopeTenant, scopeRepo, scopePerm string) error {
 	now := time.Now().Unix()
 	var exp sql.NullInt64
 	if expiresAt != nil {
@@ -334,10 +359,18 @@ func (s *Store) CreateToken(ctx context.Context, id, userID, secretHash, label s
 	if label != "" {
 		lbl = sql.NullString{String: label, Valid: true}
 	}
+	nz := func(s string) sql.NullString {
+		if s == "" {
+			return sql.NullString{}
+		}
+		return sql.NullString{String: s, Valid: true}
+	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO tokens (id, user_id, secret_hash, label, created_at, expires_at, scopes)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO tokens (id, user_id, secret_hash, label, created_at, expires_at, scopes,
+		                     scope_tenant, scope_repo, scope_perm)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, userID, secretHash, lbl, now, exp, int64(scopes),
+		nz(scopeTenant), nz(scopeRepo), nz(scopePerm),
 	)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -352,13 +385,16 @@ func (s *Store) CreateToken(ctx context.Context, id, userID, secretHash, label s
 func (s *Store) GetTokenByID(ctx context.Context, id string) (*Token, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id, user_id, secret_hash, COALESCE(label,''), created_at,
-		        expires_at, last_used_at, revoked_at, scopes
+		        expires_at, last_used_at, revoked_at, scopes,
+		        COALESCE(scope_tenant,''), COALESCE(scope_repo,''), COALESCE(scope_perm,'')
 		   FROM tokens WHERE id = ?`, id,
 	)
 	t := &Token{}
 	var exp, last, rev sql.NullInt64
 	var scopesRaw int64
-	if err := row.Scan(&t.ID, &t.UserID, &t.SecretHash, &t.Label, &t.CreatedAt, &exp, &last, &rev, &scopesRaw); err != nil {
+	if err := row.Scan(&t.ID, &t.UserID, &t.SecretHash, &t.Label, &t.CreatedAt,
+		&exp, &last, &rev, &scopesRaw,
+		&t.ScopeTenant, &t.ScopeRepo, &t.ScopePerm); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, auth.ErrNoSuchToken
 		}
@@ -745,7 +781,41 @@ func (s *Store) verifyBasicPassword(ctx context.Context, bp auth.BasicPassword) 
 	if tok.ExpiresAt != nil && *tok.ExpiresAt <= time.Now().Unix() {
 		return nil, "", nil, auth.ErrTokenExpired
 	}
-	// Lookup the user; check name match and disabled state.
+
+	// Repo-bound (OIDC-minted) tokens: the (tenant, repo, perm) binding IS the
+	// credential, like a deploy key. The actor identity comes from the label,
+	// and the URL username is not checked (CI plugs the token into any user
+	// slot, e.g. x-access-token).
+	if tok.ScopeTenant != "" && tok.ScopeRepo != "" {
+		// The backing user (_oidc) must still be enabled.
+		row := s.db.QueryRowContext(ctx,
+			`SELECT disabled_at FROM users WHERE id = ?`, tok.UserID)
+		var disabled sql.NullInt64
+		if err := row.Scan(&disabled); err != nil {
+			return nil, "", nil, auth.ErrInvalidCredential
+		}
+		if disabled.Valid {
+			return nil, "", nil, auth.ErrUserDisabled
+		}
+		perm := auth.PermRead
+		if tok.ScopePerm == "write" {
+			perm = auth.PermWrite
+		}
+		name := tok.Label
+		if name == "" {
+			name = "oidc"
+		}
+		return &auth.Actor{
+				UserID:  tok.UserID,
+				Name:    name,
+				IsAdmin: false,
+				Scopes:  tok.Scopes,
+			}, tokenID,
+			&auth.Scope{Tenant: tok.ScopeTenant, Repo: tok.ScopeRepo, Perm: perm},
+			nil
+	}
+
+	// Ordinary user token: name match + disabled check (unchanged).
 	row := s.db.QueryRowContext(ctx,
 		`SELECT name, is_admin, disabled_at FROM users WHERE id = ?`, tok.UserID,
 	)

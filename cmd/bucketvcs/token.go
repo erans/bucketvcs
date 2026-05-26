@@ -113,7 +113,7 @@ func tokenCreate(ctx context.Context, args []string, stdout, stderr io.Writer) i
 		fmt.Fprintf(stderr, "hash: %v\n", err)
 		return 1
 	}
-	if err := s.CreateToken(ctx, id, u.ID, hash, *label, expPtr, scopes); err != nil {
+	if err := s.CreateToken(ctx, id, u.ID, hash, *label, expPtr, scopes, "", "", ""); err != nil {
 		fmt.Fprintf(stderr, "create token: %v\n", err)
 		return 1
 	}

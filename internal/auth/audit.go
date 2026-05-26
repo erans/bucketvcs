@@ -59,3 +59,33 @@ func EmitRateLimitHit(ctx context.Context, logger *slog.Logger,
 		slog.String("transport", transport),
 	)
 }
+
+// EmitOIDCExchanged records a successful token exchange (M22).
+func EmitOIDCExchanged(ctx context.Context, logger *slog.Logger,
+	issuerAlias, sub, tenant, repo string, scopes TokenScope, ttlSec int64) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.LogAttrs(ctx, slog.LevelInfo, "auth.oidc.exchanged",
+		slog.String("issuer", issuerAlias),
+		slog.String("sub", sub),
+		slog.String("tenant", tenant),
+		slog.String("repo", repo),
+		slog.String("scopes", FormatScopes(scopes)),
+		slog.Int64("ttl_sec", ttlSec),
+	)
+}
+
+// EmitOIDCRejected records a rejected exchange (M22). reason is an enum:
+// unknown_issuer | invalid_token | no_rule | issuer_unavailable.
+func EmitOIDCRejected(ctx context.Context, logger *slog.Logger,
+	issuerAlias, ip, reason string) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.LogAttrs(ctx, slog.LevelWarn, "auth.oidc.rejected",
+		slog.String("issuer", issuerAlias),
+		slog.String("ip", ip),
+		slog.String("reason", reason),
+	)
+}

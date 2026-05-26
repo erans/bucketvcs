@@ -19,12 +19,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/auth/ratelimit"
+	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
 	"github.com/bucketvcs/bucketvcs/internal/gateway"
 	"github.com/bucketvcs/bucketvcs/internal/hooks"
 	"github.com/bucketvcs/bucketvcs/internal/lfs"
 	"github.com/bucketvcs/bucketvcs/internal/lfs/locks"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
+	"github.com/bucketvcs/bucketvcs/internal/oidc"
 	"github.com/bucketvcs/bucketvcs/internal/policy"
 	"github.com/bucketvcs/bucketvcs/internal/sshd"
 	"github.com/bucketvcs/bucketvcs/internal/webhooks"
@@ -125,6 +128,12 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 		"worker pool size for post-receive hook execution")
 	hooksPostReceiveQueue := fs.Int("hooks-postreceive-queue", 256,
 		"queue capacity for post-receive jobs; full queue drops with a metric")
+
+	// M22 OIDC token-exchange. Default disabled; flip with --oidc=true.
+	oidcEnabled := fs.Bool("oidc", false,
+		"Enable the OIDC token-exchange endpoint POST /_oidc/token (M22)")
+	oidcSweepInterval := fs.Duration("oidc-sweep-interval", 5*time.Minute,
+		"Interval for sweeping expired OIDC-minted tokens")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -379,6 +388,34 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	// authdb as enqueue, so no extra DB handle is needed.
 	go webhooks.StartWorker(serveCtx, webhookSvc, webhooks.DefaultWorkerConfig())
 
+	// M22 OIDC expired-token sweep goroutine.
+	if *oidcEnabled {
+		if *addr == "" && ln == nil {
+			logger.LogAttrs(serveCtx, slog.LevelWarn,
+				"oidc enabled but no HTTP listener configured; POST /_oidc/token will not be served (sweep still runs)")
+		}
+		go func() {
+			t := time.NewTicker(*oidcSweepInterval)
+			defer t.Stop()
+			for {
+				select {
+				case <-serveCtx.Done():
+					return
+				case <-t.C:
+					n, err := authS.SweepExpiredOIDCTokens(serveCtx)
+					if err != nil {
+						logger.LogAttrs(serveCtx, slog.LevelWarn, "oidc sweep error", slog.String("err", err.Error()))
+						continue
+					}
+					if n > 0 {
+						logger.LogAttrs(serveCtx, slog.LevelInfo, "metric",
+							slog.String("metric_name", "oidc_tokens_swept_total"), slog.Int64("value", n))
+					}
+				}
+			}
+		}()
+	}
+
 	// ---- HTTP listener ----
 	var httpSrv *http.Server
 	httpErrCh := make(chan error, 1)
@@ -390,6 +427,15 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 		if *lfsEnabled {
 			lfsLocksStore = locks.New(authS)
 		}
+
+		// M22 OIDC verifier + store adapters (nil when --oidc=false).
+		var oidcVerifier gateway.OIDCVerifier
+		var oidcStore gateway.OIDCExchangeStore
+		if *oidcEnabled {
+			oidcVerifier = oidcVerifierAdapter{oidc.NewVerifier()}
+			oidcStore = oidcStoreAdapter{authS}
+		}
+
 		srv, err := gateway.NewServer(store, gateway.Options{
 			MirrorDir:               *mirrorDir,
 			Version:                 buildVersion,
@@ -413,6 +459,9 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			Hooks:                   hooksSvc,
 			Limiter:                 rateLimiter,
 			TrustProxyHeaders:       *trustProxyHeaders,
+			OIDCEnabled:             *oidcEnabled,
+			OIDCStore:               oidcStore,
+			OIDCVerifier:            oidcVerifier,
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "serve: NewServer: %v\n", err)
@@ -613,4 +662,30 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+// oidcStoreAdapter adapts *sqlitestore.Store to gateway.OIDCExchangeStore,
+// translating the flat MintOIDCToken args to sqlitestore.MintOIDCParams.
+type oidcStoreAdapter struct{ s *sqlitestore.Store }
+
+func (a oidcStoreAdapter) FindOIDCIssuerByURL(ctx context.Context, u string) (auth.OIDCIssuer, error) {
+	return a.s.FindOIDCIssuerByURL(ctx, u)
+}
+func (a oidcStoreAdapter) ListOIDCRulesForIssuer(ctx context.Context, alias string) ([]auth.OIDCTrustRule, error) {
+	return a.s.ListOIDCRulesForIssuer(ctx, alias)
+}
+func (a oidcStoreAdapter) MintOIDCToken(ctx context.Context, tenant, repo string, perm auth.Perm,
+	scopes auth.TokenScope, ttl int64, label string) (string, error) {
+	return a.s.MintOIDCToken(ctx, sqlitestore.MintOIDCParams{
+		Tenant: tenant, Repo: repo, Perm: perm, Scopes: scopes, TTLSeconds: ttl, Label: label,
+	})
+}
+
+// oidcVerifierAdapter adapts *oidc.Verifier to gateway.OIDCVerifier
+// (named-type oidc.Claims -> map[string]any).
+type oidcVerifierAdapter struct{ v *oidc.Verifier }
+
+func (a oidcVerifierAdapter) Verify(ctx context.Context, raw, issuer string) (map[string]any, error) {
+	c, err := a.v.Verify(ctx, raw, issuer)
+	return map[string]any(c), err
 }

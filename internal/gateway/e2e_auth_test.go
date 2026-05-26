@@ -124,7 +124,7 @@ func seedUserToken(t *testing.T, s *sqlitestore.Store, name string, isAdmin bool
 	if err != nil {
 		t.Fatalf("HashSecret: %v", err)
 	}
-	if err := s.CreateToken(ctx, id, uid, hash, "e2e", expiresAt, auth.ScopeLegacy); err != nil {
+	if err := s.CreateToken(ctx, id, uid, hash, "e2e", expiresAt, auth.ScopeLegacy, "", "", ""); err != nil {
 		t.Fatalf("CreateToken: %v", err)
 	}
 	return tokStr

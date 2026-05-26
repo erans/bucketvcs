@@ -25,7 +25,7 @@ type fakeTokenRow struct {
 	hasExpires bool
 }
 
-func (f *fakeTokenIssuer) CreateToken(ctx context.Context, tokenID, userID, secretHash, label string, expiresAt *int64, scopes auth.TokenScope) error {
+func (f *fakeTokenIssuer) CreateToken(ctx context.Context, tokenID, userID, secretHash, label string, expiresAt *int64, scopes auth.TokenScope, scopeTenant, scopeRepo, scopePerm string) error {
 	if f.createErr != nil {
 		return f.createErr
 	}

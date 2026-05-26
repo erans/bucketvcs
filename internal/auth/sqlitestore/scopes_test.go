@@ -19,7 +19,7 @@ func TestCreateTokenWithScopes(t *testing.T) {
 		t.Fatalf("CreateUser: %v", err)
 	}
 	scopes := auth.ScopeRepoRead | auth.ScopeLFSRead
-	if err := s.CreateToken(ctx, "tokid001AAAAAAAAAAAAAAAA", uid, "$argon2id$h1", "label", nil, scopes); err != nil {
+	if err := s.CreateToken(ctx, "tokid001AAAAAAAAAAAAAAAA", uid, "$argon2id$h1", "label", nil, scopes, "", "", ""); err != nil {
 		t.Fatalf("CreateToken with scopes: %v", err)
 	}
 	got, err := s.GetTokenByID(ctx, "tokid001AAAAAAAAAAAAAAAA")
@@ -39,7 +39,7 @@ func TestCreateTokenLegacyScopes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
-	if err := s.CreateToken(ctx, "tokid001AAAAAAAAAAAAAAAA", uid, "$argon2id$h1", "label", nil, auth.ScopeLegacy); err != nil {
+	if err := s.CreateToken(ctx, "tokid001AAAAAAAAAAAAAAAA", uid, "$argon2id$h1", "label", nil, auth.ScopeLegacy, "", "", ""); err != nil {
 		t.Fatalf("CreateToken with legacy scopes: %v", err)
 	}
 	got, err := s.GetTokenByID(ctx, "tokid001AAAAAAAAAAAAAAAA")
@@ -61,7 +61,7 @@ func TestRotateToken(t *testing.T) {
 	}
 	exp := time.Now().Add(24 * time.Hour).Unix()
 	if err := s.CreateToken(ctx, "tokid001AAAAAAAAAAAAAAAA", uid, "origHash", "label",
-		&exp, auth.ScopeRepoWrite); err != nil {
+		&exp, auth.ScopeRepoWrite, "", "", ""); err != nil {
 		t.Fatalf("CreateToken: %v", err)
 	}
 
@@ -100,10 +100,10 @@ func TestListTokensIncludesScopes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
-	if err := s.CreateToken(ctx, "tok1AAAAAAAAAAAAAAAAAAAA", uid, "h1", "a", nil, auth.ScopeRepoRead); err != nil {
+	if err := s.CreateToken(ctx, "tok1AAAAAAAAAAAAAAAAAAAA", uid, "h1", "a", nil, auth.ScopeRepoRead, "", "", ""); err != nil {
 		t.Fatalf("CreateToken 1: %v", err)
 	}
-	if err := s.CreateToken(ctx, "tok2AAAAAAAAAAAAAAAAAAAA", uid, "h2", "b", nil, auth.ScopeRepoAdmin); err != nil {
+	if err := s.CreateToken(ctx, "tok2AAAAAAAAAAAAAAAAAAAA", uid, "h2", "b", nil, auth.ScopeRepoAdmin, "", "", ""); err != nil {
 		t.Fatalf("CreateToken 2: %v", err)
 	}
 	list, err := s.ListTokensForUser(ctx, "alice")
