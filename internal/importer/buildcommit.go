@@ -258,30 +258,27 @@ func BuildAndCommit(
 
 	// Upload pack/idx/.bvom/.bvcg via PutIfAbsent.
 	//
-	// Pack/idx use the strict uploadFile (errors on ErrAlreadyExists). Note
-	// that the pack_id returned by pack-objects is git's trailing SHA-1
-	// over the assembled pack BYTES (header + sorted objects + their
-	// compressed deltas), NOT a hash of the abstract object set — repeated
-	// repacks of the same reachable set normally yield different pack_ids
-	// because delta search is non-deterministic across threads / memory
-	// conditions. So in the common case the canonical key for a fresh
-	// pack_id is empty and PutIfAbsent succeeds.
+	// pack_id is git's trailing SHA-1 over the assembled pack BYTES (header +
+	// sorted objects + their compressed deltas), NOT a hash of the abstract
+	// object set — repeated repacks of the same reachable set normally yield
+	// different pack_ids because delta search is non-deterministic across
+	// threads / memory conditions, so the canonical key is usually fresh.
 	//
-	// If ErrAlreadyExists DOES fire here, it indicates a collision against
-	// pre-existing bytes (orphan from a crashed prior run, replay, or an
-	// extremely lucky deterministic repack). We surface it as an error
-	// because our locally-built .bvom encodes pack offsets specific to OUR
-	// bytes; committing a manifest whose .bvom expects our offsets but
-	// whose pack key resolves to different stored bytes would corrupt
-	// object lookup. CAS-loser detection in the mutator catches the
-	// concurrent-racer variant before any damage.
+	// When ErrAlreadyExists DOES fire (a deterministic repack reproduced
+	// existing bytes — common on low-core CI runners — or an orphan from a
+	// crashed prior run), uploadCanonicalPackVerified verifies the stored bytes
+	// are byte-identical to ours before accepting it. That keeps the upload
+	// idempotent for genuine re-uploads while still surfacing a true SHA-1
+	// collision (different bytes, same id), which would invalidate the offsets
+	// our locally-built .bvom encodes. CAS-loser detection in the mutator
+	// catches the concurrent-racer variant before any damage.
 	//
 	// .bvom/.bvcg are content-addressed by SHA-256 of their bytes, so
 	// ErrAlreadyExists trivially means "same bytes already there".
-	if err := uploadFile(ctx, store, canonicalPack, k.CanonicalPackKey(packID)); err != nil {
+	if err := uploadFileVerified(ctx, store, canonicalPack, k.CanonicalPackKey(packID)); err != nil {
 		return nil, fmt.Errorf("importer: BuildAndCommit: upload pack: %w", err)
 	}
-	if err := uploadFile(ctx, store, canonicalIdx, k.PackIdxKey(packID, "canonical")); err != nil {
+	if err := uploadFileVerified(ctx, store, canonicalIdx, k.PackIdxKey(packID, "canonical")); err != nil {
 		return nil, fmt.Errorf("importer: BuildAndCommit: upload idx: %w", err)
 	}
 	bvomKey := k.ObjectMapKey(idx.ObjectMapHash)

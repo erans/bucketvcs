@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -493,6 +494,83 @@ func uploadBytes(ctx context.Context, store storage.ObjectStore, b []byte, dstKe
 		return err
 	}
 	return nil
+}
+
+// uploadFileVerified uploads a file via PutIfAbsent, tolerating
+// ErrAlreadyExists only when the stored bytes are byte-identical to ours.
+//
+// It is used for the canonical pack and its index, whose storage keys are both
+// derived from pack_id = git's trailing SHA-1 over the assembled pack BYTES.
+// That is NOT byte-deterministic across repacks of the same object set (delta
+// search varies with threads/memory), so a fresh pack normally has no existing
+// object and PutIfAbsent succeeds. Occasionally — most often on low-core CI
+// runners where pack-objects is more deterministic — a repack reproduces bytes
+// that hash to an already-stored pack_id and PutIfAbsent returns
+// ErrAlreadyExists.
+//
+// We must NOT blindly treat that as success: our locally-built .bvom encodes
+// object offsets specific to OUR pack bytes, so committing a manifest whose
+// pack key resolves to DIFFERENT stored bytes would corrupt object lookup.
+// Instead we verify byte-identity (SHA-256) of the stored object against our
+// local file. Identical bytes ⇒ our .bvom offsets are valid against what's
+// stored ⇒ idempotent success (the idx is deterministically derived from the
+// pack, so an identical pack implies an identical idx). Differing bytes (a true
+// SHA-1 collision, or an orphan from a crashed run that wrote different bytes)
+// ⇒ surfaced as an error, preserving the corruption-safety guarantee.
+func uploadFileVerified(ctx context.Context, store storage.ObjectStore, srcPath, dstKey string) error {
+	f, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := store.PutIfAbsent(ctx, dstKey, f, nil); err != nil {
+		if !errors.Is(err, storage.ErrAlreadyExists) {
+			return err
+		}
+		// Collision on a pack-bytes-derived key: verify the stored bytes are
+		// identical to ours before accepting it.
+		localSum, lerr := sha256OfFile(srcPath)
+		if lerr != nil {
+			return lerr
+		}
+		storedSum, serr := sha256OfStoredObject(ctx, store, dstKey)
+		if serr != nil {
+			return fmt.Errorf("verify existing object %s: %w", dstKey, serr)
+		}
+		if localSum != storedSum {
+			return fmt.Errorf("pack id collision at %s: stored bytes differ from locally built file (stored sha256 %s, local %s)", dstKey, storedSum, localSum)
+		}
+		// Identical bytes already stored — safe and idempotent.
+	}
+	return nil
+}
+
+// sha256OfFile returns the hex SHA-256 of a file's contents.
+func sha256OfFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// sha256OfStoredObject returns the hex SHA-256 of a stored object's bytes.
+func sha256OfStoredObject(ctx context.Context, store storage.ObjectStore, key string) (string, error) {
+	obj, err := store.Get(ctx, key, nil)
+	if err != nil {
+		return "", err
+	}
+	defer obj.Body.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, obj.Body); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // validFullRefName performs a lightweight syntactic check on a full git

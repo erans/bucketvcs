@@ -1,11 +1,12 @@
 name: conformance
 
 on:
-  pull_request:
-  push:
-    branches: [main]
+  # Emulator + real-cloud conformance are heavyweight, so they run nightly and
+  # on demand — NOT per-commit — to keep per-commit checks fast and green.
+  # Lighter per-push storage coverage lives in the conformance-cloud workflow,
+  # and the full Go suite runs per-commit in ci.yml.
   schedule:
-    - cron: "17 6 * * *"  # nightly real-cloud run
+    - cron: "17 6 * * *"  # nightly emulator + real-cloud run
   workflow_dispatch:
 
 jobs:

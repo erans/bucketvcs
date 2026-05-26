@@ -24,13 +24,12 @@ import (
 )
 
 // NOTE: TestBuildAndCommit_RefOnlyUpdateSucceeds and TestBuildAndCommit_DeletesRef
-// have a pre-existing flake under high-parallelism `go test ./... -count=N -p $(nproc)`
-// runs. The cause is pack-objects' non-deterministic delta selection: under heavy
-// CPU contention the second BuildAndCommit's repack can produce a pack with the
-// same trailing-SHA-1 (pack ID) as the first run's pack, tripping uploadFile's
-// strict ErrAlreadyExists path. This is independent of M12 ref-sharding (reproduces
-// on pre-M12 HEAD too) and is tracked as a separate test-infrastructure issue.
-// Default `go test ./...` (no -count, no high -p) does not hit it in practice.
+// used to flake when pack-objects' non-deterministic delta selection produced a
+// repack with the same trailing-SHA-1 (pack ID) as a previously-uploaded pack,
+// tripping the canonical pack/idx upload's strict ErrAlreadyExists path. That is
+// now handled: uploadFileVerified treats ErrAlreadyExists as success when the
+// stored bytes are byte-identical to the freshly-built file (and still errors on
+// a genuine differing-bytes collision). See TestUploadFileVerified.
 
 // importedRepo bundles the test fixture: an imported bucketvcs repo, its
 // store, and a freshly-cloned bare mirror that BuildAndCommit can repack.
