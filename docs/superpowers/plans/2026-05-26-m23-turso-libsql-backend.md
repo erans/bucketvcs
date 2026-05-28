@@ -505,6 +505,7 @@ package sqlitestore
 import (
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"strings"
@@ -525,7 +526,11 @@ type libsqlBackend struct {
 
 // newLibsqlBackend builds the backend from the --auth-db URL, resolving the
 // auth token from BUCKETVCS_DB_AUTH_TOKEN (preferred) or an authToken query
-// param already on the URL. A libSQL URL with no token available is an error.
+// param already on the URL. The token is OPTIONAL: self-hosted sqld over
+// http(s) commonly runs without auth (and the conformance suite targets such
+// an instance), so we do not hard-fail when it is missing. We warn for the
+// libsql:// scheme (Turso almost always needs one) and let the connection
+// surface a clear auth error if the server actually requires it.
 func newLibsqlBackend(rawURL string) (Backend, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -533,10 +538,11 @@ func newLibsqlBackend(rawURL string) (Backend, error) {
 	}
 	q := u.Query()
 	if envTok := os.Getenv(dbAuthTokenEnv); envTok != "" {
-		q.Set("authToken", envTok) // env takes precedence
+		q.Set("authToken", envTok) // env takes precedence over any in-URL token
 	}
-	if q.Get("authToken") == "" {
-		return nil, fmt.Errorf("libsql auth token required: set %s", dbAuthTokenEnv)
+	if q.Get("authToken") == "" && strings.EqualFold(u.Scheme, "libsql") {
+		slog.Default().Warn("libsql URL has no auth token; set "+dbAuthTokenEnv+" if the server requires one",
+			"host", u.Host)
 	}
 	u.RawQuery = q.Encode()
 	return libsqlBackend{dsn: u.String()}, nil
@@ -654,7 +660,7 @@ func TestResolveBackend_Selection(t *testing.T) {
 		{"libsql://db.turso.io", "libsql"},
 		{"https://db.turso.io", "libsql"},
 	}
-	t.Setenv(dbAuthTokenEnv, "tok") // so libsql cases don't fail on missing token
+	t.Setenv(dbAuthTokenEnv, "") // token is optional; selection must not depend on it
 	for _, c := range cases {
 		b, err := resolveBackend(c.value)
 		if err != nil {
@@ -666,10 +672,16 @@ func TestResolveBackend_Selection(t *testing.T) {
 	}
 }
 
-func TestResolveBackend_LibsqlTokenRequired(t *testing.T) {
-	t.Setenv(dbAuthTokenEnv, "") // unset
-	if _, err := resolveBackend("libsql://db.turso.io"); err == nil {
-		t.Fatal("want error when libsql URL has no auth token")
+func TestResolveBackend_LibsqlNoTokenOK(t *testing.T) {
+	// Token is optional (self-hosted sqld may run without auth); a libsql URL
+	// with no token must still resolve, not error.
+	t.Setenv(dbAuthTokenEnv, "")
+	b, err := resolveBackend("http://127.0.0.1:8080")
+	if err != nil {
+		t.Fatalf("no-token libsql URL should resolve: %v", err)
+	}
+	if b.Name() != "libsql" {
+		t.Fatalf("backend=%s want libsql", b.Name())
 	}
 }
 

@@ -7,49 +7,37 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"net/url"
+	"log/slog"
 	"strings"
 	"time"
-
-	_ "modernc.org/sqlite"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 )
 
 // Store is the SQLite-backed implementation of auth.Store.
 type Store struct {
-	db *sql.DB
+	db      *sql.DB
+	backend Backend
 }
 
-// Open opens (or creates) the SQLite database at path, enables WAL and
-// foreign keys, and applies any pending migrations.
-func Open(path string) (*Store, error) {
-	// Build the DSN as a URL so paths containing `?`, `#`, or other URI
-	// metacharacters are escaped rather than misinterpreted as query/fragment.
-	u := &url.URL{
-		Scheme: "file",
-		Opaque: (&url.URL{Path: path}).EscapedPath(),
-	}
-	q := url.Values{}
-	q.Add("_pragma", "journal_mode(WAL)")
-	q.Add("_pragma", "foreign_keys(1)")
-	q.Add("_pragma", "busy_timeout(5000)")
-	u.RawQuery = q.Encode()
-	dsn := u.String()
-
-	db, err := sql.Open("sqlite", dsn)
+// Open opens (or creates) the metadata database identified by value and
+// applies any pending migrations. value is a filesystem path (SQLite, the
+// default) or a libsql://… / https://… URL (Turso/libSQL). See resolveBackend.
+func Open(value string) (*Store, error) {
+	b, err := resolveBackend(value)
 	if err != nil {
-		return nil, fmt.Errorf("open sqlite %q: %w", path, err)
+		return nil, err
 	}
-	// Single connection for the writer side simplifies WAL semantics for
-	// our use case (low concurrency on writes, many concurrent reads).
-	db.SetMaxOpenConns(1)
-
-	if err := RunMigrations(db); err != nil {
+	db, err := b.Open()
+	if err != nil {
+		return nil, fmt.Errorf("open authdb (%s): %w", b.Name(), err)
+	}
+	if err := RunMigrations(db, b); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
-	return &Store{db: db}, nil
+	slog.Default().Info("authdb opened", "backend", b.Name())
+	return &Store{db: db, backend: b}, nil
 }
 
 // Close closes the underlying database handle.

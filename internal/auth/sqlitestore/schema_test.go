@@ -34,7 +34,7 @@ func newTestDB(t *testing.T) *sql.DB {
 
 func TestRunMigrations_AppliesV2_SSHKeys(t *testing.T) {
 	db := newTestDB(t)
-	if err := RunMigrations(db); err != nil {
+	if err := RunMigrations(db, sqliteBackend{}); err != nil {
 		t.Fatalf("RunMigrations: %v", err)
 	}
 	var n int
@@ -67,7 +67,7 @@ func TestRunMigrations_AppliesV2_SSHKeys(t *testing.T) {
 
 func TestRunMigrations_AppliesV3_LFSLocks(t *testing.T) {
 	db := newTestDB(t)
-	if err := RunMigrations(db); err != nil {
+	if err := RunMigrations(db, sqliteBackend{}); err != nil {
 		t.Fatalf("RunMigrations: %v", err)
 	}
 	// Assert the lfs_locks table exists with the expected columns.
@@ -98,7 +98,7 @@ func TestRunMigrations_AppliesV3_LFSLocks(t *testing.T) {
 func TestRunMigrations_SSHKeys_CheckXOR(t *testing.T) {
 	// Verify the CHECK constraint actually rejects bad rows.
 	db := newTestDB(t)
-	if err := RunMigrations(db); err != nil {
+	if err := RunMigrations(db, sqliteBackend{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 

@@ -19,7 +19,7 @@ var migrationsFS embed.FS
 // transaction, and each numbered migration is applied at most once based on
 // its leading <NNNN_> prefix. The schema_version row is inserted by each
 // migration's SQL so that schema_version itself can be created in 0001.
-func RunMigrations(db *sql.DB) error {
+func RunMigrations(db *sql.DB, backend Backend) error {
 	entries, err := fs.ReadDir(migrationsFS, "migrations")
 	if err != nil {
 		return fmt.Errorf("read migrations dir: %w", err)
@@ -49,7 +49,7 @@ func RunMigrations(db *sql.DB) error {
 		if err != nil {
 			return fmt.Errorf("read migration %q: %w", name, err)
 		}
-		if err := applyOne(db, string(body)); err != nil {
+		if err := applyOne(db, backend, string(body)); err != nil {
 			return fmt.Errorf("apply migration %q: %w", name, err)
 		}
 	}
@@ -88,12 +88,12 @@ func parseVersion(name string) (int, error) {
 	return v, nil
 }
 
-func applyOne(db *sql.DB, body string) error {
+func applyOne(db *sql.DB, backend Backend, body string) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(body); err != nil {
+	if err := backend.ApplyMigration(tx, body); err != nil {
 		_ = tx.Rollback()
 		return err
 	}

@@ -79,3 +79,35 @@ jobs:
           BUCKETVCS_AZURE_ACCOUNT: ${{ secrets.AZURE_ACCOUNT }}
           BUCKETVCS_AZURE_ACCOUNT_KEY: ${{ secrets.AZURE_ACCOUNT_KEY }}
         run: go test -count=1 -timeout=15m ./internal/storage/azureblob
+
+  libsql:
+    name: libsql (sqld) conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      # Pinned to a verified-working tag (v0.24.33 served GET /health=200, the
+      # Hrana /v2/pipeline API, and passed the gated suite locally). sqld's user
+      # HTTP API listens on container port 8080.
+      sqld:
+        image: ghcr.io/tursodatabase/libsql-server:v0.24.33
+        ports:
+          - 8080:8080
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+      - name: Wait for sqld
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1; then
+              echo "sqld up"; exit 0
+            fi
+            sleep 1
+          done
+          echo "sqld did not become ready"; exit 1
+      - name: libSQL conformance
+        env:
+          BUCKETVCS_LIBSQL_URL: "http://127.0.0.1:8080"
+        run: go test -tags libsql -count=1 ./internal/auth/sqlitestore/ -run TestLibsqlConformance -v
