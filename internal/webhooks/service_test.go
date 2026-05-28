@@ -2,7 +2,6 @@ package webhooks_test
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -14,7 +13,7 @@ import (
 // openTestDB returns a fresh on-disk authdb with migrations applied,
 // pre-seeded with a (tenant, repo) row so the FK on webhook_endpoints
 // is satisfiable. Mirrors the M13.5/M14 test shape.
-func openTestDB(t *testing.T, tenant, repo string) *sql.DB {
+func openTestDB(t *testing.T, tenant, repo string) sqlitestore.Querier {
 	t.Helper()
 	tmp := t.TempDir()
 	store, err := sqlitestore.Open(filepath.Join(tmp, "auth.db"))
@@ -23,7 +22,7 @@ func openTestDB(t *testing.T, tenant, repo string) *sql.DB {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	db := store.DB()
-	if _, err := db.Exec(
+	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO repos (tenant, name, public_read, created_at)
 		 VALUES (?, ?, 0, strftime('%s','now'))`,
 		tenant, repo,

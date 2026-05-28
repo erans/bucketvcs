@@ -3,13 +3,13 @@ package policy
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"os/exec"
 	"path"
 	"time"
 
+	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
 	"github.com/bucketvcs/bucketvcs/internal/repo/oidconst"
 )
 
@@ -27,11 +27,11 @@ type ProtectedRef struct {
 // are safe for concurrent use; sqlite's single-writer model serializes
 // writes.
 type Service struct {
-	db *sql.DB
+	db sqlitestore.Querier
 }
 
 // New constructs a Service.
-func New(db *sql.DB) *Service {
+func New(db sqlitestore.Querier) *Service {
 	return &Service{db: db}
 }
 

@@ -19,10 +19,10 @@ func (s *Store) AddOIDCIssuer(ctx context.Context, alias, issuerURL string) erro
 		return fmt.Errorf("oidc: alias and issuer_url required")
 	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO oidc_issuers (alias, issuer_url, created_at) VALUES (?, ?, strftime('%s','now'))`,
+		`INSERT INTO oidc_issuers (alias, issuer_url, created_at) VALUES (?, ?, `+s.backend.NowSeconds()+`)`,
 		alias, issuerURL)
 	if err != nil {
-		if isUniqueViolation(err) {
+		if s.backend.IsUniqueViolation(err) {
 			return auth.ErrConflict
 		}
 		return fmt.Errorf("add oidc issuer: %w", err)
@@ -101,7 +101,7 @@ func (s *Store) AddOIDCRule(ctx context.Context, r auth.OIDCTrustRule) (string, 
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO oidc_trust_rules
 		   (id, issuer_alias, audience, tenant, repo, scopes, ttl_seconds, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s','now'))`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, `+s.backend.NowSeconds()+`)`,
 		id, r.IssuerAlias, r.Audience, r.Tenant, r.Repo, int64(r.Scopes), r.TTLSeconds)
 	if err != nil {
 		return "", fmt.Errorf("insert rule: %w", err)

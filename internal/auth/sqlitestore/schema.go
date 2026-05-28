@@ -12,6 +12,19 @@ import (
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
+//go:embed migrations_postgres/*.sql
+var postgresMigrations embed.FS
+
+// migrationsFor returns the embedded migration FS + dir name for the backend.
+// Postgres uses the hand-translated set in migrations_postgres; all other
+// backends (sqlite, libsql) use the canonical sqlite set.
+func migrationsFor(b Backend) (fs.FS, string) {
+	if b.Name() == "postgres" {
+		return postgresMigrations, "migrations_postgres"
+	}
+	return migrationsFS, "migrations"
+}
+
 // RunMigrations applies any unapplied migrations in lexical filename order.
 // It creates schema_version on first run via the embedded 0001_init.sql.
 //
@@ -20,7 +33,8 @@ var migrationsFS embed.FS
 // its leading <NNNN_> prefix. The schema_version row is inserted by each
 // migration's SQL so that schema_version itself can be created in 0001.
 func RunMigrations(db *sql.DB, backend Backend) error {
-	entries, err := fs.ReadDir(migrationsFS, "migrations")
+	migFS, dir := migrationsFor(backend)
+	entries, err := fs.ReadDir(migFS, dir)
 	if err != nil {
 		return fmt.Errorf("read migrations dir: %w", err)
 	}
@@ -45,7 +59,7 @@ func RunMigrations(db *sql.DB, backend Backend) error {
 		if applied[ver] {
 			continue
 		}
-		body, err := migrationsFS.ReadFile("migrations/" + name)
+		body, err := fs.ReadFile(migFS, dir+"/"+name)
 		if err != nil {
 			return fmt.Errorf("read migration %q: %w", name, err)
 		}

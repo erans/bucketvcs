@@ -8,8 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"strings"
 	"time"
+
+	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
 )
 
 // ErrNotFound is returned by Get / Remove / Enable / Disable when the
@@ -30,11 +31,11 @@ var ErrInvalidInput = errors.New("webhooks: invalid input")
 
 // Service exposes webhook endpoint management against the M4 authdb.
 type Service struct {
-	db *sql.DB
+	db sqlitestore.Querier
 }
 
 // New constructs a Service backed by the given authdb handle.
-func New(db *sql.DB) *Service {
+func New(db sqlitestore.Querier) *Service {
 	return &Service{db: db}
 }
 
@@ -86,21 +87,22 @@ func (s *Service) Create(ctx context.Context, in EndpointInput) (Endpoint, error
 		return Endpoint{}, fmt.Errorf("webhooks: generate secret: %w", err)
 	}
 	now := time.Now().Unix()
-	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO webhook_endpoints
-		   (tenant, repo, url, secret, event_mask, active, created_at)
-		 VALUES (?, ?, ?, ?, ?, 1, ?)`,
-		in.Tenant, in.Repo, in.URL, secret, int64(in.EventMask), now,
-	)
+	var id int64
+	err = s.db.RunInTx(ctx, func(tx sqlitestore.Tx) error {
+		var e error
+		id, e = tx.InsertReturningID(ctx,
+			`INSERT INTO webhook_endpoints
+			   (tenant, repo, url, secret, event_mask, active, created_at)
+			 VALUES (?, ?, ?, ?, ?, 1, ?)`,
+			in.Tenant, in.Repo, in.URL, secret, int64(in.EventMask), now,
+		)
+		return e
+	})
 	if err != nil {
-		if isUniqueViolation(err) {
+		if s.db.IsUniqueViolation(err) {
 			return Endpoint{}, ErrConflict
 		}
 		return Endpoint{}, fmt.Errorf("webhooks: insert endpoint: %w", err)
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return Endpoint{}, fmt.Errorf("webhooks: last insert id: %w", err)
 	}
 	return Endpoint{
 		ID:        id,
@@ -465,15 +467,4 @@ func scanDelivery(rows *sql.Rows) (Delivery, error) {
 		d.LastError = lastError.String
 	}
 	return d, nil
-}
-
-// isUniqueViolation reports whether err looks like a SQLite UNIQUE
-// constraint failure. Mirrors the pattern used by internal/lfs/locks.
-func isUniqueViolation(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "UNIQUE constraint failed") ||
-		strings.Contains(msg, "constraint failed: UNIQUE")
 }

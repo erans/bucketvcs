@@ -104,7 +104,7 @@ func TestRepoRegister_ActorFlagOverridesOSUsername(t *testing.T) {
 	store, _ = sqlitestore.Open(authDB)
 	svc := webhooks.New(store.DB())
 	// Seed the repos row so the endpoint FK is satisfiable.
-	if _, err := store.DB().Exec(
+	if _, err := store.DB().ExecContext(context.Background(),
 		`INSERT INTO repos (tenant, name, public_read, created_at)
 		 VALUES (?, ?, 0, strftime('%s','now'))`,
 		"acme", "site",
@@ -121,13 +121,13 @@ func TestRepoRegister_ActorFlagOverridesOSUsername(t *testing.T) {
 	// We must disable FK enforcement first; otherwise the ON DELETE CASCADE
 	// on webhook_endpoints(tenant, repo) -> repos(tenant, name) would
 	// cascade-delete the endpoint we just created.
-	if _, err := store.DB().Exec(`PRAGMA foreign_keys=OFF`); err != nil {
+	if _, err := store.DB().ExecContext(context.Background(), `PRAGMA foreign_keys=OFF`); err != nil {
 		t.Fatalf("disable fk: %v", err)
 	}
-	if _, err := store.DB().Exec(`DELETE FROM repos WHERE tenant=? AND name=?`, "acme", "site"); err != nil {
+	if _, err := store.DB().ExecContext(context.Background(), `DELETE FROM repos WHERE tenant=? AND name=?`, "acme", "site"); err != nil {
 		t.Fatalf("delete seed repo: %v", err)
 	}
-	if _, err := store.DB().Exec(`PRAGMA foreign_keys=ON`); err != nil {
+	if _, err := store.DB().ExecContext(context.Background(), `PRAGMA foreign_keys=ON`); err != nil {
 		t.Fatalf("re-enable fk: %v", err)
 	}
 	store.Close()
@@ -268,7 +268,7 @@ func TestRepoDelete_EmitsRepoDeletedWebhook(t *testing.T) {
 		t.Fatalf("Create endpoint: %v", err)
 	}
 	// Drain any pending rows from register so we measure only delete.
-	if _, err := store.DB().Exec(`DELETE FROM webhook_deliveries`); err != nil {
+	if _, err := store.DB().ExecContext(context.Background(), `DELETE FROM webhook_deliveries`); err != nil {
 		t.Fatalf("drain deliveries: %v", err)
 	}
 	store.Close()

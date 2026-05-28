@@ -20,7 +20,7 @@ func tempAuthDBWithRepo(t *testing.T, tenant, repo string) string {
 		t.Fatalf("sqlitestore.Open: %v", err)
 	}
 	defer store.Close()
-	if _, err := store.DB().Exec(
+	if _, err := store.DB().ExecContext(context.Background(),
 		`INSERT INTO repos (tenant, name, public_read, created_at)
 		 VALUES (?, ?, 0, strftime('%s','now'))`,
 		tenant, repo,

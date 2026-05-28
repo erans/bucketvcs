@@ -2,7 +2,6 @@ package webhooks_test
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -14,7 +13,7 @@ import (
 
 // newPruneTestService spins up an in-memory authdb + Service. Returns
 // (svc, db) so tests can both call Prune and seed/inspect rows.
-func newPruneTestService(t *testing.T) (*webhooks.Service, *sql.DB) {
+func newPruneTestService(t *testing.T) (*webhooks.Service, sqlitestore.Querier) {
 	t.Helper()
 	store, err := sqlitestore.Open(":memory:")
 	if err != nil {
@@ -43,7 +42,7 @@ var seedSeq atomic.Uint64
 
 // seedDelivery inserts one row. createdAt is mandatory; deliveredAt and
 // lastAttemptAt are 0 for "NULL" semantics in the helper.
-func seedDelivery(t *testing.T, db *sql.DB, status string, createdAt, deliveredAt, lastAttemptAt int64) string {
+func seedDelivery(t *testing.T, db sqlitestore.Querier, status string, createdAt, deliveredAt, lastAttemptAt int64) string {
 	t.Helper()
 	id := fmt.Sprintf("%s-%d-%d", status, createdAt, seedSeq.Add(1))
 	var delivered, lastAttempt any

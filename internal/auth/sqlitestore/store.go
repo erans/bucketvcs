@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
@@ -16,7 +15,7 @@ import (
 
 // Store is the SQLite-backed implementation of auth.Store.
 type Store struct {
-	db      *sql.DB
+	db      *dbWrap
 	backend Backend
 }
 
@@ -37,18 +36,17 @@ func Open(value string) (*Store, error) {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 	slog.Default().Info("authdb opened", "backend", b.Name())
-	return &Store{db: db, backend: b}, nil
+	return &Store{db: &dbWrap{db: db, backend: b}, backend: b}, nil
 }
 
 // Close closes the underlying database handle.
 func (s *Store) Close() error { return s.db.Close() }
 
-// DB returns the underlying *sql.DB for callers that need to attach
-// additional schema-managed tables to the same handle (e.g., the
-// M13.3 LFS locks store). External writers MUST respect the same
-// concurrency constraints sqlitestore.Open enforces (WAL,
+// DB returns the rebinding Querier for sibling packages that attach tables to
+// the same authdb (webhooks, policy, hooks, lfs locks/quota). External writers
+// MUST respect the same concurrency constraints sqlitestore.Open enforces (WAL,
 // foreign_keys, single open conn).
-func (s *Store) DB() *sql.DB { return s.db }
+func (s *Store) DB() Querier { return s.db }
 
 // ErrLastAdmin is returned by DeleteUser when removing the user would
 // leave the system with zero admins.
@@ -95,7 +93,7 @@ func (s *Store) CreateUser(ctx context.Context, name string, isAdmin bool) (stri
 		id, name, adminInt, now,
 	)
 	if err != nil {
-		if isUniqueViolation(err) {
+		if s.backend.IsUniqueViolation(err) {
 			return "", auth.ErrConflict
 		}
 		return "", fmt.Errorf("create user: %w", err)
@@ -266,17 +264,6 @@ func (s *Store) DeleteUser(ctx context.Context, name string) error {
 	return tx.Commit()
 }
 
-// isUniqueViolation reports whether err looks like a SQLite UNIQUE
-// constraint failure. modernc.org/sqlite errors stringify with this
-// substring across versions.
-func isUniqueViolation(err error) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(err.Error(), "UNIQUE constraint failed") ||
-		strings.Contains(err.Error(), "constraint failed: UNIQUE")
-}
-
 // isSafeTokenIDPrefix accepts any non-empty ASCII alphanumeric prefix.
 // Real token IDs use the Crockford-base32 alphabet (auth.GenerateToken),
 // which is a strict subset; the broader alphanumeric check still excludes
@@ -361,7 +348,7 @@ func (s *Store) CreateToken(ctx context.Context, id, userID, secretHash, label s
 		nz(scopeTenant), nz(scopeRepo), nz(scopePerm),
 	)
 	if err != nil {
-		if isUniqueViolation(err) {
+		if s.backend.IsUniqueViolation(err) {
 			return auth.ErrConflict
 		}
 		return fmt.Errorf("create token: %w", err)
@@ -537,8 +524,9 @@ type Repo struct {
 // RegisterRepo idempotently inserts a (tenant, name) into repos.
 func (s *Store) RegisterRepo(ctx context.Context, tenant, name string) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO repos (tenant, name, public_read, created_at)
-		 VALUES (?, ?, 0, ?)`,
+		`INSERT INTO repos (tenant, name, public_read, created_at)
+		 VALUES (?, ?, 0, ?)
+		 ON CONFLICT(tenant, name) DO NOTHING`,
 		tenant, name, time.Now().Unix(),
 	)
 	return err
@@ -552,8 +540,9 @@ func (s *Store) RegisterRepo(ctx context.Context, tenant, name string) error {
 // RegisterRepo — that pattern races with a concurrent registration.
 func (s *Store) RegisterRepoIfNew(ctx context.Context, tenant, name string) (bool, error) {
 	res, err := s.db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO repos (tenant, name, public_read, created_at)
-		 VALUES (?, ?, 0, ?)`,
+		`INSERT INTO repos (tenant, name, public_read, created_at)
+		 VALUES (?, ?, 0, ?)
+		 ON CONFLICT(tenant, name) DO NOTHING`,
 		tenant, name, time.Now().Unix(),
 	)
 	if err != nil {
@@ -925,33 +914,6 @@ func nullableString(s string) sql.NullString {
 func permToText(p auth.Perm) string            { return auth.PermToText(p) }
 func permFromText(s string) (auth.Perm, error) { return auth.PermFromText(s) }
 
-// isCheckViolation reports whether err looks like a SQLite CHECK constraint
-// failure. modernc.org/sqlite uses the message "CHECK constraint failed".
-func isCheckViolation(err error) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(err.Error(), "CHECK constraint failed")
-}
-
-// isFingerprintUniqueViolation reports whether err is a UNIQUE constraint
-// failure specifically on the ssh_keys fingerprint column/index.
-func isFingerprintUniqueViolation(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	// modernc.org/sqlite formats UNIQUE errors as:
-	//   "UNIQUE constraint failed: ssh_keys.fingerprint" OR
-	//   "constraint failed: UNIQUE: ssh_keys.fingerprint"
-	// The index name ssh_keys_fingerprint_idx may also appear, but checking
-	// for the column reference is more specific.
-	return (strings.Contains(msg, "UNIQUE constraint failed") ||
-		strings.Contains(msg, "constraint failed: UNIQUE")) &&
-		(strings.Contains(msg, "ssh_keys.fingerprint") ||
-			strings.Contains(msg, "fingerprint"))
-}
-
 // AddSSHKey persists an ssh_keys row. Implements auth.Store.
 func (s *Store) AddSSHKey(ctx context.Context, k auth.SSHKey) error {
 	hasUser := k.UserID != ""
@@ -984,10 +946,10 @@ func (s *Store) AddSSHKey(ctx context.Context, k auth.SSHKey) error {
 		userID, scopeTenant, scopeRepo, scopePerm)
 
 	if err != nil {
-		if isFingerprintUniqueViolation(err) {
+		if s.backend.IsFingerprintUniqueViolation(err) {
 			return auth.ErrDuplicateFingerprint
 		}
-		if isCheckViolation(err) {
+		if s.backend.IsCheckViolation(err) {
 			return fmt.Errorf("invalid ssh key: %w", err)
 		}
 		return err
@@ -1101,7 +1063,7 @@ func (s *Store) RevokeSSHKey(ctx context.Context, keyIDOrPrefix string) error {
 	}
 
 	_, err = s.db.ExecContext(ctx,
-		`UPDATE ssh_keys SET revoked_at = strftime('%s','now') WHERE id = ?`,
+		`UPDATE ssh_keys SET revoked_at = `+s.backend.NowSeconds()+` WHERE id = ?`,
 		matches[0],
 	)
 	return err
@@ -1111,7 +1073,7 @@ func (s *Store) RevokeSSHKey(ctx context.Context, keyIDOrPrefix string) error {
 // A missing keyID is not an error — UPDATE with no rows affected returns nil.
 func (s *Store) TouchSSHKeyUsage(ctx context.Context, keyID string) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE ssh_keys SET last_used_at = strftime('%s','now') WHERE id = ?`,
+		`UPDATE ssh_keys SET last_used_at = `+s.backend.NowSeconds()+` WHERE id = ?`,
 		keyID,
 	)
 	return err

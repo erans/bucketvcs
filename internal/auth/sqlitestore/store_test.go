@@ -21,7 +21,7 @@ func TestOpen_CreatesFileAndAppliesMigrations(t *testing.T) {
 	defer s.Close()
 
 	var pragma string
-	if err := s.db.QueryRow("PRAGMA journal_mode").Scan(&pragma); err != nil {
+	if err := s.db.raw().QueryRow("PRAGMA journal_mode").Scan(&pragma); err != nil {
 		t.Fatalf("PRAGMA journal_mode: %v", err)
 	}
 	if pragma != "wal" {
@@ -29,7 +29,7 @@ func TestOpen_CreatesFileAndAppliesMigrations(t *testing.T) {
 	}
 
 	var fk int
-	if err := s.db.QueryRow("PRAGMA foreign_keys").Scan(&fk); err != nil {
+	if err := s.db.raw().QueryRow("PRAGMA foreign_keys").Scan(&fk); err != nil {
 		t.Fatalf("PRAGMA foreign_keys: %v", err)
 	}
 	if fk != 1 {
@@ -37,7 +37,7 @@ func TestOpen_CreatesFileAndAppliesMigrations(t *testing.T) {
 	}
 
 	var v int
-	if err := s.db.QueryRow("SELECT MAX(version) FROM schema_version").Scan(&v); err != nil {
+	if err := s.db.raw().QueryRow("SELECT MAX(version) FROM schema_version").Scan(&v); err != nil {
 		t.Fatalf("schema_version: %v", err)
 	}
 	if v != 10 {
@@ -60,7 +60,7 @@ func TestOpen_ReopenIsIdempotent(t *testing.T) {
 		t.Fatalf("Open b: %v", err)
 	}
 	defer b.Close()
-	if err := b.db.PingContext(context.Background()); err != nil {
+	if err := b.db.raw().PingContext(context.Background()); err != nil {
 		t.Fatalf("Ping after reopen: %v", err)
 	}
 }

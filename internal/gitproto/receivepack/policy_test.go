@@ -36,7 +36,7 @@ func TestPolicyWiring_CheckUpdateAccept(t *testing.T) {
 	defer authStore.Close()
 	// Seed the repos row so the FK on protected_refs is satisfied
 	// (mirrors the M14 Task 1 test harness).
-	if _, err := authStore.DB().Exec(
+	if _, err := authStore.DB().ExecContext(context.Background(),
 		`INSERT INTO repos (tenant, name, public_read, created_at)
 		 VALUES (?, ?, 0, strftime('%s','now'))`,
 		"acme", "site",

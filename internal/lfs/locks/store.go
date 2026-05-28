@@ -16,7 +16,7 @@ import (
 // Backed by the *sqlitestore.Store handle from M4 authdb so locks
 // and auth share a single sqlite file (and a single backup target).
 type Store struct {
-	db *sql.DB
+	db sqlitestore.Querier
 }
 
 // New constructs a locks.Store from an open authdb handle.
@@ -50,7 +50,7 @@ func (s *Store) Create(ctx context.Context, in CreateInput) (string, error) {
 		VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		id, in.Tenant, in.Repo, in.Path, refName, in.OwnerUserID, in.Now.Unix())
 	if err != nil {
-		if isUniqueViolation(err) {
+		if s.db.IsUniqueViolation(err) {
 			return "", ErrAlreadyLocked
 		}
 		return "", fmt.Errorf("locks: insert: %w", err)
@@ -258,15 +258,4 @@ func (s *Store) Verify(ctx context.Context, tenant, repo, callerUserID string, o
 		}
 	}
 	return out, nil
-}
-
-// isUniqueViolation reports whether err looks like a SQLite UNIQUE
-// constraint failure. Mirrors the pattern used by sqlitestore.
-func isUniqueViolation(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "UNIQUE constraint failed") ||
-		strings.Contains(msg, "constraint failed: UNIQUE")
 }

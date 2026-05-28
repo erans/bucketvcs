@@ -67,7 +67,7 @@ func (s *Store) RenameRepo(ctx context.Context, tenant, oldName, newName string)
 	// rows first without tripping the FK trigger on each UPDATE; the final
 	// FK check at COMMIT sees consistent rows since the parent UPDATE
 	// arrives before we commit.
-	if _, err := tx.ExecContext(ctx, `PRAGMA defer_foreign_keys = TRUE`); err != nil {
+	if err := tx.DeferForeignKeys(); err != nil {
 		return fmt.Errorf("sqlitestore.RenameRepo: defer_foreign_keys: %w", err)
 	}
 

@@ -48,7 +48,7 @@ func TestAddSSHKey_UserKey(t *testing.T) {
 	}
 	// Roundtrip via direct SELECT (List* not yet implemented).
 	var fp string
-	if err := s.db.QueryRow(`SELECT fingerprint FROM ssh_keys WHERE id=?`, k.ID).Scan(&fp); err != nil {
+	if err := s.db.raw().QueryRow(`SELECT fingerprint FROM ssh_keys WHERE id=?`, k.ID).Scan(&fp); err != nil {
 		t.Fatalf("SELECT: %v", err)
 	}
 	if fp != k.Fingerprint {
@@ -78,7 +78,7 @@ func TestAddSSHKey_DeployKey(t *testing.T) {
 	}
 	// Verify the row landed with correct scope columns.
 	var tenant, repo, perm string
-	if err := s.db.QueryRow(`SELECT scope_tenant, scope_repo, scope_perm FROM ssh_keys WHERE id=?`, k.ID).
+	if err := s.db.raw().QueryRow(`SELECT scope_tenant, scope_repo, scope_perm FROM ssh_keys WHERE id=?`, k.ID).
 		Scan(&tenant, &repo, &perm); err != nil {
 		t.Fatalf("SELECT: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestVerifyCredential_RevokedSSHKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Manually set revoked_at since RevokeSSHKey isn't implemented yet.
-	if _, err := s.db.Exec(`UPDATE ssh_keys SET revoked_at = strftime('%s','now') WHERE id = 'k1'`); err != nil {
+	if _, err := s.db.raw().Exec(`UPDATE ssh_keys SET revoked_at = strftime('%s','now') WHERE id = 'k1'`); err != nil {
 		t.Fatal(err)
 	}
 	_, _, _, err = s.VerifyCredential(ctx, auth.SSHKeyFingerprint{Fingerprint: fp})
@@ -234,7 +234,7 @@ func TestVerifyCredential_DisabledUserSSHKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Manually disable the user.
-	if _, err := s.db.Exec(`UPDATE users SET disabled_at = strftime('%s','now') WHERE id = ?`, userID); err != nil {
+	if _, err := s.db.raw().Exec(`UPDATE users SET disabled_at = strftime('%s','now') WHERE id = ?`, userID); err != nil {
 		t.Fatal(err)
 	}
 	fp := "SHA256:disab"
@@ -416,7 +416,7 @@ func TestTouchSSHKeyUsage_UpdatesLastUsed(t *testing.T) {
 		t.Fatal(err)
 	}
 	var lu sql.NullInt64
-	if err := s.db.QueryRow(`SELECT last_used_at FROM ssh_keys WHERE id = 'bvsk_t1'`).Scan(&lu); err != nil {
+	if err := s.db.raw().QueryRow(`SELECT last_used_at FROM ssh_keys WHERE id = 'bvsk_t1'`).Scan(&lu); err != nil {
 		t.Fatal(err)
 	}
 	if !lu.Valid {

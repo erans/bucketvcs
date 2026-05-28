@@ -2,7 +2,6 @@ package quota_test
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"math"
@@ -23,7 +22,7 @@ import (
 // so MaxOpenConns=1 is what keeps these tests coherent). If that
 // invariant ever changes, switch this helper to a file-backed temp
 // DB instead.
-func openTestDB(t *testing.T) *sql.DB {
+func openTestDB(t *testing.T) sqlitestore.Querier {
 	t.Helper()
 	store, err := sqlitestore.Open(":memory:")
 	if err != nil {
@@ -275,7 +274,7 @@ func TestService_CheckBatch_DoesNotOverflow(t *testing.T) {
 	// Set used_bytes manually via the underlying DB (since the
 	// public API floors at 0 on Subtract).
 	_ = svc.Set(ctx, "acme", 100)
-	if _, err := db.Exec(`UPDATE quotas SET used_bytes = ? WHERE tenant = ?`,
+	if _, err := db.ExecContext(ctx, `UPDATE quotas SET used_bytes = ? WHERE tenant = ?`,
 		int64(math.MaxInt64-10), "acme"); err != nil {
 		t.Fatalf("seed: %v", err)
 	}

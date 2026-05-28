@@ -111,3 +111,32 @@ jobs:
         env:
           BUCKETVCS_LIBSQL_URL: "http://127.0.0.1:8080"
         run: go test -tags libsql -count=1 ./internal/auth/sqlitestore/ -run TestLibsqlConformance -v
+
+  postgres:
+    name: postgres conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: pw
+          POSTGRES_DB: bv
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+      - name: Postgres conformance
+        env:
+          BUCKETVCS_POSTGRES_URL: "postgres://postgres@127.0.0.1:5432/bv?sslmode=disable"
+          BUCKETVCS_DB_AUTH_TOKEN: "pw"
+        run: go test -tags postgres -count=1 ./internal/auth/sqlitestore/ -run TestPostgresConformance -v

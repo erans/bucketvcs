@@ -1,6 +1,7 @@
 package sqlitestore
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log/slog"
@@ -86,4 +87,29 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return string(r[:n]) + "…"
+}
+
+func (libsqlBackend) Rebind(query string) string { return query }
+
+func (libsqlBackend) IsUniqueViolation(err error) bool { return sqliteIsUnique(err) }
+func (libsqlBackend) IsCheckViolation(err error) bool  { return sqliteIsCheck(err) }
+func (libsqlBackend) IsFingerprintUniqueViolation(err error) bool {
+	return sqliteIsUnique(err) &&
+		(strings.Contains(err.Error(), "ssh_keys.fingerprint") ||
+			strings.Contains(err.Error(), "fingerprint"))
+}
+func (libsqlBackend) NowSeconds() string { return "strftime('%s','now')" }
+func (libsqlBackend) Greatest(expr, floor string) string {
+	return "MAX(" + expr + ", " + floor + ")"
+}
+func (libsqlBackend) DeferForeignKeys(tx *sql.Tx) error {
+	_, err := tx.Exec("PRAGMA defer_foreign_keys = TRUE")
+	return err
+}
+func (libsqlBackend) InsertReturningID(ctx context.Context, tx *sql.Tx, query string, args ...any) (int64, error) {
+	res, err := tx.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
 }

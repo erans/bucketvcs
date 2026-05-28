@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
 
@@ -50,14 +51,14 @@ type Report struct {
 // Service wraps the quotas table on the authdb. All methods are safe
 // for concurrent use; sqlite's single-writer model serializes writes.
 type Service struct {
-	db     *sql.DB
+	db     sqlitestore.Querier
 	logger *slog.Logger
 	ring   *addRing
 }
 
 // New constructs a Service. logger may be nil; emissions added in
 // later tasks will fall back to slog.Default() at emission time.
-func New(db *sql.DB, logger *slog.Logger) *Service {
+func New(db sqlitestore.Querier, logger *slog.Logger) *Service {
 	return &Service{
 		db:     db,
 		logger: logger,
@@ -189,13 +190,13 @@ func (s *Service) CheckBatch(ctx context.Context, tenant string, requestedBytes 
 // additional in-process serialization is essentially free. The
 // lock-across-DB model gives us TWO properties:
 //
-//   1. If UPDATE succeeds, only one caller for a given (tenant, oid)
-//      ever does so (the next caller observes Seen=true and short-
-//      circuits). True idempotency under concurrent same-OID retries
-//      — the verify-replay scenario the ring exists for.
-//   2. If UPDATE fails, we never reach Record, so the ring is not
-//      polluted with an OID that didn't actually increment. A retry
-//      from the caller will succeed.
+//  1. If UPDATE succeeds, only one caller for a given (tenant, oid)
+//     ever does so (the next caller observes Seen=true and short-
+//     circuits). True idempotency under concurrent same-OID retries
+//     — the verify-replay scenario the ring exists for.
+//  2. If UPDATE fails, we never reach Record, so the ring is not
+//     polluted with an OID that didn't actually increment. A retry
+//     from the caller will succeed.
 func (s *Service) Add(ctx context.Context, tenant, oid string, bytes int64) error {
 	if bytes < 0 {
 		return fmt.Errorf("quota: bytes must be >= 0 (got %d)", bytes)
@@ -235,11 +236,9 @@ func (s *Service) Subtract(ctx context.Context, tenant, oid string, bytes int64)
 		return nil
 	}
 	now := time.Now().Unix()
-	_, err := s.db.ExecContext(ctx, `
-		UPDATE quotas
-		SET used_bytes = MAX(used_bytes - ?, 0), updated_at = ?
-		WHERE tenant = ?
-	`, bytes, now, tenant)
+	q := `UPDATE quotas SET used_bytes = ` + s.db.Greatest("used_bytes - ?", "0") +
+		`, updated_at = ? WHERE tenant = ?`
+	_, err := s.db.ExecContext(ctx, q, bytes, now, tenant)
 	if err != nil {
 		return fmt.Errorf("quota subtract %q oid=%s: %w", tenant, oid, err)
 	}

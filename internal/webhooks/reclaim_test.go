@@ -2,10 +2,10 @@ package webhooks_test
 
 import (
 	"context"
-	"database/sql"
 	"testing"
 	"time"
 
+	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
 	"github.com/bucketvcs/bucketvcs/internal/webhooks"
 )
 
@@ -66,17 +66,17 @@ func mustCreateEndpoint(t *testing.T, svc *webhooks.Service, ctx context.Context
 	return ep
 }
 
-func mustExec(t *testing.T, db *sql.DB, q string, args ...any) {
+func mustExec(t *testing.T, db sqlitestore.Querier, q string, args ...any) {
 	t.Helper()
-	if _, err := db.Exec(q, args...); err != nil {
+	if _, err := db.ExecContext(context.Background(), q, args...); err != nil {
 		t.Fatalf("exec %q: %v", q, err)
 	}
 }
 
-func countByStatus(t *testing.T, db *sql.DB, status string) int {
+func countByStatus(t *testing.T, db sqlitestore.Querier, status string) int {
 	t.Helper()
 	var n int
-	row := db.QueryRow(`SELECT COUNT(*) FROM webhook_deliveries WHERE status=?`, status)
+	row := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM webhook_deliveries WHERE status=?`, status)
 	if err := row.Scan(&n); err != nil {
 		t.Fatalf("count %s: %v", status, err)
 	}

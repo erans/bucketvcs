@@ -2,9 +2,10 @@ package webhooks
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"time"
+
+	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
 )
 
 // Reclaim returns rows with status='in_flight' whose last_attempt_at is older
@@ -17,7 +18,7 @@ import (
 // The threshold MUST be well above the worker's POST timeout + drain window
 // to avoid double-delivery: a row currently being POSTed by a live worker
 // would otherwise be reclaimed and re-attempted.
-func Reclaim(ctx context.Context, db *sql.DB, threshold time.Duration) error {
+func Reclaim(ctx context.Context, db sqlitestore.Querier, threshold time.Duration) error {
 	cutoff := time.Now().Add(-threshold).Unix()
 	_, err := db.ExecContext(ctx,
 		`UPDATE webhook_deliveries

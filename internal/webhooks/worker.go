@@ -3,7 +3,6 @@ package webhooks
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +10,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
 )
 
 // WorkerConfig parameterizes the worker loop. Production defaults are set in
@@ -23,8 +24,8 @@ type WorkerConfig struct {
 	BackoffSchedule   []time.Duration // delay before attempt N+1; len = max attempts - 1
 	BackoffJitterFrac float64         // 0.25 → ±25% jitter per interval
 	ReclaimThreshold  time.Duration
-	HTTPClient        *http.Client  // optional override for tests
-	Logger            *slog.Logger  // optional; defaults to slog.Default()
+	HTTPClient        *http.Client // optional override for tests
+	Logger            *slog.Logger // optional; defaults to slog.Default()
 }
 
 // DefaultWorkerConfig returns the production defaults (spec §6).
@@ -147,51 +148,47 @@ type claimedRow struct {
 // The JOIN filters on e.active=1, so disabling an endpoint stops draining
 // its pending queue immediately (rows stay pending and resume only if the
 // endpoint is re-enabled).
-func claim(ctx context.Context, db *sql.DB, batch int) ([]claimedRow, error) {
-	tx, err := db.BeginTx(ctx, &sql.TxOptions{})
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx,
-		`SELECT d.id, d.endpoint_id, d.event_type, d.payload_json, d.attempts,
-		        e.url, e.secret
-		 FROM webhook_deliveries d
-		 JOIN webhook_endpoints e ON e.id = d.endpoint_id
-		 WHERE d.status='pending' AND d.next_attempt_at <= ?
-		   AND e.active=1
-		 ORDER BY d.next_attempt_at
-		 LIMIT ?`,
-		time.Now().Unix(), batch,
-	)
-	if err != nil {
-		return nil, err
-	}
+func claim(ctx context.Context, db sqlitestore.Querier, batch int) ([]claimedRow, error) {
 	var out []claimedRow
-	for rows.Next() {
-		var r claimedRow
-		if err := rows.Scan(&r.ID, &r.EndpointID, &r.EventType, &r.PayloadJSON, &r.Attempts, &r.URL, &r.Secret); err != nil {
-			rows.Close()
-			return nil, err
+	err := db.RunInTx(ctx, func(tx sqlitestore.Tx) error {
+		rows, err := tx.QueryContext(ctx,
+			`SELECT d.id, d.endpoint_id, d.event_type, d.payload_json, d.attempts,
+			        e.url, e.secret
+			 FROM webhook_deliveries d
+			 JOIN webhook_endpoints e ON e.id = d.endpoint_id
+			 WHERE d.status='pending' AND d.next_attempt_at <= ?
+			   AND e.active=1
+			 ORDER BY d.next_attempt_at
+			 LIMIT ?`,
+			time.Now().Unix(), batch)
+		if err != nil {
+			return err
 		}
-		out = append(out, r)
-	}
-	rows.Close()
-	now := time.Now().Unix()
-	for i := range out {
-		out[i].Attempts++
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE webhook_deliveries
-			   SET status='in_flight', last_attempt_at=?, attempts=?
-			 WHERE id=?`,
-			now, out[i].Attempts, out[i].ID); err != nil {
-			return nil, err
+		var claimed []claimedRow
+		for rows.Next() {
+			var r claimedRow
+			if err := rows.Scan(&r.ID, &r.EndpointID, &r.EventType, &r.PayloadJSON, &r.Attempts, &r.URL, &r.Secret); err != nil {
+				rows.Close()
+				return err
+			}
+			claimed = append(claimed, r)
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	return out, nil
+		rows.Close()
+		now := time.Now().Unix()
+		for i := range claimed {
+			claimed[i].Attempts++
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE webhook_deliveries
+				   SET status='in_flight', last_attempt_at=?, attempts=?
+				 WHERE id=?`,
+				now, claimed[i].Attempts, claimed[i].ID); err != nil {
+				return err
+			}
+		}
+		out = claimed
+		return nil
+	})
+	return out, err
 }
 
 // deliver performs one POST attempt for row and updates the DB based on outcome.

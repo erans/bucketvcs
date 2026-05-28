@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
 )
 
 // Trigger names.
@@ -36,13 +38,13 @@ type Row struct {
 	Now time.Time
 }
 
-// Store wraps a *sql.DB (the M4 authdb) with CRUD over the hooks table.
-// Constructed by NewStore; the DB lifetime is the caller's responsibility.
+// Store wraps the authdb Querier (the M4 authdb) with CRUD over the hooks
+// table. Constructed by NewStore; the DB lifetime is the caller's responsibility.
 type Store struct {
-	db *sql.DB
+	db sqlitestore.Querier
 }
 
-func NewStore(db *sql.DB) *Store { return &Store{db: db} }
+func NewStore(db sqlitestore.Querier) *Store { return &Store{db: db} }
 
 // Add inserts or updates a hook row. On upsert, created_at is preserved.
 func (s *Store) Add(ctx context.Context, r Row) error {
@@ -59,9 +61,9 @@ func (s *Store) Add(ctx context.Context, r Row) error {
 	}
 	// SQLite upsert: ON CONFLICT preserves created_at, advances updated_at.
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO hooks (tenant, repo, trigger, script_name, sort_order, enabled, created_at, updated_at)
+		INSERT INTO hooks (tenant, repo, "trigger", script_name, sort_order, enabled, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(tenant, repo, trigger, script_name) DO UPDATE SET
+		ON CONFLICT(tenant, repo, "trigger", script_name) DO UPDATE SET
 			sort_order = excluded.sort_order,
 			enabled    = excluded.enabled,
 			updated_at = excluded.updated_at
@@ -75,14 +77,14 @@ func (s *Store) Add(ctx context.Context, r Row) error {
 // List returns all hook rows for (tenant, repo). triggerFilter=="" returns all triggers.
 // Ordered by (trigger, sort_order ASC, script_name ASC) for deterministic output.
 func (s *Store) List(ctx context.Context, tenant, repo, triggerFilter string) ([]Row, error) {
-	q := `SELECT tenant, repo, trigger, script_name, sort_order, enabled, created_at, updated_at
+	q := `SELECT tenant, repo, "trigger", script_name, sort_order, enabled, created_at, updated_at
 	      FROM hooks WHERE tenant = ? AND repo = ?`
 	args := []any{tenant, repo}
 	if triggerFilter != "" {
-		q += ` AND trigger = ?`
+		q += ` AND "trigger" = ?`
 		args = append(args, triggerFilter)
 	}
-	q += ` ORDER BY trigger, sort_order, script_name`
+	q += ` ORDER BY "trigger", sort_order, script_name`
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("hooks.List: %w", err)
@@ -95,9 +97,9 @@ func (s *Store) List(ctx context.Context, tenant, repo, triggerFilter string) ([
 // ordered by (sort_order ASC, script_name ASC). Used by Service at push time.
 func (s *Store) ListActiveForTrigger(ctx context.Context, tenant, repo, trigger string) ([]Row, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT tenant, repo, trigger, script_name, sort_order, enabled, created_at, updated_at
+		SELECT tenant, repo, "trigger", script_name, sort_order, enabled, created_at, updated_at
 		FROM hooks
-		WHERE tenant = ? AND repo = ? AND trigger = ? AND enabled = 1
+		WHERE tenant = ? AND repo = ? AND "trigger" = ? AND enabled = 1
 		ORDER BY sort_order, script_name`, tenant, repo, trigger)
 	if err != nil {
 		return nil, fmt.Errorf("hooks.ListActiveForTrigger: %w", err)
@@ -109,7 +111,7 @@ func (s *Store) ListActiveForTrigger(ctx context.Context, tenant, repo, trigger 
 // Remove deletes one row. Returns ErrNotFound if no row matched.
 func (s *Store) Remove(ctx context.Context, tenant, repo, trigger, scriptName string) error {
 	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM hooks WHERE tenant = ? AND repo = ? AND trigger = ? AND script_name = ?`,
+		`DELETE FROM hooks WHERE tenant = ? AND repo = ? AND "trigger" = ? AND script_name = ?`,
 		tenant, repo, trigger, scriptName)
 	if err != nil {
 		return fmt.Errorf("hooks.Remove: %w", err)
@@ -132,7 +134,7 @@ func (s *Store) SetEnabled(ctx context.Context, tenant, repo, trigger, scriptNam
 	}
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE hooks SET enabled = ?, updated_at = ?
-		 WHERE tenant = ? AND repo = ? AND trigger = ? AND script_name = ?`,
+		 WHERE tenant = ? AND repo = ? AND "trigger" = ? AND script_name = ?`,
 		en, now.Unix(), tenant, repo, trigger, scriptName)
 	if err != nil {
 		return fmt.Errorf("hooks.SetEnabled: %w", err)

@@ -1,6 +1,7 @@
 package sqlitestore
 
 import (
+	"context"
 	"database/sql"
 	"net/url"
 	"strings"
@@ -9,26 +10,69 @@ import (
 )
 
 // Backend abstracts the driver-specific concerns that differ between the
-// SQLite (modernc) and libSQL (Turso) backends. Phase B adds a postgres
-// implementation plus a SQL-dialect helper for the divergent statements.
+// SQLite (modernc), libSQL (Turso), and PostgreSQL backends.
 type Backend interface {
-	// Name reports the backend for logging: "sqlite" | "libsql".
+	// Name reports the backend for logging: "sqlite" | "libsql" | "postgres".
 	Name() string
 	// Open opens the *sql.DB with this backend's driver, DSN, and pool
 	// config. It does NOT run migrations.
 	Open() (*sql.DB, error)
 	// ApplyMigration executes one migration file body within tx.
 	ApplyMigration(tx *sql.Tx, body string) error
+
+	// Rebind converts a ?-placeholder query to the backend's placeholder
+	// style. sqlite/libsql: identity. postgres: ?→$1,$2,… (literal-aware).
+	Rebind(query string) string
+	// IsUniqueViolation / IsCheckViolation classify constraint errors.
+	IsUniqueViolation(err error) bool
+	IsCheckViolation(err error) bool
+	// IsFingerprintUniqueViolation reports a UNIQUE violation specifically on
+	// the ssh_keys.fingerprint constraint.
+	IsFingerprintUniqueViolation(err error) bool
+
+	// NowSeconds returns a SQL expression yielding the current unix time in
+	// seconds: sqlite "strftime('%s','now')"; postgres
+	// "EXTRACT(EPOCH FROM now())::bigint".
+	NowSeconds() string
+	// Greatest returns a SQL expression for max(expr, floor): sqlite
+	// "MAX(expr, floor)"; postgres "GREATEST(expr, floor)".
+	Greatest(expr, floor string) string
+	// DeferForeignKeys defers FK checks to COMMIT for the given tx. sqlite
+	// execs "PRAGMA defer_foreign_keys = TRUE"; postgres is a no-op because
+	// its FKs are declared DEFERRABLE INITIALLY DEFERRED.
+	DeferForeignKeys(tx *sql.Tx) error
+	// InsertReturningID runs an INSERT and returns the generated integer id.
+	// sqlite execs then uses LastInsertId; postgres appends " RETURNING id"
+	// and scans. The table's surrogate key MUST be named "id".
+	InsertReturningID(ctx context.Context, tx *sql.Tx, query string, args ...any) (int64, error)
 }
 
-// resolveBackend selects a Backend from the --auth-db value. A recognized URL
-// scheme (libsql/http/https) selects libSQL; anything else (bare path, file:,
-// sqlite:, or a Windows drive path) is a filesystem path → SQLite.
+// resolveBackend selects a Backend from the --auth-db value. postgres:// /
+// postgresql:// selects PostgreSQL; libsql/http/https selects libSQL; anything
+// else (bare path, file:, sqlite:, or a Windows drive path) is a filesystem
+// path → SQLite.
 func resolveBackend(value string) (Backend, error) {
+	if isPostgresValue(value) {
+		return newPostgresBackend(value)
+	}
 	if isLibsqlValue(value) {
 		return newLibsqlBackend(value)
 	}
 	return sqliteBackend{path: sqlitePath(value)}, nil
+}
+
+// isPostgresValue reports whether value is a PostgreSQL URL.
+func isPostgresValue(value string) bool {
+	u, err := url.Parse(value)
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "postgres", "postgresql":
+		return true
+	default:
+		return false
+	}
 }
 
 // isLibsqlValue reports whether value is a libSQL/Turso URL.
@@ -90,4 +134,44 @@ func (b sqliteBackend) Open() (*sql.DB, error) {
 func (sqliteBackend) ApplyMigration(tx *sql.Tx, body string) error {
 	_, err := tx.Exec(body)
 	return err
+}
+
+func (sqliteBackend) Rebind(query string) string { return query }
+
+func (sqliteBackend) IsUniqueViolation(err error) bool { return sqliteIsUnique(err) }
+func (sqliteBackend) IsCheckViolation(err error) bool  { return sqliteIsCheck(err) }
+func (sqliteBackend) IsFingerprintUniqueViolation(err error) bool {
+	return sqliteIsUnique(err) &&
+		(strings.Contains(err.Error(), "ssh_keys.fingerprint") ||
+			strings.Contains(err.Error(), "fingerprint"))
+}
+
+func (sqliteBackend) NowSeconds() string { return "strftime('%s','now')" }
+func (sqliteBackend) Greatest(expr, floor string) string {
+	return "MAX(" + expr + ", " + floor + ")"
+}
+func (sqliteBackend) DeferForeignKeys(tx *sql.Tx) error {
+	_, err := tx.Exec("PRAGMA defer_foreign_keys = TRUE")
+	return err
+}
+func (sqliteBackend) InsertReturningID(ctx context.Context, tx *sql.Tx, query string, args ...any) (int64, error) {
+	res, err := tx.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// sqliteIsUnique / sqliteIsCheck are the substring matchers shared by the
+// sqlite and libsql backends (libSQL surfaces the same SQLite error text).
+func sqliteIsUnique(err error) bool {
+	if err == nil {
+		return false
+	}
+	m := err.Error()
+	return strings.Contains(m, "UNIQUE constraint failed") ||
+		strings.Contains(m, "constraint failed: UNIQUE")
+}
+func sqliteIsCheck(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "CHECK constraint failed")
 }
