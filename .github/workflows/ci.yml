@@ -101,3 +101,36 @@ jobs:
           BUCKETVCS_POSTGRES_URL: "postgres://postgres@127.0.0.1:5432/bv?sslmode=disable"
           BUCKETVCS_DB_AUTH_TOKEN: "pw"
         run: go test -tags postgres -count=1 ./internal/auth/sqlitestore/ -run TestPostgresConformance -v
+
+  # Per-commit libSQL/Turso metadata-backend conformance (M23 Phase A). Mirrors
+  # the postgres job above with an sqld service container; runs the //go:build
+  # libsql suite so a PR breaking the libSQL backend fails in ci.yml, not only in
+  # the nightly conformance workflow. sqld's user HTTP API listens on port 8080.
+  libsql-conformance:
+    name: libsql conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      sqld:
+        image: ghcr.io/tursodatabase/libsql-server:v0.24.33
+        ports:
+          - 8080:8080
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+      - name: Wait for sqld
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1; then
+              echo "sqld up"; exit 0
+            fi
+            sleep 1
+          done
+          echo "sqld did not become ready"; exit 1
+      - name: libSQL conformance
+        env:
+          BUCKETVCS_LIBSQL_URL: "http://127.0.0.1:8080"
+        run: go test -tags libsql -count=1 ./internal/auth/sqlitestore/ -run TestLibsqlConformance -v
