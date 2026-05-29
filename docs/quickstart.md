@@ -142,15 +142,17 @@ limiting) are read correctly.
 ## 6. Push and clone
 
 The token from step 4 is the HTTPS password (any username works once the token
-is repo-scoped, but using the owning user is clearest):
+is repo-scoped, but using the owning user is clearest). The repository URL must
+end in **`.git`** — the gateway uses that suffix to separate the repo name from
+the Git path:
 
 ```bash
 # From an existing local repo:
-git remote add origin "http://alice:<token>@127.0.0.1:8080/acme/my-repo"
+git remote add origin "http://alice:<token>@127.0.0.1:8080/acme/my-repo.git"
 git push -u origin main
 
 # Or clone it elsewhere:
-git clone "http://alice:<token>@127.0.0.1:8080/acme/my-repo"
+git clone "http://alice:<token>@127.0.0.1:8080/acme/my-repo.git"
 ```
 
 To avoid putting the token in the URL, use a Git credential helper — bucketvcs
