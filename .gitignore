@@ -29,3 +29,7 @@ auth.db
 auth.db-shm
 auth.db-wal
 .envrc
+
+# Local tooling artifacts
+.wrangler/
+bucketvcs-s3-policy.json
