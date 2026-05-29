@@ -22,8 +22,8 @@ type Store struct {
 // Open opens (or creates) the metadata database identified by value and
 // applies any pending migrations. value is a filesystem path (SQLite, the
 // default) or a libsql://… / https://… URL (Turso/libSQL). See resolveBackend.
-func Open(value string) (*Store, error) {
-	b, err := resolveBackend(value)
+func Open(value string, opts ...Option) (*Store, error) {
+	b, err := resolveBackend(value, opts...)
 	if err != nil {
 		return nil, err
 	}

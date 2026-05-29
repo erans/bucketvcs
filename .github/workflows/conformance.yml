@@ -113,12 +113,16 @@ jobs:
         run: go test -tags libsql -count=1 ./internal/auth/sqlitestore/ -run TestLibsqlConformance -v
 
   postgres:
-    name: postgres conformance
+    name: postgres conformance (pg${{ matrix.pg }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ["14", "18"]
     services:
       postgres:
-        image: postgres:17
+        image: postgres:${{ matrix.pg }}
         env:
           POSTGRES_PASSWORD: pw
           POSTGRES_DB: bv

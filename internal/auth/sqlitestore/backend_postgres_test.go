@@ -62,3 +62,22 @@ func TestResolveBackend_Postgres(t *testing.T) {
 		}
 	}
 }
+
+func TestWithMaxConns(t *testing.T) {
+	// Default (no option) → postgres uses 10.
+	b, err := resolveBackend("postgres://u@h/db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := b.(postgresBackend).maxConns; got != 10 {
+		t.Fatalf("default maxConns = %d, want 10", got)
+	}
+	// Explicit option overrides.
+	b2, err := resolveBackend("postgres://u@h/db", WithMaxConns(25))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := b2.(postgresBackend).maxConns; got != 25 {
+		t.Fatalf("maxConns = %d, want 25", got)
+	}
+}

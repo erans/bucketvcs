@@ -30,3 +30,15 @@ func TestSqliteDialect_Classifiers(t *testing.T) {
 		t.Fatal("false positive unique")
 	}
 }
+
+func TestSupportsSkipLocked(t *testing.T) {
+	if (sqliteBackend{}).SupportsSkipLocked() {
+		t.Fatal("sqlite must not support SKIP LOCKED")
+	}
+	if (libsqlBackend{}).SupportsSkipLocked() {
+		t.Fatal("libsql must not support SKIP LOCKED")
+	}
+	if !(postgresBackend{}).SupportsSkipLocked() {
+		t.Fatal("postgres must support SKIP LOCKED")
+	}
+}

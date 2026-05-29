@@ -3,7 +3,6 @@ package quota_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"math"
 	"testing"
 
@@ -167,17 +166,35 @@ func TestService_AddIncrementsUsed(t *testing.T) {
 	}
 }
 
-func TestService_AddIsIdempotentWithinRing(t *testing.T) {
+func TestService_AddIdempotentViaCredits(t *testing.T) {
 	db := openTestDB(t)
 	svc := quota.New(db, nil)
 	ctx := context.Background()
-	_ = svc.Set(ctx, "acme", 1000)
-	// Same (tenant, oid) added twice — must count once.
-	_ = svc.Add(ctx, "acme", "oid1", 50)
-	_ = svc.Add(ctx, "acme", "oid1", 50)
-	got, _ := svc.Get(ctx, "acme")
-	if got.UsedBytes != 50 {
-		t.Errorf("UsedBytes=%d, want 50 (idempotent on duplicate oid)", got.UsedBytes)
+	if err := svc.Set(ctx, "acme", 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Add(ctx, "acme", "oidA", 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Add(ctx, "acme", "oidA", 100); err != nil { // replay
+		t.Fatal(err)
+	}
+	st, err := svc.Get(ctx, "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.UsedBytes != 100 {
+		t.Fatalf("used=%d want 100 (replay must not double-count)", st.UsedBytes)
+	}
+	if err := svc.Subtract(ctx, "acme", "oidA", 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Subtract(ctx, "acme", "oidA", 100); err != nil { // second subtract no-op
+		t.Fatal(err)
+	}
+	st, _ = svc.Get(ctx, "acme")
+	if st.UsedBytes != 0 {
+		t.Fatalf("used=%d want 0", st.UsedBytes)
 	}
 }
 
@@ -212,40 +229,6 @@ func TestService_SubtractNoOpWhenNoRow(t *testing.T) {
 	svc := quota.New(db, nil)
 	if err := svc.Subtract(context.Background(), "acme", "oid1", 50); err != nil {
 		t.Errorf("Subtract with no row: %v, want nil", err)
-	}
-}
-
-func TestService_AddDoubleCountsAfterRingEviction(t *testing.T) {
-	// Pins the documented bound from design spec §6.2: beyond the
-	// ring's capacity (1024 entries), a re-Add of an already-seen
-	// (tenant, oid) is no longer deduplicated. Reconcile is the
-	// safety net for this drift. This test exists so a future cap
-	// change or LRU policy change is noticed.
-	db := openTestDB(t)
-	svc := quota.New(db, nil)
-	ctx := context.Background()
-	_ = svc.Set(ctx, "acme", 1<<30)
-
-	// First Add lands.
-	const firstOID = "0000000000000000000000000000000000000000000000000000000000000000"
-	if err := svc.Add(ctx, "acme", firstOID, 10); err != nil {
-		t.Fatalf("Add first: %v", err)
-	}
-	// Fill the ring with 1024 distinct OIDs so the first one evicts.
-	for i := 1; i <= 1024; i++ {
-		oid := fmt.Sprintf("%064x", i)
-		if err := svc.Add(ctx, "acme", oid, 1); err != nil {
-			t.Fatalf("Add filler %d: %v", i, err)
-		}
-	}
-	// Re-Add the original — it has been evicted, so it counts again.
-	if err := svc.Add(ctx, "acme", firstOID, 10); err != nil {
-		t.Fatalf("Add evicted: %v", err)
-	}
-	got, _ := svc.Get(ctx, "acme")
-	// First (10) + 1024 fillers (1024) + re-added evicted (10) = 1044.
-	if got.UsedBytes != 1044 {
-		t.Errorf("UsedBytes=%d, want 1044 (10 first + 1024 fillers + 10 re-added after eviction)", got.UsedBytes)
 	}
 }
 

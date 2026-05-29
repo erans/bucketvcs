@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
@@ -53,7 +52,6 @@ type Report struct {
 type Service struct {
 	db     sqlitestore.Querier
 	logger *slog.Logger
-	ring   *addRing
 }
 
 // New constructs a Service. logger may be nil; emissions added in
@@ -62,7 +60,6 @@ func New(db sqlitestore.Querier, logger *slog.Logger) *Service {
 	return &Service{
 		db:     db,
 		logger: logger,
-		ring:   newAddRing(1024),
 	}
 }
 
@@ -182,21 +179,13 @@ func (s *Service) CheckBatch(ctx context.Context, tenant string, requestedBytes 
 }
 
 // Add increments used_bytes by the given amount, atomically. No-op
-// when no quota row exists for the tenant. Idempotent within the
-// dedupe ring's TTL window (see addRing).
+// when no quota row exists for the tenant.
 //
-// Concurrency: holds the ring lock across the DB UPDATE. SQLite's
-// single-writer model already serializes concurrent UPDATEs, so the
-// additional in-process serialization is essentially free. The
-// lock-across-DB model gives us TWO properties:
-//
-//  1. If UPDATE succeeds, only one caller for a given (tenant, oid)
-//     ever does so (the next caller observes Seen=true and short-
-//     circuits). True idempotency under concurrent same-OID retries
-//     — the verify-replay scenario the ring exists for.
-//  2. If UPDATE fails, we never reach Record, so the ring is not
-//     polluted with an OID that didn't actually increment. A retry
-//     from the caller will succeed.
+// Idempotency is enforced cross-node via the quota_credits table: a
+// row is inserted with ON CONFLICT (tenant, oid) DO NOTHING inside the
+// same transaction as the used_bytes increment, so the same (tenant,
+// oid) — whether replayed on this node or another — increments exactly
+// once.
 func (s *Service) Add(ctx context.Context, tenant, oid string, bytes int64) error {
 	if bytes < 0 {
 		return fmt.Errorf("quota: bytes must be >= 0 (got %d)", bytes)
@@ -204,30 +193,40 @@ func (s *Service) Add(ctx context.Context, tenant, oid string, bytes int64) erro
 	if bytes == 0 {
 		return nil
 	}
-	s.ring.Lock()
-	defer s.ring.Unlock()
-
-	if s.ring.Seen(tenant, oid) {
-		return nil
-	}
-
 	now := time.Now().Unix()
-	if _, err := s.db.ExecContext(ctx, `
-		UPDATE quotas
-		SET used_bytes = used_bytes + ?, updated_at = ?
-		WHERE tenant = ?
-	`, bytes, now, tenant); err != nil {
-		return fmt.Errorf("quota add %q oid=%s: %w", tenant, oid, err)
-	}
-	s.ring.Record(tenant, oid)
-	return nil
+	return s.db.RunInTx(ctx, func(tx sqlitestore.Tx) error {
+		res, err := tx.ExecContext(ctx, `
+			INSERT INTO quota_credits (tenant, oid, bytes, recorded_at)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT (tenant, oid) DO NOTHING`,
+			tenant, oid, bytes, now)
+		if err != nil {
+			return fmt.Errorf("quota add %q oid=%s: credit: %w", tenant, oid, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("quota add %q oid=%s: rows affected: %w", tenant, oid, err)
+		}
+		if n == 0 {
+			return nil // already credited (this node or another) — idempotent no-op
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE quotas SET used_bytes = used_bytes + ?, updated_at = ?
+			WHERE tenant = ?`,
+			bytes, now, tenant); err != nil {
+			return fmt.Errorf("quota add %q oid=%s: increment: %w", tenant, oid, err)
+		}
+		return nil
+	})
 }
 
-// Subtract decrements used_bytes, floored at zero via MAX(used - ?, 0).
-// The clamp absorbs reconcile-vs-sweep drift (§6.4). Also forgets the
-// OID from the dedupe ring so an upload → GC → re-upload cycle on
-// the same OID within the ring's capacity isn't silently deduped on
-// the second Add. No-op when no quota row exists for the tenant.
+// Subtract decrements used_bytes, floored at zero via the backend's
+// Greatest(used - ?, 0) clamp (the clamp absorbs reconcile-vs-sweep
+// drift, §6.4). The decrement is gated on deleting the (tenant, oid)
+// credit row in the same transaction, so an upload → GC → re-upload
+// cycle on the same OID re-credits correctly on the next Add, and a
+// second Subtract for an already-removed credit is a no-op. No-op when
+// no quota row exists for the tenant.
 func (s *Service) Subtract(ctx context.Context, tenant, oid string, bytes int64) error {
 	if bytes < 0 {
 		return fmt.Errorf("quota: bytes must be >= 0 (got %d)", bytes)
@@ -236,16 +235,27 @@ func (s *Service) Subtract(ctx context.Context, tenant, oid string, bytes int64)
 		return nil
 	}
 	now := time.Now().Unix()
-	q := `UPDATE quotas SET used_bytes = ` + s.db.Greatest("used_bytes - ?", "0") +
-		`, updated_at = ? WHERE tenant = ?`
-	_, err := s.db.ExecContext(ctx, q, bytes, now, tenant)
-	if err != nil {
-		return fmt.Errorf("quota subtract %q oid=%s: %w", tenant, oid, err)
-	}
-	s.ring.Lock()
-	s.ring.Forget(tenant, oid)
-	s.ring.Unlock()
-	return nil
+	clamp := s.db.Greatest("used_bytes - ?", "0")
+	return s.db.RunInTx(ctx, func(tx sqlitestore.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`DELETE FROM quota_credits WHERE tenant = ? AND oid = ?`, tenant, oid)
+		if err != nil {
+			return fmt.Errorf("quota subtract %q oid=%s: uncredit: %w", tenant, oid, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("quota subtract %q oid=%s: rows affected: %w", tenant, oid, err)
+		}
+		if n == 0 {
+			return nil // not credited — nothing to subtract (idempotent; reconcile is the backstop)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE quotas SET used_bytes = `+clamp+`, updated_at = ? WHERE tenant = ?`,
+			bytes, now, tenant); err != nil {
+			return fmt.Errorf("quota subtract %q oid=%s: decrement: %w", tenant, oid, err)
+		}
+		return nil
+	})
 }
 
 // Reconcile lists the LFS storage prefix for the tenant, sums sizes
@@ -335,74 +345,4 @@ func sumLFSPrefix(ctx context.Context, store storage.ObjectStore, tenant, repo s
 // here is the storage contract from internal/lfs/keys.go::RepoLFSPrefix.
 func lfsRepoPrefix(tenant, repo string) string {
 	return "tenants/" + tenant + "/repos/" + repo + "/lfs/objects/"
-}
-
-// addRing is a fixed-size FIFO dedupe over (tenant, oid) pairs to keep
-// Add idempotent against verify-replay within the kind=5 token's TTL.
-// Capacity is fixed at construction; eviction is FIFO (the oldest
-// recorded entry is dropped when a new entry arrives at a full ring —
-// this is NOT true LRU, but the difference is academic for the
-// verify-replay use case where any duplicate within the TTL is likely
-// still inside the recent slots regardless of policy). Safe for
-// concurrent use; the mutex is internal to the ring.
-type addRing struct {
-	cap   int
-	mu    sync.Mutex
-	idx   map[string]int // (tenant + "\x00" + oid) -> slot
-	order []string
-	head  int // next slot to (re)use
-}
-
-func newAddRing(capacity int) *addRing {
-	return &addRing{
-		cap:   capacity,
-		idx:   make(map[string]int, capacity),
-		order: make([]string, capacity),
-	}
-}
-
-// Lock and Unlock expose the internal mutex so callers can perform a
-// check-then-act under the same critical section if needed.
-func (r *addRing) Lock()   { r.mu.Lock() }
-func (r *addRing) Unlock() { r.mu.Unlock() }
-
-// Seen reports whether (tenant, oid) is currently in the ring.
-// Caller must hold the ring's lock.
-func (r *addRing) Seen(tenant, oid string) bool {
-	_, ok := r.idx[ringKey(tenant, oid)]
-	return ok
-}
-
-// Record inserts (tenant, oid) into the ring, evicting the oldest
-// entry if at capacity. Caller must hold the ring's lock.
-func (r *addRing) Record(tenant, oid string) {
-	k := ringKey(tenant, oid)
-	if _, exists := r.idx[k]; exists {
-		return
-	}
-	if old := r.order[r.head]; old != "" {
-		delete(r.idx, old)
-	}
-	r.order[r.head] = k
-	r.idx[k] = r.head
-	r.head = (r.head + 1) % r.cap
-}
-
-// Forget removes (tenant, oid) from the ring if present. Used by
-// Subtract so an OID can be re-Added after a GC sweep (the upload →
-// GC → re-upload cycle within 1024 unique OIDs would otherwise be
-// silently deduped). The vacated slot is reused on the next Record
-// rotation. Caller must hold the ring's lock.
-func (r *addRing) Forget(tenant, oid string) {
-	k := ringKey(tenant, oid)
-	slot, ok := r.idx[k]
-	if !ok {
-		return
-	}
-	delete(r.idx, k)
-	r.order[slot] = ""
-}
-
-func ringKey(tenant, oid string) string {
-	return tenant + "\x00" + oid
 }

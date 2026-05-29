@@ -136,7 +136,18 @@ type claimedRow struct {
 	Secret string
 }
 
-// claim atomically transitions up to batch rows from pending → in_flight,
+// claim transitions up to batch deliveries pending → in_flight, returning them
+// with their endpoint URL/secret. Postgres uses FOR UPDATE SKIP LOCKED so
+// multiple gateway nodes never claim the same row; sqlite/libsql use the
+// serialized SELECT-then-UPDATE (single-writer).
+func claim(ctx context.Context, db sqlitestore.Querier, batch int) ([]claimedRow, error) {
+	if db.SupportsSkipLocked() {
+		return claimSkipLocked(ctx, db, batch)
+	}
+	return claimSerialized(ctx, db, batch)
+}
+
+// claimSerialized atomically transitions up to batch rows from pending → in_flight,
 // stamping last_attempt_at and incrementing attempts. Joins the endpoint
 // URL + secret in one query.
 //
@@ -148,7 +159,7 @@ type claimedRow struct {
 // The JOIN filters on e.active=1, so disabling an endpoint stops draining
 // its pending queue immediately (rows stay pending and resume only if the
 // endpoint is re-enabled).
-func claim(ctx context.Context, db sqlitestore.Querier, batch int) ([]claimedRow, error) {
+func claimSerialized(ctx context.Context, db sqlitestore.Querier, batch int) ([]claimedRow, error) {
 	var out []claimedRow
 	err := db.RunInTx(ctx, func(tx sqlitestore.Tx) error {
 		rows, err := tx.QueryContext(ctx,
@@ -189,6 +200,42 @@ func claim(ctx context.Context, db sqlitestore.Querier, batch int) ([]claimedRow
 		return nil
 	})
 	return out, err
+}
+
+// claimSkipLocked claims rows in a single atomic UPDATE … RETURNING using
+// FOR UPDATE SKIP LOCKED in the row-selection subquery. Safe for concurrent
+// claimers across nodes. Postgres-only syntax (gated by SupportsSkipLocked).
+func claimSkipLocked(ctx context.Context, db sqlitestore.Querier, batch int) ([]claimedRow, error) {
+	now := time.Now().Unix()
+	rows, err := db.QueryContext(ctx, `
+		UPDATE webhook_deliveries d
+		   SET status='in_flight', last_attempt_at=?, attempts=d.attempts+1
+		  FROM webhook_endpoints e
+		 WHERE e.id = d.endpoint_id
+		   AND d.id IN (
+		       SELECT d2.id
+		         FROM webhook_deliveries d2
+		         JOIN webhook_endpoints e2 ON e2.id = d2.endpoint_id
+		        WHERE d2.status='pending' AND d2.next_attempt_at <= ? AND e2.active=1
+		        ORDER BY d2.next_attempt_at
+		        LIMIT ?
+		        FOR UPDATE SKIP LOCKED
+		   )
+		RETURNING d.id, d.endpoint_id, d.event_type, d.payload_json, d.attempts, e.url, e.secret`,
+		now, now, batch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []claimedRow
+	for rows.Next() {
+		var r claimedRow
+		if err := rows.Scan(&r.ID, &r.EndpointID, &r.EventType, &r.PayloadJSON, &r.Attempts, &r.URL, &r.Secret); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // deliver performs one POST attempt for row and updates the DB based on outcome.

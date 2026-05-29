@@ -18,14 +18,15 @@ import (
 // adapter — pure-Go, preserves CGO_ENABLED=0). Phase B1: single-node
 // (MaxOpenConns(1)); multi-node hardening is B2.
 type postgresBackend struct {
-	dsn string
+	dsn      string
+	maxConns int
 }
 
 // newPostgresBackend builds the backend from a postgres://|postgresql:// URL.
 // The password is resolved OFF the CLI: BUCKETVCS_DB_AUTH_TOKEN env (precedence),
 // else standard libpq mechanisms (PGPASSWORD/.pgpass) honored by pgx. A password
 // embedded in the URL is allowed but warns (visible to other processes).
-func newPostgresBackend(rawURL string) (Backend, error) {
+func newPostgresBackend(rawURL string, maxConns int) (Backend, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: parse url: %w", err)
@@ -37,7 +38,10 @@ func newPostgresBackend(rawURL string) (Backend, error) {
 		slog.Default().Warn("postgres URL embeds a password; prefer "+dbAuthTokenEnv+" or PGPASSWORD (URL is visible to other processes)",
 			"host", u.Host)
 	}
-	return postgresBackend{dsn: u.String()}, nil
+	if maxConns <= 0 {
+		maxConns = defaultPostgresMaxConns
+	}
+	return postgresBackend{dsn: u.String(), maxConns: maxConns}, nil
 }
 
 func (postgresBackend) Name() string { return "postgres" }
@@ -47,7 +51,7 @@ func (b postgresBackend) Open() (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1) // B1 single-node; B2 raises this with concurrency hardening
+	db.SetMaxOpenConns(b.maxConns)
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("postgres: ping: %w", err)
@@ -145,3 +149,4 @@ func (postgresBackend) InsertReturningID(ctx context.Context, tx *sql.Tx, query 
 	}
 	return id, nil
 }
+func (postgresBackend) SupportsSkipLocked() bool { return true }

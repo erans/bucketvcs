@@ -113,3 +113,4 @@ func (libsqlBackend) InsertReturningID(ctx context.Context, tx *sql.Tx, query st
 	}
 	return res.LastInsertId()
 }
+func (libsqlBackend) SupportsSkipLocked() bool { return false }

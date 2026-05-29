@@ -12,7 +12,7 @@ Production readiness summary:
 - Password via `BUCKETVCS_DB_AUTH_TOKEN` env or standard libpq (`PGPASSWORD`/`~/.pgpass`); a URL-embedded password is accepted with a WARN — **shipped**.
 - All 10 migrations apply over Postgres; behavioral parity proven by a gated conformance suite — **shipped**.
 - SQLite (modernc, pure-Go) remains the zero-dependency default — **unchanged**.
-- Multi-node concurrency hardening (race-safe webhook claiming, DB-level quota idempotency, `MaxOpenConns > 1`) — **Phase B2 (not shipped)**.
+- Multi-node concurrency hardening (race-safe webhook claiming, DB-level quota idempotency, `--auth-db-max-conns` pool sizing) — **shipped in Phase B2** (see `docs/m23-b2-multinode-operator-guide.md`).
 
 ---
 
@@ -36,9 +36,11 @@ disk. Pointing the auth DB at a Postgres instance decouples that state from the
 gateway host, which simplifies backups, host replacement, and (in Phase B2)
 multi-node deployments.
 
-**Single-node only in B1.** `MaxOpenConns(1)` is kept, matching the M23 Phase A
-(libSQL) posture. Multi-node-safe webhook claiming and DB-level quota idempotency
-are B2; see §4.
+**Multi-node restriction lifted in B2.** B1 kept `MaxOpenConns(1)` for
+single-writer correctness. Phase B2 lifts this for the PostgreSQL backend:
+multi-node deployments are now supported via `--auth-db-max-conns` (default 10),
+`FOR UPDATE SKIP LOCKED` webhook claiming, and `quota_credits` idempotency. See
+`docs/m23-b2-multinode-operator-guide.md`. SQLite and libSQL remain single-node.
 
 ---
 
@@ -120,13 +122,15 @@ password is **never** accepted as a CLI argument.
 
 ## 4. B1 caveats (read before deploying)
 
-1. **Single-node only.** Multi-node-safe webhook claiming (`SELECT … FOR UPDATE
-   SKIP LOCKED`) and DB-level quota verify-replay idempotency are **Phase B2**.
-   Running multiple gateway nodes against one Postgres DB is **not yet
-   race-safe** — deploy a single gateway node with B1.
-2. **`MaxOpenConns(1)`.** B1 keeps one connection to preserve the single-writer
-   serialization the current webhook-claim and quota-ring code relies on. This
-   bounds throughput; B2 revisits pooling.
+1. **Multi-node restriction lifted in B2 (PostgreSQL only).** Phase B2 adds
+   `FOR UPDATE SKIP LOCKED` webhook claiming, `quota_credits` DB-level idempotency,
+   and `--auth-db-max-conns` pool sizing. Multiple gateway nodes against one
+   Postgres DB are now race-safe. See `docs/m23-b2-multinode-operator-guide.md`.
+   SQLite and libSQL remain single-node regardless of this flag.
+2. **`MaxOpenConns(1)` was a B1 constraint, now lifted for PostgreSQL.** B1 kept
+   one connection to preserve single-writer serialization. B2 makes the pool size
+   configurable via `--auth-db-max-conns` (default 10) for the Postgres backend.
+   SQLite and libSQL are always capped at 1.
 3. **Rate limiter stays per-node.** The M18 credential-failure limiter is
    in-memory per gateway node regardless of DB backend.
 4. **Package name is a historical misnomer.** The implementation lives in
@@ -211,18 +215,17 @@ contents after loading to confirm all 10 migrations are recorded.
 
 ---
 
-## 7. Phase B2 (planned, not in this release)
+## 7. Phase B2 (shipped)
 
-B1 front-loads the schema changes B2 requires (all foreign keys are declared
-`DEFERRABLE INITIALLY DEFERRED` in the Postgres migration set) so B2 will
-require no migration edits. The planned B2 work builds directly on B1:
+B2 built directly on the B1 schema (all foreign keys are `DEFERRABLE INITIALLY
+DEFERRED` in the Postgres migration set, so B2 required no migration edits).
+The following items planned at the end of B1 are now complete:
 
-- **Multi-node webhook claiming** via `SELECT … FOR UPDATE SKIP LOCKED`,
-  removing the single-writer assumption in the claim path.
-- **DB-level quota idempotency** so verify-replay under concurrent pushes is
-  atomic at the database level rather than ring-locked in memory.
-- **Connection pooling** beyond `MaxOpenConns(1)`.
+- **Multi-node webhook claiming** via `SELECT … FOR UPDATE SKIP LOCKED`.
+- **DB-level quota idempotency** via the `quota_credits` table (unique PK on
+  `(tenant, oid)`; replaces the in-process ring).
+- **Connection pooling** via `--auth-db-max-conns` (default 10; Postgres only).
 - **Documentation** of the per-node M18 rate limiter in a multi-gateway context.
 
-The `Backend` seam and `Querier` wrapper introduced in M23 are the extension
-points B2 builds on.
+See `docs/m23-b2-multinode-operator-guide.md` for full details, upgrade notes,
+and the supported PostgreSQL version matrix.

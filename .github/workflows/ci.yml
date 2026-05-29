@@ -68,18 +68,22 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: go build -o /dev/null ./cmd/bucketvcs
 
-  # Per-commit Postgres metadata-backend conformance (M23 B1). The default
+  # Per-commit Postgres metadata-backend conformance (M23 B1+B2). The default
   # `go test ./...` above covers SQLite (the default backend); this job runs the
-  # //go:build postgres suite against a real postgres:17 so a PR that breaks the
-  # Postgres backend fails here, not only in the nightly conformance workflow.
-  # (libSQL conformance stays nightly-only — it needs the sqld container.)
+  # //go:build postgres suite against a real Postgres (matrix: 14 floor + 18
+  # latest) so a PR that breaks the Postgres backend fails here, not only in the
+  # nightly conformance workflow. (libSQL has its own per-commit job below.)
   postgres-conformance:
-    name: postgres conformance
+    name: postgres conformance (pg${{ matrix.pg }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ["14", "18"]
     services:
       postgres:
-        image: postgres:17
+        image: postgres:${{ matrix.pg }}
         env:
           POSTGRES_PASSWORD: pw
           POSTGRES_DB: bv

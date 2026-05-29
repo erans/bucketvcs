@@ -45,15 +45,37 @@ type Backend interface {
 	// sqlite execs then uses LastInsertId; postgres appends " RETURNING id"
 	// and scans. The table's surrogate key MUST be named "id".
 	InsertReturningID(ctx context.Context, tx *sql.Tx, query string, args ...any) (int64, error)
+	// SupportsSkipLocked reports whether the backend supports
+	// SELECT … FOR UPDATE SKIP LOCKED concurrent row claiming. true for
+	// postgres; false for sqlite/libsql (single-writer).
+	SupportsSkipLocked() bool
 }
+
+// options carries Open-time configuration resolved from functional Options.
+type options struct {
+	maxConns int // Postgres pool size; 0 means default (10). Ignored by sqlite/libsql.
+}
+
+// Option configures Open/resolveBackend.
+type Option func(*options)
+
+// WithMaxConns sets the Postgres connection-pool size (SetMaxOpenConns).
+// Ignored by sqlite/libsql, which always use a single connection.
+func WithMaxConns(n int) Option { return func(o *options) { o.maxConns = n } }
+
+const defaultPostgresMaxConns = 10
 
 // resolveBackend selects a Backend from the --auth-db value. postgres:// /
 // postgresql:// selects PostgreSQL; libsql/http/https selects libSQL; anything
 // else (bare path, file:, sqlite:, or a Windows drive path) is a filesystem
 // path → SQLite.
-func resolveBackend(value string) (Backend, error) {
+func resolveBackend(value string, opts ...Option) (Backend, error) {
+	var o options
+	for _, fn := range opts {
+		fn(&o)
+	}
 	if isPostgresValue(value) {
-		return newPostgresBackend(value)
+		return newPostgresBackend(value, o.maxConns)
 	}
 	if isLibsqlValue(value) {
 		return newLibsqlBackend(value)
@@ -161,6 +183,7 @@ func (sqliteBackend) InsertReturningID(ctx context.Context, tx *sql.Tx, query st
 	}
 	return res.LastInsertId()
 }
+func (sqliteBackend) SupportsSkipLocked() bool { return false }
 
 // sqliteIsUnique / sqliteIsCheck are the substring matchers shared by the
 // sqlite and libsql backends (libSQL surfaces the same SQLite error text).

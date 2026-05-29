@@ -19,6 +19,9 @@ type Querier interface {
 	IsCheckViolation(err error) bool
 	// Greatest returns the backend's SQL expression for max(expr, floor).
 	Greatest(expr, floor string) string
+	// SupportsSkipLocked reports whether the backend supports
+	// SELECT … FOR UPDATE SKIP LOCKED. true for postgres; false for sqlite/libsql.
+	SupportsSkipLocked() bool
 }
 
 // Tx is the rebinding transaction surface handed to RunInTx callbacks.
@@ -59,6 +62,7 @@ func (w *dbWrap) IsCheckViolation(err error) bool  { return w.backend.IsCheckVio
 func (w *dbWrap) Greatest(expr, floor string) string {
 	return w.backend.Greatest(expr, floor)
 }
+func (w *dbWrap) SupportsSkipLocked() bool { return w.backend.SupportsSkipLocked() }
 
 func (w *dbWrap) Close() error { return w.db.Close() }
 func (w *dbWrap) raw() *sql.DB { return w.db }
@@ -112,7 +116,8 @@ func (w *txWrap) IsCheckViolation(err error) bool  { return w.backend.IsCheckVio
 func (w *txWrap) Greatest(expr, floor string) string {
 	return w.backend.Greatest(expr, floor)
 }
-func (w *txWrap) DeferForeignKeys() error { return w.backend.DeferForeignKeys(w.tx) }
+func (w *txWrap) SupportsSkipLocked() bool { return w.backend.SupportsSkipLocked() }
+func (w *txWrap) DeferForeignKeys() error  { return w.backend.DeferForeignKeys(w.tx) }
 func (w *txWrap) InsertReturningID(ctx context.Context, query string, args ...any) (int64, error) {
 	return w.backend.InsertReturningID(ctx, w.tx, query, args...)
 }

@@ -93,10 +93,29 @@ func (s *Store) RenameRepo(ctx context.Context, tenant, oldName, newName string)
 	}
 
 	// Parent last. The PK update writes a new row and removes the old.
-	if _, err := tx.ExecContext(ctx,
+	//
+	// RowsAffected MUST be checked: under Postgres READ COMMITTED two
+	// concurrent renamers can both pass the COUNT(*) existence guard above
+	// (a plain SELECT takes no row lock). The first commits and moves the
+	// row; the second re-evaluates this UPDATE's WHERE against the new
+	// committed snapshot, finds zero rows still named oldName, and would
+	// otherwise commit a silent no-op (observed as ok=2/failed=0 in the
+	// concurrency conformance test). Treating zero affected rows as
+	// ErrNoSuchRepo makes exactly one renamer win. On sqlite/libsql the
+	// single-writer model guarantees exactly one row here on success, so
+	// this is a no-op for them.
+	res, err := tx.ExecContext(ctx,
 		`UPDATE repos SET name=? WHERE tenant=? AND name=?`,
-		newName, tenant, oldName); err != nil {
+		newName, tenant, oldName)
+	if err != nil {
 		return fmt.Errorf("sqlitestore.RenameRepo: update repos: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("sqlitestore.RenameRepo: rows affected: %w", err)
+	} else if n == 0 {
+		// The source row vanished between the guard and this UPDATE
+		// (concurrent rename/delete). Roll back the child updates.
+		return auth.ErrNoSuchRepo
 	}
 
 	// defer_foreign_keys auto-resets to FALSE at the end of the transaction;

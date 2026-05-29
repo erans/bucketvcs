@@ -62,6 +62,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	storeURL := fs.String("store", "", `Store URL (e.g. "localfs:/var/lib/bucketvcs")`)
 	mirrorDir := fs.String("mirror-dir", "", "Mirror cache directory (default $XDG_CACHE_HOME/bucketvcs/mirrors)")
 	authDB := fs.String("auth-db", "", "Path to auth.db (default: $XDG_STATE_HOME/bucketvcs/bucketvcs.db)")
+	authDBMaxConns := fs.Int("auth-db-max-conns", 10, "Max DB connections for the auth/metadata DB (Postgres only; sqlite/libsql always use 1)")
 	maxBody := fs.Int64("max-body-bytes", 1<<30, "Per-request body limit in bytes")
 	shutdownTimeout := fs.Duration("shutdown-timeout", 30*time.Second, "Graceful shutdown deadline")
 	// SSH flags.
@@ -218,7 +219,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	}
 	defer closeStore(store)
 
-	authS, _, err := openAuthDB(*authDB)
+	authS, _, err := openAuthDB(*authDB, sqlitestore.WithMaxConns(*authDBMaxConns))
 	if err != nil {
 		fmt.Fprintf(stderr, "serve: auth-db: %v\n", err)
 		return 1

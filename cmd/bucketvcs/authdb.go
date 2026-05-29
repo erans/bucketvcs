@@ -50,7 +50,7 @@ func resolveAuthDB(flag string, env *envLookup) (string, error) {
 
 // openAuthDB resolves the path, ensures the parent directory exists, and
 // returns an opened sqlitestore. Caller must Close.
-func openAuthDB(flag string) (*sqlitestore.Store, string, error) {
+func openAuthDB(flag string, opts ...sqlitestore.Option) (*sqlitestore.Store, string, error) {
 	path, err := resolveAuthDB(flag, realEnv())
 	if err != nil {
 		return nil, "", err
@@ -58,7 +58,7 @@ func openAuthDB(flag string) (*sqlitestore.Store, string, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, "", err
 	}
-	s, err := sqlitestore.Open(path)
+	s, err := sqlitestore.Open(path, opts...)
 	if err != nil {
 		return nil, "", err
 	}
