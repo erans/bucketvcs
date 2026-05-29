@@ -198,16 +198,21 @@ ok "manifest readable in S3"
 step "Creating user, token, grant"
 "$BVCS" user add "$USER_NAME" --auth-db "$DB" >/dev/null
 TOKEN="$("$BVCS" token create "$USER_NAME" --auth-db "$DB" \
-          --scopes=repo:read,repo:write --label=e2e | sed -n 's/^token=//p')"
+          --scopes=repo:read,repo:write,lfs:read,lfs:write --label=e2e | sed -n 's/^token=//p')"
 [ -n "$TOKEN" ] || die "failed to capture token from 'token create' output"
 "$BVCS" repo grant "$USER_NAME" "$SLUG" write --auth-db "$DB"
-ok "user=$USER_NAME, token captured (repo:read,write), write granted"
+ok "user=$USER_NAME, token captured (repo + lfs read/write), write granted"
 
-# === 4. Start the gateway ===================================================
+# === 4. Start the gateway (LFS enabled) =====================================
+# LFS needs --lfs plus a proxied-URL signing key + base URL. For real S3/GCS the
+# transfers go DIRECT (bucketvcs mints a presigned PUT/GET straight to the
+# bucket); the proxied path is wired but should not fire. --mirror-dir keeps the
+# run self-contained.
 step "Starting gateway on $ADDR"
-# --lfs=false: this test exercises Git push/clone, not LFS (and --lfs=true would
-# require the proxied-URL signing config). --mirror-dir keeps the run self-contained.
-"$BVCS" serve --store "$STORE" --auth-db "$DB" --addr "$ADDR" --lfs=false \
+SIGNING_KEY="$WORK/signing.key"
+head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$SIGNING_KEY"   # 64 hex chars (>=16 bytes)
+"$BVCS" serve --store "$STORE" --auth-db "$DB" --addr "$ADDR" \
+  --lfs --proxied-url-signing-key "$SIGNING_KEY" --proxied-url-base "http://$ADDR" \
   --mirror-dir "$WORK/mirror" >"$SERVE_LOG" 2>&1 &
 SERVE_PID=$!
 
@@ -288,6 +293,38 @@ git -C "$FRESH" cat-file -e "origin/$BRANCH2:$MARKER2" 2>/dev/null || die "'$BRA
 ! git -C "$FRESH" cat-file -e "origin/$BRANCH:$MARKER2" 2>/dev/null \
   || die "'$BRANCH' unexpectedly contains $MARKER2 (branches not isolated)"
 ok "branch contents differ as expected ($BRANCH2 has $MARKER2, $BRANCH does not)"
+
+# === 9. Git LFS: store a large binary in the bucket and round-trip it =======
+if command -v git-lfs >/dev/null 2>&1; then
+  step "Git LFS: pushing a 1 MiB object → $STORE"
+  (
+    cd "$FRESH"
+    git lfs install --local >/dev/null
+    git config lfs.locksverify false   # silence the lock-verify hint (it echoes the token-bearing URL)
+    git lfs track "*.bin" >/dev/null
+    head -c 1048576 /dev/urandom > big.bin
+    cp big.bin "$WORK/big.bin.orig"
+    git -c user.email='e2e@bucketvcs.test' -c user.name='bucketvcs e2e' add .gitattributes big.bin
+    git -c user.email='e2e@bucketvcs.test' -c user.name='bucketvcs e2e' \
+      commit --quiet -m "e2e: add LFS object big.bin"
+    GIT_TERMINAL_PROMPT=0 git push --quiet origin "$BRANCH"
+  )
+  # What Git stores for big.bin must be the LFS *pointer*, not the raw bytes.
+  git -C "$FRESH" cat-file -p "HEAD:big.bin" | head -1 | grep -q '^version https://git-lfs' \
+    || die "big.bin in Git is not an LFS pointer — the LFS clean filter did not engage"
+  ok "Git stores an LFS pointer; 1 MiB blob pushed to $STORE"
+
+  step "Git LFS: fresh clone + 'git lfs pull', verify bytes"
+  LFSCLONE="$WORK/lfsclone"
+  GIT_LFS_SKIP_SMUDGE=1 git_ni clone --quiet "$REMOTE" "$LFSCLONE"
+  ( cd "$LFSCLONE"; git lfs install --local >/dev/null; GIT_TERMINAL_PROMPT=0 git lfs pull )
+  [ -f "$LFSCLONE/big.bin" ] || die "LFS object big.bin missing after 'git lfs pull'"
+  cmp "$WORK/big.bin.orig" "$LFSCLONE/big.bin" || die "LFS round-trip byte mismatch"
+  ok "LFS object round-tripped through $STORE byte-for-byte (1 MiB)"
+else
+  step "Git LFS"
+  info "git-lfs not on PATH — skipping the LFS phase (install from https://git-lfs.com/)"
+fi
 
 PASSED=1
 step "PASS"
