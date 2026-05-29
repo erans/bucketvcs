@@ -37,7 +37,16 @@ guide is identical regardless of backend.
 | `gcs://bucket`    | Google Cloud Storage | `GOOGLE_APPLICATION_CREDENTIALS` or workload identity |
 | `azureblob://container` | Azure Blob     | account + key (or managed identity) |
 
-For exact credential details per provider, see the adapter READMEs:
+For step-by-step cloud setup — creating the bucket, least-privilege
+credentials, where to put the secrets, and how to run the gateway — see the
+per-provider quickstarts:
+
+- **[Amazon S3](quickstart-s3.md)**
+- **[Google Cloud Storage](quickstart-gcs.md)**
+- **[Azure Blob Storage](quickstart-azure.md)**
+- **Cloudflare R2** — see [§7](#7-worked-cloud-example-cloudflare-r2) below
+
+Lower-level credential details also live in the adapter READMEs:
 [s3compat](../internal/storage/s3compat/README.md),
 [gcs](../internal/storage/gcs/README.md),
 [azureblob](../internal/storage/azureblob/README.md).
