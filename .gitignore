@@ -26,4 +26,6 @@ coverage.html
 dist/
 bucketvcs-key.json
 auth.db
+auth.db-shm
+auth.db-wal
 .envrc
