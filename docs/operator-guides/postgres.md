@@ -12,7 +12,7 @@ Production readiness summary:
 - Password via `BUCKETVCS_DB_AUTH_TOKEN` env or standard libpq (`PGPASSWORD`/`~/.pgpass`); a URL-embedded password is accepted with a WARN — **shipped**.
 - All 10 migrations apply over Postgres; behavioral parity proven by a gated conformance suite — **shipped**.
 - SQLite (modernc, pure-Go) remains the zero-dependency default — **unchanged**.
-- Multi-node concurrency hardening (race-safe webhook claiming, DB-level quota idempotency, `--auth-db-max-conns` pool sizing) — **shipped in Phase B2** (see `docs/m23-b2-multinode-operator-guide.md`).
+- Multi-node concurrency hardening (race-safe webhook claiming, DB-level quota idempotency, `--auth-db-max-conns` pool sizing) — **shipped in Phase B2** (see `docs/multinode.md`).
 
 ---
 
@@ -40,7 +40,7 @@ multi-node deployments.
 single-writer correctness. Phase B2 lifts this for the PostgreSQL backend:
 multi-node deployments are now supported via `--auth-db-max-conns` (default 10),
 `FOR UPDATE SKIP LOCKED` webhook claiming, and `quota_credits` idempotency. See
-`docs/m23-b2-multinode-operator-guide.md`. SQLite and libSQL remain single-node.
+`docs/multinode.md`. SQLite and libSQL remain single-node.
 
 ---
 
@@ -125,7 +125,7 @@ password is **never** accepted as a CLI argument.
 1. **Multi-node restriction lifted in B2 (PostgreSQL only).** Phase B2 adds
    `FOR UPDATE SKIP LOCKED` webhook claiming, `quota_credits` DB-level idempotency,
    and `--auth-db-max-conns` pool sizing. Multiple gateway nodes against one
-   Postgres DB are now race-safe. See `docs/m23-b2-multinode-operator-guide.md`.
+   Postgres DB are now race-safe. See `docs/multinode.md`.
    SQLite and libSQL remain single-node regardless of this flag.
 2. **`MaxOpenConns(1)` was a B1 constraint, now lifted for PostgreSQL.** B1 kept
    one connection to preserve single-writer serialization. B2 makes the pool size
@@ -233,5 +233,5 @@ The following items planned at the end of B1 are now complete:
 - **Connection pooling** via `--auth-db-max-conns` (default 10; Postgres only).
 - **Documentation** of the per-node M18 rate limiter in a multi-gateway context.
 
-See `docs/m23-b2-multinode-operator-guide.md` for full details, upgrade notes,
+See `docs/multinode.md` for full details, upgrade notes,
 and the supported PostgreSQL version matrix.

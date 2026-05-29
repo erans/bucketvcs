@@ -304,7 +304,7 @@ will accept violating configurations, but the operator may receive bundle
 or pack URLs that reference GC-swept blobs (404 in direct mode, 500 in
 proxied mode). If you tighten `--retention` below the default 168h, lower
 the M11 TTL flags proportionally. See
-[M11 §5 TTL vs M8 Retention](m11-bundles-operator-guide.md#5-ttl-vs-m8-retention).
+[M11 §5 TTL vs M8 Retention](bundles.md#5-ttl-vs-m8-retention).
 
 ---
 

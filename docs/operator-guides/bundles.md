@@ -70,11 +70,11 @@ from the current ref set, causing the freshness state machine to move the
 bundle to `retired` and fall back to standard fetch for that client request.
 
 See also:
-- [`bucketvcs maintenance`](m9-maintenance-operator-guide.md) for the repack
+- [`bucketvcs maintenance`](maintenance.md) for the repack
   and index pipeline that bundle generation runs alongside.
-- [`bucketvcs gc`](m8-gc-operator-guide.md) for the retention rules that
+- [`bucketvcs gc`](gc.md) for the retention rules that
   constrain bundle URL TTLs.
-- [Reachability index](m10-reachability-operator-guide.md) for the M10
+- [Reachability index](reachability.md) for the M10
   compaction that keeps negotiation fast for incremental fetches.
 
 ---
@@ -348,7 +348,7 @@ enough that any outstanding URL expires well before the retention window could
 elapse on the referenced bundle or pack. Otherwise, a client could receive a
 URL, hold it through a GC cycle, and find the object gone when finally
 downloading. The 24× safety factor accommodates GC scheduling jitter and the
-§43.6 race window (see [M8 §4](m8-gc-operator-guide.md#4-the-436-race-window)).
+§43.6 race window (see [M8 §4](gc.md#4-the-436-race-window)).
 
 ### 5.5 Adjusting retention
 

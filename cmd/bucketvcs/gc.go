@@ -529,6 +529,6 @@ Exit codes:
   1  operational error (store unreachable, GC failure, per-key sweep errors, LFS sweep errors)
   2  usage error or transient skip (bad flags, git version_mismatch, LFS skipped_concurrent — re-run to retry)
 
-See docs/m8-gc-operator-guide.md for retention guidance and the §43.6
+See docs/operator-guides/gc.md for retention guidance and the §43.6
 race window.
 `

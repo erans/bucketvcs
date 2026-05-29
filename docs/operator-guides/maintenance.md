@@ -357,7 +357,7 @@ with exit code 2.
 
 M10 adds three thresholds (`--reachability-delta-commits`, `--reachability-delta-pushes`,
 `--reachability-delta-bytes`) and a new "compact-only" outcome — maintenance refreshes
-`.bvom` and `.bvcg` without producing a new pack. See `docs/m10-reachability-operator-guide.md`
+`.bvom` and `.bvcg` without producing a new pack. See `docs/reachability.md`
 for tuning guidance and the cold-fetch SLO contract.
 
 ### Bundle thresholds (M11)
@@ -366,7 +366,7 @@ Maintenance also generates default-branch bundles when M11 is enabled. The
 bundle-specific flags (`--bundle-warm-commits`, `--bundle-warm-age`, the
 freshness state machine that decides when a bundle counts as `current` /
 `warm` / `stale` / `retired`) are documented separately. See
-[M11 Bundles Operator Guide](m11-bundles-operator-guide.md), particularly
+[M11 Bundles Operator Guide](bundles.md), particularly
 §2 Bundle Freshness Model for the tuning detail.
 
 ### Bitmap-coverage threshold (M9.5)
@@ -587,7 +587,7 @@ present in any pack in the manifest.
 - Use `bucketvcs cat-object` against the OIDs listed in the error to verify which pack
   is the source of corruption.
 
-**Remediation**: refer to `docs/m8-gc-operator-guide.md` §11 for pack corruption repair
+**Remediation**: refer to `docs/gc.md` §11 for pack corruption repair
 guidance. A corrupt canonical pack requires investigation; do not run maintenance with
 `--force` while packs are known corrupt, as the repack will embed the corrupt content.
 

@@ -113,5 +113,5 @@ Sentinel errors:
 
 `cmd/bucketvcs/gc.go` is the only entry point exposed to operators. It is a
 one-shot command intended to be run under an external scheduler (cron, cloud
-scheduler, CI). See [`docs/m8-gc-operator-guide.md`](../../docs/m8-gc-operator-guide.md)
+scheduler, CI). See [`docs/operator-guides/gc.md`](../../docs/operator-guides/gc.md)
 for scheduling, tuning, audit-log interpretation, and exit-code alerting.

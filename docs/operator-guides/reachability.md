@@ -676,7 +676,7 @@ The full set of M10 flags on `bucketvcs maintenance`:
 ```
 
 These flags are evaluated in addition to the M9 pack thresholds. See
-`docs/m9-maintenance-operator-guide.md` for the full flag reference covering
+`docs/maintenance.md` for the full flag reference covering
 all maintenance flags.
 
 Exit codes are unchanged from M9:

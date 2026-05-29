@@ -71,8 +71,8 @@ export AUTHDB="./auth.db"
 > | `--auth-db` value | Backend | When |
 > |-------------------|---------|------|
 > | `./auth.db` (a path) | SQLite (default) | single node, zero setup |
-> | `libsql://<db>.turso.io` | Turso / libSQL | managed, single node — [guide](m23-turso-operator-guide.md) |
-> | `postgres://<host>/<db>` | PostgreSQL | single or **multi-node** — [guide](m23-b1-postgres-operator-guide.md) · [multi-node](m23-b2-multinode-operator-guide.md) |
+> | `libsql://<db>.turso.io` | Turso / libSQL | managed, single node — [guide](operator-guides/turso.md) |
+> | `postgres://<host>/<db>` | PostgreSQL | single or **multi-node** — [guide](operator-guides/postgres.md) · [multi-node](operator-guides/multinode.md) |
 >
 > The rest of this guide uses the SQLite default; the backends are
 > drop-in — every step below is identical regardless of `--auth-db`.
@@ -195,7 +195,7 @@ bucketvcs inspect-manifest --store="r2://my-bucket" acme my-repo   # verify
 **Bucket lifecycle:** garbage collection does not abort *incomplete multipart
 uploads* in-process (spec §33.5) — configure your bucket to expire them
 automatically. Recipes for S3 and R2 are in the
-[GC operator guide §5](m8-gc-operator-guide.md#5-bucket-lifecycle-for-incomplete-multipart-uploads-335).
+[GC operator guide §5](operator-guides/gc.md#5-bucket-lifecycle-for-incomplete-multipart-uploads-335).
 
 ---
 
@@ -203,12 +203,12 @@ automatically. Recipes for S3 and R2 are in the
 
 | You want… | Start here |
 |-----------|------------|
-| Keyless CI auth (no long-lived secrets) | [OIDC token exchange](m22-oidc-operator-guide.md) |
-| Large files | [Git LFS](m13-lfs-operator-guide.md) |
-| Faster clones at scale | [bundle-URI & packfile-URI](m11-bundles-operator-guide.md) |
-| Protect branches / paths, run hooks | [policy & hooks](m14-hooks-policy-operator-guide.md) |
-| Keep storage tight | [`bucketvcs maintenance`](m9-maintenance-operator-guide.md) + `bucketvcs gc` ([guide](m8-gc-operator-guide.md)) |
-| A managed/multi-node metadata DB | [Turso/libSQL](m23-turso-operator-guide.md) · [PostgreSQL](m23-b1-postgres-operator-guide.md) ([multi-node](m23-b2-multinode-operator-guide.md)) |
+| Keyless CI auth (no long-lived secrets) | [OIDC token exchange](operator-guides/oidc.md) |
+| Large files | [Git LFS](operator-guides/lfs.md) |
+| Faster clones at scale | [bundle-URI & packfile-URI](operator-guides/bundles.md) |
+| Protect branches / paths, run hooks | [policy & hooks](operator-guides/hooks-policy.md) |
+| Keep storage tight | [`bucketvcs maintenance`](operator-guides/maintenance.md) + `bucketvcs gc` ([guide](operator-guides/gc.md)) |
+| A managed/multi-node metadata DB | [Turso/libSQL](operator-guides/turso.md) · [PostgreSQL](operator-guides/postgres.md) ([multi-node](operator-guides/multinode.md)) |
 
 Run `bucketvcs <command> --help` for the full flag surface of any command, and
 browse [`docs/`](.) for design specs and operator guides.
