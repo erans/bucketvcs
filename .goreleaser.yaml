@@ -1,0 +1,76 @@
+# GoReleaser configuration — https://goreleaser.com
+# Validate:  goreleaser check
+# Dry-run :  goreleaser release --snapshot --clean   (builds everything, publishes nothing)
+version: 2
+
+project_name: bucketvcs
+
+builds:
+  - id: bucketvcs
+    main: ./cmd/bucketvcs
+    binary: bucketvcs
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.buildVersion={{ .Version }}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      # No Windows/arm64 target (matches the current release matrix).
+      - goos: windows
+        goarch: arm64
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+      - NOTICE
+      - THIRD_PARTY_LICENSES
+
+nfpms:
+  - id: packages
+    package_name: bucketvcs
+    formats:
+      - deb
+      - rpm
+    maintainer: "Eran Sandler <eran@sandler.co.il>"
+    description: "bucketvcs — object-storage-backed Git server."
+    license: "Apache-2.0"
+    homepage: "https://github.com/bucketvcs/bucketvcs"
+    bindir: /usr/bin
+    contents:
+      - src: README.md
+        dst: /usr/share/doc/bucketvcs/README.md
+      - src: LICENSE
+        dst: /usr/share/doc/bucketvcs/LICENSE
+      - src: NOTICE
+        dst: /usr/share/doc/bucketvcs/NOTICE
+      - src: THIRD_PARTY_LICENSES
+        dst: /usr/share/doc/bucketvcs/THIRD_PARTY_LICENSES
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+
+release:
+  # Tags with a semver prerelease suffix (-rc1, -beta, -alpha) → GitHub pre-release;
+  # clean vX.Y.Z tags → full release.
+  prerelease: auto

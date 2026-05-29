@@ -21,3 +21,6 @@ coverage.html
 
 # Claude Code worktrees (project convention: M0 used .claude/worktrees/m0-storage)
 .claude/worktrees/
+
+# GoReleaser output
+dist/
