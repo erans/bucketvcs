@@ -39,6 +39,25 @@ jobs:
       - name: go test (race)
         run: go test -race -count=1 ./...
 
+  # Dependency-license guard. Fails if any module linked into ./cmd/bucketvcs
+  # carries a non-permissive (or missing/unrecognized) license, or if NOTICE /
+  # THIRD_PARTY_LICENSES have drifted from a fresh regeneration. bucketvcs ships
+  # Apache-2.0, so every linked dependency must be permissive (Apache-2.0, BSD,
+  # MIT, ISC) and its attribution reproduced. Run scripts/license-check.sh
+  # generate after changing dependencies.
+  license-check:
+    name: license check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+      - name: Check dependency licenses + NOTICE/THIRD_PARTY_LICENSES freshness
+        run: ./scripts/license-check.sh check
+
   cross-build:
     name: cross-build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest
