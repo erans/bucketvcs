@@ -73,3 +73,9 @@ git push https://my-host/my-org/my-repo main
 bucketvcs is open-source and built for production use as a **Git-protocol server and CLI**. It is a backend — there is **no web UI yet**; you administer it through the `bucketvcs` command and drive Git over HTTPS/SSH.
 
 Run `bucketvcs <command> --help` for the full command surface, and browse **[`docs/`](docs/)** for design specs, operator guides, and quickstarts.
+
+---
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE). Copyright 2026 Eran Sandler.

@@ -219,6 +219,24 @@ periodically (e.g. weekly) as an ongoing correction. `reconcile` walks live LFS
 objects in object storage, recomputes the true byte total, and updates
 `used_bytes` atomically. It is safe to run while the gateway is live.
 
+### 4.4 Quota byte columns widened to BIGINT (automatic, no action)
+
+On PostgreSQL `INTEGER` is 32-bit (max ~2.1 GB), so the quota byte columns
+(`quotas.limit_bytes`, `quotas.used_bytes`, and `quota_credits.bytes`) would
+overflow for LFS objects or tenant totals above ~2 GB. Migration `0012` widens
+all three to `BIGINT` and applies **automatically** on the first gateway start
+after upgrading — no operator action is required, and the `>= 0` CHECK
+constraints are preserved. (SQLite/libSQL were never affected: their `INTEGER`
+storage is already 64-bit. The SQLite `0012` is a no-op that only advances
+`schema_version` to keep both backends in lockstep.) After upgrading you can
+confirm with `psql`:
+
+```sql
+SELECT column_name, data_type FROM information_schema.columns
+ WHERE table_name IN ('quotas','quota_credits') AND column_name LIKE '%bytes%';
+-- expect data_type = bigint for all three
+```
+
 ---
 
 ## 5. Supported PostgreSQL versions
