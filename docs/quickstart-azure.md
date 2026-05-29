@@ -118,6 +118,11 @@ bucketvcs inspect-manifest --store="$STORE" acme my-repo   # sanity check
 bucketvcs serve --store="$STORE" --auth-db="$AUTHDB" --addr=127.0.0.1:8080
 ```
 
+> **Metadata DB:** `--auth-db` is a local SQLite file here, independent of your
+> `$STORE` container. It can also be **Turso/libSQL** or **PostgreSQL** (single- or
+> multi-node) — see [Quickstart §2](quickstart.md#2-choose-a-storage-backend) and
+> the [Turso](m23-turso-operator-guide.md) / [PostgreSQL](m23-b1-postgres-operator-guide.md) guides.
+
 User/token/grant setup and the push/clone flow are identical to the localfs
 walkthrough — see [Quickstart §4–6](quickstart.md#4-set-up-access). Only the
 `--store` value changed.

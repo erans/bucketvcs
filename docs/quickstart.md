@@ -33,7 +33,7 @@ guide is identical regardless of backend.
 |-------------------|----------------------|-------------|
 | `localfs:/path`   | Local filesystem     | none — great for trying it out |
 | `s3://bucket`     | Amazon S3            | standard AWS credential chain (env, profile, or instance role) |
-| `r2://bucket`     | Cloudflare R2        | `BUCKETVCS_R2_ENDPOINT` + AWS-style key/secret |
+| `r2://bucket`     | Cloudflare R2        | `BUCKETVCS_S3_ENDPOINT` + AWS-style key/secret |
 | `gcs://bucket`    | Google Cloud Storage | `GOOGLE_APPLICATION_CREDENTIALS` or workload identity |
 | `azureblob://container` | Azure Blob     | account + key (or managed identity) |
 
@@ -42,9 +42,9 @@ credentials, where to put the secrets, and how to run the gateway — see the
 per-provider quickstarts:
 
 - **[Amazon S3](quickstart-s3.md)**
+- **[Cloudflare R2](quickstart-r2.md)**
 - **[Google Cloud Storage](quickstart-gcs.md)**
 - **[Azure Blob Storage](quickstart-azure.md)**
-- **Cloudflare R2** — see [§7](#7-worked-cloud-example-cloudflare-r2) below
 
 Lower-level credential details also live in the adapter READMEs:
 [s3compat](../internal/storage/s3compat/README.md),
@@ -163,11 +163,15 @@ That's it — your history now lives in your bucket.
 
 ## 7. Worked cloud example: Cloudflare R2
 
-Provision an R2 bucket and an R2 access key in the Cloudflare dashboard, note
+> For full step-by-step R2 setup (creating the bucket, an R2 API token, and
+> secret handling), see the dedicated **[Cloudflare R2 quickstart](quickstart-r2.md)**.
+> The essentials:
+
+Provision an R2 bucket and an R2 API token in the Cloudflare dashboard, note
 your S3 endpoint (`https://<account-id>.r2.cloudflarestorage.com`), then:
 
 ```bash
-export BUCKETVCS_R2_ENDPOINT="https://<account-id>.r2.cloudflarestorage.com"
+export BUCKETVCS_S3_ENDPOINT="https://<account-id>.r2.cloudflarestorage.com"
 export AWS_ACCESS_KEY_ID="<r2-access-key-id>"
 export AWS_SECRET_ACCESS_KEY="<r2-secret>"
 
@@ -182,7 +186,7 @@ Copy the tree with any S3-compatible tool and re-point `--store`:
 
 ```bash
 aws s3 sync /var/lib/bucketvcs/ s3://my-bucket/ \
-  --endpoint-url="$BUCKETVCS_R2_ENDPOINT"
+  --endpoint-url="$BUCKETVCS_S3_ENDPOINT"
 bucketvcs inspect-manifest --store="r2://my-bucket" acme my-repo   # verify
 ```
 
