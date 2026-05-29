@@ -267,10 +267,42 @@ e2e_run() {
     [ -f "$LFSCLONE/big.bin" ] || die "LFS object big.bin missing after 'git lfs pull'"
     cmp "$WORK/big.bin.orig" "$LFSCLONE/big.bin" || die "LFS round-trip byte mismatch"
     ok "LFS object round-tripped through $STORE byte-for-byte (1 MiB)"
+
+    # Direct-mode markers: the Batch API ran (lfs.batch), but the gateway never
+    # proxied the blob bytes (lfs.object.served absent) → the client transferred
+    # straight to/from the bucket via a presigned URL. If lfs.object.served fired,
+    # direct mode silently degraded to the gateway proxy — the regression this
+    # check (ported from the m13 smokes) exists to catch.
+    grep -q 'lfs\.batch' "$SERVE_LOG" || die "LFS: expected an lfs.batch audit event (Batch API not exercised)"
+    if grep -q 'lfs\.object\.served' "$SERVE_LOG"; then
+      die "LFS did not go direct: the gateway proxied the object (lfs.object.served fired); expected a presigned direct transfer for $BACKEND"
+    fi
+    ok "LFS used the direct presigned-URL path (lfs.batch fired, lfs.object.served did not)"
   else
     step "Git LFS"
     info "git-lfs not on PATH — skipping the LFS phase (install from https://git-lfs.com/)"
   fi
+
+  # === 10. Security: a read-only token must NOT be able to push =============
+  step "Security: a repo:read-only token must NOT be able to push"
+  RO_TOKEN="$("$BVCS" token create "$USER_NAME" --auth-db "$DB" --scopes=repo:read --label=e2e-ro | sed -n 's/^token=//p')"
+  [ -n "$RO_TOKEN" ] || die "failed to mint a read-only token"
+  if git_ni -C "$FRESH" push "http://$USER_NAME:$RO_TOKEN@$ADDR/$SLUG.git" \
+       "HEAD:refs/heads/scope-denied-$$" >/dev/null 2>&1; then
+    die "SECURITY REGRESSION: a repo:read-only token was allowed to push"
+  fi
+  ok "read-only token push was correctly rejected (scope enforcement holds)"
+
+  # === 11. Policy: deletion of a protected ref must be rejected =============
+  step "Policy: deleting a protected ref must be rejected"
+  "$BVCS" policy refs add --auth-db "$DB" --tenant "$TENANT" --repo "$REPO" \
+    --pattern "refs/heads/$BRANCH2" >/dev/null
+  if git_ni -C "$FRESH" push "$REMOTE" --delete "$BRANCH2" >/dev/null 2>&1; then
+    die "POLICY REGRESSION: deletion of protected ref '$BRANCH2' was allowed"
+  fi
+  git_ni ls-remote "$REMOTE" | grep -q "refs/heads/$BRANCH2" \
+    || die "protected ref '$BRANCH2' vanished despite the rejection"
+  ok "protected-ref deletion was correctly rejected and '$BRANCH2' survived"
 
   PASSED=1
   step "PASS"
