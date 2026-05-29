@@ -125,9 +125,22 @@ bucketvcs serve --store="$STORE" --auth-db="$AUTHDB" --addr=127.0.0.1:8080
 ```
 
 > **Metadata DB:** `--auth-db` is a local SQLite file here, independent of your
-> `$STORE` bucket. It can also be **Turso/libSQL** or **PostgreSQL** (single- or
-> multi-node) — see [Quickstart §2](quickstart.md#2-choose-a-storage-backend) and
-> the [Turso](m23-turso-operator-guide.md) / [PostgreSQL](m23-b1-postgres-operator-guide.md) guides.
+> `$STORE` bucket. It can also be a managed **Turso/libSQL** or **PostgreSQL**
+> database, chosen by the `--auth-db` scheme — the secret always comes from the
+> `BUCKETVCS_DB_AUTH_TOKEN` env var, never the command line:
+>
+> ```bash
+> # Turso / libSQL (single node)
+> export BUCKETVCS_DB_AUTH_TOKEN="<turso-database-token>"   # from: turso db tokens create
+> bucketvcs serve --store="$STORE" --auth-db="libsql://<your-db>.turso.io" --addr=127.0.0.1:8080
+>
+> # PostgreSQL (single or multi-node; size the pool with --auth-db-max-conns, default 10)
+> export BUCKETVCS_DB_AUTH_TOKEN="<postgres-password>"      # or the standard PGPASSWORD
+> bucketvcs serve --store="$STORE" --auth-db="postgres://user@host:5432/dbname?sslmode=require" --addr=127.0.0.1:8080
+> ```
+>
+> SQLite (the default) needs no setup, and all three backends are drop-in — every
+> step in this guide is identical regardless of `--auth-db`.
 
 User/token/grant setup and the push/clone flow are identical to the localfs
 walkthrough — see [Quickstart §4–6](quickstart.md#4-set-up-access). Only the
@@ -136,14 +149,39 @@ walkthrough — see [Quickstart §4–6](quickstart.md#4-set-up-access). Only th
 ## 5. Bucket lifecycle (recommended)
 
 bucketvcs garbage collection does **not** abort *incomplete multipart uploads*
-left by interrupted pushes. Add an S3 lifecycle rule to expire them
-automatically — see the
-[GC operator guide §5](m8-gc-operator-guide.md#5-bucket-lifecycle-for-incomplete-multipart-uploads-335)
-for the exact recipe.
+left by interrupted pushes — they linger in the bucket and consume storage. Add
+an S3 lifecycle rule to abort them automatically (7 days is safe — longer than
+any legitimate push). Create `lifecycle.json`:
+
+```json
+{
+  "Rules": [
+    {
+      "ID": "abort-incomplete-mpu",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "" },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+    }
+  ]
+}
+```
+
+Apply and verify:
+
+```bash
+aws s3api put-bucket-lifecycle-configuration \
+  --bucket my-bucket --lifecycle-configuration file://lifecycle.json
+aws s3api get-bucket-lifecycle-configuration --bucket my-bucket
+```
+
+If the bucket is shared with other systems, scope the rule to bucketvcs paths
+with `"Prefix": "tenants/"`.
 
 ---
 
 **See also:** [main Quickstart](quickstart.md) ·
 [s3compat adapter README](../internal/storage/s3compat/README.md) ·
-[Cloudflare R2 quickstart](quickstart-r2.md) ·
-[Git LFS](m13-lfs-operator-guide.md) (large files; needs presigned-URL config)
+[Cloudflare R2 quickstart](quickstart-r2.md)
+
+**Large files (Git LFS):** supported on this backend — LFS objects are served
+via presigned URLs, which the credentials above already permit.

@@ -93,9 +93,22 @@ bucketvcs serve --store="$STORE" --auth-db="$AUTHDB" --addr=127.0.0.1:8080
 ```
 
 > **Metadata DB:** `--auth-db` is a local SQLite file here, independent of your
-> `$STORE` bucket. It can also be **Turso/libSQL** or **PostgreSQL** (single- or
-> multi-node) — see [Quickstart §2](quickstart.md#2-choose-a-storage-backend) and
-> the [Turso](m23-turso-operator-guide.md) / [PostgreSQL](m23-b1-postgres-operator-guide.md) guides.
+> `$STORE` bucket. It can also be a managed **Turso/libSQL** or **PostgreSQL**
+> database, chosen by the `--auth-db` scheme — the secret always comes from the
+> `BUCKETVCS_DB_AUTH_TOKEN` env var, never the command line:
+>
+> ```bash
+> # Turso / libSQL (single node)
+> export BUCKETVCS_DB_AUTH_TOKEN="<turso-database-token>"   # from: turso db tokens create
+> bucketvcs serve --store="$STORE" --auth-db="libsql://<your-db>.turso.io" --addr=127.0.0.1:8080
+>
+> # PostgreSQL (single or multi-node; size the pool with --auth-db-max-conns, default 10)
+> export BUCKETVCS_DB_AUTH_TOKEN="<postgres-password>"      # or the standard PGPASSWORD
+> bucketvcs serve --store="$STORE" --auth-db="postgres://user@host:5432/dbname?sslmode=require" --addr=127.0.0.1:8080
+> ```
+>
+> SQLite (the default) needs no setup, and all three backends are drop-in — every
+> step in this guide is identical regardless of `--auth-db`.
 
 User/token/grant setup and the push/clone flow are identical to the localfs
 walkthrough — see [Quickstart §4–6](quickstart.md#4-set-up-access). Only the
@@ -104,10 +117,34 @@ walkthrough — see [Quickstart §4–6](quickstart.md#4-set-up-access). Only th
 ## 5. Bucket lifecycle (recommended)
 
 bucketvcs garbage collection does **not** abort *incomplete multipart uploads*
-left by interrupted pushes. Add an R2 object-lifecycle rule to expire them
-automatically — see the
-[GC operator guide §5](m8-gc-operator-guide.md#5-bucket-lifecycle-for-incomplete-multipart-uploads-335)
-for the recipe (the S3 form applies to R2).
+left by interrupted pushes. Add an R2 lifecycle rule to abort them automatically
+(7 days is safe). With Wrangler:
+
+```bash
+wrangler r2 bucket lifecycle add my-bucket \
+  --abort-incomplete-multipart-upload-days 7
+```
+
+Or via R2's S3-compatible API with a `lifecycle.json`:
+
+```json
+{
+  "Rules": [
+    {
+      "ID": "abort-incomplete-mpu",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "" },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+    }
+  ]
+}
+```
+
+```bash
+aws s3api put-bucket-lifecycle-configuration \
+  --endpoint-url "$BUCKETVCS_S3_ENDPOINT" \
+  --bucket my-bucket --lifecycle-configuration file://lifecycle.json
+```
 
 **Migrating from localfs:** R2 (and S3) layouts are byte-identical to localfs.
 Copy the tree with any S3-compatible tool and re-point `--store`:
@@ -122,5 +159,7 @@ bucketvcs inspect-manifest --store="r2://my-bucket" acme my-repo   # verify
 
 **See also:** [main Quickstart](quickstart.md) ·
 [s3compat adapter README](../internal/storage/s3compat/README.md) ·
-[Amazon S3 quickstart](quickstart-s3.md) ·
-[Git LFS](m13-lfs-operator-guide.md) (large files; needs presigned-URL config)
+[Amazon S3 quickstart](quickstart-s3.md)
+
+**Large files (Git LFS):** supported on this backend — LFS objects are served
+via presigned URLs, which the credentials above already permit.
