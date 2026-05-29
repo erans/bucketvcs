@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# scripts/m13-lfs-smoke-local.sh
+# scripts/lfs-smoke-localfs.sh
 #
-# End-to-end smoke test for M13 LFS against a localfs gateway. Drives
+# End-to-end smoke test for Git LFS against a localfs gateway. Drives
 # the stock `git-lfs` client through push and pull, verifying that the
-# batch + transfer + verify endpoints all work together.
+# batch + transfer + verify endpoints all work together. Needs no cloud
+# credentials — the local counterpart to the scripts/e2e-*-push.sh suite.
 #
 # Skips with exit 77 if git-lfs is not installed (autoconf SKIP
 # convention). Requires `bucketvcs` and `git` on PATH.
@@ -41,7 +42,7 @@ cleanup() {
     fi
     [[ -n "$SERVE_PID" ]] && kill "$SERVE_PID" 2>/dev/null || true
     rm -rf "$ROOT"
-    echo "M13_SMOKE_OK"
+    echo "LFS_LOCALFS_SMOKE_OK"
 }
 trap cleanup EXIT
 
