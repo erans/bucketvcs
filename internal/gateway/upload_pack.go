@@ -97,6 +97,11 @@ func (s *Server) handleUploadPack(w http.ResponseWriter, r *http.Request, tenant
 		case errors.Is(err, uploadpack.ErrBadRequest):
 			http.Error(w, err.Error(), http.StatusBadRequest)
 		default:
+			// Emit the underlying error before collapsing it to the
+			// generic 500 — otherwise the cause vanishes (mirrors the
+			// receive-pack swallow that hid the EXDEV bug until M20.1).
+			s.logger.Error("uploadpack: internal error",
+				"err", err, "tenant", tenant, "repo", repoID)
 			http.Error(w, "internal storage error", http.StatusInternalServerError)
 		}
 	}

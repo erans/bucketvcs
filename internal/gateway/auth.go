@@ -126,6 +126,8 @@ func RunAuth(w http.ResponseWriter, r *http.Request, store auth.Store, rr *Route
 	} else {
 		perm, err = store.LookupRepoPerm(ctx, actor, rr.Tenant, rr.Repo)
 		if err != nil {
+			logger.Error("auth: GetRepoFlags internal error",
+				"err", err, "tenant", rr.Tenant, "repo", rr.Repo)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return nil, false
 		}

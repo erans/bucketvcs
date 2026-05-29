@@ -81,6 +81,8 @@ func (s *Server) handleInfoRefs(w http.ResponseWriter, r *http.Request, tenant, 
 				http.Error(w, "invalid tenant or repository name", http.StatusBadRequest)
 				return
 			}
+			s.logger.Error("inforefs upload-pack: internal error",
+				"err", err, "tenant", tenant, "repo", repoID)
 			http.Error(w, "internal storage error", http.StatusInternalServerError)
 			return
 		}
@@ -118,6 +120,8 @@ func (s *Server) handleInfoRefs(w http.ResponseWriter, r *http.Request, tenant, 
 			http.Error(w, "invalid tenant or repository name", http.StatusBadRequest)
 			return
 		}
+		s.logger.Error("inforefs receive-pack: internal error",
+			"err", err, "tenant", tenant, "repo", repoID)
 		http.Error(w, "internal storage error", http.StatusInternalServerError)
 		return
 	}
