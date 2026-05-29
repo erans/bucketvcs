@@ -35,16 +35,42 @@ bucketvcs to a sub-path with `r2://my-bucket/some/prefix`.
 
 ## 2. Create an R2 API token
 
-In the dashboard: **R2 → Manage R2 API Tokens → Create API token**. Give it
-**Object Read & Write** permission, scoped to this bucket (not account-wide).
-Cloudflare shows, once:
+> **Use the R2-specific token page — not the regular Cloudflare API Tokens page.**
+> R2 API tokens produce **S3-compatible** credentials (an Access Key ID + a
+> Secret Access Key); the account/profile *API Tokens* page produces
+> general-purpose Cloudflare REST API tokens that do **not** work for S3 object
+> access. Mixing the two up is the most common R2 setup mistake.
+
+Open the R2 API Tokens page directly:
+
+```
+https://dash.cloudflare.com/?to=/:account/r2/api-tokens
+```
+
+(the `:account` placeholder resolves to your account automatically). Or navigate
+there: **R2 → Overview → Manage** next to *API Tokens* (a.k.a. **Manage R2 API
+Tokens**) → **Create API token**.
+
+Configure the token:
+
+- **Permissions:** *Object Read & Write* — sufficient for bucketvcs; avoid the
+  broader *Admin Read & Write*.
+- **Scope:** restrict it to this one bucket, not account-wide.
+- **Token type:** an **Account** API token (valid until revoked, usable by an
+  unattended server) is the right choice for a long-running gateway; a **User**
+  token is tied to your personal login and stops working if your user is removed
+  from the account.
+
+Cloudflare then shows, **once**:
 
 - an **Access Key ID**
 - a **Secret Access Key**
 
 These are S3-style credentials — bucketvcs consumes them through the standard
 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` variables. Copy them now; the
-secret is not shown again.
+secret is not shown again. See Cloudflare's
+[R2 authentication docs](https://developers.cloudflare.com/r2/api/tokens/) for
+details, including creating tokens programmatically via the API.
 
 ## 3. Place the secrets
 
