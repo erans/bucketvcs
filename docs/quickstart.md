@@ -12,7 +12,7 @@ Replace `<...>` placeholders with your own values throughout.
 
 Prebuilt binaries for Linux, macOS, and Windows (amd64 + arm64) are attached to
 each [GitHub Release](https://github.com/erans/bucketvcs/releases). Or build
-from source (Go 1.25+):
+from source (Go 1.26+):
 
 ```bash
 git clone https://github.com/erans/bucketvcs

@@ -54,8 +54,63 @@ Runs on **S3, R2, GCS, and Azure Blob** (all first-class), plus a local-filesyst
 
 ## Get started
 
-A complete end-to-end walkthrough — install, a repository, access control, the
-gateway, and your first push (on local disk or any cloud backend) — lives in the
+### Install
+
+Prebuilt binaries for **Linux, macOS, and Windows** (amd64 + arm64) are attached
+to every [GitHub Release](https://github.com/erans/bucketvcs/releases), alongside
+a `checksums.txt`. Pick the version you want, then grab the matching artifact:
+
+```bash
+VER=0.1.0   # latest: https://github.com/erans/bucketvcs/releases/latest
+```
+
+**Linux** — `.deb`, `.rpm`, or a portable tarball (swap `amd64` → `arm64` on ARM):
+
+```bash
+# Debian / Ubuntu
+curl -fsSLO https://github.com/erans/bucketvcs/releases/download/v$VER/bucketvcs_${VER}_linux_amd64.deb
+sudo dpkg -i bucketvcs_${VER}_linux_amd64.deb
+
+# Fedora / RHEL / openSUSE
+curl -fsSLO https://github.com/erans/bucketvcs/releases/download/v$VER/bucketvcs_${VER}_linux_amd64.rpm
+sudo rpm -i bucketvcs_${VER}_linux_amd64.rpm
+
+# Any distro (tarball)
+curl -fsSL https://github.com/erans/bucketvcs/releases/download/v$VER/bucketvcs_${VER}_linux_amd64.tar.gz | tar xz
+sudo install bucketvcs /usr/local/bin/
+```
+
+**macOS** — tarball (`arm64` = Apple Silicon, `amd64` = Intel):
+
+```bash
+curl -fsSL https://github.com/erans/bucketvcs/releases/download/v$VER/bucketvcs_${VER}_darwin_arm64.tar.gz | tar xz
+sudo install bucketvcs /usr/local/bin/
+# binaries aren't notarized yet; if Gatekeeper blocks the first run, clear the quarantine flag:
+xattr -d com.apple.quarantine /usr/local/bin/bucketvcs 2>/dev/null || true
+```
+
+**Windows** (PowerShell) — zip:
+
+```powershell
+$ver = "0.1.0"
+Invoke-WebRequest "https://github.com/erans/bucketvcs/releases/download/v$ver/bucketvcs_${ver}_windows_amd64.zip" -OutFile bucketvcs.zip
+Expand-Archive bucketvcs.zip -DestinationPath $Env:LOCALAPPDATA\bucketvcs
+# then add %LOCALAPPDATA%\bucketvcs to your PATH
+```
+
+**From source** (Go 1.26+):
+
+```bash
+git clone https://github.com/erans/bucketvcs
+cd bucketvcs && go build -o bucketvcs ./cmd/bucketvcs
+```
+
+Put the resulting `bucketvcs` binary on your `PATH`.
+
+### First push
+
+A complete end-to-end walkthrough — a repository, access control, the gateway,
+and your first push (on local disk or any cloud backend) — lives in the
 **[Quickstart](docs/quickstart.md)**.
 
 The short version:
