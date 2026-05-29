@@ -338,3 +338,50 @@ func TestPGConcurrentRename(t *testing.T) {
 }
 
 func fmtID(i int) string { return "dlv" + strconv.Itoa(i) }
+
+// TestPGQuotaBigInt is the regression for the 32-bit INTEGER overflow on the
+// quota byte columns (migration 0012 widens them to BIGINT). On PostgreSQL
+// INTEGER is 32-bit (max 2147483647 ≈ 2.0 GiB); LFS objects and tenant totals
+// routinely exceed that. Before 0012, writing a multi-GB value errored with
+// "integer out of range"; after 0012 the BIGINT columns round-trip it exactly.
+// Exercises all three byte columns: quotas.limit_bytes, quotas.used_bytes,
+// quota_credits.bytes.
+func TestPGQuotaBigInt(t *testing.T) {
+	s := openPostgres(t)
+	ctx := context.Background()
+	db := s.DB()
+
+	const big = int64(5_000_000_000)  // ~5 GB, > 2^31-1
+	const used = int64(3_000_000_000) // ~3 GB, > 2^31-1
+
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO quotas (tenant, limit_bytes, used_bytes, updated_at) VALUES (?, ?, 0, 0)`,
+		"bigt", big); err != nil {
+		t.Fatalf("insert >2^31 limit_bytes (INTEGER overflow if not BIGINT): %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO quota_credits (tenant, oid, bytes, recorded_at) VALUES (?, ?, ?, 0)`,
+		"bigt", "bigoid", used); err != nil {
+		t.Fatalf("insert >2^31 quota_credits.bytes: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`UPDATE quotas SET used_bytes = ? WHERE tenant = ?`, used, "bigt"); err != nil {
+		t.Fatalf("update >2^31 used_bytes: %v", err)
+	}
+
+	var gotLimit, gotUsed, gotCredit int64
+	if err := db.QueryRowContext(ctx,
+		`SELECT limit_bytes, used_bytes FROM quotas WHERE tenant = ?`, "bigt").
+		Scan(&gotLimit, &gotUsed); err != nil {
+		t.Fatalf("read quotas: %v", err)
+	}
+	if err := db.QueryRowContext(ctx,
+		`SELECT bytes FROM quota_credits WHERE tenant = ? AND oid = ?`, "bigt", "bigoid").
+		Scan(&gotCredit); err != nil {
+		t.Fatalf("read quota_credits: %v", err)
+	}
+	if gotLimit != big || gotUsed != used || gotCredit != used {
+		t.Fatalf("byte values truncated: limit=%d used=%d credit=%d, want %d/%d/%d",
+			gotLimit, gotUsed, gotCredit, big, used, used)
+	}
+}
