@@ -5,6 +5,10 @@ on:
     tags:
       - 'v*'   # semver release tags only (v0.1.0, v1.2.3, v1.2.3-rc1). Milestone tags (mNN-*) are ignored.
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false   # never cancel a half-finished publish; queue instead
+
 permissions:
   contents: read
 
