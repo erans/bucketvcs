@@ -31,7 +31,16 @@ key prefix automatically. Optionally scope bucketvcs to a sub-path with
 ## 2. Create least-privilege credentials
 
 Create an IAM user (for static keys) or role (for instance/EKS roles) limited to
-this one bucket. Attach this policy:
+this one bucket.
+
+**Create the user:**
+
+```bash
+aws iam create-user --user-name bucketvcs
+```
+
+**Attach a least-privilege policy.** Save the following as
+`bucketvcs-s3-policy.json` (replace `my-bucket` with your bucket name):
 
 ```json
 {
@@ -62,12 +71,31 @@ this one bucket. Attach this policy:
 ```
 
 `AbortMultipartUpload` / `ListBucketMultipartUploads` are needed because large
-objects upload in multipart chunks. If you create an IAM user, generate an
-access key pair for it (IAM → Users → Security credentials → Create access key).
+objects upload in multipart chunks. Attach the policy inline to the user:
 
-**Prefer keyless in production:** attach the policy to an **EC2 instance role**,
-**ECS task role**, or **EKS IRSA** role instead of minting a static key — then
-skip the `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` env vars entirely (step 3).
+```bash
+aws iam put-user-policy \
+  --user-name bucketvcs \
+  --policy-name bucketvcs-s3 \
+  --policy-document file://bucketvcs-s3-policy.json
+```
+
+**Generate an access key** — this is the only time the secret is shown, so copy
+both values now:
+
+```bash
+aws iam create-access-key --user-name bucketvcs
+```
+
+The `AccessKeyId` and `SecretAccessKey` from the output become
+`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` in step 3.
+
+**Prefer keyless in production:** attach the same policy to an **EC2 instance
+role**, **ECS task role**, or **EKS IRSA** role instead of minting a static key
+— then skip the `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` env vars entirely
+(step 3). (To attach the policy to a role instead, save it as a managed policy
+with `aws iam create-policy --policy-name bucketvcs-s3 --policy-document
+file://bucketvcs-s3-policy.json` and `aws iam attach-role-policy` it.)
 
 ## 3. Place the secrets
 
