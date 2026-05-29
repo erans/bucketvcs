@@ -60,6 +60,23 @@ export STORE="localfs:/var/lib/bucketvcs"
 export AUTHDB="./auth.db"
 ```
 
+> **Metadata backend (`--auth-db`).** `$AUTHDB` is the small database holding
+> users, tokens, repo registrations, permissions, policies, and webhooks — it is
+> separate from where Git data lives (`--store`). It defaults to a local
+> **SQLite** file (great for single-node), and can instead be a managed
+> **Turso/libSQL** or **PostgreSQL** database — selected purely by the
+> `--auth-db` scheme, with the secret supplied via `BUCKETVCS_DB_AUTH_TOKEN`
+> (never on the command line):
+>
+> | `--auth-db` value | Backend | When |
+> |-------------------|---------|------|
+> | `./auth.db` (a path) | SQLite (default) | single node, zero setup |
+> | `libsql://<db>.turso.io` | Turso / libSQL | managed, single node — [guide](m23-turso-operator-guide.md) |
+> | `postgres://<host>/<db>` | PostgreSQL | single or **multi-node** — [guide](m23-b1-postgres-operator-guide.md) · [multi-node](m23-b2-multinode-operator-guide.md) |
+>
+> The rest of this guide uses the SQLite default; the backends are
+> drop-in — every step below is identical regardless of `--auth-db`.
+
 ---
 
 ## 3. Create a repository
@@ -185,6 +202,7 @@ automatically. Recipes for S3 and R2 are in the
 | Faster clones at scale | [bundle-URI & packfile-URI](m11-bundles-operator-guide.md) |
 | Protect branches / paths, run hooks | [policy & hooks](m14-hooks-policy-operator-guide.md) |
 | Keep storage tight | [`bucketvcs maintenance`](m9-maintenance-operator-guide.md) + `bucketvcs gc` ([guide](m8-gc-operator-guide.md)) |
+| A managed/multi-node metadata DB | [Turso/libSQL](m23-turso-operator-guide.md) · [PostgreSQL](m23-b1-postgres-operator-guide.md) ([multi-node](m23-b2-multinode-operator-guide.md)) |
 
 Run `bucketvcs <command> --help` for the full flag surface of any command, and
 browse [`docs/`](.) for design specs and operator guides.
