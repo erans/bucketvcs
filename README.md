@@ -79,3 +79,5 @@ Run `bucketvcs <command> --help` for the full command surface, and browse **[`do
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE). Copyright 2026 Eran Sandler.
+
+Distributed binaries statically link third-party Go modules; see [NOTICE](NOTICE) for required attributions and [THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES) for their full license texts.
