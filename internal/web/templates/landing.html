@@ -1,0 +1,17 @@
+{{define "title"}}repos · bucketvcs{{end}}
+{{define "content"}}
+<h1>repositories</h1>
+{{if not .Repos}}<p class="empty">(no repositories visible)</p>{{end}}
+{{range $tenant, $repos := .Repos}}
+<section class="tenant">
+  <h2>{{$tenant}}/</h2>
+  <ul class="repolist">
+    {{range $repos}}
+    <li><a href="/{{.Tenant}}/{{.Name}}">{{.Name}}</a>
+        <span class="vis">{{if .PublicRead}}public{{else}}private{{end}}</span></li>
+    {{end}}
+  </ul>
+</section>
+{{end}}
+{{end}}
+{{template "base" .}}

@@ -1,0 +1,7 @@
+{{define "title"}}{{.Code}} · bucketvcs{{end}}
+{{define "content"}}
+<h1>{{.Code}}</h1>
+<p class="error">{{.Message}}</p>
+<p><a href="/">← home</a></p>
+{{end}}
+{{template "base" .}}

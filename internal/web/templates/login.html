@@ -1,0 +1,13 @@
+{{define "title"}}log in · bucketvcs{{end}}
+{{define "content"}}
+<h1>log in</h1>
+{{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+<form method="post" action="/login" class="login">
+  <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+  <input type="hidden" name="next" value="{{.Next}}">
+  <label>user <input name="username" autofocus autocomplete="username"></label>
+  <label>pass <input name="password" type="password" autocomplete="current-password"></label>
+  <button type="submit">enter</button>
+</form>
+{{end}}
+{{template "base" .}}

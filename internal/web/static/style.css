@@ -1,0 +1,21 @@
+:root { --fg:#d8d8d8; --bg:#0d0d0d; --accent:#8fd98f; --dim:#666; }
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; margin: 0; line-height: 1.5; }
+main { max-width: 72ch; margin: 2rem auto; padding: 0 1rem; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.topbar { display: flex; justify-content: space-between; align-items: center; padding: .5rem 1rem; border-bottom: 1px solid var(--dim); }
+.brand { color: var(--accent); }
+.topbar nav { display: flex; gap: 1rem; align-items: center; }
+.inline, .login { display: inline; }
+button { background: transparent; color: var(--accent); border: 1px solid var(--dim); font: inherit; padding: .1rem .6rem; cursor: pointer; }
+button:hover { border-color: var(--accent); }
+h1, h2 { font-weight: normal; }
+h2 { color: var(--dim); border-bottom: 1px dashed var(--dim); }
+.repolist { list-style: none; padding-left: 1rem; }
+.repolist li::before { content: "├─ "; color: var(--dim); }
+.vis { color: var(--dim); margin-left: 1ch; }
+.error { color: #d98f8f; }
+.empty, .who { color: var(--dim); }
+.login label { display: block; margin: .5rem 0; }
+.login input { background: #111; color: var(--fg); border: 1px solid var(--dim); font: inherit; padding: .2rem .4rem; }
