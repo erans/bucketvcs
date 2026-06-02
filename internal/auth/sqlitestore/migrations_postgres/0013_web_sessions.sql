@@ -8,7 +8,7 @@ CREATE TABLE sessions (
     created_at  BIGINT NOT NULL,
     expires_at  BIGINT NOT NULL,
     last_seen   BIGINT NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
 );
 CREATE INDEX sessions_user_idx    ON sessions(user_id);
 CREATE INDEX sessions_expires_idx ON sessions(expires_at);
