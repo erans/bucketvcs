@@ -89,3 +89,13 @@ func EmitOIDCRejected(ctx context.Context, logger *slog.Logger,
 		slog.String("reason", reason),
 	)
 }
+
+// EmitPasswordSet records that a user's local password was set/changed.
+func EmitPasswordSet(ctx context.Context, logger *slog.Logger, user string) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.LogAttrs(ctx, slog.LevelInfo, "auth.password.set",
+		slog.String("user", user),
+	)
+}
