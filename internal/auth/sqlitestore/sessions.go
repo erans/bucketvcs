@@ -1,0 +1,106 @@
+package sqlitestore
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/bucketvcs/bucketvcs/internal/auth"
+)
+
+// newSessionID returns a 256-bit URL-safe random id (the cookie value).
+func newSessionID() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("session id: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// hashSessionID returns SHA-256(rawID) as hex. The id is high-entropy, so a
+// single SHA-256 (not argon2) is sufficient: there is no low-entropy secret to
+// brute-force, and lookups must be cheap (one per request).
+func hashSessionID(rawID string) string {
+	sum := sha256.Sum256([]byte(rawID))
+	return hex.EncodeToString(sum[:])
+}
+
+// CreateSession inserts a session for userID and returns the raw cookie id.
+func (s *Store) CreateSession(ctx context.Context, userID, provider string, ttl time.Duration) (string, error) {
+	raw, err := newSessionID()
+	if err != nil {
+		return "", err
+	}
+	now := time.Now()
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO sessions (id_hash, user_id, provider, created_at, expires_at, last_seen)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		hashSessionID(raw), userID, provider, now.Unix(), now.Add(ttl).Unix(), now.Unix())
+	if err != nil {
+		return "", fmt.Errorf("insert session: %w", err)
+	}
+	return raw, nil
+}
+
+// LookupSession returns the live session for rawID, joining users for identity.
+// Expired or absent sessions return auth.ErrNoSession.
+func (s *Store) LookupSession(ctx context.Context, rawID string) (*auth.Session, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT s.user_id, u.name, u.is_admin, s.provider, s.created_at, s.expires_at
+		   FROM sessions s JOIN users u ON u.id = s.user_id
+		  WHERE s.id_hash = ? AND s.expires_at > ?`,
+		hashSessionID(rawID), time.Now().Unix())
+	var (
+		userID, name, provider string
+		adminInt               int
+		created, expires       int64
+	)
+	if err := row.Scan(&userID, &name, &adminInt, &provider, &created, &expires); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, auth.ErrNoSession
+		}
+		return nil, fmt.Errorf("lookup session: %w", err)
+	}
+	return &auth.Session{
+		UserID:    userID,
+		Name:      name,
+		IsAdmin:   adminInt != 0,
+		Provider:  provider,
+		CreatedAt: time.Unix(created, 0),
+		ExpiresAt: time.Unix(expires, 0),
+	}, nil
+}
+
+// TouchSession slides expiry forward, but writes at most once per minute per
+// session (the `last_seen <= now-60` guard) to avoid write amplification.
+// Best-effort: a no-op update (recently touched, or gone) is not an error.
+func (s *Store) TouchSession(ctx context.Context, rawID string, ttl time.Duration) error {
+	now := time.Now()
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE sessions SET expires_at = ?, last_seen = ?
+		   WHERE id_hash = ? AND last_seen <= ?`,
+		now.Add(ttl).Unix(), now.Unix(), hashSessionID(rawID), now.Unix()-60)
+	return err
+}
+
+// DeleteSession removes a session (logout). Absent id is not an error.
+func (s *Store) DeleteSession(ctx context.Context, rawID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE id_hash = ?`, hashSessionID(rawID))
+	return err
+}
+
+// SweepExpiredSessions deletes sessions whose expiry is at or before `now`.
+func (s *Store) SweepExpiredSessions(ctx context.Context, now time.Time) (int, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at <= ?`, now.Unix())
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
