@@ -1,0 +1,26 @@
+{{define "base"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{block "title" .}}bucketvcs{{end}}</title>
+<link rel="stylesheet" href="/_ui/static/style.css">
+<script src="/_ui/static/htmx.min.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <span class="brand">┌─ bucketvcs ─┐</span>
+  <nav>
+    {{if .Session}}<span class="who">[ {{.Session.Name}} ]</span>
+      <form method="post" action="/logout" class="inline">
+        <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+        <button type="submit">logout</button>
+      </form>
+    {{else}}<a href="/login">log in</a>{{end}}
+  </nav>
+</header>
+<main>
+{{block "content" .}}{{end}}
+</main>
+</body>
+</html>{{end}}

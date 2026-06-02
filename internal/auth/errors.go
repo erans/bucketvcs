@@ -11,6 +11,7 @@ var (
 	ErrNoSuchUser           = errors.New("auth: no such user")
 	ErrNoSuchToken          = errors.New("auth: no such token")
 	ErrNoSuchKey            = errors.New("auth: no such ssh key")
+	ErrNoSession            = errors.New("auth: no session")
 	ErrConflict             = errors.New("auth: conflict")
 	ErrDuplicateFingerprint = errors.New("auth: duplicate fingerprint")
 )
