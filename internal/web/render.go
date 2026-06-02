@@ -64,8 +64,11 @@ func newRenderer(dir string) (*renderer, error) {
 // Each page file ends with {{template "base" .}}, which means executing
 // the template named after the page file produces the full rendered page.
 func parsePage(fsys fs.FS, dir, page string) (*template.Template, error) {
-	base := dir + "/base.html"
-	pg := dir + "/" + page
+	base, pg := "base.html", page
+	if dir != "" && dir != "." {
+		base = dir + "/base.html"
+		pg = dir + "/" + page
+	}
 	return template.New("").ParseFS(fsys, base, pg)
 }
 
@@ -96,7 +99,10 @@ func (r *renderer) render(w io.Writer, page string, data any) error {
 func staticHandler(dir string) http.Handler {
 	var fsys fs.FS
 	if dir == "" {
-		sub, _ := fs.Sub(assetsFS, "static")
+		sub, err := fs.Sub(assetsFS, "static")
+		if err != nil {
+			panic("web: embed static sub: " + err.Error()) // impossible: compile-time embed
+		}
 		fsys = sub
 	} else {
 		fsys = os.DirFS(filepath.Join(dir, "static"))
