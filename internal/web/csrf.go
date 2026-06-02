@@ -16,7 +16,10 @@ const (
 // in a hidden form field (double-submit pattern). secure marks the cookie Secure.
 func issueCSRF(w http.ResponseWriter, secure bool) string {
 	b := make([]byte, 32)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		// A broken OS CSPRNG must fail loudly, not emit a predictable token.
+		panic("web: csrf: crypto/rand failed: " + err.Error())
+	}
 	tok := base64.RawURLEncoding.EncodeToString(b)
 	http.SetCookie(w, &http.Cookie{
 		Name:     csrfCookieName,
