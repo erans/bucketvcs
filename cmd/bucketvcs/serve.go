@@ -235,6 +235,15 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 
 	logger := slog.Default()
 
+	// M24: the web UI is served only on an HTTP listener. If an operator asked
+	// for a separate --ui-addr but provided no main HTTP listener (--addr), the
+	// UI block below is skipped and nothing is served on --ui-addr — warn loudly
+	// rather than fail silently.
+	if *uiEnabled && *uiAddr != "" && *addr == "" {
+		logger.Warn("web UI not served: --ui-addr requires a main HTTP listener (--addr); the UI shares or sits alongside --addr",
+			"ui_addr", *uiAddr)
+	}
+
 	// M14 protected-refs enforcement. Always constructed against the
 	// same authdb the gateway uses; when the operator has added no
 	// rules via `bucketvcs policy refs add`, CheckUpdate's List call
