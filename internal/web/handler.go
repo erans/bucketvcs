@@ -73,9 +73,12 @@ func (s *server) renderError(w http.ResponseWriter, r *http.Request, code int, m
 	EmitRequestMetric(r.Context(), s.logger, "error", code)
 }
 
-// safeNext returns a local redirect target, defaulting to "/". Prevents open redirects.
+// safeNext returns a local redirect target, defaulting to "/". Prevents open
+// redirects: it rejects empty, non-"/"-prefixed, "//"-prefixed (protocol-relative),
+// and any value containing a backslash (browsers normalize "\" to "/" in the
+// authority position, so "/\evil.com" would redirect off-site).
 func safeNext(v string) string {
-	if v == "" || !strings.HasPrefix(v, "/") || strings.HasPrefix(v, "//") {
+	if v == "" || !strings.HasPrefix(v, "/") || strings.HasPrefix(v, "//") || strings.ContainsRune(v, '\\') {
 		return "/"
 	}
 	return v
