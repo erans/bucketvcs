@@ -54,8 +54,8 @@ func TestSplitSQLStatements_AllMigrationsNonEmpty(t *testing.T) {
 			}
 		}
 	}
-	if count != 12 {
-		t.Fatalf("expected 12 migration files, saw %d", count)
+	if count != 13 {
+		t.Fatalf("expected 13 migration files, saw %d", count)
 	}
 }
 
