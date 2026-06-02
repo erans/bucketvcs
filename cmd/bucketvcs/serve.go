@@ -30,6 +30,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/oidc"
 	"github.com/bucketvcs/bucketvcs/internal/policy"
 	"github.com/bucketvcs/bucketvcs/internal/sshd"
+	"github.com/bucketvcs/bucketvcs/internal/web"
 	"github.com/bucketvcs/bucketvcs/internal/webhooks"
 )
 
@@ -139,6 +140,12 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 		"Enable the OIDC token-exchange endpoint POST /_oidc/token (M22)")
 	oidcSweepInterval := fs.Duration("oidc-sweep-interval", 5*time.Minute,
 		"Interval for sweeping expired OIDC-minted tokens")
+
+	// Web UI (M24)
+	uiEnabled := fs.Bool("ui", true, "Enable the web UI (HTTP)")
+	uiAddr := fs.String("ui-addr", "", "Optional separate listen address for the web UI; empty shares --addr")
+	uiDir := fs.String("ui-dir", "", "Serve UI templates/static from this dir instead of the embedded assets (dev)")
+	uiSessionTTL := fs.Duration("ui-session-ttl", 168*time.Hour, "Web session lifetime (sliding)")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -421,9 +428,33 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 		}()
 	}
 
+	// M24 web-UI session sweeper. Deletes expired sessions on a fixed tick;
+	// runs for the lifetime of serveCtx.
+	if *uiEnabled {
+		go func() {
+			t := time.NewTicker(10 * time.Minute)
+			defer t.Stop()
+			for {
+				select {
+				case <-serveCtx.Done():
+					return
+				case <-t.C:
+					if n, err := authS.SweepExpiredSessions(serveCtx, time.Now()); err != nil {
+						logger.Warn("session sweep failed", "err", err)
+					} else if n > 0 {
+						logger.Info("swept expired sessions", "count", n)
+					}
+				}
+			}
+		}()
+	}
+
 	// ---- HTTP listener ----
 	var httpSrv *http.Server
-	httpErrCh := make(chan error, 1)
+	var uiSrv *http.Server
+	// Buffered for 2 potential senders: the main HTTP listener and, when
+	// --ui-addr is set, a separate web-UI listener.
+	httpErrCh := make(chan error, 2)
 	if *addr != "" || ln != nil {
 		// LFS Locks store (M13.3) shares the authdb sqlite handle. Only
 		// constructed when LFS is enabled — when --lfs=false the locks
@@ -478,7 +509,26 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 		if ln != nil {
 			listenAddr = ln.Addr().String()
 		}
-		httpSrv = &http.Server{Addr: listenAddr, Handler: srv}
+
+		// Web UI handler (M24): mounted on the same listener as git via a
+		// dispatcher, or on its own --ui-addr listener.
+		var uiHandler http.Handler
+		if *uiEnabled {
+			uiHandler = web.NewHandler(web.Deps{
+				Store:      newWebAdapter(authS),
+				Logger:     logger,
+				Limiter:    rateLimiter,
+				UIDir:      *uiDir,
+				SessionTTL: *uiSessionTTL,
+				TrustProxy: *trustProxyHeaders,
+			})
+		}
+
+		var mainHandler http.Handler = srv // gateway
+		if uiHandler != nil && *uiAddr == "" {
+			mainHandler = web.Dispatcher(srv, uiHandler) // shared listener: git vs UI
+		}
+		httpSrv = &http.Server{Addr: listenAddr, Handler: mainHandler}
 		go func() {
 			if ln != nil {
 				httpErrCh <- httpSrv.Serve(ln)
@@ -486,6 +536,12 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 				httpErrCh <- httpSrv.ListenAndServe()
 			}
 		}()
+
+		// Optional separate UI listener.
+		if uiHandler != nil && *uiAddr != "" {
+			uiSrv = &http.Server{Addr: *uiAddr, Handler: uiHandler}
+			go func() { httpErrCh <- uiSrv.ListenAndServe() }()
+		}
 	}
 
 	// ---- SSH listener ----
@@ -609,6 +665,9 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 			fmt.Fprintf(stderr, "serve: http shutdown: %v\n", err)
 			return 1
+		}
+		if uiSrv != nil {
+			_ = uiSrv.Shutdown(shutdownCtx)
 		}
 		// Drain the httpErrCh in case we never received from it above.
 		select {
