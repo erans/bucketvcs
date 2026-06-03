@@ -7,8 +7,10 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/browsemodel"
@@ -128,6 +130,13 @@ func parsePage(fsys fs.FS, dir, page string) (*template.Template, error) {
 				return 0
 			}
 			return n - 1
+		},
+		"urlpath": func(p string) string {
+			seg := strings.Split(p, "/")
+			for i := range seg {
+				seg[i] = url.PathEscape(seg[i])
+			}
+			return strings.Join(seg, "/")
 		},
 	}
 	return template.New("").Funcs(funcs).ParseFS(fsys, base, pg)

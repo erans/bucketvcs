@@ -119,10 +119,12 @@ func parseUnifiedDiff(raw []byte) ([]browsemodel.FileDiff, bool) {
 		}
 	}
 
+	inHunks := false
 	for _, ln := range lines {
 		switch {
 		case strings.HasPrefix(ln, "diff --git "):
 			flushFile()
+			inHunks = false
 			if len(files) >= maxDiffFiles {
 				truncated = true
 				return files, truncated
@@ -138,33 +140,34 @@ func parseUnifiedDiff(raw []byte) ([]browsemodel.FileDiff, bool) {
 			}
 		case cur == nil:
 			// preamble before first file header; ignore
-		case strings.HasPrefix(ln, "new file"):
+		case !inHunks && strings.HasPrefix(ln, "new file"):
 			cur.Status = "A"
-		case strings.HasPrefix(ln, "deleted file"):
+		case !inHunks && strings.HasPrefix(ln, "deleted file"):
 			cur.Status = "D"
-		case strings.HasPrefix(ln, "rename from "):
+		case !inHunks && strings.HasPrefix(ln, "rename from "):
 			cur.Status = "R"
 			cur.OldPath = strings.TrimPrefix(ln, "rename from ")
-		case strings.HasPrefix(ln, "rename to "):
+		case !inHunks && strings.HasPrefix(ln, "rename to "):
 			cur.NewPath = strings.TrimPrefix(ln, "rename to ")
-		case strings.HasPrefix(ln, "copy from "):
+		case !inHunks && strings.HasPrefix(ln, "copy from "):
 			cur.Status = "C"
 			cur.OldPath = strings.TrimPrefix(ln, "copy from ")
-		case strings.HasPrefix(ln, "copy to "):
+		case !inHunks && strings.HasPrefix(ln, "copy to "):
 			cur.NewPath = strings.TrimPrefix(ln, "copy to ")
-		case strings.HasPrefix(ln, "Binary files "):
+		case !inHunks && strings.HasPrefix(ln, "Binary files "):
 			cur.Binary = true
-		case strings.HasPrefix(ln, "--- "):
+		case !inHunks && strings.HasPrefix(ln, "--- "):
 			p := strings.TrimPrefix(ln, "--- ")
 			if p != "/dev/null" {
 				cur.OldPath = strings.TrimPrefix(p, "a/")
 			}
-		case strings.HasPrefix(ln, "+++ "):
+		case !inHunks && strings.HasPrefix(ln, "+++ "):
 			p := strings.TrimPrefix(ln, "+++ ")
 			if p != "/dev/null" {
 				cur.NewPath = strings.TrimPrefix(p, "b/")
 			}
 		case strings.HasPrefix(ln, "@@"):
+			inHunks = true
 			flushHunk()
 			if cur.TooLarge {
 				continue

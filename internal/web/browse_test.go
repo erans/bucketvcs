@@ -347,6 +347,23 @@ func TestRaw_TooLargeReturns413(t *testing.T) {
 	}
 }
 
+// TestTree_HashInFilenameLinkEscaped verifies that filenames containing '#'
+// are percent-encoded in generated href attributes.
+func TestTree_HashInFilenameLinkEscaped(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+		tree: []browsemodel.TreeEntry{{Name: "a#b.txt", Path: "a#b.txt", Type: "blob", Size: 3, OID: "x"}},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/tree/main/", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, "a%23b.txt") {
+		t.Fatalf("expected %%23-escaped link for #-filename, body: %s", body)
+	}
+}
+
 // TestCommit_NonOIDIs404 verifies that /commit/<ref-name> returns 404
 // (commit links always use full OIDs, never ref names).
 func TestCommit_NonOIDIs404(t *testing.T) {

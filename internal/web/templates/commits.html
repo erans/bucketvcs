@@ -12,8 +12,8 @@
     {{end}}
   </table>
   <div class="pager">
-    {{if gt .Page 0}}<a href="/{{.Tenant}}/{{.Repo}}/commits/{{.RefOrOID}}?page={{minus1 .Page}}">prev</a>{{end}}
-    {{if .HasMore}}<a href="/{{.Tenant}}/{{.Repo}}/commits/{{.RefOrOID}}?page={{plus1 .Page}}">next</a>{{end}}
+    {{if gt .Page 0}}<a href="/{{.Tenant}}/{{.Repo}}/commits/{{urlpath .RefOrOID}}?page={{minus1 .Page}}">prev</a>{{end}}
+    {{if .HasMore}}<a href="/{{.Tenant}}/{{.Repo}}/commits/{{urlpath .RefOrOID}}?page={{plus1 .Page}}">next</a>{{end}}
   </div>
 </div>
 {{end}}

@@ -120,6 +120,36 @@ func TestParseUnifiedDiff_FileCountCap(t *testing.T) {
 	}
 }
 
+func TestParseUnifiedDiff_DashDashContentLines(t *testing.T) {
+	patch := "diff --git a/sig.txt b/sig.txt\n" +
+		"--- a/sig.txt\n" +
+		"+++ b/sig.txt\n" +
+		"@@ -1,2 +1,2 @@\n" +
+		" context\n" +
+		"--- removed signature\n" + // removed line whose content is "-- removed signature"
+		"+++ added rule\n" + // added line whose content is "++ added rule"
+		"@@ -10 +10 @@\n" +
+		"-x\n" +
+		"+y\n"
+	files, _ := parseUnifiedDiff([]byte(patch))
+	if len(files) != 1 {
+		t.Fatalf("want 1 file, got %d", len(files))
+	}
+	f := files[0]
+	if f.OldPath != "sig.txt" || f.NewPath != "sig.txt" {
+		t.Fatalf("paths corrupted by content lines: %+v", f)
+	}
+	if f.Additions != 2 || f.Deletions != 2 {
+		t.Fatalf("counts = +%d -%d, want +2 -2", f.Additions, f.Deletions)
+	}
+	if len(f.Hunks) != 2 {
+		t.Fatalf("want 2 hunks, got %d", len(f.Hunks))
+	}
+	if got := f.Hunks[0].Lines[1]; got.Kind != '-' || got.Text != "-- removed signature" {
+		t.Fatalf("mid-hunk dash line misparsed: %+v", got)
+	}
+}
+
 func TestCommit_MergeShowsFirstParentDiff(t *testing.T) {
 	svc, tenant, repo, oids := fixture(t)
 	cd, err := svc.Commit(context.Background(), tenant, repo, oids["merge"])
