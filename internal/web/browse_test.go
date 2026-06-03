@@ -121,13 +121,13 @@ func TestBrowse_Routing(t *testing.T) {
 		want int
 	}{
 		{"/acme/demo", 200},
-		{"/acme/demo/", 200},                          // trailing slash on repo home
+		{"/acme/demo/", 200},                            // trailing slash on repo home
 		{"/acme/demo//x", http.StatusTemporaryRedirect}, // double-slash: mux path-cleans to 307
 		{"/acme/demo/tree/main/sub", 200},
 		{"/acme/demo/commits/main", 200},
 		{"/acme/demo/bogus/main", http.StatusNotFound}, // unknown verb
-		{"/acme", http.StatusNotFound},                  // single segment
-		{"/acme/secret", http.StatusNotFound},           // not visible → 404
+		{"/acme", http.StatusNotFound},                 // single segment
+		{"/acme/secret", http.StatusNotFound},          // not visible → 404
 	}
 	for _, c := range cases {
 		req := httptest.NewRequest("GET", c.path, nil)
@@ -373,5 +373,33 @@ func TestCommit_NonOIDIs404(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("got %d, want 404 for non-OID commit URL", rec.Code)
+	}
+}
+
+func TestRfc5987Encode(t *testing.T) {
+	cases := map[string]string{
+		"plain.txt":   "plain.txt",
+		"foo'bar.png": "foo%27bar.png",
+		"a(b)*c.bin":  "a%28b%29%2Ac.bin",
+		"caf\xc3\xa9": "caf%C3%A9",
+		"sp ace.dat":  "sp%20ace.dat",
+	}
+	for in, want := range cases {
+		if got := rfc5987Encode(in); got != want {
+			t.Errorf("rfc5987Encode(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestCommits_PathFilteredIs404(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/commits/main/sub", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("path-filtered commits should 404 (deferred feature), got %d", rec.Code)
 	}
 }

@@ -132,7 +132,12 @@ func parseUnifiedDiff(raw []byte) ([]browsemodel.FileDiff, bool) {
 			cur = &browsemodel.FileDiff{Status: "M"}
 			// Pre-populate NewPath from "diff --git a/<path> b/<path>".
 			// The +++ line may not appear for binary files, so we parse it here
-			// as a fallback. It will be overwritten by +++ if present.
+			// as a fallback. It will be overwritten by +++ (or rename/copy to)
+			// if present. Best-effort by design: the first " b/" occurrence is
+			// taken, so a path containing the literal substring " b/" can
+			// mis-split — but only for BINARY adds/modifies (text diffs are
+			// corrected by +++), and the "Binary files a/x and b/y differ"
+			// line is equally ambiguous for such names. Display-only edge.
 			rest := strings.TrimPrefix(ln, "diff --git ")
 			// rest is "a/<path> b/<path>"; find the b/ half by splitting on " b/"
 			if bi := strings.Index(rest, " b/"); bi >= 0 {

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"html/template"
 	"net/http"
-	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -232,8 +231,9 @@ func (s *server) handleRaw(w http.ResponseWriter, r *http.Request, br browseRout
 	if b.Binary {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		// RFC 5987 filename* avoids quoted-string breakage for names containing
-		// quotes; percent-encoding also neutralizes any odd bytes in the name.
-		w.Header().Set("Content-Disposition", "attachment; filename*=UTF-8''"+url.PathEscape(filepath.Base(res.Path)))
+		// quotes; attr-char percent-encoding neutralizes any odd bytes in the
+		// name, including the single quote that delimits the ext-value fields.
+		w.Header().Set("Content-Disposition", "attachment; filename*=UTF-8''"+rfc5987Encode(filepath.Base(res.Path)))
 	} else {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Header().Set("Content-Disposition", "inline")
@@ -241,6 +241,31 @@ func (s *server) handleRaw(w http.ResponseWriter, r *http.Request, br browseRout
 	EmitRequestMetric(r.Context(), s.logger, "raw", http.StatusOK)
 	_, _ = w.Write(b.Bytes)
 }
+
+// rfc5987Encode percent-encodes s per RFC 5987 attr-char rules: every byte
+// except ALPHA / DIGIT / "!" / "#" / "$" / "&" / "+" / "-" / "." / "^" / "_" /
+// "`" / "|" / "~" is %-encoded. Stricter than url.PathEscape, which leaves
+// the ext-value delimiter "'" (and a few other non-attr-chars) bare.
+func rfc5987Encode(s string) string {
+	const hexdigits = "0123456789ABCDEF"
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9',
+			c == '!', c == '#', c == '$', c == '&', c == '+', c == '-',
+			c == '.', c == '^', c == '_', c == '`', c == '|', c == '~':
+			b.WriteByte(c)
+		default:
+			b.WriteByte('%')
+			b.WriteByte(hexdigits[c>>4])
+			b.WriteByte(hexdigits[c&0xf])
+		}
+	}
+	return b.String()
+}
+
 func (s *server) handleCommits(w http.ResponseWriter, r *http.Request, br browseRoute) {
 	refs, err := s.content.ListRefs(r.Context(), br.tenant, br.repo)
 	if err != nil {
@@ -250,6 +275,12 @@ func (s *server) handleCommits(w http.ResponseWriter, r *http.Request, br browse
 	res, err := browsemodel.ResolveRest(refs, br.rest)
 	if err != nil {
 		s.browseError(w, r, err)
+		return
+	}
+	if res.Path != "" {
+		// Path-filtered log is a deferred feature; generated links never carry
+		// a path here. 404 rather than silently returning unfiltered history.
+		s.renderError(w, r, http.StatusNotFound, "not found")
 		return
 	}
 	const pageSize = 50
