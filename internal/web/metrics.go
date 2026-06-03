@@ -19,6 +19,19 @@ func EmitLoginMetric(ctx context.Context, logger *slog.Logger, result, provider 
 	)
 }
 
+// EmitBrowseMetric records a served browse view. view ∈
+// {repo,tree,blob,raw,commits,commit}.
+func EmitBrowseMetric(ctx context.Context, logger *slog.Logger, view string) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.LogAttrs(ctx, slog.LevelInfo, "metric",
+		slog.String("name", "web_browse_total"),
+		slog.String("view", view),
+		slog.Int("value", 1),
+	)
+}
+
 // EmitRequestMetric records a served request by route + status.
 func EmitRequestMetric(ctx context.Context, logger *slog.Logger, route string, status int) {
 	if logger == nil {

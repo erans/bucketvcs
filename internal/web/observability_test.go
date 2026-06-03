@@ -37,6 +37,26 @@ func TestEmitLoginMetric_Provider(t *testing.T) {
 	}
 }
 
+func TestEmitBrowseMetric(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	EmitBrowseMetric(context.Background(), logger, "tree")
+	out := buf.String()
+	if !strings.Contains(out, "web_browse_total") || !strings.Contains(out, "tree") {
+		t.Fatalf("metric not emitted: %s", out)
+	}
+}
+
+func TestEmitBrowseMetric_RepoView(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	EmitBrowseMetric(context.Background(), logger, "repo")
+	out := buf.String()
+	if !strings.Contains(out, "web_browse_total") || !strings.Contains(out, "repo") {
+		t.Fatalf("metric not emitted: %s", out)
+	}
+}
+
 func TestEmitOIDCEvents(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))

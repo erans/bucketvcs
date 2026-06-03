@@ -71,6 +71,12 @@ func (s *server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	view := br.verb
+	if view == "" {
+		view = "repo"
+	}
+	EmitBrowseMetric(r.Context(), s.logger, view)
+
 	switch br.verb {
 	case "":
 		s.handleRepoHome(w, r, br)

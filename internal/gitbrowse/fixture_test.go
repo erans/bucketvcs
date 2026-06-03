@@ -97,5 +97,5 @@ func fixture(t *testing.T) (svc *Service, tenant, repo string, oids map[string]s
 	}
 	t.Cleanup(func() { _ = mgr.Close() })
 
-	return NewService(store, mgr, 0), "acme", "demo", oids
+	return NewService(store, mgr, 0, nil), "acme", "demo", oids
 }

@@ -7,6 +7,7 @@ package gitbrowse
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/browsemodel"
@@ -22,25 +23,40 @@ type Service struct {
 	store   storage.ObjectStore
 	mgr     *mirror.Manager
 	timeout time.Duration
+	logger  *slog.Logger
 }
 
 // NewService constructs a Service. timeout <= 0 uses DefaultTimeout.
-func NewService(store storage.ObjectStore, mgr *mirror.Manager, timeout time.Duration) *Service {
+func NewService(store storage.ObjectStore, mgr *mirror.Manager, timeout time.Duration, logger *slog.Logger) *Service {
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
-	return &Service{store: store, mgr: mgr, timeout: timeout}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Service{store: store, mgr: mgr, timeout: timeout, logger: logger}
 }
 
 // openMirror opens (materializing if cold) the bare mirror and takes its read
 // lock. The returned release func MUST be called to drop the lock. A
 // materialization that exceeds s.timeout is reported as browsemodel.ErrWarming.
 func (s *Service) openMirror(ctx context.Context, tenant, repo string) (*mirror.Mirror, func(), error) {
+	start := time.Now()
 	octx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 	m, err := s.mgr.Open(octx, tenant, repo)
+	s.logger.LogAttrs(ctx, slog.LevelInfo, "metric",
+		slog.String("name", "web_browse_mirror_wait_seconds"),
+		slog.Float64("value", time.Since(start).Seconds()),
+	)
 	if err != nil {
 		if errors.Is(octx.Err(), context.DeadlineExceeded) {
+			// A real backend failure can coincide with the deadline; surface it
+			// to operators even though the client sees a generic "warming" 503.
+			s.logger.LogAttrs(ctx, slog.LevelWarn, "browse mirror open exceeded timeout",
+				slog.String("tenant", tenant), slog.String("repo", repo),
+				slog.String("err", err.Error()),
+			)
 			return nil, nil, browsemodel.ErrWarming
 		}
 		return nil, nil, err
