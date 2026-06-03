@@ -2,6 +2,8 @@ package gitbrowse
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -14,13 +16,22 @@ import (
 
 // loadRefs resolves the full ref map and default-branch name via the manifest
 // path (no mirror). Returned map is refname->40-hex OID (e.g. "refs/heads/main").
+// A repo that is visible in the auth DB but has no root manifest in storage
+// (e.g. registered with --no-init and never pushed) maps to
+// browsemodel.ErrNotFound so the web layer renders the uniform 404, not a 500.
 func (s *Service) loadRefs(ctx context.Context, tenant, repoID string) (refMap map[string]string, defaultBranch string, err error) {
 	r, err := repo.Open(ctx, s.store, tenant, repoID)
 	if err != nil {
+		if errors.Is(err, repo.ErrRepoNotFound) {
+			return nil, "", fmt.Errorf("open repo: %w", browsemodel.ErrNotFound)
+		}
 		return nil, "", err
 	}
 	view, err := r.ReadRoot(ctx)
 	if err != nil {
+		if errors.Is(err, repo.ErrRepoNotFound) {
+			return nil, "", fmt.Errorf("read root: %w", browsemodel.ErrNotFound)
+		}
 		return nil, "", err
 	}
 	body, err := manifest.UnmarshalBody(view.Body)

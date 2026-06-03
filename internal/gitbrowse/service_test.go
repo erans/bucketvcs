@@ -57,3 +57,13 @@ func TestListRefs(t *testing.T) {
 		t.Fatalf("missing tag v1.0: %+v", refs.Tags)
 	}
 }
+
+func TestListRefs_UnmaterializedRepoIsNotFound(t *testing.T) {
+	svc, tenant, _, _ := fixture(t)
+	// A repo with no root manifest in storage (e.g. registered --no-init,
+	// never pushed) must map to ErrNotFound so the web layer 404s, not 500s.
+	_, err := svc.ListRefs(context.Background(), tenant, "ghost")
+	if !errors.Is(err, browsemodel.ErrNotFound) {
+		t.Fatalf("want ErrNotFound for manifest-absent repo, got %v", err)
+	}
+}
