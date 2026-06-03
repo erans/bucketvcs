@@ -57,3 +57,34 @@ func TestListRefs(t *testing.T) {
 		t.Fatalf("missing tag v1.0: %+v", refs.Tags)
 	}
 }
+
+func TestResolve_SlashRefVsPath(t *testing.T) {
+	svc, tenant, repo, oids := fixture(t)
+	ctx := context.Background()
+
+	// "feature/foo/c.txt" must split ref="feature/foo", path="c.txt".
+	r, err := svc.Resolve(ctx, tenant, repo, "feature/foo/c.txt")
+	if err != nil {
+		t.Fatalf("Resolve slash ref: %v", err)
+	}
+	if r.Ref != "feature/foo" || r.Path != "c.txt" || r.OID != oids["feat"] {
+		t.Fatalf("got %+v", r)
+	}
+
+	// "main" alone resolves to a ref with empty path.
+	r, err = svc.Resolve(ctx, tenant, repo, "main")
+	if err != nil || r.Ref != "main" || r.Path != "" || r.OID != oids["c2"] {
+		t.Fatalf("Resolve main: %v %+v", err, r)
+	}
+
+	// A raw 40-hex OID resolves with empty ref.
+	r, err = svc.Resolve(ctx, tenant, repo, oids["c1"]+"/a.txt")
+	if err != nil || r.Ref != "" || r.OID != oids["c1"] || r.Path != "a.txt" {
+		t.Fatalf("Resolve oid: %v %+v", err, r)
+	}
+
+	// Unknown ref → ErrNotFound.
+	if _, err := svc.Resolve(ctx, tenant, repo, "nope/x.txt"); !errors.Is(err, browsemodel.ErrNotFound) {
+		t.Fatalf("want ErrNotFound for unknown ref, got %v", err)
+	}
+}
