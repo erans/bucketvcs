@@ -259,6 +259,9 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 		logger.Warn("web UI not served: --ui-addr requires a main HTTP listener (--addr); the UI shares or sits alongside --addr",
 			"ui_addr", *uiAddr)
 	}
+	if *oidcLogin && !*uiEnabled {
+		logger.Warn("--oidc-login has no effect when --ui=false; OIDC login routes will not be served")
+	}
 
 	// M14 protected-refs enforcement. Always constructed against the
 	// same authdb the gateway uses; when the operator has added no
