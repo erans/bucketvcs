@@ -57,11 +57,14 @@ func (b *browseDataStore) LinkIdentity(ctx context.Context, userID, issuer, subj
 
 // fakeContent is a configurable ContentStore for browse tests.
 type fakeContent struct {
-	refs browsemodel.Refs
-	res  browsemodel.Resolved
-	warm bool
-	tree []browsemodel.TreeEntry
-	blob browsemodel.Blob
+	refs   browsemodel.Refs
+	res    browsemodel.Resolved
+	warm   bool
+	tree   []browsemodel.TreeEntry
+	blob   browsemodel.Blob
+	log    []browsemodel.CommitMeta
+	more   bool
+	commit browsemodel.CommitDetail
 }
 
 func (f *fakeContent) ListRefs(ctx context.Context, t, r string) (browsemodel.Refs, error) {
@@ -89,10 +92,16 @@ func (f *fakeContent) ReadBlob(ctx context.Context, t, r, oid, p string) (browse
 	return f.blob, nil
 }
 func (f *fakeContent) Log(ctx context.Context, t, r, oid string, off, lim int) ([]browsemodel.CommitMeta, bool, error) {
-	return nil, false, nil
+	if f.warm {
+		return nil, false, browsemodel.ErrWarming
+	}
+	return f.log, f.more, nil
 }
 func (f *fakeContent) Commit(ctx context.Context, t, r, oid string) (browsemodel.CommitDetail, error) {
-	return browsemodel.CommitDetail{}, browsemodel.ErrNotFound
+	if f.warm {
+		return browsemodel.CommitDetail{}, browsemodel.ErrWarming
+	}
+	return f.commit, nil
 }
 
 func newBrowseServer(content ContentStore, visible map[string]bool) http.Handler {
@@ -248,5 +257,49 @@ func TestBlob_HighlightedAndEscaped(t *testing.T) {
 	}
 	if !strings.Contains(body, "main.go") {
 		t.Fatalf("blob view missing filename")
+	}
+}
+
+func TestCommits_ListAndPaging(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main"},
+		res:  browsemodel.Resolved{Ref: "main", OID: "abc"},
+		log:  []browsemodel.CommitMeta{{OID: "c2", ShortOID: "c2", Summary: "update a", AuthorName: "Ann"}},
+		more: true,
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/commits/main", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, "update a") {
+		t.Fatalf("commit log missing summary: %s", body)
+	}
+	if !strings.Contains(body, "page=1") {
+		t.Fatalf("expected next-page link when more=true: %s", body)
+	}
+}
+
+func TestCommit_RendersDiff(t *testing.T) {
+	content := &fakeContent{
+		commit: browsemodel.CommitDetail{
+			Meta:    browsemodel.CommitMeta{OID: "c2", ShortOID: "c2", Summary: "update a", AuthorName: "Ann"},
+			Message: "update a\n",
+			Parents: []string{"c1"},
+			Files: []browsemodel.FileDiff{{
+				NewPath: "a.txt", Status: "M", Additions: 1, Deletions: 1,
+				Hunks: []browsemodel.Hunk{{Header: "@@ -1 +1 @@", Lines: []browsemodel.DiffLine{
+					{Kind: '-', Text: "hello"}, {Kind: '+', Text: "hello again"},
+				}}},
+			}},
+		},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/commit/c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, "a.txt") || !strings.Contains(body, "hello again") {
+		t.Fatalf("commit view missing diff: %s", body)
 	}
 }

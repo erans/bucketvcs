@@ -1,0 +1,26 @@
+{{define "title"}}{{.Detail.Meta.ShortOID}} · {{.Tenant}}/{{.Repo}}{{end}}
+{{define "content"}}
+<div class="browse">
+  <div class="repohdr"><span class="path">{{.Tenant}}/{{.Repo}}</span></div>
+  <div class="commitmeta">
+    <div class="summary"><strong>{{.Detail.Meta.Summary}}</strong></div>
+    <div class="who">{{.Detail.Meta.ShortOID}} · {{.Detail.Meta.AuthorName}} &lt;{{.Detail.Meta.AuthorEmail}}&gt;</div>
+    <pre class="message">{{.Detail.Message}}</pre>
+  </div>
+  {{range .Detail.Files}}
+  <div class="filediff">
+    <div class="fhdr">{{.Status}} {{if .NewPath}}{{.NewPath}}{{else}}{{.OldPath}}{{end}} (+{{.Additions}} -{{.Deletions}})</div>
+    {{if .Binary}}<div class="empty">binary file</div>
+    {{else if .TooLarge}}<div class="empty">diff too large; view raw</div>
+    {{else}}
+      {{range .Hunks}}
+        <div class="hunk">{{.Header}}</div>
+        {{range .Lines}}<div class="dl k{{printf "%c" .Kind}}">{{printf "%c" .Kind}}{{.Text}}</div>{{end}}
+      {{end}}
+    {{end}}
+  </div>
+  {{end}}
+  {{if .Detail.Truncated}}<p class="empty">diff truncated (too many files)</p>{{end}}
+</div>
+{{end}}
+{{template "base" .}}

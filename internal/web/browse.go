@@ -219,8 +219,44 @@ func (s *server) handleRaw(w http.ResponseWriter, r *http.Request, br browseRout
 	EmitRequestMetric(r.Context(), s.logger, "raw", http.StatusOK)
 	_, _ = w.Write(b.Bytes)
 }
-func (s *server) handleCommits(w http.ResponseWriter, r *http.Request, br browseRoute) { w.WriteHeader(http.StatusOK) }
-func (s *server) handleCommit(w http.ResponseWriter, r *http.Request, br browseRoute)  { w.WriteHeader(http.StatusOK) }
+func (s *server) handleCommits(w http.ResponseWriter, r *http.Request, br browseRoute) {
+	refs, err := s.content.ListRefs(r.Context(), br.tenant, br.repo)
+	if err != nil {
+		s.browseError(w, r, err)
+		return
+	}
+	res, err := s.content.Resolve(r.Context(), br.tenant, br.repo, br.rest)
+	if err != nil {
+		s.browseError(w, r, err)
+		return
+	}
+	const pageSize = 50
+	page := queryPage(r)
+	commits, more, err := s.content.Log(r.Context(), br.tenant, br.repo, res.OID, page*pageSize, pageSize)
+	if err != nil {
+		s.browseError(w, r, err)
+		return
+	}
+	s.renderBrowse(w, r, "commits.html", commitsData{
+		browseHeader: s.header(w, r, br, refs, res.Ref),
+		Commits:      commits,
+		Page:         page,
+		HasMore:      more,
+	})
+}
+
+func (s *server) handleCommit(w http.ResponseWriter, r *http.Request, br browseRoute) {
+	oid := strings.Trim(br.rest, "/")
+	detail, err := s.content.Commit(r.Context(), br.tenant, br.repo, oid)
+	if err != nil {
+		s.browseError(w, r, err)
+		return
+	}
+	s.renderBrowse(w, r, "commit.html", commitData{
+		browseHeader: s.header(w, r, br, browsemodel.Refs{}, ""),
+		Detail:       detail,
+	})
+}
 
 // header builds the common browse header view-model. It issues a CSRF token for
 // the layout's logout form when the request is authenticated.
