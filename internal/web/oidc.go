@@ -20,6 +20,10 @@ func randToken() string {
 }
 
 func (s *server) handleOIDCAuthorize(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.renderError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
 	secure := requestIsTLS(r, s.trustProxy)
 	state := randToken()
 	nonce := randToken()

@@ -61,9 +61,13 @@ func NewHandler(d Deps) http.Handler {
 		mux:        http.NewServeMux(),
 	}
 	if d.OIDC != nil {
+		if len(d.OIDC.HMACKey) < 16 {
+			// Without a real key the bvcs_oidc temp cookie is forgeable.
+			panic("web: oidc: HMACKey must be at least 16 bytes")
+		}
 		s.oidc = d.OIDC
 		s.oauthCfg = d.OIDC.oauthConfig()
-		s.verifier = d.OIDC.Verifier
+		s.verifier = d.OIDC.Verifier // used by handleOIDCCallback (Task 9)
 		if s.verifier == nil {
 			s.verifier = oidc.NewVerifier()
 		}

@@ -52,8 +52,12 @@ func TestOIDCAuthorize_RedirectsWithParams(t *testing.T) {
 	if q.Get("response_type") != "code" {
 		t.Fatalf("response_type = %q", q.Get("response_type"))
 	}
-	if findCookie(rec.Result().Cookies(), oidcCookieName) == nil {
+	ck := findCookie(rec.Result().Cookies(), oidcCookieName)
+	if ck == nil {
 		t.Fatal("no bvcs_oidc cookie")
+	}
+	if !ck.HttpOnly || ck.SameSite != http.SameSiteLaxMode || ck.Path != "/login/oidc" || ck.MaxAge != 600 {
+		t.Fatalf("temp cookie attrs wrong: HttpOnly=%v SameSite=%v Path=%q MaxAge=%d", ck.HttpOnly, ck.SameSite, ck.Path, ck.MaxAge)
 	}
 }
 
