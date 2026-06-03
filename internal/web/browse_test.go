@@ -391,6 +391,19 @@ func TestRfc5987Encode(t *testing.T) {
 	}
 }
 
+func TestChromaCSSRoute(t *testing.T) {
+	h := newBrowseServer(&fakeContent{}, map[string]bool{})
+	req := httptest.NewRequest("GET", "/_ui/static/chroma.css", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), ".chroma") {
+		t.Fatalf("chroma.css route: code=%d body=%.120s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/css") {
+		t.Fatalf("content-type = %q", ct)
+	}
+}
+
 func TestCommits_PathFilteredIs404(t *testing.T) {
 	content := &fakeContent{
 		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},

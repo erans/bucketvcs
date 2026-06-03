@@ -184,3 +184,19 @@ func staticHandler(dir string) http.Handler {
 	}
 	return http.StripPrefix("/_ui/static/", http.FileServer(http.FS(fsys)))
 }
+
+// chromaCSSHandler serves the generated highlight stylesheet. With dir != ""
+// a static/chroma.css file on disk overrides the generated one (theming hook).
+func chromaCSSHandler(dir string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if dir != "" {
+			if b, err := os.ReadFile(filepath.Join(dir, "static", "chroma.css")); err == nil {
+				w.Header().Set("Content-Type", "text/css; charset=utf-8")
+				_, _ = w.Write(b)
+				return
+			}
+		}
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+		_, _ = w.Write(chromaCSS())
+	}
+}

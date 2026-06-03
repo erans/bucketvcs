@@ -76,6 +76,7 @@ func NewHandler(d Deps) http.Handler {
 		}
 	}
 	s.mux.Handle("/_ui/static/", staticHandler(d.UIDir))
+	s.mux.HandleFunc("/_ui/static/chroma.css", chromaCSSHandler(d.UIDir))
 	s.mux.HandleFunc("/login", s.handleLogin)
 	s.mux.HandleFunc("/logout", s.handleLogout)
 	if s.oidc != nil {
