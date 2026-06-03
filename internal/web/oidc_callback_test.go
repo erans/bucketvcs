@@ -137,6 +137,7 @@ func TestOIDCCallback_Rejections(t *testing.T) {
 		{"token_invalid", goodClaims(), oidc.ErrInvalidToken, "nonce-1", "state-1", nil, http.StatusUnauthorized},
 		{"no_user", goodClaims(), nil, "nonce-1", "state-1", func(string) (*auth.Actor, error) { return nil, auth.ErrNoSuchUser }, http.StatusUnauthorized},
 		{"disabled", goodClaims(), nil, "nonce-1", "state-1", func(string) (*auth.Actor, error) { return nil, auth.ErrUserDisabled }, http.StatusUnauthorized},
+		{"empty_sub", func() oidc.Claims { c := goodClaims(); delete(c, "sub"); return c }(), nil, "nonce-1", "state-1", nil, http.StatusUnauthorized},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

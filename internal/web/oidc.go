@@ -127,6 +127,12 @@ func (s *server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	subject := claims.String("sub")
+	if subject == "" {
+		// A token without a stable subject must never pin an identity
+		// (would collide on (issuer, "") and ignore email — confused deputy).
+		reject(http.StatusUnauthorized, "token_invalid", email)
+		return
+	}
 
 	// 8. resolve user
 	actor, err := s.store.FindIdentity(r.Context(), s.oidc.Issuer, subject)
