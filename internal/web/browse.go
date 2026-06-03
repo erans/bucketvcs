@@ -113,15 +113,21 @@ func (s *server) browseError(w http.ResponseWriter, r *http.Request, err error) 
 }
 
 // queryPage parses ?page= as a non-negative int (default 0).
+// maxLogPage caps ?page= so a crafted URL cannot force an O(history)
+// `git log --skip` walk on a large repo (2000 pages × 50/page reaches the
+// most recent 100k commits; beyond that the pager simply pins to the cap).
+const maxLogPage = 2000
+
 func queryPage(r *http.Request) int {
 	n, err := strconv.Atoi(r.URL.Query().Get("page"))
 	if err != nil || n < 0 {
 		return 0
 	}
+	if n > maxLogPage {
+		return maxLogPage
+	}
 	return n
 }
-
-// --- placeholder page handlers (replaced in Tasks 13–16) ---
 
 func (s *server) handleRepoHome(w http.ResponseWriter, r *http.Request, br browseRoute) {
 	refs, err := s.content.ListRefs(r.Context(), br.tenant, br.repo)

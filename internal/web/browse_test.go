@@ -403,3 +403,14 @@ func TestCommits_PathFilteredIs404(t *testing.T) {
 		t.Fatalf("path-filtered commits should 404 (deferred feature), got %d", rec.Code)
 	}
 }
+
+func TestQueryPage_Clamped(t *testing.T) {
+	req := httptest.NewRequest("GET", "/x?page=99999999", nil)
+	if got := queryPage(req); got != maxLogPage {
+		t.Fatalf("queryPage huge = %d, want clamp %d", got, maxLogPage)
+	}
+	req = httptest.NewRequest("GET", "/x?page=3", nil)
+	if got := queryPage(req); got != 3 {
+		t.Fatalf("queryPage 3 = %d", got)
+	}
+}

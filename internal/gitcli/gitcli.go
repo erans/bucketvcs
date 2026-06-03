@@ -568,7 +568,9 @@ func CatFilePretty(ctx context.Context, dir, oid string) ([]byte, error) {
 }
 
 // CatFileType returns the type ("commit", "tree", "blob", "tag") for an
-// object, matching `git cat-file -t <oid>`.
+// object, matching `git cat-file -t <oid>`. The oid may also be a
+// "<oid>:<path>" rev (path may contain spaces) — guarded by validRevPath
+// rather than validRefOrOID deliberately, for the code-browse reader.
 func CatFileType(ctx context.Context, dir, oid string) (string, error) {
 	if !validRevPath(oid) {
 		return "", fmt.Errorf("gitcli: CatFileType: invalid oid %q", oid)
@@ -581,7 +583,8 @@ func CatFileType(ctx context.Context, dir, oid string) (string, error) {
 }
 
 // CatFileSize returns the size of an object's content, matching
-// `git cat-file -s <oid>`.
+// `git cat-file -s <oid>`. Like CatFileType, accepts "<oid>:<path>" revs
+// (validRevPath) deliberately, for the code-browse reader.
 func CatFileSize(ctx context.Context, dir, oid string) (int64, error) {
 	if !validRevPath(oid) {
 		return 0, fmt.Errorf("gitcli: CatFileSize: invalid oid %q", oid)

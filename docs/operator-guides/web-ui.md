@@ -427,6 +427,11 @@ No new audit events are emitted for Phase 2. Read operations are not audited.
 - Web clone / zip download.
 - htmx partial swaps for the ref switcher (currently full-page navigation).
 - Branch and tag management through the UI.
+- A `Content-Security-Policy` on the rendered HTML browse pages. The raw
+  endpoint carries a strict CSP, but HTML pages rely on bluemonday's
+  sanitization (scripts and event handlers are stripped). A rendered README
+  may still reference remote images, which can disclose a viewer's IP to the
+  image host; a UI-wide CSP / image proxy is deferred.
 - Git errors during a read surface as HTTP 404 when the object, ref, or path does
   not exist (missing-ref/missing-path/missing-object checks return ErrNotFound →
   404); an unexpected git failure that occurs after the object's existence is
