@@ -77,7 +77,7 @@ func NewHandler(d Deps) http.Handler {
 	s.mux.HandleFunc("/logout", s.handleLogout)
 	if s.oidc != nil {
 		s.mux.HandleFunc("/login/oidc", s.handleOIDCAuthorize)
-		// /login/oidc/callback is registered in Task 9.
+		s.mux.HandleFunc("/login/oidc/callback", s.handleOIDCCallback)
 	}
 	s.mux.HandleFunc("/", s.handleLanding)
 
