@@ -42,3 +42,13 @@ func (a *webAdapter) ListAccessibleRepos(ctx context.Context, actor *auth.Actor)
 	}
 	return out, nil
 }
+
+func (a *webAdapter) FindUserByEmail(ctx context.Context, email string) (*auth.Actor, error) {
+	return a.s.FindUserByEmail(ctx, email)
+}
+func (a *webAdapter) FindIdentity(ctx context.Context, issuer, subject string) (*auth.Actor, error) {
+	return a.s.FindIdentity(ctx, issuer, subject)
+}
+func (a *webAdapter) LinkIdentity(ctx context.Context, userID, issuer, subject, email string) error {
+	return a.s.LinkIdentity(ctx, userID, issuer, subject, email)
+}

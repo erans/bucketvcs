@@ -12,9 +12,12 @@ import (
 
 // fakeStore implements DataStore for handler/middleware tests.
 type fakeStore struct {
-	verify   func(ctx context.Context, u, p string) (*auth.Actor, error)
-	sessions map[string]*auth.Session // keyed by raw id
-	repos    func(actor *auth.Actor) []Repo
+	verify       func(ctx context.Context, u, p string) (*auth.Actor, error)
+	sessions     map[string]*auth.Session // keyed by raw id
+	repos        func(actor *auth.Actor) []Repo
+	findByEmail  func(email string) (*auth.Actor, error)
+	findIdentity func(issuer, subject string) (*auth.Actor, error)
+	linkIdentity func(userID, issuer, subject, email string) error
 }
 
 func newFakeStore() *fakeStore { return &fakeStore{sessions: map[string]*auth.Session{}} }
@@ -46,6 +49,24 @@ func (f *fakeStore) ListAccessibleRepos(ctx context.Context, actor *auth.Actor) 
 		return nil, nil
 	}
 	return f.repos(actor), nil
+}
+func (f *fakeStore) FindUserByEmail(ctx context.Context, email string) (*auth.Actor, error) {
+	if f.findByEmail != nil {
+		return f.findByEmail(email)
+	}
+	return nil, auth.ErrNoSuchUser
+}
+func (f *fakeStore) FindIdentity(ctx context.Context, issuer, subject string) (*auth.Actor, error) {
+	if f.findIdentity != nil {
+		return f.findIdentity(issuer, subject)
+	}
+	return nil, auth.ErrNoSuchUser
+}
+func (f *fakeStore) LinkIdentity(ctx context.Context, userID, issuer, subject, email string) error {
+	if f.linkIdentity != nil {
+		return f.linkIdentity(userID, issuer, subject, email)
+	}
+	return nil
 }
 
 func TestSessionMiddleware_LoadsAndAnon(t *testing.T) {
