@@ -16,7 +16,8 @@ follow-on phases.
 | Session management (sqlite-backed) | ✅ shipped | sliding TTL, periodic sweep |
 | CSRF double-submit protection | ✅ shipped | all POST handlers |
 | Per-IP rate-limiting on login failures | ✅ shipped | shares M18 rate limiter |
-| Code browse / repo settings / admin screens | ❌ deferred (Phase 2+) | |
+| Code browse (tree, blob, diff, log) | ✅ shipped | Phase 2; see §6 |
+| Repo settings / admin screens | ❌ deferred (Phase 3) | |
 | OIDC browser login | ❌ deferred (Phase 1.5) | |
 | Per-session audit trail | ❌ deferred | |
 
@@ -33,7 +34,7 @@ request path and routes it: paths ending in `.git` or containing `.git/`,
 `/healthz`, or `/_` internal prefixes go to the git handler; everything else goes
 to the UI handler.
 
-Phase 1 ships identity and a repository landing page only:
+Phase 1 ships identity and a repository landing page:
 
 - `GET /login` — login form (HTML).
 - `POST /login` — credential check + session cookie.
@@ -41,8 +42,16 @@ Phase 1 ships identity and a repository landing page only:
 - `GET /` — landing page listing all repos the current visitor can see.
 - `GET /_ui/static/*` — embedded CSS/JS/font assets.
 
-Phase 2 will add code browse, diff, and blob views. The admin screen (user/repo
-management) is a planned Phase 3 item.
+Phase 2 ships read-only git code browsing (see §6):
+
+- `GET /{tenant}/{repo}` — repository home: default-branch root tree + rendered README.
+- `GET /{tenant}/{repo}/tree/{ref}/{path}` — directory listing.
+- `GET /{tenant}/{repo}/blob/{ref}/{path}` — file view with syntax highlighting.
+- `GET /{tenant}/{repo}/raw/{ref}/{path}` — raw file bytes (safely served).
+- `GET /{tenant}/{repo}/commits/{ref}` — paginated commit log.
+- `GET /{tenant}/{repo}/commit/{oid}` — single commit with diff.
+
+The admin screen (user/repo management) is a planned Phase 3 item.
 
 ---
 
@@ -283,17 +292,175 @@ Login outcomes also increment `web_login_total` with `provider=oidc`.
 
 ---
 
-## 6. Observability
+## 6. Code browse (Phase 2)
 
-### 6.1 Metrics
+Phase 2 adds read-only git code browsing. All browse routes share the same
+visibility rules as the landing page (see §5): anonymous visitors see only
+public repositories; logged-in users see their granted repos; admins see all.
+Both not-found and not-authorized conditions return a uniform HTTP 404 to
+prevent repository enumeration.
+
+### 6.1 Routes
+
+| Route | Description |
+|---|---|
+| `GET /{tenant}/{repo}` | Repository home: root directory tree of the default branch + rendered README |
+| `GET /{tenant}/{repo}/tree/{ref}/{path}` | Directory listing at `path` on `ref` |
+| `GET /{tenant}/{repo}/blob/{ref}/{path}` | File view with syntax highlighting |
+| `GET /{tenant}/{repo}/raw/{ref}/{path}` | Raw file bytes (see §6.5 for safety headers) |
+| `GET /{tenant}/{repo}/commits/{ref}` | Paginated commit log (50 commits per page, `?page=N`) |
+| `GET /{tenant}/{repo}/commit/{oid}` | Single commit: metadata, message, and unified diff |
+
+`{ref}` accepts a branch name, tag name, or 40-hex commit OID. The resolver
+prefers the longest matching branch/tag prefix so that refs containing slashes
+(e.g. `feature/foo`) are resolved correctly. When a branch and a tag share the
+same name, the branch wins; use the tag's commit OID to browse the tag.
+
+### 6.2 Branch and tag switcher
+
+Each browse page shows a branch/tag dropdown populated from all known refs. The
+switcher uses plain links (full-page navigation); htmx partial swaps are a
+deferred item. The single-commit view is the exception: commits are addressed
+by OID, so it omits the switcher (and skips the ref load entirely).
+
+### 6.3 README rendering
+
+The repository home page automatically renders a `README.md` or
+`README.markdown` (case-insensitive) found at the root of the default-branch
+tree. Rendering is a two-step pipeline:
+
+1. **goldmark** converts Markdown to HTML.
+2. **bluemonday** (UGC policy) sanitizes the HTML — scripts, event handlers,
+   and unsafe markup are stripped before the result is embedded in the page.
+
+If no README file is present, the root tree is shown without a rendered preamble.
+README files that are binary or exceed the 10 MiB blob limit are silently
+skipped.
+
+### 6.4 Syntax highlighting and blob caps
+
+| Condition | Behaviour |
+|---|---|
+| Text blob ≤ 1 MiB | Syntax-highlighted via **chroma** (inline styles, "bw" theme) |
+| Text blob > 1 MiB | Plain escaped `<pre>` (no highlighting) |
+| Binary blob (NUL byte in first 8 KiB) | Message + download link; no source rendered |
+| Any blob > 10 MiB | "Too large" message; bytes are not fetched and the file is not downloadable (the raw endpoint returns HTTP 413) |
+
+Chroma selects a lexer by filename; if that fails it falls back to content
+analysis, then to a plain-text lexer. Inline styles (`WithClasses(false)`) keep
+the output self-contained — no separate CSS file is required.
+
+### 6.5 Raw endpoint safety headers
+
+The `/{tenant}/{repo}/raw/{ref}/{path}` endpoint serves file bytes directly.
+Because repo content is attacker-controlled, every response is hardened:
+
+| Header | Value |
+|---|---|
+| `X-Content-Type-Options` | `nosniff` |
+| `Content-Security-Policy` | `default-src 'none'; sandbox` |
+| `Content-Type` (text) | `text/plain; charset=utf-8` |
+| `Content-Type` (binary) | `application/octet-stream` |
+| `Content-Disposition` (binary) | `attachment; filename*=UTF-8''<RFC 5987 encoded name>` |
+
+Blobs over the 10 MiB cap are not served at all: the raw endpoint returns
+HTTP 413 rather than an empty attachment.
+
+These headers together ensure that HTML, SVG, and other active content cannot
+execute inline under the UI's origin, even when a browser ignores
+`Content-Security-Policy`.
+
+### 6.6 Diff caps
+
+Commit diffs are capped to prevent runaway page rendering:
+
+- **300 files per commit** — additional files are silently omitted and a
+  truncation notice is displayed.
+- **3 000 changed (added/removed) lines per file** — files exceeding this limit
+  show a "too large" notice in place of the diff hunks. Context lines (unchanged
+  lines shown for surrounding context) are not counted toward this cap.
+- **20 MiB raw patch** — the raw unified patch read from git is additionally
+  byte-capped at 20 MiB before any line counting begins. An over-cap commit
+  renders as truncated (the parsed prefix of the diff is shown; the final,
+  possibly incomplete, file entry is dropped). Tree listings and raw commit
+  objects carry similar internal byte caps (32 MiB and 4 MiB respectively).
+
+### 6.7 Hybrid reader and cold-mirror warming
+
+The browse backend uses a hybrid reading strategy:
+
+- **Refs** (branches, tags, default branch) are resolved directly from the
+  object-store manifest — no mirror access required.
+- **Tree listings, blob content, commit log, and diffs** are served from the
+  shared on-disk git mirror, the same warm cache used by the git gateway for
+  clone and fetch operations.
+
+For repositories that have no local mirror yet ("cold"), the first browse
+request materializes the mirror synchronously. This cold materialization is the
+only operation bounded by `--ui-browse-timeout` (default `20s`). If the mirror
+is not ready within the timeout, the server returns HTTP 503 with the message
+`repository is warming up — please retry shortly`. The operation is then logged
+at `WARN` level for operator visibility.
+
+Note: after cold materialization completes, a browse read can additionally wait
+for an in-flight push (or maintenance run) to the same repository to complete
+before it can acquire the per-repo read lock. This write-lock wait is **not**
+covered by `--ui-browse-timeout` — it is identical to the behavior of a `git
+fetch` on the gateway, and is expected to be brief in practice.
+
+#### New serve flag
+
+| Flag | Default | Description |
+|---|---|---|
+| `--ui-browse-timeout` | `20s` | Maximum wait for **cold mirror materialization** on a browse request. Requests that exceed this deadline receive HTTP 503. Does not cover the subsequent read-lock acquisition or git reads. |
+
+### 6.8 Observability
+
+Browse requests emit two new metrics:
+
+| Metric | Labels | Description |
+|---|---|---|
+| `web_browse_total` | `view` | Browse requests by view, counted after authorization (includes reads that subsequently fail with 404/503; per-outcome counts are in web_requests_total); `view` ∈ `repo`, `tree`, `blob`, `raw`, `commits`, `commit` |
+| `web_browse_mirror_wait_seconds` | — | Time spent opening (and possibly materializing) the git mirror; emitted once per git read operation (a single page may perform several, e.g. repo home = tree + README), not once per request |
+
+No new audit events are emitted for Phase 2. Read operations are not audited.
+
+### 6.9 Known limitations (deferred)
+
+- Path-filtered commit log (`git log -- <path>`).
+- Blame view.
+- File and commit search.
+- Compare / branch-diff views.
+- Cursor-based pagination (current log pagination is offset-based).
+- Per-read audit events.
+- Web clone / zip download.
+- htmx partial swaps for the ref switcher (currently full-page navigation).
+- Branch and tag management through the UI.
+- A `Content-Security-Policy` on the rendered HTML browse pages. The raw
+  endpoint carries a strict CSP, but HTML pages rely on bluemonday's
+  sanitization (scripts and event handlers are stripped). A rendered README
+  may still reference remote images, which can disclose a viewer's IP to the
+  image host; a UI-wide CSP / image proxy is deferred.
+- Git errors during a read surface as HTTP 404 when the object, ref, or path does
+  not exist (missing-ref/missing-path/missing-object checks return ErrNotFound →
+  404); an unexpected git failure that occurs after the object's existence is
+  confirmed (e.g. cat-file content read, diff generation) surfaces as HTTP 500.
+
+---
+
+## 7. Observability
+
+### 7.1 Metrics
 
 | Metric | Labels | Description |
 |---|---|---|
 | `web_requests_total` | `route`, `status` | Request count by UI route and HTTP status |
 | `web_login_total` | `result` | Login outcomes: `success`, `invalid`, `ratelimited` |
 | `web_sessions_active` | — | Count of non-expired sessions |
+| `web_browse_total` | `view` | Browse requests by view, counted after authorization (includes reads that subsequently fail with 404/503; per-outcome counts are in web_requests_total); `view` ∈ `repo`, `tree`, `blob`, `raw`, `commits`, `commit` (Phase 2) |
+| `web_browse_mirror_wait_seconds` | — | Mirror open/materialize latency; emitted once per git read operation (a single page may perform several, e.g. repo home = tree + README), not once per request (Phase 2) |
 
-### 6.2 Audit events
+### 7.2 Audit events
 
 | Event | When |
 |---|---|
@@ -303,12 +470,15 @@ Login outcomes also increment `web_login_total` with `provider=oidc`.
 
 ---
 
-## 7. Deferred work and planned phases
+## 8. Deferred work and planned phases
 
 - **Phase 1.5 — OIDC browser login**: shipped — see "OIDC browser login
   (Phase 1.5)" above. Remaining OIDC follow-ups (multiple IdPs, auto-provisioning,
   RP-initiated logout) are listed in that section's "Deferred" note.
-- **Phase 2 — code browse**: tree, blob, and diff views for git repositories.
+- **Phase 2 — code browse**: shipped — see §6 above. Remaining Phase 2 deferrals
+  (path-filtered log, blame, search, compare views, cursor pagination, per-read
+  audit, web clone/zip, htmx partial swaps, branch/tag management) are listed in
+  §6.9.
 - **Phase 3 — settings / admin screens**: manage users, repos, protected-ref
   policies, webhooks, and token scopes through the UI rather than the CLI.
 - **Per-session audit trail**: expose session list and per-user login history to

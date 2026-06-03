@@ -1,0 +1,23 @@
+{{define "title"}}{{.Tenant}}/{{.Repo}}: {{.Path}}{{end}}
+{{define "content"}}
+<div class="browse">
+  <div class="repohdr"><span class="path">{{.Tenant}}/{{.Repo}}</span></div>
+  <div class="refs">
+    {{if .Refs.Branches}}branches: {{range .Refs.Branches}}<a href="/{{$.Tenant}}/{{$.Repo}}/tree/{{urlpath .Name}}">{{.Name}}</a> {{end}}{{end}}
+    {{if .Refs.Tags}}&nbsp;&middot;&nbsp;tags: {{range .Refs.Tags}}<a href="/{{$.Tenant}}/{{$.Repo}}/tree/{{urlpath .Name}}">{{.Name}}</a> {{end}}{{end}}
+  </div>
+  <div class="path">/{{.Path}}</div>
+  {{if .Entries}}
+  <table class="tree">
+    {{range .Entries}}
+    <tr>
+      {{if eq .Type "tree"}}<td class="kind">dir</td><td><a href="/{{$.Tenant}}/{{$.Repo}}/tree/{{urlpath $.RefOrOID}}/{{urlpath .Path}}">{{.Name}}/</a></td><td class="size"></td>
+      {{else if eq .Type "blob"}}<td class="kind">file</td><td><a href="/{{$.Tenant}}/{{$.Repo}}/blob/{{urlpath $.RefOrOID}}/{{urlpath .Path}}">{{.Name}}</a></td><td class="size">{{.Size}}</td>
+      {{else}}<td class="kind">mod</td><td>{{.Name}}</td><td class="size"></td>{{end}}
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<p class="empty">empty directory</p>{{end}}
+</div>
+{{end}}
+{{template "base" .}}

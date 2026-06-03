@@ -194,6 +194,24 @@ func validHexOID(s string) bool {
 	return true
 }
 
+// validRevPath permits the "<oid>:<path>" rev form used by code browse, where
+// the path component may contain spaces. It rejects a leading '-' (flag
+// injection) and any NUL/CR/LF, but allows spaces because the value is always
+// passed as a single argv element. It is intentionally more permissive than
+// validRefOrOID, which guards bare ref/OID args.
+func validRevPath(s string) bool {
+	if s == "" || s[0] == '-' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case 0x00, '\n', '\r':
+			return false
+		}
+	}
+	return true
+}
+
 // validPackBasename returns true iff s matches exactly `pack-<40hex>.pack`.
 // This is the canonical form pack files take inside a bare repo's
 // `objects/pack/` directory (set by `git index-pack` and by our
@@ -550,9 +568,11 @@ func CatFilePretty(ctx context.Context, dir, oid string) ([]byte, error) {
 }
 
 // CatFileType returns the type ("commit", "tree", "blob", "tag") for an
-// object, matching `git cat-file -t <oid>`.
+// object, matching `git cat-file -t <oid>`. The oid may also be a
+// "<oid>:<path>" rev (path may contain spaces) — guarded by validRevPath
+// rather than validRefOrOID deliberately, for the code-browse reader.
 func CatFileType(ctx context.Context, dir, oid string) (string, error) {
-	if !validRefOrOID(oid) {
+	if !validRevPath(oid) {
 		return "", fmt.Errorf("gitcli: CatFileType: invalid oid %q", oid)
 	}
 	out, err := run(ctx, dir, "--no-replace-objects", "cat-file", "-t", oid)
@@ -563,9 +583,10 @@ func CatFileType(ctx context.Context, dir, oid string) (string, error) {
 }
 
 // CatFileSize returns the size of an object's content, matching
-// `git cat-file -s <oid>`.
+// `git cat-file -s <oid>`. Like CatFileType, accepts "<oid>:<path>" revs
+// (validRevPath) deliberately, for the code-browse reader.
 func CatFileSize(ctx context.Context, dir, oid string) (int64, error) {
-	if !validRefOrOID(oid) {
+	if !validRevPath(oid) {
 		return 0, fmt.Errorf("gitcli: CatFileSize: invalid oid %q", oid)
 	}
 	out, err := run(ctx, dir, "--no-replace-objects", "cat-file", "-s", oid)
@@ -1078,4 +1099,163 @@ func shortOID(oid string) string {
 		return oid[:12]
 	}
 	return oid
+}
+
+// ErrOutputCapped is returned (wrapped) by capped helpers when git produced
+// more stdout than the helper's byte cap. The returned bytes are the prefix
+// captured before the cap was hit.
+var ErrOutputCapped = errors.New("gitcli: output exceeded cap")
+
+// cappedWriter stores up to cap bytes and sets capped=true on overflow so the
+// exec copy loop aborts (killing git via the write error) instead of streaming
+// an unbounded payload into memory. The capped flag is inspected after
+// cmd.Run() returns rather than relying on error propagation, because
+// cmd.Run()/Wait() prefers the process exit error (git SIGPIPE, exit non-zero)
+// over the goroutine copy error when both occur simultaneously.
+type cappedWriter struct {
+	buf    bytes.Buffer
+	cap    int64
+	capped bool
+}
+
+func (w *cappedWriter) Write(p []byte) (int, error) {
+	remain := w.cap - int64(w.buf.Len())
+	if remain <= 0 {
+		w.capped = true
+		return 0, ErrOutputCapped
+	}
+	if int64(len(p)) <= remain {
+		return w.buf.Write(p)
+	}
+	n, _ := w.buf.Write(p[:remain])
+	w.capped = true
+	return n, ErrOutputCapped
+}
+
+// runCapped is run() with a stdout byte cap. On overflow it returns the
+// captured prefix together with an error wrapping ErrOutputCapped; other
+// failures behave like run(). The cap is enforced by cappedWriter; when the
+// cap is hit the write error propagates to the io.Copy goroutine, causing git
+// to receive SIGPIPE and exit non-zero. cmd.Run()/Wait() prefers the process
+// exit error over the goroutine copy error, so we check cappedWriter.capped
+// directly instead of relying on errors.Is(err, ErrOutputCapped).
+func runCapped(ctx context.Context, dir string, capBytes int64, args ...string) ([]byte, error) {
+	bin, err := resolveBinary()
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, bin, args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = scrubGitRepoEnv(os.Environ())
+	out := &cappedWriter{cap: capBytes}
+	var stderr bytes.Buffer
+	cmd.Stdout = out
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+	if out.capped {
+		return out.buf.Bytes(), fmt.Errorf("git %s: %w", args[0], ErrOutputCapped)
+	}
+	if runErr != nil {
+		exit := -1
+		var ee *exec.ExitError
+		if errors.As(runErr, &ee) {
+			exit = ee.ExitCode()
+		}
+		return out.buf.Bytes(), &runError{
+			cmd: bin, args: args, dir: dir, exit: exit,
+			stderr: stderr.String(), cause: runErr,
+		}
+	}
+	return out.buf.Bytes(), nil
+}
+
+// maxDiffPatchBytes caps the raw unified patch read from git diff-tree.
+// Callers receive the prefix and ErrOutputCapped on overflow.
+const maxDiffPatchBytes = 20 << 20 // 20 MiB
+
+// maxLsTreeBytes caps the raw ls-tree output.
+const maxLsTreeBytes = 32 << 20 // 32 MiB
+
+// maxCommitObjBytes caps the raw commit object read from git cat-file commit.
+const maxCommitObjBytes = 4 << 20 // 4 MiB
+
+// LsTree returns the raw `git ls-tree --long -z <treeish>` output for a tree-ish.
+// treeish is typically "<commitOID>" for the root tree or "<commitOID>:<dir>" for
+// a subdirectory. Output is NUL-terminated records, each:
+//
+//	"<mode> SP <type> SP <oid> SP <size|-> TAB <name>" \0
+//
+// Output is capped at maxLsTreeBytes; overflow returns the prefix and
+// ErrOutputCapped.
+func LsTree(ctx context.Context, dir, treeish string) ([]byte, error) {
+	if !validRevPath(treeish) {
+		return nil, fmt.Errorf("gitcli: LsTree: invalid treeish %q", treeish)
+	}
+	return runCapped(ctx, dir, maxLsTreeBytes, "--no-replace-objects", "ls-tree", "--long", "-z", treeish)
+}
+
+// CatBlob returns raw blob bytes for a rev, matching `git cat-file blob <rev>`.
+// rev is typically "<commitOID>:<path>".
+func CatBlob(ctx context.Context, dir, rev string) ([]byte, error) {
+	if !validRevPath(rev) {
+		return nil, fmt.Errorf("gitcli: CatBlob: invalid rev %q", rev)
+	}
+	return run(ctx, dir, "--no-replace-objects", "cat-file", "blob", rev)
+}
+
+// LogRaw returns commit-log records for rev, paginated by skip/max. Each record
+// is unit-separated (0x1f) fields terminated by a record separator (0x1e):
+//
+//	<full-oid> 0x1f <author-name> 0x1f <author-email> 0x1f <author-unixtime> 0x1f <subject> 0x1e
+func LogRaw(ctx context.Context, dir, rev string, skip, max int) ([]byte, error) {
+	if !validRefOrOID(rev) {
+		return nil, fmt.Errorf("gitcli: LogRaw: invalid rev %q", rev)
+	}
+	if skip < 0 || max <= 0 {
+		return nil, fmt.Errorf("gitcli: LogRaw: bad skip/max %d/%d", skip, max)
+	}
+	const format = "--pretty=format:%H%x1f%an%x1f%ae%x1f%at%x1f%s%x1e"
+	return run(ctx, dir, "--no-replace-objects", "log", rev,
+		fmt.Sprintf("--skip=%d", skip), fmt.Sprintf("--max-count=%d", max),
+		"--no-color", format)
+}
+
+// CatFileCommit returns the raw commit object bytes, matching
+// `git cat-file commit <oid>` (headers: tree/parent/author/committer, blank line,
+// then the message). Output is capped at maxCommitObjBytes; overflow returns the
+// captured prefix and ErrOutputCapped (the header block comes first, so
+// callers may still parse author/parent metadata from the prefix).
+func CatFileCommit(ctx context.Context, dir, oid string) ([]byte, error) {
+	if !validRefOrOID(oid) {
+		return nil, fmt.Errorf("gitcli: CatFileCommit: invalid oid %q", oid)
+	}
+	return runCapped(ctx, dir, maxCommitObjBytes, "--no-replace-objects", "cat-file", "commit", oid)
+}
+
+// DiffTreePatch returns the unified patch for a commit. When parent is
+// non-empty the diff is computed against that parent (two-tree form — required
+// for merge commits, where bare `diff-tree -p <oid>` suppresses the patch);
+// when parent is "" the commit is treated as a root and diffed against the
+// empty tree via --root.
+//
+// Filenames in diff headers are emitted verbatim (no c-quoting) because
+// core.quotePath is explicitly disabled via -c core.quotePath=false.
+//
+// Output is capped at maxDiffPatchBytes; overflow returns the captured prefix
+// and ErrOutputCapped.
+func DiffTreePatch(ctx context.Context, dir, oid, parent string) ([]byte, error) {
+	if !validRefOrOID(oid) {
+		return nil, fmt.Errorf("gitcli: DiffTreePatch: invalid oid %q", oid)
+	}
+	if parent != "" {
+		if !validRefOrOID(parent) {
+			return nil, fmt.Errorf("gitcli: DiffTreePatch: invalid parent %q", parent)
+		}
+		return runCapped(ctx, dir, maxDiffPatchBytes, "-c", "core.quotePath=false", "--no-replace-objects", "diff-tree", "-p", "-M",
+			"--no-color", parent, oid)
+	}
+	return runCapped(ctx, dir, maxDiffPatchBytes, "-c", "core.quotePath=false", "--no-replace-objects", "diff-tree", "-p", "-M",
+		"--root", "--no-color", oid)
 }

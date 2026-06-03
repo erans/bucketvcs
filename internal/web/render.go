@@ -7,10 +7,13 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
+	"github.com/bucketvcs/bucketvcs/internal/browsemodel"
 )
 
 // base is embedded by every page's view-model so the layout can render identity.
@@ -38,6 +41,55 @@ type errorData struct {
 	Message string
 }
 
+type browseHeader struct {
+	base
+	Tenant string
+	Repo   string
+	Ref    string // current ref display name
+	OID    string // resolved OID; used by RefOrOID when Ref is empty
+	Refs   browsemodel.Refs
+}
+
+// RefOrOID returns the ref name for links, falling back to the resolved OID
+// when the page was reached via a raw OID (Ref empty).
+func (h browseHeader) RefOrOID() string {
+	if h.Ref != "" {
+		return h.Ref
+	}
+	return h.OID
+}
+
+type repoHomeData struct {
+	browseHeader
+	Entries    []browsemodel.TreeEntry
+	ReadmeHTML template.HTML // sanitized; "" when no README (real render in Task 16)
+}
+
+type treeData struct {
+	browseHeader
+	Path    string
+	Entries []browsemodel.TreeEntry
+}
+
+type blobData struct {
+	browseHeader
+	Path string
+	Blob browsemodel.Blob
+	Code template.HTML // highlighted HTML; empty for binary/too-large
+}
+
+type commitsData struct {
+	browseHeader
+	Commits []browsemodel.CommitMeta
+	Page    int
+	HasMore bool
+}
+
+type commitData struct {
+	browseHeader
+	Detail browsemodel.CommitDetail
+}
+
 // renderer parses the page templates. With dir=="" it parses the embedded
 // assets once; with a non-empty dir it re-parses from disk on every render so
 // designers can hot-iterate (templates/ under the given dir).
@@ -50,7 +102,7 @@ func newRenderer(dir string) (*renderer, error) {
 	r := &renderer{dir: dir}
 	if dir == "" {
 		r.cache = map[string]*template.Template{}
-		for _, page := range []string{"landing.html", "login.html", "error.html"} {
+		for _, page := range []string{"landing.html", "login.html", "error.html", "repo.html", "tree.html", "blob.html", "commits.html", "commit.html"} {
 			t, err := parsePage(assetsFS, "templates", page)
 			if err != nil {
 				return nil, err
@@ -71,7 +123,23 @@ func parsePage(fsys fs.FS, dir, page string) (*template.Template, error) {
 		base = dir + "/base.html"
 		pg = dir + "/" + page
 	}
-	return template.New("").ParseFS(fsys, base, pg)
+	funcs := template.FuncMap{
+		"plus1": func(n int) int { return n + 1 },
+		"minus1": func(n int) int {
+			if n <= 0 {
+				return 0
+			}
+			return n - 1
+		},
+		"urlpath": func(p string) string {
+			seg := strings.Split(p, "/")
+			for i := range seg {
+				seg[i] = url.PathEscape(seg[i])
+			}
+			return strings.Join(seg, "/")
+		},
+	}
+	return template.New("").Funcs(funcs).ParseFS(fsys, base, pg)
 }
 
 func (r *renderer) lookup(page string) (*template.Template, error) {

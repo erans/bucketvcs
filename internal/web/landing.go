@@ -4,8 +4,7 @@ import "net/http"
 
 func (s *server) handleLanding(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
-		// Unknown human path (repo browse is Phase 2). 404 for now.
-		s.renderError(w, r, http.StatusNotFound, "not found")
+		s.handleBrowse(w, r) // repo browse (Phase 2); 404s for non-repo paths
 		return
 	}
 	sess := SessionFromContext(r.Context())

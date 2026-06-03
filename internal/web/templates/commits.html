@@ -1,0 +1,20 @@
+{{define "title"}}commits · {{.Tenant}}/{{.Repo}}{{end}}
+{{define "content"}}
+<div class="browse">
+  <div class="repohdr"><span class="path">{{.Tenant}}/{{.Repo}}</span></div>
+  <table class="commits">
+    {{range .Commits}}
+    <tr>
+      <td class="oid"><a href="/{{$.Tenant}}/{{$.Repo}}/commit/{{.OID}}">{{.ShortOID}}</a></td>
+      <td class="summary">{{.Summary}}</td>
+      <td class="who">{{.AuthorName}}</td>
+    </tr>
+    {{end}}
+  </table>
+  <div class="pager">
+    {{if gt .Page 0}}<a href="/{{.Tenant}}/{{.Repo}}/commits/{{urlpath .RefOrOID}}?page={{minus1 .Page}}">prev</a>{{end}}
+    {{if .HasMore}}<a href="/{{.Tenant}}/{{.Repo}}/commits/{{urlpath .RefOrOID}}?page={{plus1 .Page}}">next</a>{{end}}
+  </div>
+</div>
+{{end}}
+{{template "base" .}}
