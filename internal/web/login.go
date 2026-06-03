@@ -13,10 +13,15 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		tok := issueCSRF(w, secure)
-		_ = s.render.render(w, "login.html", loginData{
+		ld := loginData{
 			base: base{Session: SessionFromContext(r.Context()), CSRF: tok},
 			Next: safeNext(r.URL.Query().Get("next")),
-		})
+		}
+		if s.oidc != nil {
+			ld.OIDC = true
+			ld.OIDCLabel = s.oidc.Label
+		}
+		_ = s.render.render(w, "login.html", ld)
 		EmitRequestMetric(r.Context(), s.logger, "login", 200)
 
 	case http.MethodPost:
@@ -51,11 +56,16 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			EmitLoginMetric(r.Context(), s.logger, "invalid", "password")
 			tok := issueCSRF(w, secure)
 			w.WriteHeader(http.StatusUnauthorized)
-			_ = s.render.render(w, "login.html", loginData{
+			ld401 := loginData{
 				base:  base{CSRF: tok},
 				Error: "invalid username or password",
 				Next:  safeNext(r.PostFormValue("next")),
-			})
+			}
+			if s.oidc != nil {
+				ld401.OIDC = true
+				ld401.OIDCLabel = s.oidc.Label
+			}
+			_ = s.render.render(w, "login.html", ld401)
 			return
 		}
 		s.limiter.MarkSuccess(ip, username) // nil-safe
