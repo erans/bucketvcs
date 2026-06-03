@@ -181,3 +181,104 @@ func TestOIDCCallback_IdPError(t *testing.T) {
 		t.Fatalf("status %d, want >=400 on IdP error", rec.Code)
 	}
 }
+
+// Bad-HMAC / undecodable temp cookie → 400, distinct from missing-cookie.
+func TestOIDCCallback_TamperedCookie(t *testing.T) {
+	store := newFakeStore()
+	h, done := callbackEnv(t, store, goodClaims(), nil)
+	defer done()
+	// A cookie value that fails HMAC verification.
+	req := httptest.NewRequest("GET", "/login/oidc/callback?code=c&state=state-1", nil)
+	req.AddCookie(&http.Cookie{Name: oidcCookieName, Value: "garbage.not-a-valid-hmac"})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("tampered cookie: status %d, want 400", rec.Code)
+	}
+	if findCookie(rec.Result().Cookies(), sessionCookieName) != nil {
+		t.Fatal("no session on tampered cookie")
+	}
+}
+
+// Token endpoint returns no id_token → 401.
+func TestOIDCCallback_MissingIDToken(t *testing.T) {
+	store := newFakeStore()
+	store.findIdentity = func(iss, sub string) (*auth.Actor, error) { return nil, auth.ErrNoSuchUser }
+	store.findByEmail = func(email string) (*auth.Actor, error) { return &auth.Actor{UserID: "u1", Name: "alice"}, nil }
+	// Build a handler whose token endpoint omits id_token.
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "at", "token_type": "Bearer"}) // no id_token
+	}))
+	defer tokenSrv.Close()
+	h := NewHandler(Deps{
+		Store: store,
+		OIDC: &OIDCProvider{
+			Issuer: "https://idp.example.com", ClientID: "cid",
+			AuthURL: "https://idp.example.com/authorize", TokenURL: tokenSrv.URL,
+			RedirectURL: "https://app/login/oidc/callback", Scopes: []string{"openid", "email"},
+			HMACKey:  hmacKey,
+			Verifier: fakeVerifier{claims: goodClaims()},
+		},
+	})
+	rec := doCallback(t, h, hmacKey, "state-1", "nonce-1", "code-1", "state-1")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("missing id_token: status %d, want 401; body=%s", rec.Code, rec.Body.String())
+	}
+	if findCookie(rec.Result().Cookies(), sessionCookieName) != nil {
+		t.Fatal("no session when id_token missing")
+	}
+}
+
+// LinkIdentity races with a concurrent link (ErrConflict) → handler re-resolves
+// via FindIdentity and still issues a session (303), no duplicate link.
+func TestOIDCCallback_LinkConflictReResolves(t *testing.T) {
+	store := newFakeStore()
+	// First FindIdentity (pre-link) misses; after the conflicting link, the
+	// re-resolve must succeed. Model with a call counter.
+	calls := 0
+	store.findIdentity = func(iss, sub string) (*auth.Actor, error) {
+		calls++
+		if calls == 1 {
+			return nil, auth.ErrNoSuchUser // initial miss → TOFU path
+		}
+		return &auth.Actor{UserID: "u1", Name: "alice"}, nil // re-resolve after conflict
+	}
+	store.findByEmail = func(email string) (*auth.Actor, error) {
+		return &auth.Actor{UserID: "u1", Name: "alice"}, nil
+	}
+	store.linkIdentity = func(uid, iss, sub, email string) error { return auth.ErrConflict }
+
+	h, done := callbackEnv(t, store, goodClaims(), nil)
+	defer done()
+	rec := doCallback(t, h, hmacKey, "state-1", "nonce-1", "code-1", "state-1")
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("conflict-race: status %d, want 303; body=%s", rec.Code, rec.Body.String())
+	}
+	if findCookie(rec.Result().Cookies(), sessionCookieName) == nil {
+		t.Fatal("conflict-race should still issue a session after re-resolve")
+	}
+	if calls != 2 {
+		t.Fatalf("conflict-race: FindIdentity called %d times, want 2 (initial miss + re-resolve)", calls)
+	}
+}
+
+// On success, the temp cookie is cleared (MaxAge<0) and the session cookie has the hardened attrs.
+func TestOIDCCallback_CookieHygiene(t *testing.T) {
+	store := newFakeStore()
+	store.findIdentity = func(iss, sub string) (*auth.Actor, error) { return &auth.Actor{UserID: "u1", Name: "alice"}, nil }
+	h, done := callbackEnv(t, store, goodClaims(), nil)
+	defer done()
+	rec := doCallback(t, h, hmacKey, "state-1", "nonce-1", "code-1", "state-1")
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status %d, want 303", rec.Code)
+	}
+	cleared := findCookie(rec.Result().Cookies(), oidcCookieName)
+	if cleared == nil || cleared.MaxAge >= 0 {
+		t.Fatalf("temp cookie not cleared: %+v", cleared)
+	}
+	sess := findCookie(rec.Result().Cookies(), sessionCookieName)
+	if sess == nil || !sess.HttpOnly || sess.SameSite != http.SameSiteLaxMode || sess.Path != "/" {
+		t.Fatalf("session cookie attrs wrong: %+v", sess)
+	}
+}
