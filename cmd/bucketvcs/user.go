@@ -58,7 +58,7 @@ func reorderFlagsFirst(args []string, boolFlags map[string]bool) []string {
 
 func runUser(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: bucketvcs user <add|list|disable|enable|delete|key|set-password|set-email> [flags]")
+		fmt.Fprintln(stderr, "usage: bucketvcs user <add|list|disable|enable|delete|key|set-password|set-email|identity> [flags]")
 		return 2
 	}
 	sub, rest := args[0], args[1:]
@@ -79,6 +79,8 @@ func runUser(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return userSetPassword(ctx, rest, stdout, stderr, os.Stdin)
 	case "set-email":
 		return userSetEmail(ctx, rest, stdout, stderr)
+	case "identity":
+		return runUserIdentity(ctx, rest, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "user: unknown subcommand %q\n", sub)
 		return 2
