@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -59,6 +60,7 @@ type fakeContent struct {
 	refs browsemodel.Refs
 	res  browsemodel.Resolved
 	warm bool
+	tree []browsemodel.TreeEntry
 }
 
 func (f *fakeContent) ListRefs(ctx context.Context, t, r string) (browsemodel.Refs, error) {
@@ -74,7 +76,10 @@ func (f *fakeContent) Resolve(ctx context.Context, t, r, rest string) (browsemod
 	return f.res, nil
 }
 func (f *fakeContent) ReadTree(ctx context.Context, t, r, oid, p string) ([]browsemodel.TreeEntry, error) {
-	return nil, nil
+	if f.warm {
+		return nil, browsemodel.ErrWarming
+	}
+	return f.tree, nil
 }
 func (f *fakeContent) ReadBlob(ctx context.Context, t, r, oid, p string) (browsemodel.Blob, error) {
 	return browsemodel.Blob{}, browsemodel.ErrNotFound
@@ -144,5 +149,41 @@ func TestBrowse_DisabledWhenContentNil(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("content nil should 404, got %d", rec.Code)
+	}
+}
+
+func TestRepoHome_RendersTree(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abc"}}},
+		res:  browsemodel.Resolved{Ref: "main", OID: "abc"},
+		tree: []browsemodel.TreeEntry{{Name: "a.txt", Path: "a.txt", Type: "blob", Size: 6, OID: "x"}},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("code %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "a.txt") {
+		t.Fatalf("home missing tree entry: %s", rec.Body.String())
+	}
+}
+
+func TestTree_RendersPathEntries(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abc"}}},
+		res:  browsemodel.Resolved{Ref: "main", OID: "abc", Path: "sub"},
+		tree: []browsemodel.TreeEntry{{Name: "b.txt", Path: "sub/b.txt", Type: "blob", OID: "y"}},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/tree/main/sub", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("code %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "b.txt") {
+		t.Fatalf("tree missing entry: %s", rec.Body.String())
 	}
 }

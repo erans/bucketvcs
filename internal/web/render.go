@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
+	"github.com/bucketvcs/bucketvcs/internal/browsemodel"
 )
 
 // base is embedded by every page's view-model so the layout can render identity.
@@ -38,6 +39,26 @@ type errorData struct {
 	Message string
 }
 
+type browseHeader struct {
+	base
+	Tenant string
+	Repo   string
+	Ref    string // current ref display name
+	Refs   browsemodel.Refs
+}
+
+type repoHomeData struct {
+	browseHeader
+	Entries    []browsemodel.TreeEntry
+	ReadmeHTML template.HTML // sanitized; "" when no README (real render in Task 16)
+}
+
+type treeData struct {
+	browseHeader
+	Path    string
+	Entries []browsemodel.TreeEntry
+}
+
 // renderer parses the page templates. With dir=="" it parses the embedded
 // assets once; with a non-empty dir it re-parses from disk on every render so
 // designers can hot-iterate (templates/ under the given dir).
@@ -50,7 +71,7 @@ func newRenderer(dir string) (*renderer, error) {
 	r := &renderer{dir: dir}
 	if dir == "" {
 		r.cache = map[string]*template.Template{}
-		for _, page := range []string{"landing.html", "login.html", "error.html"} {
+		for _, page := range []string{"landing.html", "login.html", "error.html", "repo.html", "tree.html"} {
 			t, err := parsePage(assetsFS, "templates", page)
 			if err != nil {
 				return nil, err

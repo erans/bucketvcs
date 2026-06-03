@@ -1,7 +1,10 @@
 package web
 
 import (
+	"bytes"
+	"context"
 	"errors"
+	"html/template"
 	"net/http"
 	"strconv"
 	"strings"
@@ -109,20 +112,89 @@ func queryPage(r *http.Request) int {
 // --- placeholder page handlers (replaced in Tasks 13–16) ---
 
 func (s *server) handleRepoHome(w http.ResponseWriter, r *http.Request, br browseRoute) {
-	if _, err := s.content.ListRefs(r.Context(), br.tenant, br.repo); err != nil {
+	refs, err := s.content.ListRefs(r.Context(), br.tenant, br.repo)
+	if err != nil {
 		s.browseError(w, r, err)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
+	if refs.Default == "" {
+		s.renderBrowse(w, r, "repo.html", repoHomeData{browseHeader: s.header(w, r, br, refs, "")})
+		return
+	}
+	res, err := s.content.Resolve(r.Context(), br.tenant, br.repo, refs.Default)
+	if err != nil {
+		s.browseError(w, r, err)
+		return
+	}
+	entries, err := s.content.ReadTree(r.Context(), br.tenant, br.repo, res.OID, "")
+	if err != nil {
+		s.browseError(w, r, err)
+		return
+	}
+	readme := s.renderReadme(r.Context(), br, res.OID, entries)
+	s.renderBrowse(w, r, "repo.html", repoHomeData{
+		browseHeader: s.header(w, r, br, refs, refs.Default),
+		Entries:      entries,
+		ReadmeHTML:   readme,
+	})
 }
+
 func (s *server) handleTree(w http.ResponseWriter, r *http.Request, br browseRoute) {
-	if _, err := s.content.Resolve(r.Context(), br.tenant, br.repo, br.rest); err != nil {
+	refs, err := s.content.ListRefs(r.Context(), br.tenant, br.repo)
+	if err != nil {
 		s.browseError(w, r, err)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
+	res, err := s.content.Resolve(r.Context(), br.tenant, br.repo, br.rest)
+	if err != nil {
+		s.browseError(w, r, err)
+		return
+	}
+	entries, err := s.content.ReadTree(r.Context(), br.tenant, br.repo, res.OID, res.Path)
+	if err != nil {
+		s.browseError(w, r, err)
+		return
+	}
+	s.renderBrowse(w, r, "tree.html", treeData{
+		browseHeader: s.header(w, r, br, refs, res.Ref),
+		Path:         res.Path,
+		Entries:      entries,
+	})
 }
+
 func (s *server) handleBlob(w http.ResponseWriter, r *http.Request, br browseRoute)    { w.WriteHeader(http.StatusOK) }
 func (s *server) handleRaw(w http.ResponseWriter, r *http.Request, br browseRoute)     { w.WriteHeader(http.StatusOK) }
 func (s *server) handleCommits(w http.ResponseWriter, r *http.Request, br browseRoute) { w.WriteHeader(http.StatusOK) }
 func (s *server) handleCommit(w http.ResponseWriter, r *http.Request, br browseRoute)  { w.WriteHeader(http.StatusOK) }
+
+// header builds the common browse header view-model. It issues a CSRF token for
+// the layout's logout form when the request is authenticated.
+func (s *server) header(w http.ResponseWriter, r *http.Request, br browseRoute, refs browsemodel.Refs, ref string) browseHeader {
+	sess := SessionFromContext(r.Context())
+	tok := ""
+	if sess != nil {
+		tok = issueCSRF(w, requestIsTLS(r, s.trustProxy))
+	}
+	return browseHeader{
+		base:   base{Session: sess, CSRF: tok},
+		Tenant: br.tenant, Repo: br.repo, Ref: ref, Refs: refs,
+	}
+}
+
+// renderBrowse renders a browse page to a buffer (so a render error becomes a
+// clean 500 rather than a truncated 200) and records the request metric.
+func (s *server) renderBrowse(w http.ResponseWriter, r *http.Request, page string, data any) {
+	var buf bytes.Buffer
+	if err := s.render.render(&buf, page, data); err != nil {
+		s.renderError(w, r, http.StatusInternalServerError, "render error")
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = buf.WriteTo(w)
+	EmitRequestMetric(r.Context(), s.logger, strings.TrimSuffix(page, ".html"), http.StatusOK)
+}
+
+// renderReadme is implemented in Task 16; this stub returns no README.
+func (s *server) renderReadme(ctx context.Context, br browseRoute, oid string, entries []browsemodel.TreeEntry) template.HTML {
+	return ""
+}
