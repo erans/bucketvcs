@@ -33,3 +33,4 @@ auth.db-wal
 # Local tooling artifacts
 .wrangler/
 bucketvcs-s3-policy.json
+.superpowers/
