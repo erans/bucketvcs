@@ -65,7 +65,8 @@ git clone -q --bare "$WORK" "$SRC_BARE"
 "$BUCKETVCS" import --store "localfs:$STORE_DIR" --default-branch refs/heads/main "$SRC_BARE" acme demo
 "$BUCKETVCS" repo register acme/demo --auth-db "$AUTH_DB" --no-init
 "$BUCKETVCS" repo public acme/demo on --auth-db "$AUTH_DB"
-# A second, private, unregistered-to-anon repo for the 404 anti-enumeration check.
+# /acme/secret is simply an absent/unregistered repo; anonymous gets a uniform
+# 404 regardless of whether the repo exists (anti-enumeration).
 
 PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
 BASE_URL="http://127.0.0.1:$PORT"

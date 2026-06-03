@@ -303,3 +303,45 @@ func TestCommit_RendersDiff(t *testing.T) {
 		t.Fatalf("commit view missing diff: %s", body)
 	}
 }
+
+// TestBrowse_OIDLinksUseOID checks that navigation links use the resolved OID
+// (not an empty string) when a page is reached via a raw 40-hex OID URL.
+func TestBrowse_OIDLinksUseOID(t *testing.T) {
+	const testOID = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	content := &fakeContent{
+		res:  browsemodel.Resolved{Ref: "", OID: testOID, Path: ""},
+		tree: []browsemodel.TreeEntry{{Name: "a.txt", Path: "a.txt", Type: "blob", Size: 6, OID: "x"}},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/tree/"+testOID+"/", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	// The entry is a blob so the link uses /blob/ — the key invariant is that the
+	// OID appears in the href (not an empty segment producing "//").
+	if !strings.Contains(body, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef/a.txt") {
+		t.Errorf("expected OID in navigation link, got: %s", body)
+	}
+	if strings.Contains(body, "blob//") || strings.Contains(body, "tree//") {
+		t.Errorf("double-slash in navigation link: %s", body)
+	}
+}
+
+// TestRaw_TooLargeReturns413 checks that requesting a raw download for an
+// oversized blob returns 413 instead of a 0-byte 200.
+func TestRaw_TooLargeReturns413(t *testing.T) {
+	content := &fakeContent{
+		res:  browsemodel.Resolved{Ref: "main", OID: "abc", Path: "big.bin"},
+		blob: browsemodel.Blob{Path: "big.bin", Size: 11 << 20, TooLarge: true},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/raw/main/big.bin", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("got %d, want 413", rec.Code)
+	}
+}

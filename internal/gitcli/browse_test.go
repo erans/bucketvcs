@@ -120,3 +120,65 @@ func TestBrowseHelpers_RejectFlagLikeArgs(t *testing.T) {
 		t.Fatal("expected rejection of flag-like treeish")
 	}
 }
+
+func TestValidRevPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	bare, _ := makeBrowseBare(t)
+
+	// Space in path: should be accepted by validRevPath and resolve correctly.
+	// Write a file with a space in the name directly into the work tree via
+	// RunForTest, then read it back through the bare clone.
+	work := t.TempDir()
+	mustRun := func(dir string, args ...string) {
+		c := exec.Command("git", args...)
+		c.Dir = dir
+		c.Env = append(scrubGitRepoEnv(os.Environ()), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	mustRun("", "clone", "-q", bare, work)
+	if err := os.WriteFile(filepath.Join(work, "has space.txt"), []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(work, "add", ".")
+	mustRun(work, "commit", "-q", "-m", "add spaced file")
+
+	newBare := filepath.Join(t.TempDir(), "new.git")
+	mustRun("", "clone", "-q", "--bare", work, newBare)
+	headOID := strings.TrimSpace(func() string {
+		out, err := exec.Command("git", "-C", newBare, "rev-parse", "main").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(out)
+	}())
+
+	rev := headOID + ":has space.txt"
+
+	// LsTree on a treeish that contains a file with a space in the name.
+	out, err := LsTree(context.Background(), newBare, headOID)
+	if err != nil {
+		t.Fatalf("LsTree: %v", err)
+	}
+	if !strings.Contains(string(out), "has space.txt") {
+		t.Errorf("LsTree output missing spaced filename: %q", out)
+	}
+
+	// CatBlob with the rev "<oid>:has space.txt" (space in path component).
+	b, err := CatBlob(context.Background(), newBare, rev)
+	if err != nil {
+		t.Fatalf("CatBlob spaced name: %v", err)
+	}
+	if string(b) != "ok\n" {
+		t.Fatalf("CatBlob got %q", b)
+	}
+
+	// Confirm bare "-" prefix is still rejected.
+	if _, err := CatBlob(context.Background(), newBare, "-bad"); err == nil {
+		t.Fatal("expected rejection of flag-like rev")
+	}
+}

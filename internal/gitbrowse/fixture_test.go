@@ -55,6 +55,7 @@ func fixture(t *testing.T) (svc *Service, tenant, repo string, oids map[string]s
 	write("a.txt", "hello\n")
 	write("README.md", "# Demo\n\nHello *world* & <b>safe</b>.\n")
 	write("sub/b.txt", "world\n")
+	write("a file.txt", "spaced\n")
 	if err := os.WriteFile(filepath.Join(work, "bin.dat"), []byte{0x00, 0x01, 0x02, 0x00}, 0o644); err != nil {
 		t.Fatal(err)
 	}

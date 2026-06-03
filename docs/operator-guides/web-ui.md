@@ -371,8 +371,9 @@ Commit diffs are capped to prevent runaway page rendering:
 
 - **300 files per commit** — additional files are silently omitted and a
   truncation notice is displayed.
-- **3 000 lines per file** — files exceeding this limit show a "too large"
-  notice in place of the diff hunks.
+- **3 000 changed (added/removed) lines per file** — files exceeding this limit
+  show a "too large" notice in place of the diff hunks. Context lines (unchanged
+  lines shown for surrounding context) are not counted toward this cap.
 
 ### 6.7 Hybrid reader and cold-mirror warming
 

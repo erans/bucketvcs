@@ -44,7 +44,17 @@ type browseHeader struct {
 	Tenant string
 	Repo   string
 	Ref    string // current ref display name
+	OID    string // resolved OID; used by RefOrOID when Ref is empty
 	Refs   browsemodel.Refs
+}
+
+// RefOrOID returns the ref name for links, falling back to the resolved OID
+// when the page was reached via a raw OID (Ref empty).
+func (h browseHeader) RefOrOID() string {
+	if h.Ref != "" {
+		return h.Ref
+	}
+	return h.OID
 }
 
 type repoHomeData struct {

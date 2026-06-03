@@ -125,7 +125,7 @@ func (s *server) handleRepoHome(w http.ResponseWriter, r *http.Request, br brows
 		return
 	}
 	if refs.Default == "" {
-		s.renderBrowse(w, r, "repo.html", repoHomeData{browseHeader: s.header(w, r, br, refs, "")})
+		s.renderBrowse(w, r, "repo.html", repoHomeData{browseHeader: s.header(w, r, br, refs, "", "")})
 		return
 	}
 	res, err := s.content.Resolve(r.Context(), br.tenant, br.repo, refs.Default)
@@ -140,7 +140,7 @@ func (s *server) handleRepoHome(w http.ResponseWriter, r *http.Request, br brows
 	}
 	readme := s.renderReadme(r.Context(), br, res.OID, entries)
 	s.renderBrowse(w, r, "repo.html", repoHomeData{
-		browseHeader: s.header(w, r, br, refs, refs.Default),
+		browseHeader: s.header(w, r, br, refs, refs.Default, res.OID),
 		Entries:      entries,
 		ReadmeHTML:   readme,
 	})
@@ -163,7 +163,7 @@ func (s *server) handleTree(w http.ResponseWriter, r *http.Request, br browseRou
 		return
 	}
 	s.renderBrowse(w, r, "tree.html", treeData{
-		browseHeader: s.header(w, r, br, refs, res.Ref),
+		browseHeader: s.header(w, r, br, refs, res.Ref, res.OID),
 		Path:         res.Path,
 		Entries:      entries,
 	})
@@ -190,7 +190,7 @@ func (s *server) handleBlob(w http.ResponseWriter, r *http.Request, br browseRou
 		code = highlight(res.Path, b.Bytes)
 	}
 	s.renderBrowse(w, r, "blob.html", blobData{
-		browseHeader: s.header(w, r, br, refs, res.Ref),
+		browseHeader: s.header(w, r, br, refs, res.Ref, res.OID),
 		Path:         res.Path,
 		Blob:         b,
 		Code:         code,
@@ -212,7 +212,13 @@ func (s *server) handleRaw(w http.ResponseWriter, r *http.Request, br browseRout
 	// SVG blob) can never execute inline in the UI origin.
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
-	if b.Binary || b.TooLarge {
+	if b.TooLarge {
+		// The 10 MiB cap is intentional; do not stream large blobs. Return a
+		// 413 so the client gets a clear signal instead of a 0-byte download.
+		s.renderError(w, r, http.StatusRequestEntityTooLarge, "file too large to serve")
+		return
+	}
+	if b.Binary {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		// RFC 5987 filename* avoids quoted-string breakage for names containing
 		// quotes; percent-encoding also neutralizes any odd bytes in the name.
@@ -243,7 +249,7 @@ func (s *server) handleCommits(w http.ResponseWriter, r *http.Request, br browse
 		return
 	}
 	s.renderBrowse(w, r, "commits.html", commitsData{
-		browseHeader: s.header(w, r, br, refs, res.Ref),
+		browseHeader: s.header(w, r, br, refs, res.Ref, res.OID),
 		Commits:      commits,
 		Page:         page,
 		HasMore:      more,
@@ -258,14 +264,17 @@ func (s *server) handleCommit(w http.ResponseWriter, r *http.Request, br browseR
 		return
 	}
 	s.renderBrowse(w, r, "commit.html", commitData{
-		browseHeader: s.header(w, r, br, browsemodel.Refs{}, ""),
+		browseHeader: s.header(w, r, br, browsemodel.Refs{}, "", detail.Meta.OID),
 		Detail:       detail,
 	})
 }
 
 // header builds the common browse header view-model. It issues a CSRF token for
 // the layout's logout form when the request is authenticated.
-func (s *server) header(w http.ResponseWriter, r *http.Request, br browseRoute, refs browsemodel.Refs, ref string) browseHeader {
+// oid is the resolved object ID; it is stored as a fallback for RefOrOID() so
+// that navigation links work when the page was reached via a raw 40-hex OID
+// (in which case ref is empty and oid provides the non-empty value).
+func (s *server) header(w http.ResponseWriter, r *http.Request, br browseRoute, refs browsemodel.Refs, ref, oid string) browseHeader {
 	sess := SessionFromContext(r.Context())
 	tok := ""
 	if sess != nil {
@@ -273,7 +282,7 @@ func (s *server) header(w http.ResponseWriter, r *http.Request, br browseRoute, 
 	}
 	return browseHeader{
 		base:   base{Session: sess, CSRF: tok},
-		Tenant: br.tenant, Repo: br.repo, Ref: ref, Refs: refs,
+		Tenant: br.tenant, Repo: br.repo, Ref: ref, OID: oid, Refs: refs,
 	}
 }
 

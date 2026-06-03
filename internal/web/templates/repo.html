@@ -10,8 +10,8 @@
   <table class="tree">
     {{range .Entries}}
     <tr>
-      {{if eq .Type "tree"}}<td class="kind">dir</td><td><a href="/{{$.Tenant}}/{{$.Repo}}/tree/{{$.Ref}}/{{.Path}}">{{.Name}}/</a></td><td class="size"></td>
-      {{else if eq .Type "blob"}}<td class="kind">file</td><td><a href="/{{$.Tenant}}/{{$.Repo}}/blob/{{$.Ref}}/{{.Path}}">{{.Name}}</a></td><td class="size">{{.Size}}</td>
+      {{if eq .Type "tree"}}<td class="kind">dir</td><td><a href="/{{$.Tenant}}/{{$.Repo}}/tree/{{$.RefOrOID}}/{{.Path}}">{{.Name}}/</a></td><td class="size"></td>
+      {{else if eq .Type "blob"}}<td class="kind">file</td><td><a href="/{{$.Tenant}}/{{$.Repo}}/blob/{{$.RefOrOID}}/{{.Path}}">{{.Name}}</a></td><td class="size">{{.Size}}</td>
       {{else}}<td class="kind">mod</td><td>{{.Name}}</td><td class="size"></td>{{end}}
     </tr>
     {{end}}

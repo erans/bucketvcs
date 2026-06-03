@@ -2,11 +2,11 @@
 {{define "content"}}
 <div class="browse">
   <div class="repohdr"><span class="path">{{.Tenant}}/{{.Repo}}</span></div>
-  <div class="path">{{.Path}} &nbsp;<a href="/{{.Tenant}}/{{.Repo}}/raw/{{.Ref}}/{{.Path}}">[raw]</a></div>
+  <div class="path">{{.Path}} &nbsp;<a href="/{{.Tenant}}/{{.Repo}}/raw/{{.RefOrOID}}/{{.Path}}">[raw]</a></div>
   {{if .Blob.TooLarge}}
-    <p class="empty">file too large to display ({{.Blob.Size}} bytes) — <a href="/{{.Tenant}}/{{.Repo}}/raw/{{.Ref}}/{{.Path}}">download</a></p>
+    <p class="empty">file too large to display ({{.Blob.Size}} bytes)</p>
   {{else if .Blob.Binary}}
-    <p class="empty">binary file ({{.Blob.Size}} bytes) — <a href="/{{.Tenant}}/{{.Repo}}/raw/{{.Ref}}/{{.Path}}">download</a></p>
+    <p class="empty">binary file ({{.Blob.Size}} bytes) — <a href="/{{.Tenant}}/{{.Repo}}/raw/{{.RefOrOID}}/{{.Path}}">download</a></p>
   {{else}}
     <div class="code">{{.Code}}</div>
   {{end}}

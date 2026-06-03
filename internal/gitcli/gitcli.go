@@ -194,6 +194,24 @@ func validHexOID(s string) bool {
 	return true
 }
 
+// validRevPath permits the "<oid>:<path>" rev form used by code browse, where
+// the path component may contain spaces. It rejects a leading '-' (flag
+// injection) and any NUL/CR/LF, but allows spaces because the value is always
+// passed as a single argv element. It is intentionally more permissive than
+// validRefOrOID, which guards bare ref/OID args.
+func validRevPath(s string) bool {
+	if s == "" || s[0] == '-' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case 0x00, '\n', '\r':
+			return false
+		}
+	}
+	return true
+}
+
 // validPackBasename returns true iff s matches exactly `pack-<40hex>.pack`.
 // This is the canonical form pack files take inside a bare repo's
 // `objects/pack/` directory (set by `git index-pack` and by our
@@ -552,7 +570,7 @@ func CatFilePretty(ctx context.Context, dir, oid string) ([]byte, error) {
 // CatFileType returns the type ("commit", "tree", "blob", "tag") for an
 // object, matching `git cat-file -t <oid>`.
 func CatFileType(ctx context.Context, dir, oid string) (string, error) {
-	if !validRefOrOID(oid) {
+	if !validRevPath(oid) {
 		return "", fmt.Errorf("gitcli: CatFileType: invalid oid %q", oid)
 	}
 	out, err := run(ctx, dir, "--no-replace-objects", "cat-file", "-t", oid)
@@ -565,7 +583,7 @@ func CatFileType(ctx context.Context, dir, oid string) (string, error) {
 // CatFileSize returns the size of an object's content, matching
 // `git cat-file -s <oid>`.
 func CatFileSize(ctx context.Context, dir, oid string) (int64, error) {
-	if !validRefOrOID(oid) {
+	if !validRevPath(oid) {
 		return 0, fmt.Errorf("gitcli: CatFileSize: invalid oid %q", oid)
 	}
 	out, err := run(ctx, dir, "--no-replace-objects", "cat-file", "-s", oid)
@@ -1086,7 +1104,7 @@ func shortOID(oid string) string {
 //
 //	"<mode> SP <type> SP <oid> SP <size|-> TAB <name>" \0
 func LsTree(ctx context.Context, dir, treeish string) ([]byte, error) {
-	if !validRefOrOID(treeish) {
+	if !validRevPath(treeish) {
 		return nil, fmt.Errorf("gitcli: LsTree: invalid treeish %q", treeish)
 	}
 	return run(ctx, dir, "--no-replace-objects", "ls-tree", "--long", "-z", treeish)
@@ -1095,7 +1113,7 @@ func LsTree(ctx context.Context, dir, treeish string) ([]byte, error) {
 // CatBlob returns raw blob bytes for a rev, matching `git cat-file blob <rev>`.
 // rev is typically "<commitOID>:<path>".
 func CatBlob(ctx context.Context, dir, rev string) ([]byte, error) {
-	if !validRefOrOID(rev) {
+	if !validRevPath(rev) {
 		return nil, fmt.Errorf("gitcli: CatBlob: invalid rev %q", rev)
 	}
 	return run(ctx, dir, "--no-replace-objects", "cat-file", "blob", rev)

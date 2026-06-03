@@ -38,3 +38,14 @@ func TestReadBlob_Missing(t *testing.T) {
 		t.Fatal("expected error for missing blob")
 	}
 }
+
+func TestReadBlob_SpaceInName(t *testing.T) {
+	svc, tenant, repo, oids := fixture(t)
+	b, err := svc.ReadBlob(context.Background(), tenant, repo, oids["c2"], "a file.txt")
+	if err != nil {
+		t.Fatalf("ReadBlob space-in-name: %v", err)
+	}
+	if b.Binary || b.TooLarge || string(b.Bytes) != "spaced\n" {
+		t.Fatalf("unexpected blob for spaced filename: %+v", b)
+	}
+}
