@@ -25,7 +25,7 @@ func Discover(ctx context.Context, hc *http.Client, issuer string) (Metadata, er
 		hc = http.DefaultClient
 	}
 	if err := requireSecureURL(issuer); err != nil {
-		return Metadata{}, err
+		return Metadata{}, fmt.Errorf("%w: %v", ErrIssuerUnavailable, err)
 	}
 	url := strings.TrimRight(issuer, "/") + "/.well-known/openid-configuration"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -54,7 +54,7 @@ func Discover(ctx context.Context, hc *http.Client, issuer string) (Metadata, er
 		JWKSURI               string `json:"jwks_uri"`
 	}
 	if err := json.Unmarshal(body, &doc); err != nil {
-		return Metadata{}, fmt.Errorf("%w: discovery decode", ErrIssuerUnavailable)
+		return Metadata{}, fmt.Errorf("%w: discovery decode: %v", ErrIssuerUnavailable, err)
 	}
 	if doc.Issuer != issuer {
 		return Metadata{}, fmt.Errorf("%w: discovery issuer mismatch (%q != %q)", ErrInvalidToken, doc.Issuer, issuer)

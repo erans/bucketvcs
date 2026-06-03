@@ -3,6 +3,7 @@ package oidc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -42,7 +43,7 @@ func TestDiscover_IssuerMismatch(t *testing.T) {
 		})
 	}))
 	defer srv.Close()
-	if _, err := Discover(context.Background(), srv.Client(), srv.URL); err == nil {
-		t.Fatal("want error on issuer mismatch, got nil")
+	if _, err := Discover(context.Background(), srv.Client(), srv.URL); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("want ErrInvalidToken on issuer mismatch, got %v", err)
 	}
 }
