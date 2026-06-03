@@ -2,6 +2,7 @@ package gitcli
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -180,5 +181,45 @@ func TestValidRevPath(t *testing.T) {
 	// Confirm bare "-" prefix is still rejected.
 	if _, err := CatBlob(context.Background(), newBare, "-bad"); err == nil {
 		t.Fatal("expected rejection of flag-like rev")
+	}
+}
+
+// TestRunCapped_Overflow confirms that when git output exceeds the byte cap,
+// runCapped returns (prefix, err) where errors.Is(err, ErrOutputCapped) and
+// len(prefix) <= cap.
+func TestRunCapped_Overflow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	bare, _ := makeBrowseBare(t)
+	ctx := context.Background()
+	const cap = 4
+	out, err := runCapped(ctx, bare, cap, "log", "main")
+	if err == nil {
+		t.Fatalf("runCapped: expected error on cap=4, got nil (output: %q)", out)
+	}
+	if !errors.Is(err, ErrOutputCapped) {
+		t.Fatalf("runCapped: error %v is not ErrOutputCapped", err)
+	}
+	if len(out) > cap {
+		t.Fatalf("runCapped: output prefix len=%d exceeds cap=%d", len(out), cap)
+	}
+}
+
+// TestRunCapped_UnderCap confirms that when git output fits within the cap,
+// runCapped succeeds and returns the full output.
+func TestRunCapped_UnderCap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	bare, _ := makeBrowseBare(t)
+	ctx := context.Background()
+	out, err := runCapped(ctx, bare, 1<<20, "rev-parse", "main")
+	if err != nil {
+		t.Fatalf("runCapped: unexpected error: %v", err)
+	}
+	oid := strings.TrimSpace(string(out))
+	if len(oid) != 40 {
+		t.Fatalf("runCapped: expected 40-char OID, got %q", oid)
 	}
 }

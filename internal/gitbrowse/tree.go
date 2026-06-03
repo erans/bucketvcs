@@ -1,7 +1,9 @@
 package gitbrowse
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -26,6 +28,13 @@ func (s *Service) ReadTree(ctx context.Context, tenant, repoID, oid, path string
 	}
 	out, err := gitcli.LsTree(ctx, m.BareDir(), treeish)
 	if err != nil {
+		if errors.Is(err, gitcli.ErrOutputCapped) {
+			// Pathologically large directory: keep the complete records from
+			// the captured prefix (already far beyond a usable page).
+			if i := bytes.LastIndexByte(out, 0x00); i >= 0 {
+				return parseLsTree(out[:i+1], clean)
+			}
+		}
 		// git exits non-zero for a missing path/oid; treat as not found.
 		return nil, fmt.Errorf("ls-tree %q: %w", treeish, browsemodel.ErrNotFound)
 	}

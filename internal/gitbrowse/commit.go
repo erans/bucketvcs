@@ -2,6 +2,7 @@ package gitbrowse
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 
@@ -23,7 +24,7 @@ func (s *Service) Commit(ctx context.Context, tenant, repoID, oid string) (brows
 	defer release()
 
 	rawCommit, err := gitcli.CatFileCommit(ctx, m.BareDir(), oid)
-	if err != nil {
+	if err != nil && !errors.Is(err, gitcli.ErrOutputCapped) {
 		return browsemodel.CommitDetail{}, browsemodel.ErrNotFound
 	}
 	meta, parents, msg, err := parseCommitObject(rawCommit)
@@ -41,10 +42,19 @@ func (s *Service) Commit(ctx context.Context, tenant, repoID, oid string) (brows
 		parent = parents[0]
 	}
 	rawDiff, err := gitcli.DiffTreePatch(ctx, m.BareDir(), oid, parent)
-	if err != nil {
+	capped := errors.Is(err, gitcli.ErrOutputCapped)
+	if err != nil && !capped {
 		return browsemodel.CommitDetail{}, err
 	}
 	files, truncated := parseUnifiedDiff(rawDiff)
+	if capped {
+		// The raw patch exceeded the byte cap; we parsed the captured prefix.
+		// Drop the final (possibly mid-line) file and mark the commit truncated.
+		if len(files) > 0 {
+			files = files[:len(files)-1]
+		}
+		truncated = true
+	}
 	return browsemodel.CommitDetail{
 		Meta: meta, Message: msg, Parents: parents, Files: files, Truncated: truncated,
 	}, nil

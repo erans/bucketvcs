@@ -375,6 +375,11 @@ Commit diffs are capped to prevent runaway page rendering:
 - **3 000 changed (added/removed) lines per file** — files exceeding this limit
   show a "too large" notice in place of the diff hunks. Context lines (unchanged
   lines shown for surrounding context) are not counted toward this cap.
+- **20 MiB raw patch** — the raw unified patch read from git is additionally
+  byte-capped at 20 MiB before any line counting begins. An over-cap commit
+  renders as truncated (the parsed prefix of the diff is shown; the final,
+  possibly incomplete, file entry is dropped). Tree listings and raw commit
+  objects carry similar internal byte caps (32 MiB and 4 MiB respectively).
 
 ### 6.7 Hybrid reader and cold-mirror warming
 
