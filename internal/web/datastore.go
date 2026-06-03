@@ -25,6 +25,9 @@ type DataStore interface {
 	TouchSession(ctx context.Context, rawID string, ttl time.Duration) error
 	DeleteSession(ctx context.Context, rawID string) error
 	ListAccessibleRepos(ctx context.Context, actor *auth.Actor) ([]Repo, error)
+	// GetVisibleRepo returns the repo if the actor may view it, or an error.
+	// The web layer treats any error as 404 (anti-enumeration).
+	GetVisibleRepo(ctx context.Context, actor *auth.Actor, tenant, name string) (*Repo, error)
 
 	// OIDC (Phase 1.5)
 	FindUserByEmail(ctx context.Context, email string) (*auth.Actor, error)

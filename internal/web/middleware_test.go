@@ -50,6 +50,9 @@ func (f *fakeStore) ListAccessibleRepos(ctx context.Context, actor *auth.Actor) 
 	}
 	return f.repos(actor), nil
 }
+func (f *fakeStore) GetVisibleRepo(ctx context.Context, actor *auth.Actor, tenant, name string) (*Repo, error) {
+	return nil, nil
+}
 func (f *fakeStore) FindUserByEmail(ctx context.Context, email string) (*auth.Actor, error) {
 	if f.findByEmail != nil {
 		return f.findByEmail(email)

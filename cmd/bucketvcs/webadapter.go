@@ -43,6 +43,14 @@ func (a *webAdapter) ListAccessibleRepos(ctx context.Context, actor *auth.Actor)
 	return out, nil
 }
 
+func (a *webAdapter) GetVisibleRepo(ctx context.Context, actor *auth.Actor, tenant, name string) (*web.Repo, error) {
+	r, err := a.s.GetVisibleRepo(ctx, actor, tenant, name)
+	if err != nil {
+		return nil, err
+	}
+	return &web.Repo{Tenant: r.Tenant, Name: r.Name, PublicRead: r.PublicRead, CreatedAt: r.CreatedAt}, nil
+}
+
 func (a *webAdapter) FindUserByEmail(ctx context.Context, email string) (*auth.Actor, error) {
 	return a.s.FindUserByEmail(ctx, email)
 }
