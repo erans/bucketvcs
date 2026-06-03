@@ -313,7 +313,8 @@ prevent repository enumeration.
 
 `{ref}` accepts a branch name, tag name, or 40-hex commit OID. The resolver
 prefers the longest matching branch/tag prefix so that refs containing slashes
-(e.g. `feature/foo`) are resolved correctly.
+(e.g. `feature/foo`) are resolved correctly. When a branch and a tag share the
+same name, the branch wins; use the tag's commit OID to browse the tag.
 
 ### 6.2 Branch and tag switcher
 
