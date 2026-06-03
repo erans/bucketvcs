@@ -58,7 +58,7 @@ func reorderFlagsFirst(args []string, boolFlags map[string]bool) []string {
 
 func runUser(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: bucketvcs user <add|list|disable|enable|delete|key|set-password> [flags]")
+		fmt.Fprintln(stderr, "usage: bucketvcs user <add|list|disable|enable|delete|key|set-password|set-email> [flags]")
 		return 2
 	}
 	sub, rest := args[0], args[1:]
@@ -77,6 +77,8 @@ func runUser(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return runUserKey(ctx, rest, stdout, stderr)
 	case "set-password":
 		return userSetPassword(ctx, rest, stdout, stderr, os.Stdin)
+	case "set-email":
+		return userSetEmail(ctx, rest, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "user: unknown subcommand %q\n", sub)
 		return 2
@@ -87,6 +89,7 @@ func userAdd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("user add", flag.ContinueOnError)
 	authDB := fs.String("auth-db", "", "path to auth.db")
 	admin := fs.Bool("admin", false, "create as admin")
+	email := fs.String("email", "", "email for OIDC verified-email login")
 	fs.SetOutput(stderr)
 	if err := fs.Parse(reorderFlagsFirst(args, map[string]bool{"admin": true})); err != nil {
 		return 2
@@ -109,6 +112,12 @@ func userAdd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintf(stderr, "create user: %v\n", err)
 		return 1
+	}
+	if *email != "" {
+		if err := s.SetEmail(ctx, name, *email); err != nil {
+			fmt.Fprintf(stderr, "set email: %v\n", err)
+			return 1
+		}
 	}
 	fmt.Fprintf(stdout, "created user %s\n", name)
 	return 0
