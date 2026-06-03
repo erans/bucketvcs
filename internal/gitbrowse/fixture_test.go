@@ -76,6 +76,11 @@ func fixture(t *testing.T) (svc *Service, tenant, repo string, oids map[string]s
 	oids["feat"] = git(work, "rev-parse", "HEAD")
 	git(work, "checkout", "-q", "main")
 
+	git(work, "checkout", "-q", "-b", "merged", "main")
+	git(work, "merge", "-q", "--no-ff", "-m", "merge feature", "feature/foo")
+	oids["merge"] = git(work, "rev-parse", "HEAD")
+	git(work, "checkout", "-q", "main")
+
 	git("", "clone", "-q", "--bare", work, srcBare)
 
 	store, err := localfs.Open(t.TempDir())

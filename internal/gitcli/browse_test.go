@@ -108,7 +108,7 @@ func TestDiffTreePatch(t *testing.T) {
 		t.Skip("requires git binary")
 	}
 	bare, oid := makeBrowseBare(t)
-	d, err := DiffTreePatch(context.Background(), bare, oid)
+	d, err := DiffTreePatch(context.Background(), bare, oid, "")
 	if err != nil || !strings.Contains(string(d), "a.txt") {
 		t.Fatalf("DiffTreePatch: %v %q", err, d)
 	}

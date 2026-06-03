@@ -1146,11 +1146,21 @@ func CatFileCommit(ctx context.Context, dir, oid string) ([]byte, error) {
 	return run(ctx, dir, "--no-replace-objects", "cat-file", "commit", oid)
 }
 
-// DiffTreePatch returns the unified patch for a commit against its first parent
-// (or the empty tree for a root commit, via --root), with rename detection (-M).
-func DiffTreePatch(ctx context.Context, dir, oid string) ([]byte, error) {
+// DiffTreePatch returns the unified patch for a commit. When parent is
+// non-empty the diff is computed against that parent (two-tree form — required
+// for merge commits, where bare `diff-tree -p <oid>` suppresses the patch);
+// when parent is "" the commit is treated as a root and diffed against the
+// empty tree via --root.
+func DiffTreePatch(ctx context.Context, dir, oid, parent string) ([]byte, error) {
 	if !validRefOrOID(oid) {
 		return nil, fmt.Errorf("gitcli: DiffTreePatch: invalid oid %q", oid)
+	}
+	if parent != "" {
+		if !validRefOrOID(parent) {
+			return nil, fmt.Errorf("gitcli: DiffTreePatch: invalid parent %q", parent)
+		}
+		return run(ctx, dir, "--no-replace-objects", "diff-tree", "-p", "-M",
+			"--no-color", parent, oid)
 	}
 	return run(ctx, dir, "--no-replace-objects", "diff-tree", "-p", "-M",
 		"--root", "--no-color", oid)

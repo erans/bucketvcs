@@ -119,3 +119,24 @@ func TestParseUnifiedDiff_FileCountCap(t *testing.T) {
 		t.Fatalf("len(files) = %d, want 300", len(files))
 	}
 }
+
+func TestCommit_MergeShowsFirstParentDiff(t *testing.T) {
+	svc, tenant, repo, oids := fixture(t)
+	cd, err := svc.Commit(context.Background(), tenant, repo, oids["merge"])
+	if err != nil {
+		t.Fatalf("Commit(merge): %v", err)
+	}
+	if len(cd.Parents) != 2 {
+		t.Fatalf("parents = %v, want 2 (merge)", cd.Parents)
+	}
+	// Diff vs first parent (merged base) must show the branch's file arriving.
+	var sawC bool
+	for _, f := range cd.Files {
+		if f.NewPath == "c.txt" {
+			sawC = true
+		}
+	}
+	if !sawC {
+		t.Fatalf("merge diff missing c.txt (first-parent diff suppressed?), files = %+v", cd.Files)
+	}
+}

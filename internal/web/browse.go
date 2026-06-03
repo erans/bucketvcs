@@ -134,7 +134,7 @@ func (s *server) handleRepoHome(w http.ResponseWriter, r *http.Request, br brows
 		s.renderBrowse(w, r, "repo.html", repoHomeData{browseHeader: s.header(w, r, br, refs, "", "")})
 		return
 	}
-	res, err := s.content.Resolve(r.Context(), br.tenant, br.repo, refs.Default)
+	res, err := browsemodel.ResolveRest(refs, refs.Default)
 	if err != nil {
 		s.browseError(w, r, err)
 		return
@@ -158,7 +158,7 @@ func (s *server) handleTree(w http.ResponseWriter, r *http.Request, br browseRou
 		s.browseError(w, r, err)
 		return
 	}
-	res, err := s.content.Resolve(r.Context(), br.tenant, br.repo, br.rest)
+	res, err := browsemodel.ResolveRest(refs, br.rest)
 	if err != nil {
 		s.browseError(w, r, err)
 		return
@@ -181,7 +181,7 @@ func (s *server) handleBlob(w http.ResponseWriter, r *http.Request, br browseRou
 		s.browseError(w, r, err)
 		return
 	}
-	res, err := s.content.Resolve(r.Context(), br.tenant, br.repo, br.rest)
+	res, err := browsemodel.ResolveRest(refs, br.rest)
 	if err != nil {
 		s.browseError(w, r, err)
 		return
@@ -204,7 +204,12 @@ func (s *server) handleBlob(w http.ResponseWriter, r *http.Request, br browseRou
 }
 
 func (s *server) handleRaw(w http.ResponseWriter, r *http.Request, br browseRoute) {
-	res, err := s.content.Resolve(r.Context(), br.tenant, br.repo, br.rest)
+	refs, err := s.content.ListRefs(r.Context(), br.tenant, br.repo)
+	if err != nil {
+		s.browseError(w, r, err)
+		return
+	}
+	res, err := browsemodel.ResolveRest(refs, br.rest)
 	if err != nil {
 		s.browseError(w, r, err)
 		return
@@ -242,7 +247,7 @@ func (s *server) handleCommits(w http.ResponseWriter, r *http.Request, br browse
 		s.browseError(w, r, err)
 		return
 	}
-	res, err := s.content.Resolve(r.Context(), br.tenant, br.repo, br.rest)
+	res, err := browsemodel.ResolveRest(refs, br.rest)
 	if err != nil {
 		s.browseError(w, r, err)
 		return
@@ -264,6 +269,10 @@ func (s *server) handleCommits(w http.ResponseWriter, r *http.Request, br browse
 
 func (s *server) handleCommit(w http.ResponseWriter, r *http.Request, br browseRoute) {
 	oid := strings.Trim(br.rest, "/")
+	if !browsemodel.IsHex40(oid) {
+		s.renderError(w, r, http.StatusNotFound, "not found")
+		return
+	}
 	detail, err := s.content.Commit(r.Context(), br.tenant, br.repo, oid)
 	if err != nil {
 		s.browseError(w, r, err)

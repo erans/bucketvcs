@@ -36,7 +36,11 @@ func (s *Service) Commit(ctx context.Context, tenant, repoID, oid string) (brows
 		meta.ShortOID = oid[:12]
 	}
 
-	rawDiff, err := gitcli.DiffTreePatch(ctx, m.BareDir(), oid)
+	parent := ""
+	if len(parents) > 0 {
+		parent = parents[0]
+	}
+	rawDiff, err := gitcli.DiffTreePatch(ctx, m.BareDir(), oid, parent)
 	if err != nil {
 		return browsemodel.CommitDetail{}, err
 	}

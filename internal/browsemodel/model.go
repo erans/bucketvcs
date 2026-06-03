@@ -5,7 +5,11 @@
 // preserving the Phase 1 decoupling rule.
 package browsemodel
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
 
 // Sentinel errors crossing the ContentStore boundary.
 var (
@@ -101,4 +105,52 @@ type CommitDetail struct {
 	Parents   []string
 	Files     []FileDiff
 	Truncated bool // diff exceeded the file cap; Files is partial
+}
+
+// IsHex40 reports whether s is exactly 40 hex characters (a full git OID).
+func IsHex40(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	for _, c := range s {
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// ResolveRest splits a browse-URL remainder ("ref/maybe/path" or "<40hex>/path")
+// into {Ref, OID, Path} using the given refs. A leading 40-hex OID wins;
+// otherwise the LONGEST branch/tag name that is a slash-delimited prefix of
+// rest is chosen. Pure function — no I/O — so callers resolve from refs they
+// have already loaded. Returns ErrNotFound (wrapped) when nothing matches.
+func ResolveRest(refs Refs, rest string) (Resolved, error) {
+	rest = strings.Trim(rest, "/")
+	head, tail := rest, ""
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		head, tail = rest[:i], rest[i+1:]
+	}
+	if IsHex40(head) {
+		return Resolved{Ref: "", OID: head, Path: tail}, nil
+	}
+	best := RefInfo{}
+	pick := func(c RefInfo) {
+		if (rest == c.Name || strings.HasPrefix(rest, c.Name+"/")) && len(c.Name) > len(best.Name) {
+			best = c
+		}
+	}
+	for _, b := range refs.Branches {
+		pick(b)
+	}
+	for _, t := range refs.Tags {
+		pick(t)
+	}
+	if best.Name == "" {
+		return Resolved{}, fmt.Errorf("resolve %q: %w", rest, ErrNotFound)
+	}
+	path := strings.TrimPrefix(strings.TrimPrefix(rest, best.Name), "/")
+	return Resolved{Ref: best.Name, OID: best.OID, Path: path}, nil
 }

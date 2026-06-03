@@ -58,7 +58,6 @@ func (b *browseDataStore) LinkIdentity(ctx context.Context, userID, issuer, subj
 // fakeContent is a configurable ContentStore for browse tests.
 type fakeContent struct {
 	refs   browsemodel.Refs
-	res    browsemodel.Resolved
 	warm   bool
 	tree   []browsemodel.TreeEntry
 	blob   browsemodel.Blob
@@ -72,12 +71,6 @@ func (f *fakeContent) ListRefs(ctx context.Context, t, r string) (browsemodel.Re
 		return browsemodel.Refs{}, browsemodel.ErrWarming
 	}
 	return f.refs, nil
-}
-func (f *fakeContent) Resolve(ctx context.Context, t, r, rest string) (browsemodel.Resolved, error) {
-	if f.warm {
-		return browsemodel.Resolved{}, browsemodel.ErrWarming
-	}
-	return f.res, nil
 }
 func (f *fakeContent) ReadTree(ctx context.Context, t, r, oid, p string) ([]browsemodel.TreeEntry, error) {
 	if f.warm {
@@ -111,8 +104,17 @@ func newBrowseServer(content ContentStore, visible map[string]bool) http.Handler
 	})
 }
 
+// mainRefs is a convenience refs fixture with branch "main" pointing to a
+// well-formed 40-hex OID, used across tests that hit ref-based URLs.
+func mainRefs() browsemodel.Refs {
+	return browsemodel.Refs{
+		Default:  "main",
+		Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}},
+	}
+}
+
 func TestBrowse_Routing(t *testing.T) {
-	content := &fakeContent{res: browsemodel.Resolved{Ref: "main", OID: "abc", Path: ""}}
+	content := &fakeContent{refs: mainRefs()}
 	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
 	cases := []struct {
 		path string
@@ -169,8 +171,7 @@ func TestBrowse_DisabledWhenContentNil(t *testing.T) {
 
 func TestRepoHome_RendersTree(t *testing.T) {
 	content := &fakeContent{
-		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abc"}}},
-		res:  browsemodel.Resolved{Ref: "main", OID: "abc"},
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
 		tree: []browsemodel.TreeEntry{{Name: "a.txt", Path: "a.txt", Type: "blob", Size: 6, OID: "x"}},
 	}
 	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
@@ -187,8 +188,7 @@ func TestRepoHome_RendersTree(t *testing.T) {
 
 func TestTree_RendersPathEntries(t *testing.T) {
 	content := &fakeContent{
-		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abc"}}},
-		res:  browsemodel.Resolved{Ref: "main", OID: "abc", Path: "sub"},
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
 		tree: []browsemodel.TreeEntry{{Name: "b.txt", Path: "sub/b.txt", Type: "blob", OID: "y"}},
 	}
 	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
@@ -205,7 +205,7 @@ func TestTree_RendersPathEntries(t *testing.T) {
 
 func TestRaw_ForcesSafeContentType(t *testing.T) {
 	content := &fakeContent{
-		res:  browsemodel.Resolved{Ref: "main", OID: "abc", Path: "evil.html"},
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
 		blob: browsemodel.Blob{Path: "evil.html", Size: 20, Bytes: []byte("<script>x()</script>")},
 	}
 	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
@@ -228,7 +228,7 @@ func TestRaw_ForcesSafeContentType(t *testing.T) {
 
 func TestRaw_BinaryIsOctetStreamAttachment(t *testing.T) {
 	content := &fakeContent{
-		res:  browsemodel.Resolved{Ref: "main", OID: "abc", Path: "bin.dat"},
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
 		blob: browsemodel.Blob{Path: "bin.dat", Size: 4, Binary: true, Bytes: []byte{0, 1, 2, 0}},
 	}
 	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
@@ -245,8 +245,7 @@ func TestRaw_BinaryIsOctetStreamAttachment(t *testing.T) {
 
 func TestBlob_HighlightedAndEscaped(t *testing.T) {
 	content := &fakeContent{
-		refs: browsemodel.Refs{Default: "main"},
-		res:  browsemodel.Resolved{Ref: "main", OID: "abc", Path: "main.go"},
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
 		blob: browsemodel.Blob{Path: "main.go", Size: 30, Bytes: []byte("package main // <x>\n")},
 	}
 	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
@@ -264,8 +263,7 @@ func TestBlob_HighlightedAndEscaped(t *testing.T) {
 
 func TestCommits_ListAndPaging(t *testing.T) {
 	content := &fakeContent{
-		refs: browsemodel.Refs{Default: "main"},
-		res:  browsemodel.Resolved{Ref: "main", OID: "abc"},
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
 		log:  []browsemodel.CommitMeta{{OID: "c2", ShortOID: "c2", Summary: "update a", AuthorName: "Ann"}},
 		more: true,
 	}
@@ -311,7 +309,8 @@ func TestCommit_RendersDiff(t *testing.T) {
 func TestBrowse_OIDLinksUseOID(t *testing.T) {
 	const testOID = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 	content := &fakeContent{
-		res:  browsemodel.Resolved{Ref: "", OID: testOID, Path: ""},
+		// No refs needed: testOID is a raw 40-hex OID, so ResolveRest takes the
+		// IsHex40 fast path without consulting refs.
 		tree: []browsemodel.TreeEntry{{Name: "a.txt", Path: "a.txt", Type: "blob", Size: 6, OID: "x"}},
 	}
 	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
@@ -336,7 +335,7 @@ func TestBrowse_OIDLinksUseOID(t *testing.T) {
 // oversized blob returns 413 instead of a 0-byte 200.
 func TestRaw_TooLargeReturns413(t *testing.T) {
 	content := &fakeContent{
-		res:  browsemodel.Resolved{Ref: "main", OID: "abc", Path: "big.bin"},
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
 		blob: browsemodel.Blob{Path: "big.bin", Size: 11 << 20, TooLarge: true},
 	}
 	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
@@ -345,5 +344,17 @@ func TestRaw_TooLargeReturns413(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("got %d, want 413", rec.Code)
+	}
+}
+
+// TestCommit_NonOIDIs404 verifies that /commit/<ref-name> returns 404
+// (commit links always use full OIDs, never ref names).
+func TestCommit_NonOIDIs404(t *testing.T) {
+	h := newBrowseServer(&fakeContent{}, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/commit/main", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("got %d, want 404 for non-OID commit URL", rec.Code)
 	}
 }

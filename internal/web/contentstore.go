@@ -12,7 +12,6 @@ import (
 // browsemodel package — never on the storage/mirror layer.
 type ContentStore interface {
 	ListRefs(ctx context.Context, tenant, repo string) (browsemodel.Refs, error)
-	Resolve(ctx context.Context, tenant, repo, rest string) (browsemodel.Resolved, error)
 	ReadTree(ctx context.Context, tenant, repo, oid, path string) ([]browsemodel.TreeEntry, error)
 	ReadBlob(ctx context.Context, tenant, repo, oid, path string) (browsemodel.Blob, error)
 	Log(ctx context.Context, tenant, repo, oid string, offset, limit int) ([]browsemodel.CommitMeta, bool, error)
