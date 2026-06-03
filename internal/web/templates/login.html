@@ -9,5 +9,8 @@
   <label>pass <input name="password" type="password" autocomplete="current-password"></label>
   <button type="submit">enter</button>
 </form>
+{{if .OIDC}}
+<p class="oidc"><a href="/login/oidc?next={{.Next}}">{{.OIDCLabel}}</a></p>
+{{end}}
 {{end}}
 {{template "base" .}}

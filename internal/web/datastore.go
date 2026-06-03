@@ -25,4 +25,9 @@ type DataStore interface {
 	TouchSession(ctx context.Context, rawID string, ttl time.Duration) error
 	DeleteSession(ctx context.Context, rawID string) error
 	ListAccessibleRepos(ctx context.Context, actor *auth.Actor) ([]Repo, error)
+
+	// OIDC (Phase 1.5)
+	FindUserByEmail(ctx context.Context, email string) (*auth.Actor, error)
+	FindIdentity(ctx context.Context, issuer, subject string) (*auth.Actor, error)
+	LinkIdentity(ctx context.Context, userID, issuer, subject, email string) error
 }

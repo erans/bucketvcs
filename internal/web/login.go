@@ -13,10 +13,15 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		tok := issueCSRF(w, secure)
-		_ = s.render.render(w, "login.html", loginData{
+		ld := loginData{
 			base: base{Session: SessionFromContext(r.Context()), CSRF: tok},
 			Next: safeNext(r.URL.Query().Get("next")),
-		})
+		}
+		if s.oidc != nil {
+			ld.OIDC = true
+			ld.OIDCLabel = s.oidc.Label
+		}
+		_ = s.render.render(w, "login.html", ld)
 		EmitRequestMetric(r.Context(), s.logger, "login", 200)
 
 	case http.MethodPost:
@@ -37,7 +42,7 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 					sec = 1
 				}
 				w.Header().Set("Retry-After", strconv.Itoa(sec))
-				EmitLoginMetric(r.Context(), s.logger, "ratelimited")
+				EmitLoginMetric(r.Context(), s.logger, "ratelimited", "password")
 				s.renderError(w, r, http.StatusTooManyRequests, "too many attempts; try again later")
 				return
 			}
@@ -48,14 +53,19 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			if auth.IsCredentialError(err) {
 				s.limiter.MarkFailure(ip, username) // nil-safe
 			}
-			EmitLoginMetric(r.Context(), s.logger, "invalid")
+			EmitLoginMetric(r.Context(), s.logger, "invalid", "password")
 			tok := issueCSRF(w, secure)
 			w.WriteHeader(http.StatusUnauthorized)
-			_ = s.render.render(w, "login.html", loginData{
+			ld401 := loginData{
 				base:  base{CSRF: tok},
 				Error: "invalid username or password",
 				Next:  safeNext(r.PostFormValue("next")),
-			})
+			}
+			if s.oidc != nil {
+				ld401.OIDC = true
+				ld401.OIDCLabel = s.oidc.Label
+			}
+			_ = s.render.render(w, "login.html", ld401)
 			return
 		}
 		s.limiter.MarkSuccess(ip, username) // nil-safe
@@ -73,7 +83,7 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			Secure:   secure,
 			SameSite: http.SameSiteLaxMode,
 		})
-		EmitLoginMetric(r.Context(), s.logger, "success")
+		EmitLoginMetric(r.Context(), s.logger, "success", "password")
 		EmitSessionCreated(r.Context(), s.logger, actor.UserID, actor.Name, "password")
 		http.Redirect(w, r, safeNext(r.PostFormValue("next")), http.StatusSeeOther)
 

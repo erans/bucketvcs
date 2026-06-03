@@ -183,6 +183,106 @@ bucketvcs repo public acme/site off --auth-db /var/lib/bucketvcs/auth.db
 
 ---
 
+## OIDC browser login (Phase 1.5)
+
+Browser login can additionally delegate authentication to an external OIDC
+identity provider (Okta, Google Workspace, Microsoft Entra, Auth0, etc.). When
+enabled, the login page shows a single-sign-on button alongside the username +
+password form. The flow is Authorization Code + PKCE with nonce binding; the
+returned ID token's RS256/ES256 signature is verified against the provider's
+JWKS (fetched via OIDC discovery), and users are matched to local accounts by
+**verified email** on first login.
+
+OIDC login requires the UI to be enabled (`--ui`, default on) and an HTTP
+listener (`--addr` or `--ui-addr`). It does not change git HTTPS/SSH auth.
+
+### Enabling OIDC
+
+| Flag | Description |
+|---|---|
+| `--oidc-login` | Enable OIDC browser login. Off by default. |
+| `--oidc-login-issuer` | Issuer URL, e.g. `https://accounts.example.com`. Discovery fetches `<issuer>/.well-known/openid-configuration`. Must be `https` except for loopback hosts (`localhost`, `127.0.0.1`, `::1`) used in local testing. |
+| `--oidc-login-client-id` | OAuth client ID registered with the provider. |
+| `--oidc-login-client-secret-file` | Path to a file containing the client secret. Alternatively set the secret in the `BUCKETVCS_OIDC_LOGIN_CLIENT_SECRET` environment variable (keeps it out of `ps` / shell history). |
+| `--oidc-login-redirect-url` | The public callback URL. Must be `https://<host>/login/oidc/callback` and registered verbatim as an allowed redirect URI with the provider. |
+| `--oidc-login-scopes` | Space- or comma-separated scopes. Defaults to `openid email`. `openid` and `email` are required for verified-email matching. |
+| `--oidc-login-label` | Button label shown on the login page, e.g. `Sign in with Okta`. |
+
+```
+bucketvcs serve \
+    --addr 0.0.0.0:8080 \
+    --oidc-login \
+    --oidc-login-issuer https://accounts.example.com \
+    --oidc-login-client-id bucketvcs-web \
+    --oidc-login-client-secret-file /run/secrets/oidc_client_secret \
+    --oidc-login-redirect-url https://git.example.com/login/oidc/callback \
+    --oidc-login-scopes "openid email" \
+    --oidc-login-label "Sign in with SSO" \
+    ...
+```
+
+The redirect URL path is fixed: register `https://<host>/login/oidc/callback`
+with the IdP. A mismatch causes the IdP to refuse the authorization request.
+
+### Verified-email TOFU (trust on first use)
+
+There is **no auto-provisioning**. Operators pre-create accounts and set a
+verified email; the first OIDC login then matches by that email and pins the
+`(issuer, subject)` pair to the account:
+
+```sh
+# Pre-create the user with a verified email (TOFU match key).
+bucketvcs user add alice --email alice@corp.com --auth-db /var/lib/bucketvcs/auth.db
+
+# Or update an existing user's email.
+bucketvcs user set-email alice alice@corp.com --auth-db /var/lib/bucketvcs/auth.db
+```
+
+On the first successful login, the verified `email` claim is matched to a local
+user and the identity `(issuer, subject)` is linked. Subsequent logins resolve
+directly by the pinned `(issuer, subject)` and ignore email changes at the IdP.
+A login is **rejected** (no session, no account created) when:
+
+- the email claim is absent or `email_verified` is not `true`;
+- no local user has that verified email;
+- the matched user is disabled;
+- the token fails signature, `iss`, `exp`, `aud`, or `nonce` validation.
+
+All rejections return a uniform error page so the wire never reveals which gate
+failed.
+
+### Inspecting and revoking pinned identities
+
+```sh
+# List the (issuer, subject) identities pinned to a user (NDJSON).
+bucketvcs user identity list alice --auth-db /var/lib/bucketvcs/auth.db
+
+# Unpin an identity (e.g. after an account is re-keyed at the IdP).
+bucketvcs user identity remove https://accounts.example.com sub-12345 \
+    --auth-db /var/lib/bucketvcs/auth.db
+```
+
+After removal, the next OIDC login for that subject falls back to verified-email
+TOFU and re-pins.
+
+### OIDC audit events
+
+| Event | When |
+|---|---|
+| `auth.oidc.login` | OIDC login succeeded; session issued |
+| `auth.oidc.identity_linked` | A verified email was matched and `(issuer, subject)` pinned to a user (first login) |
+| `auth.oidc.rejected` | OIDC login rejected; carries a `reason` attribute (`state_mismatch`, `idp_error`, `token_invalid`, `email_unverified`, `no_user`, `disabled`, `server_error`) |
+
+Login outcomes also increment `web_login_total` with `provider=oidc`.
+
+### Deferred
+
+- Multiple simultaneous IdPs (one issuer per process today).
+- Auto-provisioning of unknown users (operator pre-creation is required).
+- RP-initiated logout / IdP session termination.
+
+---
+
 ## 6. Observability
 
 ### 6.1 Metrics
@@ -205,8 +305,9 @@ bucketvcs repo public acme/site off --auth-db /var/lib/bucketvcs/auth.db
 
 ## 7. Deferred work and planned phases
 
-- **Phase 1.5 — OIDC browser login**: allow users to authenticate via an OIDC
-  provider (GitHub, Google, etc.) in addition to username + password.
+- **Phase 1.5 — OIDC browser login**: shipped — see "OIDC browser login
+  (Phase 1.5)" above. Remaining OIDC follow-ups (multiple IdPs, auto-provisioning,
+  RP-initiated logout) are listed in that section's "Deferred" note.
 - **Phase 2 — code browse**: tree, blob, and diff views for git repositories.
 - **Phase 3 — settings / admin screens**: manage users, repos, protected-ref
   policies, webhooks, and token scopes through the UI rather than the CLI.

@@ -26,8 +26,10 @@ type landingData struct {
 
 type loginData struct {
 	base
-	Error string
-	Next  string
+	Error     string
+	Next      string
+	OIDC      bool
+	OIDCLabel string
 }
 
 type errorData struct {
