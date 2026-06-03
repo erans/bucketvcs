@@ -424,6 +424,11 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 // Close releases the mirror manager's process flock.
 func (s *Server) Close() error { return s.mgr.Close() }
 
+// MirrorManager returns the server's mirror manager so co-located components
+// (e.g. the web UI's code-browse reader) can reuse the same warm cache and the
+// same process-wide mirror flock instead of opening a second manager.
+func (s *Server) MirrorManager() *mirror.Manager { return s.mgr }
+
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)

@@ -24,6 +24,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/auth/ratelimit"
 	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
 	"github.com/bucketvcs/bucketvcs/internal/gateway"
+	"github.com/bucketvcs/bucketvcs/internal/gitbrowse"
 	"github.com/bucketvcs/bucketvcs/internal/hooks"
 	"github.com/bucketvcs/bucketvcs/internal/lfs"
 	"github.com/bucketvcs/bucketvcs/internal/lfs/locks"
@@ -147,6 +148,8 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	uiAddr := fs.String("ui-addr", "", "Optional separate listen address for the web UI; empty shares --addr")
 	uiDir := fs.String("ui-dir", "", "Serve UI templates/static from this dir instead of the embedded assets (dev)")
 	uiSessionTTL := fs.Duration("ui-session-ttl", 168*time.Hour, "Web session lifetime (sliding)")
+	uiBrowseTimeout := fs.Duration("ui-browse-timeout", 20*time.Second,
+		"Max wait for cold mirror materialization on a browse request before returning a 503 warming page")
 
 	// M24 Phase 1.5 — OIDC browser login (relying-party)
 	oidcLogin := fs.Bool("oidc-login", false, "Enable OIDC browser login (relying-party)")
@@ -572,6 +575,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 				}
 				logger.Info("oidc browser login enabled", "issuer", *oidcIssuer)
 			}
+			browseSvc := gitbrowse.NewService(store, srv.MirrorManager(), *uiBrowseTimeout, logger)
 			uiHandler = web.NewHandler(web.Deps{
 				Store:      newWebAdapter(authS),
 				Logger:     logger,
@@ -580,6 +584,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 				SessionTTL: *uiSessionTTL,
 				TrustProxy: *trustProxyHeaders,
 				OIDC:       oidcProvider,
+				Content:    browseSvc,
 			})
 		}
 
