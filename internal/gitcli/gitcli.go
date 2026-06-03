@@ -1079,3 +1079,61 @@ func shortOID(oid string) string {
 	}
 	return oid
 }
+
+// LsTree returns the raw `git ls-tree --long -z <treeish>` output for a tree-ish.
+// treeish is typically "<commitOID>" for the root tree or "<commitOID>:<dir>" for
+// a subdirectory. Output is NUL-terminated records, each:
+//
+//	"<mode> SP <type> SP <oid> SP <size|-> TAB <name>" \0
+func LsTree(ctx context.Context, dir, treeish string) ([]byte, error) {
+	if !validRefOrOID(treeish) {
+		return nil, fmt.Errorf("gitcli: LsTree: invalid treeish %q", treeish)
+	}
+	return run(ctx, dir, "--no-replace-objects", "ls-tree", "--long", "-z", treeish)
+}
+
+// CatBlob returns raw blob bytes for a rev, matching `git cat-file blob <rev>`.
+// rev is typically "<commitOID>:<path>".
+func CatBlob(ctx context.Context, dir, rev string) ([]byte, error) {
+	if !validRefOrOID(rev) {
+		return nil, fmt.Errorf("gitcli: CatBlob: invalid rev %q", rev)
+	}
+	return run(ctx, dir, "--no-replace-objects", "cat-file", "blob", rev)
+}
+
+// LogRaw returns commit-log records for rev, paginated by skip/max. Each record
+// is unit-separated (0x1f) fields terminated by a record separator (0x1e):
+//
+//	<full-oid> 0x1f <author-name> 0x1f <author-email> 0x1f <author-unixtime> 0x1f <subject> 0x1e
+func LogRaw(ctx context.Context, dir, rev string, skip, max int) ([]byte, error) {
+	if !validRefOrOID(rev) {
+		return nil, fmt.Errorf("gitcli: LogRaw: invalid rev %q", rev)
+	}
+	if skip < 0 || max <= 0 {
+		return nil, fmt.Errorf("gitcli: LogRaw: bad skip/max %d/%d", skip, max)
+	}
+	const format = "--pretty=format:%H%x1f%an%x1f%ae%x1f%at%x1f%s%x1e"
+	return run(ctx, dir, "--no-replace-objects", "log", rev,
+		fmt.Sprintf("--skip=%d", skip), fmt.Sprintf("--max-count=%d", max),
+		"--no-color", format)
+}
+
+// CatFileCommit returns the raw commit object bytes, matching
+// `git cat-file commit <oid>` (headers: tree/parent/author/committer, blank line,
+// then the message).
+func CatFileCommit(ctx context.Context, dir, oid string) ([]byte, error) {
+	if !validRefOrOID(oid) {
+		return nil, fmt.Errorf("gitcli: CatFileCommit: invalid oid %q", oid)
+	}
+	return run(ctx, dir, "--no-replace-objects", "cat-file", "commit", oid)
+}
+
+// DiffTreePatch returns the unified patch for a commit against its first parent
+// (or the empty tree for a root commit, via --root), with rename detection (-M).
+func DiffTreePatch(ctx context.Context, dir, oid string) ([]byte, error) {
+	if !validRefOrOID(oid) {
+		return nil, fmt.Errorf("gitcli: DiffTreePatch: invalid oid %q", oid)
+	}
+	return run(ctx, dir, "--no-replace-objects", "diff-tree", "-p", "-M",
+		"--root", "--no-color", oid)
+}
