@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"flag"
 	"fmt"
@@ -147,6 +148,15 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	uiDir := fs.String("ui-dir", "", "Serve UI templates/static from this dir instead of the embedded assets (dev)")
 	uiSessionTTL := fs.Duration("ui-session-ttl", 168*time.Hour, "Web session lifetime (sliding)")
 
+	// M24 Phase 1.5 — OIDC browser login (relying-party)
+	oidcLogin := fs.Bool("oidc-login", false, "Enable OIDC browser login (relying-party)")
+	oidcIssuer := fs.String("oidc-login-issuer", "", "OIDC issuer URL, e.g. https://accounts.google.com")
+	oidcClientID := fs.String("oidc-login-client-id", "", "OAuth2 client id")
+	oidcSecretFile := fs.String("oidc-login-client-secret-file", "", "File with the OAuth2 client secret (or env BUCKETVCS_OIDC_LOGIN_CLIENT_SECRET)")
+	oidcRedirect := fs.String("oidc-login-redirect-url", "", "OAuth2 redirect URL, e.g. https://host/login/oidc/callback")
+	oidcScopes := fs.String("oidc-login-scopes", "openid,email,profile", "Comma-separated OIDC scopes")
+	oidcLabel := fs.String("oidc-login-label", "Single sign-on", "Login-page SSO button label")
+
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -214,6 +224,12 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	if *storeURL == "" {
 		fmt.Fprintln(stderr, "serve: --store is required")
 		return 2
+	}
+	if *oidcLogin {
+		if *oidcIssuer == "" || *oidcClientID == "" || *oidcRedirect == "" {
+			fmt.Fprintln(stderr, "serve: --oidc-login requires --oidc-login-issuer, --oidc-login-client-id, and --oidc-login-redirect-url")
+			return 2
+		}
 	}
 	if *mirrorDir == "" {
 		*mirrorDir = defaultMirrorDir()
@@ -523,6 +539,36 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 		// dispatcher, or on its own --ui-addr listener.
 		var uiHandler http.Handler
 		if *uiEnabled {
+			var oidcProvider *web.OIDCProvider
+			if *oidcLogin {
+				secret, serr := resolveOIDCClientSecret(*oidcSecretFile, os.Getenv)
+				if serr != nil {
+					fmt.Fprintf(stderr, "serve: %v\n", serr)
+					return 1
+				}
+				md, derr := oidc.Discover(serveCtx, http.DefaultClient, *oidcIssuer)
+				if derr != nil {
+					fmt.Fprintf(stderr, "serve: oidc discovery for %s: %v\n", *oidcIssuer, derr)
+					return 1
+				}
+				hmacKey := make([]byte, 32)
+				if _, kerr := rand.Read(hmacKey); kerr != nil {
+					fmt.Fprintf(stderr, "serve: oidc hmac key: %v\n", kerr)
+					return 1
+				}
+				oidcProvider = &web.OIDCProvider{
+					Issuer:      *oidcIssuer,
+					ClientID:    *oidcClientID,
+					Secret:      secret,
+					AuthURL:     md.AuthorizationEndpoint,
+					TokenURL:    md.TokenEndpoint,
+					RedirectURL: *oidcRedirect,
+					Scopes:      splitCSV(*oidcScopes),
+					Label:       *oidcLabel,
+					HMACKey:     hmacKey,
+				}
+				logger.Info("oidc browser login enabled", "issuer", *oidcIssuer)
+			}
 			uiHandler = web.NewHandler(web.Deps{
 				Store:      newWebAdapter(authS),
 				Logger:     logger,
@@ -530,6 +576,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 				UIDir:      *uiDir,
 				SessionTTL: *uiSessionTTL,
 				TrustProxy: *trustProxyHeaders,
+				OIDC:       oidcProvider,
 			})
 		}
 
