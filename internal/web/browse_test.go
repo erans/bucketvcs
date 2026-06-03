@@ -414,3 +414,33 @@ func TestQueryPage_Clamped(t *testing.T) {
 		t.Fatalf("queryPage 3 = %d", got)
 	}
 }
+
+func TestCommit_DiffLineClasses(t *testing.T) {
+	content := &fakeContent{
+		commit: browsemodel.CommitDetail{
+			Meta:    browsemodel.CommitMeta{OID: "c2", ShortOID: "c2", Summary: "update a", AuthorName: "Ann", AuthorTime: 1700000000},
+			Message: "update a\n",
+			Files: []browsemodel.FileDiff{{
+				NewPath: "a.txt", Status: "M", Additions: 1, Deletions: 1,
+				Hunks: []browsemodel.Hunk{{Header: "@@ -1 +1 @@", Lines: []browsemodel.DiffLine{
+					{Kind: ' ', Text: "ctx line"},
+					{Kind: '-', Text: "old"},
+					{Kind: '+', Text: "new"},
+				}}},
+			}},
+		},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/commit/c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	for _, want := range []string{`class="dl ctx"`, `class="dl del"`, `class="dl add"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing %s in commit view: %s", want, body)
+		}
+	}
+	if strings.Contains(body, `class="dl k`) {
+		t.Errorf("old k-class scheme still present")
+	}
+}
