@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth/ratelimit"
+	"github.com/bucketvcs/bucketvcs/internal/oidc"
+	"golang.org/x/oauth2"
 )
 
 // DefaultSessionTTL is used when Deps.SessionTTL is zero.
@@ -20,6 +22,7 @@ type Deps struct {
 	UIDir      string             // "" => embedded assets
 	SessionTTL time.Duration      // 0 => DefaultSessionTTL
 	TrustProxy bool               // for Secure-cookie / client-IP decisions
+	OIDC       *OIDCProvider      // nil => OIDC login disabled
 }
 
 type server struct {
@@ -30,6 +33,9 @@ type server struct {
 	ttl        time.Duration
 	trustProxy bool
 	mux        *http.ServeMux
+	oidc       *OIDCProvider
+	oauthCfg   *oauth2.Config
+	verifier   idTokenVerifier
 }
 
 // NewHandler builds the web UI http.Handler. Panics only on an unrecoverable
@@ -54,9 +60,21 @@ func NewHandler(d Deps) http.Handler {
 		trustProxy: d.TrustProxy,
 		mux:        http.NewServeMux(),
 	}
+	if d.OIDC != nil {
+		s.oidc = d.OIDC
+		s.oauthCfg = d.OIDC.oauthConfig()
+		s.verifier = d.OIDC.Verifier
+		if s.verifier == nil {
+			s.verifier = oidc.NewVerifier()
+		}
+	}
 	s.mux.Handle("/_ui/static/", staticHandler(d.UIDir))
 	s.mux.HandleFunc("/login", s.handleLogin)
 	s.mux.HandleFunc("/logout", s.handleLogout)
+	if s.oidc != nil {
+		s.mux.HandleFunc("/login/oidc", s.handleOIDCAuthorize)
+		// /login/oidc/callback is registered in Task 9.
+	}
 	s.mux.HandleFunc("/", s.handleLanding)
 
 	return sessionMiddleware(s.store, s.ttl)(s.mux)
