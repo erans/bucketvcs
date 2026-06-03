@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/browsemodel"
@@ -138,6 +139,10 @@ func parsePage(fsys fs.FS, dir, page string) (*template.Template, error) {
 			}
 			return strings.Join(seg, "/")
 		},
+		"reltime":   func(unix int64) string { return relTimeAt(time.Now(), unix) },
+		"abstime":   absTime,
+		"humansize": humanSize,
+		"diffclass": func(kind byte) string { return diffClass(kind) },
 	}
 	return template.New("").Funcs(funcs).ParseFS(fsys, base, pg)
 }
