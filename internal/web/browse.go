@@ -41,6 +41,12 @@ func parseBrowsePath(p string) (browseRoute, bool) {
 		return br, true // repo home
 	}
 	br.verb = seg[2]
+	if br.verb == "" {
+		if len(seg) == 3 {
+			return br, true // trailing slash on repo home: "/{tenant}/{repo}/"
+		}
+		return browseRoute{}, false // "//"-style path: not a route
+	}
 	switch br.verb {
 	case "tree", "blob", "raw", "commits", "commit":
 	default:

@@ -2,6 +2,8 @@ package gitbrowse
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -80,5 +82,40 @@ func TestCommit_EndToEnd(t *testing.T) {
 	}
 	if !sawA {
 		t.Fatalf("expected a.txt in diff, files = %+v", cd.Files)
+	}
+}
+
+func TestParseUnifiedDiff_PerFileLineCap(t *testing.T) {
+	var sb strings.Builder
+	sb.WriteString("diff --git a/big.txt b/big.txt\n--- a/big.txt\n+++ b/big.txt\n@@ -0,0 +1,4000 @@\n")
+	for i := 0; i < 4000; i++ {
+		sb.WriteString("+x\n")
+	}
+	files, truncated := parseUnifiedDiff([]byte(sb.String()))
+	if truncated {
+		t.Fatal("commit-level truncation should not trip for one file")
+	}
+	if len(files) != 1 || !files[0].TooLarge {
+		t.Fatalf("want 1 TooLarge file, got %+v", files)
+	}
+	if files[0].Hunks != nil {
+		t.Fatalf("TooLarge file must have no hunks, got %d", len(files[0].Hunks))
+	}
+	if files[0].Additions != 4000 {
+		t.Fatalf("Additions = %d, want true total 4000", files[0].Additions)
+	}
+}
+
+func TestParseUnifiedDiff_FileCountCap(t *testing.T) {
+	var sb strings.Builder
+	for i := 0; i < 305; i++ {
+		fmt.Fprintf(&sb, "diff --git a/f%d.txt b/f%d.txt\n--- a/f%d.txt\n+++ b/f%d.txt\n@@ -1 +1 @@\n-a\n+b\n", i, i, i, i)
+	}
+	files, truncated := parseUnifiedDiff([]byte(sb.String()))
+	if !truncated {
+		t.Fatal("expected commit-level truncation at 300 files")
+	}
+	if len(files) != 300 {
+		t.Fatalf("len(files) = %d, want 300", len(files))
 	}
 }

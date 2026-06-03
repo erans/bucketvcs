@@ -166,22 +166,30 @@ func parseUnifiedDiff(raw []byte) ([]browsemodel.FileDiff, bool) {
 				continue
 			}
 			curHunk = &browsemodel.Hunk{Header: ln}
-		case curHunk != nil && (strings.HasPrefix(ln, "+") || strings.HasPrefix(ln, "-") || strings.HasPrefix(ln, " ")):
-			if cur.Additions+cur.Deletions >= maxDiffLinesPerFile {
-				cur.TooLarge = true
-				cur.Hunks = nil
-				curHunk = nil
-				continue
+		case strings.HasPrefix(ln, "+") || strings.HasPrefix(ln, "-") || strings.HasPrefix(ln, " "):
+			// Hunk content. We are inside a hunk iff curHunk != nil; once a file
+			// is TooLarge its hunks are dropped but +/- counting continues so the
+			// rendered (+X −Y) totals stay accurate.
+			if curHunk == nil && !cur.TooLarge {
+				continue // stray content outside any hunk
 			}
 			kind := ln[0]
-			text := ln[1:]
 			switch kind {
 			case '+':
 				cur.Additions++
 			case '-':
 				cur.Deletions++
 			}
-			curHunk.Lines = append(curHunk.Lines, browsemodel.DiffLine{Kind: kind, Text: text})
+			if cur.TooLarge {
+				continue
+			}
+			if cur.Additions+cur.Deletions >= maxDiffLinesPerFile {
+				cur.TooLarge = true
+				cur.Hunks = nil
+				curHunk = nil
+				continue
+			}
+			curHunk.Lines = append(curHunk.Lines, browsemodel.DiffLine{Kind: kind, Text: ln[1:]})
 		}
 	}
 	flushFile()

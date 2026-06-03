@@ -386,17 +386,23 @@ The browse backend uses a hybrid reading strategy:
   clone and fetch operations.
 
 For repositories that have no local mirror yet ("cold"), the first browse
-request materializes the mirror synchronously. This operation is bounded by
-`--ui-browse-timeout` (default `20s`). If the mirror is not ready within the
-timeout, the server returns HTTP 503 with the message
+request materializes the mirror synchronously. This cold materialization is the
+only operation bounded by `--ui-browse-timeout` (default `20s`). If the mirror
+is not ready within the timeout, the server returns HTTP 503 with the message
 `repository is warming up — please retry shortly`. The operation is then logged
 at `WARN` level for operator visibility.
+
+Note: after cold materialization completes, a browse read can additionally wait
+for an in-flight push (or maintenance run) to the same repository to complete
+before it can acquire the per-repo read lock. This write-lock wait is **not**
+covered by `--ui-browse-timeout` — it is identical to the behavior of a `git
+fetch` on the gateway, and is expected to be brief in practice.
 
 #### New serve flag
 
 | Flag | Default | Description |
 |---|---|---|
-| `--ui-browse-timeout` | `20s` | Maximum wait for cold mirror materialization on a browse request. Requests that exceed this deadline receive HTTP 503. |
+| `--ui-browse-timeout` | `20s` | Maximum wait for **cold mirror materialization** on a browse request. Requests that exceed this deadline receive HTTP 503. Does not cover the subsequent read-lock acquisition or git reads. |
 
 ### 6.8 Observability
 
@@ -404,7 +410,7 @@ Browse requests emit two new metrics:
 
 | Metric | Labels | Description |
 |---|---|---|
-| `web_browse_total` | `view` | Browse views served; `view` ∈ `repo`, `tree`, `blob`, `raw`, `commits`, `commit` |
+| `web_browse_total` | `view` | Browse requests by view, counted after authorization (includes reads that subsequently fail with 404/503; per-outcome counts are in web_requests_total); `view` ∈ `repo`, `tree`, `blob`, `raw`, `commits`, `commit` |
 | `web_browse_mirror_wait_seconds` | — | Time spent opening (and possibly materializing) the git mirror per request |
 
 No new audit events are emitted for Phase 2. Read operations are not audited.
@@ -434,7 +440,7 @@ No new audit events are emitted for Phase 2. Read operations are not audited.
 | `web_requests_total` | `route`, `status` | Request count by UI route and HTTP status |
 | `web_login_total` | `result` | Login outcomes: `success`, `invalid`, `ratelimited` |
 | `web_sessions_active` | — | Count of non-expired sessions |
-| `web_browse_total` | `view` | Browse views served (Phase 2); `view` ∈ `repo`, `tree`, `blob`, `raw`, `commits`, `commit` |
+| `web_browse_total` | `view` | Browse requests by view, counted after authorization (includes reads that subsequently fail with 404/503; per-outcome counts are in web_requests_total); `view` ∈ `repo`, `tree`, `blob`, `raw`, `commits`, `commit` (Phase 2) |
 | `web_browse_mirror_wait_seconds` | — | Mirror open/materialize latency per browse request (Phase 2) |
 
 ### 7.2 Audit events

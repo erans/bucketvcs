@@ -38,8 +38,15 @@ func NewService(store storage.ObjectStore, mgr *mirror.Manager, timeout time.Dur
 }
 
 // openMirror opens (materializing if cold) the bare mirror and takes its read
-// lock. The returned release func MUST be called to drop the lock. A
-// materialization that exceeds s.timeout is reported as browsemodel.ErrWarming.
+// lock. The returned release func MUST be called to drop the lock.
+//
+// Timeout scope: s.timeout bounds cold mirror materialization (mgr.Open) only.
+// The m.RLock() call that follows can additionally block if an in-flight push
+// or maintenance run holds the repository write lock — this wait is unbounded,
+// matching the gateway's fetch-path semantics. Similarly, the git reads that
+// run after the lock is acquired operate under the caller's request context, not
+// this timeout. A materialization that exceeds s.timeout is reported as
+// browsemodel.ErrWarming.
 func (s *Service) openMirror(ctx context.Context, tenant, repo string) (*mirror.Mirror, func(), error) {
 	start := time.Now()
 	octx, cancel := context.WithTimeout(ctx, s.timeout)

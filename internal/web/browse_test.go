@@ -119,6 +119,8 @@ func TestBrowse_Routing(t *testing.T) {
 		want int
 	}{
 		{"/acme/demo", 200},
+		{"/acme/demo/", 200},                          // trailing slash on repo home
+		{"/acme/demo//x", http.StatusTemporaryRedirect}, // double-slash: mux path-cleans to 307
 		{"/acme/demo/tree/main/sub", 200},
 		{"/acme/demo/commits/main", 200},
 		{"/acme/demo/bogus/main", http.StatusNotFound}, // unknown verb
