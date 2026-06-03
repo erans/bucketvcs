@@ -9,8 +9,8 @@ func TestPostgresMigrationsSplit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 13 {
-		t.Fatalf("expected 13 postgres migrations, got %d", len(entries))
+	if len(entries) != 14 {
+		t.Fatalf("expected 14 postgres migrations, got %d", len(entries))
 	}
 	for _, e := range entries {
 		body, err := postgresMigrations.ReadFile("migrations_postgres/" + e.Name())
