@@ -6,6 +6,8 @@ import (
 	"errors"
 	"html/template"
 	"net/http"
+	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -162,8 +164,61 @@ func (s *server) handleTree(w http.ResponseWriter, r *http.Request, br browseRou
 	})
 }
 
-func (s *server) handleBlob(w http.ResponseWriter, r *http.Request, br browseRoute)    { w.WriteHeader(http.StatusOK) }
-func (s *server) handleRaw(w http.ResponseWriter, r *http.Request, br browseRoute)     { w.WriteHeader(http.StatusOK) }
+func (s *server) handleBlob(w http.ResponseWriter, r *http.Request, br browseRoute) {
+	refs, err := s.content.ListRefs(r.Context(), br.tenant, br.repo)
+	if err != nil {
+		s.browseError(w, r, err)
+		return
+	}
+	res, err := s.content.Resolve(r.Context(), br.tenant, br.repo, br.rest)
+	if err != nil {
+		s.browseError(w, r, err)
+		return
+	}
+	b, err := s.content.ReadBlob(r.Context(), br.tenant, br.repo, res.OID, res.Path)
+	if err != nil {
+		s.browseError(w, r, err)
+		return
+	}
+	var code template.HTML
+	if !b.Binary && !b.TooLarge {
+		code = highlight(res.Path, b.Bytes)
+	}
+	s.renderBrowse(w, r, "blob.html", blobData{
+		browseHeader: s.header(w, r, br, refs, res.Ref),
+		Path:         res.Path,
+		Blob:         b,
+		Code:         code,
+	})
+}
+
+func (s *server) handleRaw(w http.ResponseWriter, r *http.Request, br browseRoute) {
+	res, err := s.content.Resolve(r.Context(), br.tenant, br.repo, br.rest)
+	if err != nil {
+		s.browseError(w, r, err)
+		return
+	}
+	b, err := s.content.ReadBlob(r.Context(), br.tenant, br.repo, res.OID, res.Path)
+	if err != nil {
+		s.browseError(w, r, err)
+		return
+	}
+	// Force a safe content type so attacker-controlled repo content (an HTML or
+	// SVG blob) can never execute inline in the UI origin.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
+	if b.Binary || b.TooLarge {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		// RFC 5987 filename* avoids quoted-string breakage for names containing
+		// quotes; percent-encoding also neutralizes any odd bytes in the name.
+		w.Header().Set("Content-Disposition", "attachment; filename*=UTF-8''"+url.PathEscape(filepath.Base(res.Path)))
+	} else {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Content-Disposition", "inline")
+	}
+	EmitRequestMetric(r.Context(), s.logger, "raw", http.StatusOK)
+	_, _ = w.Write(b.Bytes)
+}
 func (s *server) handleCommits(w http.ResponseWriter, r *http.Request, br browseRoute) { w.WriteHeader(http.StatusOK) }
 func (s *server) handleCommit(w http.ResponseWriter, r *http.Request, br browseRoute)  { w.WriteHeader(http.StatusOK) }
 

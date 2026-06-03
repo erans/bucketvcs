@@ -59,6 +59,13 @@ type treeData struct {
 	Entries []browsemodel.TreeEntry
 }
 
+type blobData struct {
+	browseHeader
+	Path string
+	Blob browsemodel.Blob
+	Code template.HTML // highlighted HTML; empty for binary/too-large
+}
+
 // renderer parses the page templates. With dir=="" it parses the embedded
 // assets once; with a non-empty dir it re-parses from disk on every render so
 // designers can hot-iterate (templates/ under the given dir).
@@ -71,7 +78,7 @@ func newRenderer(dir string) (*renderer, error) {
 	r := &renderer{dir: dir}
 	if dir == "" {
 		r.cache = map[string]*template.Template{}
-		for _, page := range []string{"landing.html", "login.html", "error.html", "repo.html", "tree.html"} {
+		for _, page := range []string{"landing.html", "login.html", "error.html", "repo.html", "tree.html", "blob.html"} {
 			t, err := parsePage(assetsFS, "templates", page)
 			if err != nil {
 				return nil, err

@@ -61,6 +61,7 @@ type fakeContent struct {
 	res  browsemodel.Resolved
 	warm bool
 	tree []browsemodel.TreeEntry
+	blob browsemodel.Blob
 }
 
 func (f *fakeContent) ListRefs(ctx context.Context, t, r string) (browsemodel.Refs, error) {
@@ -82,7 +83,10 @@ func (f *fakeContent) ReadTree(ctx context.Context, t, r, oid, p string) ([]brow
 	return f.tree, nil
 }
 func (f *fakeContent) ReadBlob(ctx context.Context, t, r, oid, p string) (browsemodel.Blob, error) {
-	return browsemodel.Blob{}, browsemodel.ErrNotFound
+	if f.warm {
+		return browsemodel.Blob{}, browsemodel.ErrWarming
+	}
+	return f.blob, nil
 }
 func (f *fakeContent) Log(ctx context.Context, t, r, oid string, off, lim int) ([]browsemodel.CommitMeta, bool, error) {
 	return nil, false, nil
@@ -185,5 +189,64 @@ func TestTree_RendersPathEntries(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "b.txt") {
 		t.Fatalf("tree missing entry: %s", rec.Body.String())
+	}
+}
+
+func TestRaw_ForcesSafeContentType(t *testing.T) {
+	content := &fakeContent{
+		res:  browsemodel.Resolved{Ref: "main", OID: "abc", Path: "evil.html"},
+		blob: browsemodel.Blob{Path: "evil.html", Size: 20, Bytes: []byte("<script>x()</script>")},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/raw/main/evil.html", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if ct := rec.Header().Get("Content-Type"); ct != "text/plain; charset=utf-8" {
+		t.Fatalf("content-type = %q, want text/plain", ct)
+	}
+	if rec.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatal("missing nosniff")
+	}
+	if csp := rec.Header().Get("Content-Security-Policy"); csp != "default-src 'none'; sandbox" {
+		t.Fatalf("CSP = %q, want default-src 'none'; sandbox", csp)
+	}
+	if rec.Body.String() != "<script>x()</script>" {
+		t.Fatalf("raw body altered: %q", rec.Body.String())
+	}
+}
+
+func TestRaw_BinaryIsOctetStreamAttachment(t *testing.T) {
+	content := &fakeContent{
+		res:  browsemodel.Resolved{Ref: "main", OID: "abc", Path: "bin.dat"},
+		blob: browsemodel.Blob{Path: "bin.dat", Size: 4, Binary: true, Bytes: []byte{0, 1, 2, 0}},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/raw/main/bin.dat", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if ct := rec.Header().Get("Content-Type"); ct != "application/octet-stream" {
+		t.Fatalf("content-type = %q", ct)
+	}
+	if cd := rec.Header().Get("Content-Disposition"); !strings.Contains(cd, "attachment") {
+		t.Fatalf("disposition = %q", cd)
+	}
+}
+
+func TestBlob_HighlightedAndEscaped(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main"},
+		res:  browsemodel.Resolved{Ref: "main", OID: "abc", Path: "main.go"},
+		blob: browsemodel.Blob{Path: "main.go", Size: 30, Bytes: []byte("package main // <x>\n")},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/blob/main/main.go", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if strings.Contains(body, "<x>") {
+		t.Fatalf("blob content must be HTML-escaped, found raw <x>: %s", body)
+	}
+	if !strings.Contains(body, "main.go") {
+		t.Fatalf("blob view missing filename")
 	}
 }
