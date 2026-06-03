@@ -65,6 +65,7 @@ func fixture(t *testing.T) (svc *Service, tenant, repo string, oids map[string]s
 	git(work, "tag", "v1.0")
 
 	write("a.txt", "hello again\n")
+	write("café.txt", "utf8\n")
 	git(work, "add", ".")
 	git(work, "commit", "-q", "-m", "update a")
 	oids["c2"] = git(work, "rev-parse", "HEAD")

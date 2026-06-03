@@ -411,7 +411,7 @@ Browse requests emit two new metrics:
 | Metric | Labels | Description |
 |---|---|---|
 | `web_browse_total` | `view` | Browse requests by view, counted after authorization (includes reads that subsequently fail with 404/503; per-outcome counts are in web_requests_total); `view` ∈ `repo`, `tree`, `blob`, `raw`, `commits`, `commit` |
-| `web_browse_mirror_wait_seconds` | — | Time spent opening (and possibly materializing) the git mirror per request |
+| `web_browse_mirror_wait_seconds` | — | Time spent opening (and possibly materializing) the git mirror; emitted once per git read operation (a single page may perform several, e.g. repo home = tree + README), not once per request |
 
 No new audit events are emitted for Phase 2. Read operations are not audited.
 
@@ -426,8 +426,10 @@ No new audit events are emitted for Phase 2. Read operations are not audited.
 - Web clone / zip download.
 - htmx partial swaps for the ref switcher (currently full-page navigation).
 - Branch and tag management through the UI.
-- Git errors during a read surface as HTTP 404 (a read-only-path simplification;
-  no distinction between "file not found" and "git command failed").
+- Git errors during a read surface as HTTP 404 when the object, ref, or path does
+  not exist (missing-ref/missing-path/missing-object checks return ErrNotFound →
+  404); an unexpected git failure that occurs after the object's existence is
+  confirmed (e.g. cat-file content read, diff generation) surfaces as HTTP 500.
 
 ---
 
@@ -441,7 +443,7 @@ No new audit events are emitted for Phase 2. Read operations are not audited.
 | `web_login_total` | `result` | Login outcomes: `success`, `invalid`, `ratelimited` |
 | `web_sessions_active` | — | Count of non-expired sessions |
 | `web_browse_total` | `view` | Browse requests by view, counted after authorization (includes reads that subsequently fail with 404/503; per-outcome counts are in web_requests_total); `view` ∈ `repo`, `tree`, `blob`, `raw`, `commits`, `commit` (Phase 2) |
-| `web_browse_mirror_wait_seconds` | — | Mirror open/materialize latency per browse request (Phase 2) |
+| `web_browse_mirror_wait_seconds` | — | Mirror open/materialize latency; emitted once per git read operation (a single page may perform several, e.g. repo home = tree + README), not once per request (Phase 2) |
 
 ### 7.2 Audit events
 

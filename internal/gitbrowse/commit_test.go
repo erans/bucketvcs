@@ -170,3 +170,23 @@ func TestCommit_MergeShowsFirstParentDiff(t *testing.T) {
 		t.Fatalf("merge diff missing c.txt (first-parent diff suppressed?), files = %+v", cd.Files)
 	}
 }
+
+func TestCommit_NonASCIIPathUnquoted(t *testing.T) {
+	svc, tenant, repo, oids := fixture(t)
+	cd, err := svc.Commit(context.Background(), tenant, repo, oids["c2"])
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	var saw bool
+	for _, f := range cd.Files {
+		if f.NewPath == "café.txt" {
+			saw = true
+		}
+		if strings.Contains(f.NewPath, "\\303") || strings.HasPrefix(f.NewPath, "\"") {
+			t.Fatalf("c-quoted path leaked: %q", f.NewPath)
+		}
+	}
+	if !saw {
+		t.Fatalf("café.txt not in c2 diff: %+v", cd.Files)
+	}
+}

@@ -1151,6 +1151,9 @@ func CatFileCommit(ctx context.Context, dir, oid string) ([]byte, error) {
 // for merge commits, where bare `diff-tree -p <oid>` suppresses the patch);
 // when parent is "" the commit is treated as a root and diffed against the
 // empty tree via --root.
+//
+// Filenames in diff headers are emitted verbatim (no c-quoting) because
+// core.quotePath is explicitly disabled via -c core.quotePath=false.
 func DiffTreePatch(ctx context.Context, dir, oid, parent string) ([]byte, error) {
 	if !validRefOrOID(oid) {
 		return nil, fmt.Errorf("gitcli: DiffTreePatch: invalid oid %q", oid)
@@ -1159,9 +1162,9 @@ func DiffTreePatch(ctx context.Context, dir, oid, parent string) ([]byte, error)
 		if !validRefOrOID(parent) {
 			return nil, fmt.Errorf("gitcli: DiffTreePatch: invalid parent %q", parent)
 		}
-		return run(ctx, dir, "--no-replace-objects", "diff-tree", "-p", "-M",
+		return run(ctx, dir, "-c", "core.quotePath=false", "--no-replace-objects", "diff-tree", "-p", "-M",
 			"--no-color", parent, oid)
 	}
-	return run(ctx, dir, "--no-replace-objects", "diff-tree", "-p", "-M",
+	return run(ctx, dir, "-c", "core.quotePath=false", "--no-replace-objects", "diff-tree", "-p", "-M",
 		"--root", "--no-color", oid)
 }
