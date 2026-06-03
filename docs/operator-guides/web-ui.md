@@ -320,7 +320,8 @@ same name, the branch wins; use the tag's commit OID to browse the tag.
 
 Each browse page shows a branch/tag dropdown populated from all known refs. The
 switcher uses plain links (full-page navigation); htmx partial swaps are a
-deferred item.
+deferred item. The single-commit view is the exception: commits are addressed
+by OID, so it omits the switcher (and skips the ref load entirely).
 
 ### 6.3 README rendering
 
@@ -343,7 +344,7 @@ skipped.
 | Text blob ≤ 1 MiB | Syntax-highlighted via **chroma** (inline styles, "bw" theme) |
 | Text blob > 1 MiB | Plain escaped `<pre>` (no highlighting) |
 | Binary blob (NUL byte in first 8 KiB) | Message + download link; no source rendered |
-| Any blob > 10 MiB | Message + download link; bytes not fetched from the mirror |
+| Any blob > 10 MiB | "Too large" message; bytes are not fetched and the file is not downloadable (the raw endpoint returns HTTP 413) |
 
 Chroma selects a lexer by filename; if that fails it falls back to content
 analysis, then to a plain-text lexer. Inline styles (`WithClasses(false)`) keep
@@ -359,8 +360,11 @@ Because repo content is attacker-controlled, every response is hardened:
 | `X-Content-Type-Options` | `nosniff` |
 | `Content-Security-Policy` | `default-src 'none'; sandbox` |
 | `Content-Type` (text) | `text/plain; charset=utf-8` |
-| `Content-Type` (binary or >10 MiB) | `application/octet-stream` |
-| `Content-Disposition` (binary or >10 MiB) | `attachment; filename*=UTF-8''<RFC 5987 encoded name>` |
+| `Content-Type` (binary) | `application/octet-stream` |
+| `Content-Disposition` (binary) | `attachment; filename*=UTF-8''<RFC 5987 encoded name>` |
+
+Blobs over the 10 MiB cap are not served at all: the raw endpoint returns
+HTTP 413 rather than an empty attachment.
 
 These headers together ensure that HTML, SVG, and other active content cannot
 execute inline under the UI's origin, even when a browser ignores

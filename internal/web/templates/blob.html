@@ -2,7 +2,7 @@
 {{define "content"}}
 <div class="browse">
   <div class="repohdr"><span class="path">{{.Tenant}}/{{.Repo}}</span></div>
-  <div class="path">{{.Path}} &nbsp;<a href="/{{.Tenant}}/{{.Repo}}/raw/{{urlpath .RefOrOID}}/{{urlpath .Path}}">[raw]</a></div>
+  <div class="path">{{.Path}}{{if not .Blob.TooLarge}} &nbsp;<a href="/{{.Tenant}}/{{.Repo}}/raw/{{urlpath .RefOrOID}}/{{urlpath .Path}}">[raw]</a>{{end}}</div>
   {{if .Blob.TooLarge}}
     <p class="empty">file too large to display ({{.Blob.Size}} bytes)</p>
   {{else if .Blob.Binary}}
