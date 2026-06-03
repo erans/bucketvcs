@@ -23,6 +23,7 @@ type Deps struct {
 	SessionTTL time.Duration      // 0 => DefaultSessionTTL
 	TrustProxy bool               // for Secure-cookie / client-IP decisions
 	OIDC       *OIDCProvider      // nil => OIDC login disabled
+	Content    ContentStore       // nil => code browse disabled (routes 404)
 }
 
 type server struct {
@@ -34,6 +35,7 @@ type server struct {
 	trustProxy bool
 	mux        *http.ServeMux
 	oidc       *OIDCProvider
+	content    ContentStore
 	oauthCfg   *oauth2.Config
 	verifier   idTokenVerifier
 }
@@ -58,6 +60,7 @@ func NewHandler(d Deps) http.Handler {
 		render:     r,
 		ttl:        d.SessionTTL,
 		trustProxy: d.TrustProxy,
+		content:    d.Content,
 		mux:        http.NewServeMux(),
 	}
 	if d.OIDC != nil {
