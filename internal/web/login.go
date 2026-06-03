@@ -37,7 +37,7 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 					sec = 1
 				}
 				w.Header().Set("Retry-After", strconv.Itoa(sec))
-				EmitLoginMetric(r.Context(), s.logger, "ratelimited")
+				EmitLoginMetric(r.Context(), s.logger, "ratelimited", "password")
 				s.renderError(w, r, http.StatusTooManyRequests, "too many attempts; try again later")
 				return
 			}
@@ -48,7 +48,7 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			if auth.IsCredentialError(err) {
 				s.limiter.MarkFailure(ip, username) // nil-safe
 			}
-			EmitLoginMetric(r.Context(), s.logger, "invalid")
+			EmitLoginMetric(r.Context(), s.logger, "invalid", "password")
 			tok := issueCSRF(w, secure)
 			w.WriteHeader(http.StatusUnauthorized)
 			_ = s.render.render(w, "login.html", loginData{
@@ -73,7 +73,7 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			Secure:   secure,
 			SameSite: http.SameSiteLaxMode,
 		})
-		EmitLoginMetric(r.Context(), s.logger, "success")
+		EmitLoginMetric(r.Context(), s.logger, "success", "password")
 		EmitSessionCreated(r.Context(), s.logger, actor.UserID, actor.Name, "password")
 		http.Redirect(w, r, safeNext(r.PostFormValue("next")), http.StatusSeeOther)
 

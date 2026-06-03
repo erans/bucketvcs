@@ -5,14 +5,16 @@ import (
 	"log/slog"
 )
 
-// EmitLoginMetric records a login outcome. result ∈ "success"|"invalid"|"ratelimited".
-func EmitLoginMetric(ctx context.Context, logger *slog.Logger, result string) {
+// EmitLoginMetric records a login outcome. result ∈ "success"|"invalid"|"ratelimited";
+// provider ∈ "password"|"oidc".
+func EmitLoginMetric(ctx context.Context, logger *slog.Logger, result, provider string) {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "metric",
 		slog.String("name", "web_login_total"),
 		slog.String("result", result),
+		slog.String("provider", provider),
 		slog.Int("value", 1),
 	)
 }
