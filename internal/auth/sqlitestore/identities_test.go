@@ -67,3 +67,55 @@ func TestSetEmail_DupAndUnknownAndClearAndDisabled(t *testing.T) {
 		t.Fatalf("disabled: want ErrUserDisabled, got %v", err)
 	}
 }
+
+func TestIdentityLinkFindListRemove(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+	uid, _ := s.CreateUser(ctx, "alice", false)
+	const iss, sub = "https://idp.example.com", "subject-123"
+
+	if _, err := s.FindIdentity(ctx, iss, sub); !errors.Is(err, auth.ErrNoSuchUser) {
+		t.Fatalf("unlinked: want ErrNoSuchUser, got %v", err)
+	}
+	if err := s.LinkIdentity(ctx, uid, iss, sub, "alice@corp.com"); err != nil {
+		t.Fatalf("LinkIdentity: %v", err)
+	}
+	got, err := s.FindIdentity(ctx, iss, sub)
+	if err != nil {
+		t.Fatalf("FindIdentity: %v", err)
+	}
+	if got.UserID != uid || got.Name != "alice" {
+		t.Fatalf("actor = %+v", got)
+	}
+	uid2, _ := s.CreateUser(ctx, "bob", false)
+	if err := s.LinkIdentity(ctx, uid2, iss, sub, "bob@corp.com"); !errors.Is(err, auth.ErrConflict) {
+		t.Fatalf("dup identity: want ErrConflict, got %v", err)
+	}
+	ids, err := s.ListIdentities(ctx, "alice")
+	if err != nil || len(ids) != 1 || ids[0].Issuer != iss || ids[0].Subject != sub {
+		t.Fatalf("ListIdentities = %+v, err %v", ids, err)
+	}
+	if err := s.RemoveIdentity(ctx, iss, sub); err != nil {
+		t.Fatalf("RemoveIdentity: %v", err)
+	}
+	if _, err := s.FindIdentity(ctx, iss, sub); !errors.Is(err, auth.ErrNoSuchUser) {
+		t.Fatalf("after remove: want ErrNoSuchUser, got %v", err)
+	}
+}
+
+func TestIdentity_CascadeOnUserDelete(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+	uid, _ := s.CreateUser(ctx, "carol", false)
+	if err := s.LinkIdentity(ctx, uid, "https://i", "s", "c@x.com"); err != nil {
+		t.Fatalf("LinkIdentity: %v", err)
+	}
+	if err := s.DeleteUser(ctx, "carol"); err != nil {
+		t.Fatalf("DeleteUser: %v", err)
+	}
+	if _, err := s.FindIdentity(ctx, "https://i", "s"); !errors.Is(err, auth.ErrNoSuchUser) {
+		t.Fatalf("after user delete: want ErrNoSuchUser, got %v", err)
+	}
+}
