@@ -2,7 +2,6 @@ package web
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"html/template"
 	"net/http"
@@ -283,9 +282,4 @@ func (s *server) renderBrowse(w http.ResponseWriter, r *http.Request, page strin
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = buf.WriteTo(w)
 	EmitRequestMetric(r.Context(), s.logger, strings.TrimSuffix(page, ".html"), http.StatusOK)
-}
-
-// renderReadme is implemented in Task 16; this stub returns no README.
-func (s *server) renderReadme(ctx context.Context, br browseRoute, oid string, entries []browsemodel.TreeEntry) template.HTML {
-	return ""
 }
