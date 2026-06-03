@@ -18,9 +18,11 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.101.0
 	github.com/aws/smithy-go v1.25.1
 	github.com/go-jose/go-jose/v4 v4.1.4
+	github.com/jackc/pgx/v5 v5.9.2
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/tursodatabase/libsql-client-go v0.0.0-20260514053736-a9a8fadfe885
 	golang.org/x/crypto v0.50.0
+	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sync v0.20.0
 	golang.org/x/sys v0.43.0
 	google.golang.org/api v0.274.0
@@ -69,7 +71,6 @@ require (
 	github.com/googleapis/gax-go/v2 v2.21.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
-	github.com/jackc/pgx/v5 v5.9.2 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
@@ -89,7 +90,6 @@ require (
 	go.opentelemetry.io/otel/trace v1.43.0 // indirect
 	golang.org/x/exp v0.0.0-20240325151524-a685a6edb6d8 // indirect
 	golang.org/x/net v0.52.0 // indirect
-	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/text v0.36.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/genproto v0.0.0-20260319201613-d00831a3d3e7 // indirect
