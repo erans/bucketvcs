@@ -2,7 +2,6 @@
 {{define "content"}}
 <div class="settings">
   {{template "adminnav" .}}
-  {{if .Flash}}<p class="flash">{{.Flash}}</p>{{end}}
   <h2>lfs quotas</h2>
   {{if .Enabled}}
   {{if .Quotas}}

@@ -7,7 +7,6 @@
   {{if not .Enabled}}
   <p class="hint">policy enforcement is not enabled on this server.</p>
   {{else}}
-  {{if .Flash}}<p class="flash">{{.Flash}}</p>{{end}}
   <h3>protected refs (Tier 1)</h3>
   <p class="hint">rules block deletion and/or non-fast-forward pushes on matching refs.</p>
   {{if .Refs}}

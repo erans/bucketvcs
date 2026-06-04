@@ -5,7 +5,6 @@
   {{template "reposettingsnav" .}}
   <h2>deliveries for endpoint {{.Endpoint.ID}}</h2>
   <p class="hint">url: <span class="mono">{{.Endpoint.URL}}</span> · events: {{.Endpoint.EventMask.String}} · <a href="/{{.Tenant}}/{{.Repo}}/settings/webhooks">← back to webhooks</a></p>
-  {{if .Flash}}<p class="flash">{{.Flash}}</p>{{end}}
   {{if .Deliveries}}
   <table>
     <thead>
