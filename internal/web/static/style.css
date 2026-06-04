@@ -19,3 +19,60 @@ h2 { color: var(--dim); border-bottom: 1px dashed var(--dim); }
 .empty, .who { color: var(--dim); }
 .login label { display: block; margin: .5rem 0; }
 .login input { background: #111; color: var(--fg); border: 1px solid var(--dim); font: inherit; padding: .2rem .4rem; }
+
+/* ── Phase 2 browse (direction B: minimal rules + tree glyphs) ─────────── */
+main:has(.browse) { max-width: 100ch; }
+
+.browse .repohdr { display: flex; justify-content: space-between; align-items: baseline;
+  border-bottom: 1px solid var(--dim); padding-bottom: .4rem; margin-bottom: .6rem; }
+.browse .repohdr .path { color: var(--accent); }
+.browse .refs { color: var(--dim); font-size: .92em; margin-bottom: 1rem; }
+.browse .refs a { color: var(--accent); }
+.browse > .path { color: var(--fg); margin: .6rem 0; }
+
+.refswitch { display: inline-flex; gap: .4rem; align-items: center; }
+.refswitch select { background: #111; color: var(--fg); border: 1px solid var(--dim);
+  font: inherit; padding: .1rem .4rem; }
+
+table.tree { border-collapse: collapse; width: 100%; }
+table.tree td { padding: .1rem .6rem .1rem 0; vertical-align: baseline; }
+table.tree td.kind { color: var(--dim); width: 4ch; white-space: nowrap; }
+table.tree td.kind::before { content: "├─ "; color: var(--dim); }
+table.tree tr:last-child td.kind::before { content: "└─ "; }
+table.tree td.name a { color: var(--accent); }
+table.tree td.size { color: var(--dim); text-align: right; white-space: nowrap; width: 9ch; }
+table.tree td.age { color: var(--dim); text-align: right; white-space: nowrap;
+  max-width: 38ch; overflow: hidden; text-overflow: ellipsis; }
+table.tree td.age .lastmsg { overflow: hidden; text-overflow: ellipsis; }
+
+.readme { margin-top: 1.5rem; border-top: 1px dashed var(--dim); padding-top: .8rem;
+  max-width: 72ch; }
+.readme img { max-width: 100%; }
+
+table.commits { border-collapse: collapse; width: 100%; }
+table.commits td { padding: .15rem .8rem .15rem 0; vertical-align: baseline; }
+table.commits td.oid { width: 13ch; }
+table.commits td.who, table.commits td.age { color: var(--dim); white-space: nowrap; }
+table.commits td.age { text-align: right; }
+.pager { margin-top: 1rem; }
+.pager a { margin-right: 1rem; }
+.pager a::before { content: "["; color: var(--dim); }
+.pager a::after { content: "]"; color: var(--dim); }
+
+.commitmeta { border-bottom: 1px solid var(--dim); padding-bottom: .6rem; margin-bottom: 1rem; }
+.commitmeta .who { color: var(--dim); margin: .3rem 0; }
+.commitmeta .message { border-left: 2px solid var(--dim); padding-left: .8rem;
+  color: var(--fg); white-space: pre-wrap; }
+
+.filediff { margin: 1.2rem 0; }
+.filediff .fhdr { color: var(--dim); border-bottom: 1px dashed var(--dim);
+  padding-bottom: .2rem; margin-bottom: .3rem; }
+.filediff .hunk { color: var(--dim); background: #161616; padding: 0 .5rem; margin-top: .4rem; }
+.dl { white-space: pre-wrap; padding: 0 .5rem; }
+.dl.add { background: rgba(143, 217, 143, .13); color: #b9e9b9; }
+.dl.del { background: rgba(217, 143, 143, .13); color: #e9b3b3; }
+.dl.ctx { color: var(--fg); }
+
+.code { margin-top: .6rem; }
+/* pre.blob is emitted by highlight.go's plainPre fallback (oversize/unhighlightable blobs) */
+pre.blob { background: #111; border: 1px solid #333; padding: .5rem; overflow-x: auto; }
