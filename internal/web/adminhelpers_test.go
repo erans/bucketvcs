@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
+	"github.com/bucketvcs/bucketvcs/internal/hooks"
 	"github.com/bucketvcs/bucketvcs/internal/policy"
 )
 
@@ -142,8 +143,10 @@ func TestRenderBufferedNilLogger(t *testing.T) {
 	}
 }
 
-// TestFlashableErr pins the conservative validation-vs-internal predicates so
-// wrapped DB errors never leak into a flash.
+// TestFlashableErr pins the pure-sentinel validation-vs-internal predicates so
+// wrapped DB errors never leak into a flash. After the M-debt sentinel refactor
+// flashableErr matches ONLY typed sentinels (policy.ErrInvalidInput,
+// policy.ErrConflict, hooks.ErrInvalidInput) — no error-text prefix matching.
 func TestFlashableErr(t *testing.T) {
 	dbWrap := errors.New("disk I/O error")
 	cases := []struct {
@@ -152,20 +155,24 @@ func TestFlashableErr(t *testing.T) {
 		want bool
 	}{
 		{"nil", nil, false},
-		// policy.Add validation messages.
-		{"policy empty pattern", fmt.Errorf("policy: refname_pattern must not be empty"), true},
-		{"policy invalid refname", fmt.Errorf("policy: invalid refname_pattern %q: %w", "[", errors.New("syntax error in pattern")), true},
-		// policy.Add DB wrap ("policy add ...", no colon) → masked.
+		// policy.Add validation messages now wrap ErrInvalidInput.
+		{"policy empty pattern", fmt.Errorf("%w: refname_pattern must not be empty", policy.ErrInvalidInput), true},
+		{"policy invalid refname", fmt.Errorf("%w: invalid refname_pattern %q: %v", policy.ErrInvalidInput, "[", errors.New("syntax error in pattern")), true},
+		// policy.Add DB wrap ("policy add ...") → masked.
 		{"policy.Add db wrap", fmt.Errorf("policy add %q/%q %q: %w", "acme", "demo", "refs/heads/main", dbWrap), false},
 		// policy.AddPathRule validation wraps ErrInvalidInput.
 		{"path ErrInvalidInput", fmt.Errorf("%w: invalid path_pattern: bad", policy.ErrInvalidInput), true},
 		// policy.AddPathRule DB wrap ("policy: add path rule: ...") → masked
-		// despite the "policy: " prefix.
+		// despite the "policy: " prefix (no sentinel).
 		{"path db wrap", fmt.Errorf("policy: add path rule: %w", dbWrap), false},
-		// hooks validateRow messages.
-		{"hooks validate", fmt.Errorf("hooks: invalid script_name %q (must be ...)", "bad/name"), true},
+		// hooks validateRow messages now wrap hooks.ErrInvalidInput.
+		{"hooks validate", fmt.Errorf("%w: invalid script_name %q (must be ...)", hooks.ErrInvalidInput, "bad/name"), true},
 		// hooks DB wrap ("hooks.Add: ...") → masked.
 		{"hooks.Add db wrap", fmt.Errorf("hooks.Add: %w", dbWrap), false},
+		// A DB error whose text begins "hooks: " but carries NO sentinel must
+		// NOT be flashable. The deleted string-prefix matcher would have leaked
+		// it — this case is the whole point of the sentinel refactor.
+		{"hooks-prefixed db error no sentinel", fmt.Errorf("hooks: disk I/O"), false},
 		// ErrConflict reserved-sentinel conformance.
 		{"policy ErrConflict", fmt.Errorf("wrapped: %w", policy.ErrConflict), true},
 		// Arbitrary unknown error → masked.

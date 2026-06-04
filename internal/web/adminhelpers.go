@@ -7,47 +7,33 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"strings"
 
+	"github.com/bucketvcs/bucketvcs/internal/hooks"
 	"github.com/bucketvcs/bucketvcs/internal/policy"
 )
 
 // flashableErr reports whether err is a user-actionable validation error whose
 // text is safe to surface in a flash (vs an internal failure to mask as 500).
 //
-// Predicates are derived conservatively from the service code so an unknown
-// (wrapped DB) error always falls through to the 500 path:
+// Matches ONLY typed sentinels — never error-text prefixes — so a future
+// rewording of a service's validation message cannot silently downgrade
+// validation feedback to a 500, and a DB error whose text happens to begin
+// "policy: " or "hooks: " can never leak to the browser:
 //
-//   - policy.AddPathRule wraps policy.ErrInvalidInput for bad patterns; its DB
-//     failure is fmt.Errorf("policy: add path rule: %w", err) — caught by NONE
-//     of the predicates below, so it masks as 500.
-//   - policy.Add returns fmt.Errorf("policy: refname_pattern must not be empty")
-//     and fmt.Errorf("policy: invalid refname_pattern %q: %w", ...) for
-//     validation; its DB failure is fmt.Errorf("policy add %q/...", ...) (no
-//     colon after "policy", so the prefixes below do not match it).
-//   - hooks.Store.Add returns validateRow errors prefixed "hooks: "; its DB
-//     failure is fmt.Errorf("hooks.Add: %w", err) (prefix "hooks.Add: ", not
-//     "hooks: ").
+//   - policy.Add and policy.AddPathRule wrap policy.ErrInvalidInput on bad
+//     input; their DB failures wrap the underlying sqlite error WITHOUT the
+//     sentinel, so they fall through to the 500 path.
+//   - hooks.Store.Add wraps hooks.ErrInvalidInput on validateRow failures; its
+//     DB failure is fmt.Errorf("hooks.Add: %w", err) (no sentinel) → masked.
 //
 // policy.ErrConflict is matched for interface conformance (reserved sentinel).
 func flashableErr(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, policy.ErrInvalidInput) || errors.Is(err, policy.ErrConflict) {
-		return true
-	}
-	msg := err.Error()
-	// policy.Add validation messages (NOT its DB wrap "policy add ...").
-	if strings.HasPrefix(msg, "policy: refname_pattern ") ||
-		strings.HasPrefix(msg, "policy: invalid refname_pattern ") {
-		return true
-	}
-	// hooks.Store.Add validateRow messages (NOT its DB wrap "hooks.Add: ...").
-	if strings.HasPrefix(msg, "hooks: ") {
-		return true
-	}
-	return false
+	return errors.Is(err, policy.ErrInvalidInput) ||
+		errors.Is(err, policy.ErrConflict) ||
+		errors.Is(err, hooks.ErrInvalidInput)
 }
 
 // postGuard enforces POST + parseable form + valid CSRF, writing the error

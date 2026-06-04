@@ -40,10 +40,10 @@ func New(db sqlitestore.Querier) *Service {
 // at Add time so they can't silently break receive-pack later.
 func (s *Service) Add(ctx context.Context, r ProtectedRef) error {
 	if r.RefnamePattern == "" {
-		return fmt.Errorf("policy: refname_pattern must not be empty")
+		return fmt.Errorf("%w: refname_pattern must not be empty", ErrInvalidInput)
 	}
 	if _, err := path.Match(r.RefnamePattern, ""); err != nil {
-		return fmt.Errorf("policy: invalid refname_pattern %q: %w", r.RefnamePattern, err)
+		return fmt.Errorf("%w: invalid refname_pattern %q: %v", ErrInvalidInput, r.RefnamePattern, err)
 	}
 	now := time.Now().Unix()
 	_, err := s.db.ExecContext(ctx, `
