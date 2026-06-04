@@ -61,6 +61,7 @@ var ErrReservedUser = errors.New("sqlitestore: cannot modify reserved system use
 type User struct {
 	ID         string
 	Name       string
+	Email      string // empty when NULL
 	IsAdmin    bool
 	CreatedAt  int64
 	DisabledAt *int64
@@ -129,7 +130,7 @@ func (s *Store) GetUserByName(ctx context.Context, name string) (*auth.User, err
 // output or CLI listings.
 func (s *Store) ListUsers(ctx context.Context) ([]*User, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, is_admin, created_at, disabled_at FROM users WHERE name != ? ORDER BY name`,
+		`SELECT id, name, COALESCE(email,''), is_admin, created_at, disabled_at FROM users WHERE name != ? ORDER BY name`,
 		oidcSystemUserID,
 	)
 	if err != nil {
@@ -141,7 +142,7 @@ func (s *Store) ListUsers(ctx context.Context) ([]*User, error) {
 		u := &User{}
 		var adminInt int
 		var disabled sql.NullInt64
-		if err := rows.Scan(&u.ID, &u.Name, &adminInt, &u.CreatedAt, &disabled); err != nil {
+		if err := rows.Scan(&u.ID, &u.Name, &u.Email, &adminInt, &u.CreatedAt, &disabled); err != nil {
 			return nil, err
 		}
 		u.IsAdmin = adminInt != 0
