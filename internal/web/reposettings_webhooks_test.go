@@ -45,6 +45,7 @@ type extendedFakeWebhooks struct {
 	disableFn        func(ctx context.Context, id int64) error
 	rotateSecretFn   func(ctx context.Context, id int64) (string, error)
 	listDeliveriesFn func(ctx context.Context, f webhooks.ListDeliveriesFilter) ([]webhooks.Delivery, error)
+	showDeliveryFn   func(ctx context.Context, id string) (webhooks.Delivery, error)
 	replayDeliveryFn func(ctx context.Context, id string) error
 	enqueueFn        func(ctx context.Context, event webhooks.Event, tenant, repo, actor string, payload any) error
 }
@@ -90,6 +91,12 @@ func (w *extendedFakeWebhooks) ListDeliveries(ctx context.Context, f webhooks.Li
 		return w.listDeliveriesFn(ctx, f)
 	}
 	return nil, nil
+}
+func (w *extendedFakeWebhooks) ShowDelivery(ctx context.Context, id string) (webhooks.Delivery, error) {
+	if w.showDeliveryFn != nil {
+		return w.showDeliveryFn(ctx, id)
+	}
+	return webhooks.Delivery{}, nil
 }
 func (w *extendedFakeWebhooks) ReplayDelivery(ctx context.Context, id string) error {
 	if w.replayDeliveryFn != nil {
@@ -678,6 +685,9 @@ func TestRepoSettingsWebhooksReplay(t *testing.T) {
 			listFn: func(ctx context.Context, tenant, repo string) ([]webhooks.Endpoint, error) {
 				return []webhooks.Endpoint{stdEndpoint}, nil
 			},
+			showDeliveryFn: func(ctx context.Context, id string) (webhooks.Delivery, error) {
+				return webhooks.Delivery{ID: id, EndpointID: 42}, nil
+			},
 			replayDeliveryFn: func(ctx context.Context, id string) error {
 				return fmt.Errorf("webhooks: cannot replay %s: row is in_flight", id)
 			},
@@ -707,6 +717,9 @@ func TestRepoSettingsWebhooksReplay(t *testing.T) {
 			listFn: func(ctx context.Context, tenant, repo string) ([]webhooks.Endpoint, error) {
 				return []webhooks.Endpoint{stdEndpoint}, nil
 			},
+			showDeliveryFn: func(ctx context.Context, id string) (webhooks.Delivery, error) {
+				return webhooks.Delivery{ID: id, EndpointID: 42}, nil
+			},
 			replayDeliveryFn: func(ctx context.Context, id string) error {
 				replayedID = id
 				return nil
@@ -734,6 +747,72 @@ func TestRepoSettingsWebhooksReplay(t *testing.T) {
 		}
 		if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
 			t.Fatal("expected flash cookie on replay success")
+		}
+	})
+}
+
+// TestWebhooksReplayForeignDelivery covers the cross-tenant replay bypass:
+// even with an owned endpoint_id, the posted delivery_id must actually belong
+// to that endpoint. A delivery whose EndpointID != the owned endpoint (or a
+// no-such-delivery error from ShowDelivery) must 404 without calling
+// ReplayDelivery — hiding no-such-delivery and foreign-delivery alike.
+func TestWebhooksReplayForeignDelivery(t *testing.T) {
+	t.Run("foreign delivery (owned endpoint, mismatched delivery) → 404, ReplayDelivery not called", func(t *testing.T) {
+		store := webhookStore()
+		var replayed bool
+		wh := &extendedFakeWebhooks{
+			listFn: func(ctx context.Context, tenant, repo string) ([]webhooks.Endpoint, error) {
+				return []webhooks.Endpoint{stdEndpoint}, nil // owns endpoint 42
+			},
+			showDeliveryFn: func(ctx context.Context, id string) (webhooks.Delivery, error) {
+				// delivery exists but belongs to a DIFFERENT endpoint (cross-repo/tenant)
+				return webhooks.Delivery{ID: id, EndpointID: 7777}, nil
+			},
+			replayDeliveryFn: func(ctx context.Context, id string) error {
+				replayed = true
+				return nil
+			},
+		}
+		h := newTestHandlerWith(store, func(d *Deps) { d.Webhooks = wh })
+		req := csrfPost(t, "/acme/demo/settings/webhooks/replay",
+			url.Values{"delivery_id": {"foreign-del-1"}, "endpoint_id": {"42"}})
+		addSessionCookie(t, req, store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("foreign delivery: status %d, want 404; body=%s", rec.Code, rec.Body.String())
+		}
+		if replayed {
+			t.Fatal("ReplayDelivery must not be called for a delivery owned by another endpoint")
+		}
+	})
+
+	t.Run("no such delivery (ShowDelivery error) → 404, ReplayDelivery not called", func(t *testing.T) {
+		store := webhookStore()
+		var replayed bool
+		wh := &extendedFakeWebhooks{
+			listFn: func(ctx context.Context, tenant, repo string) ([]webhooks.Endpoint, error) {
+				return []webhooks.Endpoint{stdEndpoint}, nil
+			},
+			showDeliveryFn: func(ctx context.Context, id string) (webhooks.Delivery, error) {
+				return webhooks.Delivery{}, webhooks.ErrNotFound
+			},
+			replayDeliveryFn: func(ctx context.Context, id string) error {
+				replayed = true
+				return nil
+			},
+		}
+		h := newTestHandlerWith(store, func(d *Deps) { d.Webhooks = wh })
+		req := csrfPost(t, "/acme/demo/settings/webhooks/replay",
+			url.Values{"delivery_id": {"ghost-del"}, "endpoint_id": {"42"}})
+		addSessionCookie(t, req, store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("no such delivery: status %d, want 404; body=%s", rec.Code, rec.Body.String())
+		}
+		if replayed {
+			t.Fatal("ReplayDelivery must not be called when ShowDelivery errors")
 		}
 	})
 }

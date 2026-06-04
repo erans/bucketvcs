@@ -20,6 +20,7 @@ type WebhookAdmin interface {
 	Disable(ctx context.Context, id int64) error
 	RotateSecret(ctx context.Context, id int64) (string, error)
 	ListDeliveries(ctx context.Context, f webhooks.ListDeliveriesFilter) ([]webhooks.Delivery, error)
+	ShowDelivery(ctx context.Context, id string) (webhooks.Delivery, error)
 	ReplayDelivery(ctx context.Context, id string) error
 	Enqueue(ctx context.Context, event webhooks.Event, tenant, repo, actor string, payload any) error
 }

@@ -395,16 +395,12 @@ func (s *server) webhooksReplay(w http.ResponseWriter, r *http.Request, sr setti
 		s.renderError(w, r, http.StatusNotFound, "not found")
 		return
 	}
-	// Ownership check: the delivery's endpoint must belong to this repo.
-	// We do this by listing the repo's endpoints and checking that the
-	// delivery's endpoint_id matches one of them. We need to know the
-	// delivery's EndpointID first — however the service only exposes
-	// ReplayDelivery (not ShowDelivery) through the interface. We work
-	// around this by: listing deliveries for each owned endpoint and finding
-	// the delivery id, OR by listing endpoints and using a small fan-out.
-	// Simpler approach: we know the endpoint_id from the form (hidden field),
-	// so we require the caller to also post endpoint_id. Verify ownership
-	// using ownEndpointOr404, then replay.
+	// Two-step ownership check, both required:
+	//  1. the posted endpoint_id must belong to this (tenant, repo), and
+	//  2. the posted delivery_id must actually belong to that endpoint.
+	// Step 1 alone is insufficient: a repo-admin could otherwise replay ANY
+	// delivery in the system by pairing their own endpoint_id with a foreign
+	// delivery_id (ReplayDelivery checks only status, not ownership).
 	eps, err := s.webhooks.List(r.Context(), sr.tenant, sr.repo)
 	if err != nil {
 		s.logger.Error("webhooks: list for replay check", "tenant", sr.tenant, "repo", sr.repo, "err", err)
@@ -428,6 +424,13 @@ func (s *server) webhooksReplay(w http.ResponseWriter, r *http.Request, sr setti
 	}
 	if !found {
 		// anti-enumeration
+		s.renderError(w, r, http.StatusNotFound, "not found")
+		return
+	}
+	// Step 2: bind the delivery to the owned endpoint. A 404 here hides
+	// no-such-delivery and foreign-delivery (cross-repo/tenant) alike.
+	d, err := s.webhooks.ShowDelivery(r.Context(), deliveryID)
+	if err != nil || d.EndpointID != ep.ID {
 		s.renderError(w, r, http.StatusNotFound, "not found")
 		return
 	}

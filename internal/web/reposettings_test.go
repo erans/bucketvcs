@@ -348,6 +348,9 @@ func (w *fakeWebhooks) RotateSecret(ctx context.Context, id int64) (string, erro
 func (w *fakeWebhooks) ListDeliveries(ctx context.Context, f webhooks.ListDeliveriesFilter) ([]webhooks.Delivery, error) {
 	return nil, nil
 }
+func (w *fakeWebhooks) ShowDelivery(ctx context.Context, id string) (webhooks.Delivery, error) {
+	return webhooks.Delivery{}, nil
+}
 func (w *fakeWebhooks) ReplayDelivery(ctx context.Context, id string) error { return nil }
 func (w *fakeWebhooks) Enqueue(ctx context.Context, event webhooks.Event, tenant, repo, actor string, payload any) error {
 	if w.enqueue != nil {
