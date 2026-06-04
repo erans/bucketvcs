@@ -9,10 +9,7 @@ import (
 	"io"
 	"os"
 
-	"golang.org/x/crypto/ssh"
-
 	"github.com/bucketvcs/bucketvcs/internal/auth"
-	"github.com/bucketvcs/bucketvcs/internal/sshd"
 )
 
 // runRepoDeployKey dispatches `bucketvcs repo deploy-key <subcommand>`.
@@ -93,14 +90,11 @@ func repoDeployKeyAdd(ctx context.Context, args []string, stdout, stderr io.Writ
 		return 1
 	}
 
-	parsedKey, _, _, _, err := ssh.ParseAuthorizedKey(pubBytes)
+	key, err := auth.BuildDeploySSHKey(pubBytes, tenant, repo, perm, *label)
 	if err != nil {
 		fmt.Fprintf(stderr, "repo deploy-key add: not an OpenSSH public key: %v\n", err)
 		return 1
 	}
-	fp := sshd.SHA256Fingerprint(parsedKey)
-	keyType := parsedKey.Type()
-	wireBytes := parsedKey.Marshal()
 
 	db, _, err := openAuthDB("")
 	if err != nil {
@@ -119,22 +113,7 @@ func repoDeployKeyAdd(ctx context.Context, args []string, stdout, stderr io.Writ
 		return 1
 	}
 
-	keyID, err := auth.GenerateSSHKeyID()
-	if err != nil {
-		fmt.Fprintf(stderr, "repo deploy-key add: generate id: %v\n", err)
-		return 1
-	}
-
-	err = db.AddSSHKey(ctx, auth.SSHKey{
-		ID:          keyID,
-		Fingerprint: fp,
-		PublicKey:   wireBytes,
-		KeyType:     keyType,
-		Label:       *label,
-		ScopeTenant: tenant,
-		ScopeRepo:   repo,
-		ScopePerm:   perm,
-	})
+	err = db.AddSSHKey(ctx, key)
 	if err != nil {
 		if errors.Is(err, auth.ErrDuplicateFingerprint) {
 			fmt.Fprintln(stderr, "repo deploy-key add: fingerprint already registered")
@@ -145,7 +124,7 @@ func repoDeployKeyAdd(ctx context.Context, args []string, stdout, stderr io.Writ
 	}
 
 	fmt.Fprintf(stdout, "added deploy key %s (%s %s) %s for %s/%s\n",
-		keyID, fp, keyType, permStr, tenant, repo)
+		key.ID, key.Fingerprint, key.KeyType, permStr, tenant, repo)
 	return 0
 }
 
