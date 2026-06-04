@@ -135,6 +135,9 @@ func TestAdminRepoRegister_Validation(t *testing.T) {
 		{"bad name", "acme", "de mo"},
 		{"empty tenant", "", "demo"},
 		{"empty name", "acme", ""},
+		// Reserved web UI segments would be shadowed by the literal mux routes.
+		{"reserved tenant admin", "admin", "users"},
+		{"reserved tenant settings", "settings", "tokens"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

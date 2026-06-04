@@ -42,6 +42,7 @@ func (s *server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.renderBuffered(w, "settings.html", d); err != nil {
 		s.renderError(w, r, http.StatusInternalServerError, "render error")
+		return
 	}
 	EmitRequestMetric(r.Context(), s.logger, "settings", 200)
 }

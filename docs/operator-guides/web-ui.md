@@ -534,6 +534,12 @@ Navigation: the navbar shows `[ settings ]` when a user is logged in and
 `[ admin ]` when `IsAdmin`; repo browse pages show a `[settings]` link when the
 viewer is repo-admin or global-admin.
 
+Reserved tenant names: `admin`, `settings`, `login`, `logout`, and `healthz`
+collide with the web UI's top-level routes — a tenant with one of those names
+is unreachable through web browse/settings (git-protocol access via `.git`
+paths is unaffected). Web repo registration refuses these names; the CLI does
+not, so an operator who registers one accepts the web shadowing.
+
 ### 7.2 Authorization tiers
 
 | Area | Who can access | Why |

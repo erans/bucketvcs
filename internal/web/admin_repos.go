@@ -10,6 +10,17 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/webhooks"
 )
 
+// reservedTenantNames are top-level web UI path segments. A tenant with one
+// of these names would be shadowed by the explicit mux routes (the literal
+// /admin/* and /settings/* handlers win over the "/" browse catch-all), so
+// web registration refuses them. Git-protocol access is unaffected (.git
+// paths route to the gateway), and the CLI is intentionally not gated — an
+// operator who really wants such a tenant accepts the web shadowing, which
+// the operator guide documents.
+var reservedTenantNames = map[string]bool{
+	"admin": true, "settings": true, "login": true, "logout": true, "healthz": true,
+}
+
 type adminReposData struct {
 	base
 	Repos       []Repo
@@ -66,6 +77,11 @@ func (s *server) handleAdminRepoRegister(w http.ResponseWriter, r *http.Request)
 	if !routenames.ValidateName(tenant) || !routenames.ValidateName(name) {
 		EmitAdminActionMetric(r.Context(), s.logger, "admin_repos", "register", "invalid")
 		s.redirectFlash(w, r, dest, "invalid tenant or repo name")
+		return
+	}
+	if reservedTenantNames[tenant] {
+		EmitAdminActionMetric(r.Context(), s.logger, "admin_repos", "register", "invalid")
+		s.redirectFlash(w, r, dest, "tenant name "+tenant+" is reserved (shadows a web UI route)")
 		return
 	}
 	// No storage handle → registration is unavailable; surface as 404 so the
