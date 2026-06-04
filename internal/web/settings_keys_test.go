@@ -339,3 +339,55 @@ func TestKeyRevokeHappy(t *testing.T) {
 		t.Fatal("happy revoke: audit event auth.sshkey.revoked not logged")
 	}
 }
+
+// TestKeyRevokeAlreadyRevoked verifies that revoking a key whose RevokedAt is
+// already non-zero (i.e. already revoked, but still owned by the session user
+// and still visible in ListSSHKeysForUser) is handled harmlessly.
+//
+// The handler does NOT short-circuit on RevokedAt — it calls RevokeSSHKey and
+// issues a 303 flash exactly as for a first revoke.  This test locks that
+// behaviour: if someone adds an early-exit for "already revoked", the flash
+// assertion will fail and the change will require a deliberate update here.
+func TestKeyRevokeAlreadyRevoked(t *testing.T) {
+	store := newFakeStore()
+
+	const keyID = "bvsk_ALREADY000000000000000000"
+	now := time.Now().Unix()
+	store.listSSHKeysForUser = func(ctx context.Context, userID string) ([]auth.SSHKey, error) {
+		return []auth.SSHKey{
+			{
+				ID:          keyID,
+				Fingerprint: "SHA256:abc123",
+				KeyType:     "ssh-ed25519",
+				UserID:      userID,
+				CreatedAt:   now - 7200,
+				RevokedAt:   now - 3600, // already revoked
+			},
+		}, nil
+	}
+	var revokeCallCount int
+	store.revokeSSHKey = func(ctx context.Context, keyIDOrPrefix string) error {
+		revokeCallCount++
+		return nil
+	}
+	h := newTestHandler(store)
+
+	req := csrfPost(t, "/settings/keys/revoke", url.Values{"id": {keyID}})
+	addSessionCookie(t, req, store, userSession())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	// Handler must redirect (not 500 / 404), and must have called the store.
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("already-revoked: status %d, want 303; body:\n%s", rec.Code, rec.Body.String())
+	}
+	if loc := rec.Header().Get("Location"); loc != "/settings/keys" {
+		t.Fatalf("already-revoked: Location %q, want /settings/keys", loc)
+	}
+	if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
+		t.Fatal("already-revoked: no flash cookie")
+	}
+	if revokeCallCount != 1 {
+		t.Fatalf("already-revoked: RevokeSSHKey called %d times, want 1", revokeCallCount)
+	}
+}

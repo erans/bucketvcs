@@ -57,3 +57,27 @@ func TestBuildUserSSHKey_EmptyLabel(t *testing.T) {
 		t.Errorf("UserID = %q, want u2", k.UserID)
 	}
 }
+
+// TestBuildUserSSHKey_OptionsPrefix verifies that an authorized_keys line with
+// leading options (e.g. restrict,command=...) is accepted and produces the same
+// fingerprint as the plain line — options are stripped by ssh.ParseAuthorizedKey
+// before the wire bytes are marshalled, so only the key material matters.
+func TestBuildUserSSHKey_OptionsPrefix(t *testing.T) {
+	// Same ed25519 key material as testEd25519PubLine, but with a leading
+	// restrict,command= options field, as a client tool might paste it.
+	const optionsLine = `restrict,command="/bin/false" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFpotneIfuGp8t6tsn1sFS3ehwRteumxH4JRK5ZzNSb8 bucketvcs-test-ed25519`
+
+	plain, err := BuildUserSSHKey([]byte(testEd25519PubLine), "u3", "plain")
+	if err != nil {
+		t.Fatalf("BuildUserSSHKey plain: %v", err)
+	}
+	opts, err := BuildUserSSHKey([]byte(optionsLine), "u3", "with-options")
+	if err != nil {
+		t.Fatalf("BuildUserSSHKey options: %v", err)
+	}
+
+	if opts.Fingerprint != plain.Fingerprint {
+		t.Errorf("options-prefixed line fingerprint %q != plain line fingerprint %q; options should be discarded",
+			opts.Fingerprint, plain.Fingerprint)
+	}
+}
