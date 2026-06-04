@@ -575,3 +575,27 @@ func TestTree_ActivityColumnRendered(t *testing.T) {
 		t.Fatalf("unattributed entry should render —: %s", body)
 	}
 }
+
+func TestUIWideCSP(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+		tree: []browsemodel.TreeEntry{{Name: "a.txt", Path: "a.txt", Type: "blob", OID: "x"}},
+		blob: browsemodel.Blob{Path: "a.txt", Size: 2, Bytes: []byte("x\n")},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	const want = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+	for _, path := range []string{"/", "/login", "/acme/demo", "/acme/demo/tree/main", "/acme/demo/blob/main/a.txt", "/nope"} {
+		req := httptest.NewRequest("GET", path, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if got := rec.Header().Get("Content-Security-Policy"); got != want {
+			t.Errorf("%s: CSP = %q", path, got)
+		}
+	}
+	req := httptest.NewRequest("GET", "/acme/demo/raw/main/a.txt", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if got := rec.Header().Get("Content-Security-Policy"); got != "default-src 'none'; sandbox" {
+		t.Errorf("raw CSP = %q", got)
+	}
+}
