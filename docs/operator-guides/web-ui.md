@@ -1,9 +1,9 @@
-# M24 — Web UI (operator guide)
+# Web UI (operator guide)
 
-This guide covers the M24 Phase 1 web UI feature. It explains what ships, how
-to configure the embedded HTTP server, how to create browser-login accounts,
-the session and CSRF security model, the repo-visibility rules, and the planned
-follow-on phases.
+This guide covers the bucketvcs web UI. It explains what the UI serves, how to
+configure the embedded HTTP server, how to create browser-login accounts, the
+session and CSRF security model, OIDC browser login, read-only code browsing,
+the settings and admin screens, and the repo-visibility rules.
 
 ---
 
@@ -15,11 +15,11 @@ follow-on phases.
 | Landing page — public + granted repos | ✅ shipped | grouped by tenant |
 | Session management (sqlite-backed) | ✅ shipped | sliding TTL, periodic sweep |
 | CSRF double-submit protection | ✅ shipped | all POST handlers |
-| Per-IP rate-limiting on login failures | ✅ shipped | shares M18 rate limiter |
-| Code browse (tree, blob, diff, log) | ✅ shipped | Phase 2; see §6 |
-| Repo settings / admin screens | ✅ shipped | Phase 3; see §7 |
-| OIDC browser login | ❌ deferred (Phase 1.5) | |
-| Per-session audit trail | ❌ deferred | |
+| Per-IP rate-limiting on login failures | ✅ shipped | shares the login rate limiter |
+| OIDC browser login | ✅ shipped | see §6 |
+| Code browse (tree, blob, diff, log) | ✅ shipped | see §7 |
+| Repo settings / admin screens | ✅ shipped | see §8 |
+| Per-session audit trail | ❌ deferred | see §10 |
 
 Schema migration `0013_sessions.sql` is forward-only and applied by the existing
 `RunMigrations` on first startup.
@@ -28,21 +28,24 @@ Schema migration `0013_sessions.sql` is forward-only and applied by the existing
 
 ## 1. Overview
 
-M24 mounts a human-readable web UI on the same HTTP listener as the git gateway
-(or on a separate listener via `--ui-addr`). A built-in dispatcher inspects each
-request path and routes it: paths ending in `.git` or containing `.git/`,
-`/healthz`, or `/_` internal prefixes go to the git handler; everything else goes
-to the UI handler.
+The web UI mounts a human-readable interface on the same HTTP listener as the git
+gateway (or on a separate listener via `--ui-addr`). A built-in dispatcher
+inspects each request path and routes it: paths ending in `.git` or containing
+`.git/`, `/healthz`, or `/_` internal prefixes go to the git handler; everything
+else goes to the UI handler.
 
-Phase 1 ships identity and a repository landing page:
+The UI serves three groups of routes.
+
+**Identity and landing:**
 
 - `GET /login` — login form (HTML).
 - `POST /login` — credential check + session cookie.
+- `GET /login/oidc/start`, `GET /login/oidc/callback` — OIDC browser login (see §6).
 - `POST /logout` — session teardown.
 - `GET /` — landing page listing all repos the current visitor can see.
 - `GET /_ui/static/*` — embedded CSS/JS/font assets.
 
-Phase 2 ships read-only git code browsing (see §6):
+**Read-only code browse** (see §7):
 
 - `GET /{tenant}/{repo}` — repository home: default-branch root tree + rendered README.
 - `GET /{tenant}/{repo}/tree/{ref}/{path}` — directory listing.
@@ -51,7 +54,11 @@ Phase 2 ships read-only git code browsing (see §6):
 - `GET /{tenant}/{repo}/commits/{ref}` — paginated commit log.
 - `GET /{tenant}/{repo}/commit/{oid}` — single commit with diff.
 
-Phase 3 ships settings and admin screens (see §7).
+**Settings and admin** (see §8):
+
+- `/settings`, `/settings/tokens`, `/settings/keys` — self-service.
+- `/{tenant}/{repo}/settings/*` — per-repo settings (repo-admin or global admin).
+- `/admin/*` — instance administration (global admin only).
 
 ---
 
@@ -154,14 +161,14 @@ rightmost value of the `X-Forwarded-For` header (standard appending-proxy
 convention) and treats `X-Forwarded-Proto: https` as authoritative for the
 `Secure` cookie flag.
 
-A startup `WARN` is emitted when the M18 rate limiter is enabled without
+A startup `WARN` is emitted when the login rate limiter is enabled without
 `--trust-proxy-headers` because every request would appear to come from the
 proxy IP.
 
 ### 4.4 Login rate limiting
 
-Login failures (wrong password, unknown user) are counted by the M18 per-IP
-token-bucket rate limiter (default burst 10, refill 1 per minute). When the
+Login failures (wrong password, unknown user) are counted by the shared per-IP
+token-bucket login rate limiter (default burst 10, refill 1 per minute). When the
 bucket is exhausted the server returns HTTP 429 with a `Retry-After` header.
 A successful login resets the bucket. The UI login path shares the same limiter
 as HTTPS git and LFS operations.
@@ -192,7 +199,7 @@ bucketvcs repo public acme/site off --auth-db /var/lib/bucketvcs/auth.db
 
 ---
 
-## OIDC browser login (Phase 1.5)
+## 6. OIDC browser login
 
 Browser login can additionally delegate authentication to an external OIDC
 identity provider (Okta, Google Workspace, Microsoft Entra, Auth0, etc.). When
@@ -205,7 +212,7 @@ JWKS (fetched via OIDC discovery), and users are matched to local accounts by
 OIDC login requires the UI to be enabled (`--ui`, default on) and an HTTP
 listener (`--addr` or `--ui-addr`). It does not change git HTTPS/SSH auth.
 
-### Enabling OIDC
+### 6.1 Enabling OIDC
 
 | Flag | Description |
 |---|---|
@@ -233,7 +240,7 @@ bucketvcs serve \
 The redirect URL path is fixed: register `https://<host>/login/oidc/callback`
 with the IdP. A mismatch causes the IdP to refuse the authorization request.
 
-### Verified-email TOFU (trust on first use)
+### 6.2 Verified-email TOFU (trust on first use)
 
 There is **no auto-provisioning**. Operators pre-create accounts and set a
 verified email; the first OIDC login then matches by that email and pins the
@@ -260,7 +267,7 @@ A login is **rejected** (no session, no account created) when:
 All rejections return a uniform error page so the wire never reveals which gate
 failed.
 
-### Inspecting and revoking pinned identities
+### 6.3 Inspecting and revoking pinned identities
 
 ```sh
 # List the (issuer, subject) identities pinned to a user (NDJSON).
@@ -274,7 +281,7 @@ bucketvcs user identity remove https://accounts.example.com sub-12345 \
 After removal, the next OIDC login for that subject falls back to verified-email
 TOFU and re-pins.
 
-### OIDC audit events
+### 6.4 OIDC audit events
 
 | Event | When |
 |---|---|
@@ -284,30 +291,24 @@ TOFU and re-pins.
 
 Login outcomes also increment `web_login_total` with `provider=oidc`.
 
-### Deferred
-
-- Multiple simultaneous IdPs (one issuer per process today).
-- Auto-provisioning of unknown users (operator pre-creation is required).
-- RP-initiated logout / IdP session termination.
-
 ---
 
-## 6. Code browse (Phase 2)
+## 7. Code browse
 
-Phase 2 adds read-only git code browsing. All browse routes share the same
-visibility rules as the landing page (see §5): anonymous visitors see only
-public repositories; logged-in users see their granted repos; admins see all.
-Both not-found and not-authorized conditions return a uniform HTTP 404 to
-prevent repository enumeration.
+Read-only git code browsing. All browse routes share the same visibility rules as
+the landing page (see §5): anonymous visitors see only public repositories;
+logged-in users see their granted repos; admins see all. Both not-found and
+not-authorized conditions return a uniform HTTP 404 to prevent repository
+enumeration.
 
-### 6.1 Routes
+### 7.1 Routes
 
 | Route | Description |
 |---|---|
 | `GET /{tenant}/{repo}` | Repository home: root directory tree of the default branch + rendered README |
 | `GET /{tenant}/{repo}/tree/{ref}/{path}` | Directory listing at `path` on `ref` |
 | `GET /{tenant}/{repo}/blob/{ref}/{path}` | File view with syntax highlighting |
-| `GET /{tenant}/{repo}/raw/{ref}/{path}` | Raw file bytes (see §6.5 for safety headers) |
+| `GET /{tenant}/{repo}/raw/{ref}/{path}` | Raw file bytes (see §7.5 for safety headers) |
 | `GET /{tenant}/{repo}/commits/{ref}` | Paginated commit log (50 commits per page, `?page=N`) |
 | `GET /{tenant}/{repo}/commit/{oid}` | Single commit: metadata, message, and unified diff |
 
@@ -316,7 +317,7 @@ prefers the longest matching branch/tag prefix so that refs containing slashes
 (e.g. `feature/foo`) are resolved correctly. When a branch and a tag share the
 same name, the branch wins; use the tag's commit OID to browse the tag.
 
-### 6.2 Branch and tag switcher
+### 7.2 Branch and tag switcher
 
 Each tree page shows a branch/tag `<select>` dropdown. When JavaScript is
 available, htmx intercepts the `change` event and swaps only the tree table
@@ -327,7 +328,7 @@ ref from a blob or commits page always performs a full navigation to the new
 ref's tree root. The single-commit view is the exception: commits are addressed
 by OID, so it omits the switcher (and skips the ref load entirely).
 
-### 6.3 README rendering
+### 7.3 README rendering
 
 The repository home page automatically renders a `README.md` or
 `README.markdown` (case-insensitive) found at the root of the default-branch
@@ -341,7 +342,7 @@ If no README file is present, the root tree is shown without a rendered preamble
 README files that are binary or exceed the 10 MiB blob limit are silently
 skipped.
 
-### 6.4 Syntax highlighting and blob caps
+### 7.4 Syntax highlighting and blob caps
 
 | Condition | Behaviour |
 |---|---|
@@ -358,10 +359,8 @@ rather than inline styles — a requirement of the strict UI CSP. The stylesheet
 generated at startup and served at `/_ui/static/chroma.css`. If `--ui-dir` is
 set and a `static/chroma.css` file exists under that directory, it is served
 instead (theming hook). No separate download is required; the page `<base.html>`
-links the stylesheet automatically.
-
-The old "white-box" symptom (highlighted text invisible on a dark background) is
-gone — the monokai dark theme is embedded in the generated stylesheet.
+links the stylesheet automatically. The monokai dark theme is embedded in the
+generated stylesheet.
 
 Line numbers in highlighted blobs are anchors (`#L42`), and ranges are
 supported as `#L42:50` (lenient parsing also accepts `#L42:L50`, `#L42-50`,
@@ -373,7 +372,7 @@ selects a range.
 Blob and tree views also show relative times ("2h ago") with absolute UTC
 tooltips, and file sizes are displayed in binary units (e.g. "1.2 KiB").
 
-### 6.4a Tree activity column
+### 7.4a Tree activity column
 
 Each directory listing includes a "last commit" column: the most recent commit
 that touched each entry, with a relative timestamp and commit summary. The
@@ -395,7 +394,7 @@ attribution is computed from a single bounded history walk per tree page:
   tree listing — so a tree page incurs one extra mirror-open wait recorded in the
   `web_browse_mirror_wait_seconds` metric.
 
-### 6.5 Raw endpoint safety headers
+### 7.5 Raw endpoint safety headers
 
 The `/{tenant}/{repo}/raw/{ref}/{path}` endpoint serves file bytes directly.
 Because repo content is attacker-controlled, every response is hardened:
@@ -425,7 +424,7 @@ shown instead. This prevents a viewer's IP from being disclosed to a remote
 image host. The raw endpoint overrides the UI-wide policy with its own stricter
 `default-src 'none'; sandbox` directive.
 
-### 6.6 Diff caps
+### 7.6 Diff caps
 
 Commit diffs are capped to prevent runaway page rendering:
 
@@ -440,7 +439,7 @@ Commit diffs are capped to prevent runaway page rendering:
   possibly incomplete, file entry is dropped). Tree listings and raw commit
   objects carry similar internal byte caps (32 MiB and 4 MiB respectively).
 
-### 6.7 Hybrid reader and cold-mirror warming
+### 7.7 Hybrid reader and cold-mirror warming
 
 The browse backend uses a hybrid reading strategy:
 
@@ -463,24 +462,24 @@ before it can acquire the per-repo read lock. This write-lock wait is **not**
 covered by `--ui-browse-timeout` — it is identical to the behavior of a `git
 fetch` on the gateway, and is expected to be brief in practice.
 
-#### New serve flag
+#### Serve flag
 
 | Flag | Default | Description |
 |---|---|---|
 | `--ui-browse-timeout` | `20s` | Maximum wait for **cold mirror materialization** on a browse request. Requests that exceed this deadline receive HTTP 503. Does not cover the subsequent read-lock acquisition or git reads. |
 
-### 6.8 Observability
+### 7.8 Observability
 
-Browse requests emit two new metrics:
+Browse requests emit two metrics:
 
 | Metric | Labels | Description |
 |---|---|---|
 | `web_browse_total` | `view` | Browse requests by view, counted after authorization (includes reads that subsequently fail with 404/503; per-outcome counts are in web_requests_total); `view` ∈ `repo`, `tree`, `blob`, `raw`, `commits`, `commit` |
 | `web_browse_mirror_wait_seconds` | — | Time spent opening (and possibly materializing) the git mirror; emitted once per git read operation (a single page may perform several, e.g. repo home = tree + README), not once per request |
 
-No new audit events are emitted for Phase 2. Read operations are not audited.
+Code browse emits no audit events. Read operations are not audited.
 
-### 6.9 Known limitations (deferred)
+### 7.9 Known limitations
 
 - Path-filtered commit log (`git log -- <path>`).
 - Blame view.
@@ -499,14 +498,14 @@ No new audit events are emitted for Phase 2. Read operations are not audited.
 
 ---
 
-## 7. Settings and admin (Phase 3)
+## 8. Settings and admin
 
-Phase 3 adds CSRF-protected settings forms for three audiences: any logged-in
-user (self-service), repo admins (per-repo settings), and global admins (instance
-management). No new stores or schema migrations: every operation wraps an
+CSRF-protected settings forms for three audiences: any logged-in user
+(self-service), repo admins (per-repo settings), and global admins (instance
+management). No dedicated stores or schema migrations: every operation wraps an
 existing service that can also be driven from the CLI.
 
-### 7.1 Page map
+### 8.1 Page map
 
 ```
 /settings                         self-service (any logged-in user)
@@ -522,7 +521,7 @@ existing service that can also be driven from the CLI.
   /settings/webhooks              webhook endpoints (add/enable/disable/rotate-secret/remove)
                                   + per-endpoint delivery view with replay
   /settings/policy                protected-ref rules + protected-path rules (add/remove)
-  /settings/hooks                 Tier 3 hook scripts (global admin only — see §7.2)
+  /settings/hooks                 custom hook scripts (global admin only — see §8.2)
 
 /admin                            instance admin (global admin only)
   /admin/users                    list, create, disable/enable, set-email, delete
@@ -540,23 +539,23 @@ is unreachable through web browse/settings (git-protocol access via `.git`
 paths is unaffected). Web repo registration refuses these names; the CLI does
 not, so an operator who registers one accepts the web shadowing.
 
-### 7.2 Authorization tiers
+### 8.2 Authorization tiers
 
 | Area | Who can access | Why |
 |---|---|---|
 | `/settings` | Any logged-in user | Self-service: own tokens, SSH keys, password |
-| `/{t}/{r}/settings` (all tabs except hooks) | Global admin OR users with `admin` perm on the repo | First web-side meaning of the `admin` perm level |
-| `/{t}/{r}/settings/hooks` | Global admin only | M20 hooks execute operator scripts on the server. Allowing repo-admins to register hooks would be privilege escalation. |
+| `/{t}/{r}/settings` (all tabs except hooks) | Global admin OR users with `admin` perm on the repo | Web-side meaning of the `admin` perm level |
+| `/{t}/{r}/settings/hooks` | Global admin only | Custom hooks execute operator scripts on the server. Allowing repo-admins to register hooks would be privilege escalation. |
 | `/admin/*` | Global admin only | Instance-wide user, repo, and quota management |
-| **Repo rename** | Global admin only (not repo-admin) | M21 rename is auth-only: the auth.db row + dependent tables move atomically, but storage keys are NOT migrated — the operator moves the storage prefix out of band (see §7.3 *Repo rename and storage migration*). A repo-admin can't complete that, and the UI runs the same destination-prefix collision probe as the CLI to refuse renaming onto leftover/foreign objects |
+| **Repo rename** | Global admin only (not repo-admin) | Repo rename is auth-only: the auth.db row + dependent tables move atomically, but storage keys are NOT migrated — the operator moves the storage prefix out of band (see §8.3 *Repo rename and storage migration*). A repo-admin can't complete that, and the UI runs the same destination-prefix collision probe as the CLI to refuse renaming onto leftover/foreign objects |
 | **Repo delete** | Global admin only (not repo-admin) | Irreversible; never purges storage from the UI — `--purge-storage` remains a CLI-only path |
-| **Quota set/clear/reconcile** | Global admin only | M13.5 quotas are per-tenant LFS byte caps that constrain operator spend; a repo-admin raising their own cap defeats them |
+| **Quota set/clear/reconcile** | Global admin only | LFS quotas are per-tenant LFS byte caps that constrain operator spend; a repo-admin raising their own cap defeats them |
 
 Note on quota visibility: the repo-settings general tab shows the TENANT's
-aggregate LFS usage/cap read-only to any repo-admin in that tenant (spec §3,
-deliberate). Quotas are tenant-scoped, so a repo-admin of one repo sees the
-tenant-wide figure; operators who consider that sensitive should reserve the
-repo `admin` perm accordingly.
+aggregate LFS usage/cap read-only to any repo-admin in that tenant (deliberate).
+Quotas are tenant-scoped, so a repo-admin of one repo sees the tenant-wide
+figure; operators who consider that sensitive should reserve the repo `admin`
+perm accordingly.
 
 All authorization failures return a uniform HTTP 404 (same anti-enumeration
 stance as the browse and git gateway handlers). Unauthorized access to any
@@ -566,7 +565,7 @@ settings page or action is indistinguishable from "not found".
 so admin revocation takes effect on the next request without requiring a
 re-login.
 
-### 7.3 Repo rename and storage migration
+### 8.3 Repo rename and storage migration
 
 A UI rename (global admin only) updates **auth.db only** — the repo row plus
 every FK-bearing dependent table (grants, deploy keys, protected refs/paths,
@@ -591,7 +590,7 @@ contain the old prefix; rewrite them as part of the migration. If LFS quotas
 drifted during the cutover, run `bucketvcs quota reconcile --tenant=<tenant>`.
 See the `repo rename` CLI guide for the full out-of-band procedure.
 
-### 7.4 Form mechanics
+### 8.4 Form mechanics
 
 Every settings GET issues a CSRF token embedded in a hidden `csrf_token` form
 field; every POST runs the double-submit CSRF check before anything else. The
@@ -617,21 +616,21 @@ cookies die; the current session survives so the operator is not logged out).
 API tokens are NOT auto-revoked — rotate or revoke those separately via
 `/settings/tokens`.
 
-### 7.5 SSRF note — webhook endpoint URLs
+### 8.5 SSRF note — webhook endpoint URLs
 
 Repo admins can register webhook endpoint URLs. A malicious URL could cause the
 server to issue HTTP requests to internal services. Restrict outbound egress
 from the bucketvcs process using network policy or an egress firewall; see the
 webhooks operator guide §11 for recommendations.
 
-### 7.6 Nil-service degradation
+### 8.6 Nil-service degradation
 
-Each Phase 3 service dependency (`Webhooks`, `Policy`, `Hooks`, `Quotas`) is
+Each settings service dependency (`Webhooks`, `Policy`, `Hooks`, `Quotas`) is
 optional. When a service is not wired at startup, the corresponding tab or page
 renders a "not enabled on this server" notice instead of forms; no panic or 500
 occurs. This mirrors the `Content == nil` behavior that disables code browse.
 
-Quotas are wired only when `--lfs=true`: M13.5 quota enforcement lives in the
+Quotas are wired only when `--lfs=true`: LFS quota enforcement lives in the
 LFS Batch handler, so with LFS off the `/admin/quotas` pages degrade to the
 unavailable notice rather than offering knobs that nothing enforces (the
 repo-settings quota display is likewise hidden).
@@ -639,14 +638,15 @@ repo-settings quota display is likewise hidden).
 The hooks tab returns HTTP 404 unconditionally for non-admin users regardless of
 service availability (authz check precedes nil check).
 
-### 7.7 Postgres caveat
+### 8.7 Postgres caveat
 
 Repo deletion via the web UI (or `bucketvcs repo delete`) is refused on Postgres
-auth-databases with the error `ErrCascadeUnsupportedBackend`. The webhook-drain
-design for Postgres requires a schema change that is deferred. SQLite is not
-affected.
+auth-databases with the error `ErrCascadeUnsupportedBackend`. The webhook
+endpoint rows survive repo deletion so pending `repo.deleted` deliveries can
+drain; on Postgres that drain requires a schema change that is deferred. SQLite
+is not affected.
 
-### 7.8 Phase 3 observability
+### 8.8 Settings observability
 
 **Metrics**
 
@@ -654,7 +654,7 @@ affected.
 |---|---|---|
 | `web_admin_actions_total` | `domain`, `action`, `result` | Count of settings-form actions; `result` ∈ `ok`, `invalid`, `error`; `domain` matches the settings area (e.g. `token`, `webhook`, `admin_users`, `admin_repos`, `admin_quotas`, `user`) |
 
-**Audit events** — all Phase 3 events carry `source=web`; actor is the session user.
+**Audit events** — all settings events carry `source=web`; actor is the session user.
 
 | Domain | Events |
 |---|---|
@@ -667,24 +667,25 @@ affected.
 | Hooks | `policy.hook.added`, `policy.hook.removed`, `policy.hook.enabled`, `policy.hook.disabled` |
 | Quotas | `quota.set`, `quota.cleared`, `quota.reconciled` |
 
-Existing event names from the CLI and gateway are reused; Phase 3 adds no new
-event names.
+Existing event names from the CLI and gateway are reused; the settings screens
+add no new event names.
 
 ---
 
-## 8. Observability
+## 9. Observability
 
-### 8.1 Metrics
+### 9.1 Metrics
 
 | Metric | Labels | Description |
 |---|---|---|
 | `web_requests_total` | `route`, `status` | Request count by UI route and HTTP status |
 | `web_login_total` | `result` | Login outcomes: `success`, `invalid`, `ratelimited` |
 | `web_sessions_active` | — | Count of non-expired sessions |
-| `web_browse_total` | `view` | Browse requests by view, counted after authorization (includes reads that subsequently fail with 404/503; per-outcome counts are in web_requests_total); `view` ∈ `repo`, `tree`, `blob`, `raw`, `commits`, `commit` (Phase 2) |
-| `web_browse_mirror_wait_seconds` | — | Mirror open/materialize latency; emitted once per git read operation (a single page may perform several, e.g. repo home = tree + README), not once per request (Phase 2) |
+| `web_browse_total` | `view` | Browse requests by view, counted after authorization (includes reads that subsequently fail with 404/503; per-outcome counts are in web_requests_total); `view` ∈ `repo`, `tree`, `blob`, `raw`, `commits`, `commit` |
+| `web_browse_mirror_wait_seconds` | — | Mirror open/materialize latency; emitted once per git read operation (a single page may perform several, e.g. repo home = tree + README), not once per request |
+| `web_admin_actions_total` | `domain`, `action`, `result` | Settings-form actions (see §8.8) |
 
-### 8.2 Audit events
+### 9.2 Audit events
 
 | Event | When |
 |---|---|
@@ -692,20 +693,33 @@ event names.
 | `auth.session.destroyed` | Session deleted via `/logout` |
 | `auth.password.set` | Password hash updated via `user set-password` |
 
+OIDC login and settings-form actions emit additional events; see §6.4 and §8.8.
+
 ---
 
-## 9. Deferred work and planned phases
+## 10. Deferred work
 
-- **Phase 1.5 — OIDC browser login**: shipped — see "OIDC browser login
-  (Phase 1.5)" above. Remaining OIDC follow-ups (multiple IdPs, auto-provisioning,
-  RP-initiated logout) are listed in that section's "Deferred" note.
-- **Phase 2 — code browse**: shipped — see §6 above. Remaining Phase 2 deferrals
-  (path-filtered log, blame, search, compare views, cursor pagination, per-read
-  audit, web clone/zip, branch/tag management, README remote-image proxy) are
-  listed in §6.9.
-- **Phase 3 — settings / admin screens**: shipped — see §7 above. Remaining
-  deferrals: per-session audit trail UI, session list/revocation UI, OIDC
-  identity link/unlink UI, repo transfer between tenants, storage purge from
-  the UI, Postgres repo delete (ErrCascadeUnsupportedBackend).
-- **Per-session audit trail**: expose session list and per-user login history to
-  admins.
+Features not yet implemented:
+
+**OIDC follow-ups:**
+
+- Multiple simultaneous IdPs (one issuer per process today).
+- Auto-provisioning of unknown users (operator pre-creation is required).
+- RP-initiated logout / IdP session termination.
+- OIDC identity link/unlink UI (use the `user identity` CLI today).
+
+**Code browse:**
+
+- Path-filtered commit log, blame view, file/commit search, compare/branch-diff
+  views, cursor-based pagination, per-read audit events, web clone/zip download,
+  branch and tag management through the UI, README remote-image proxy (see §7.9).
+
+**Settings and admin:**
+
+- Per-session audit trail UI; session list/revocation UI.
+- Repo transfer between tenants.
+- Storage purge from the UI (`--purge-storage` remains CLI-only).
+- Repo delete on Postgres auth-databases (`ErrCascadeUnsupportedBackend`; see §8.7).
+
+**Per-session audit trail**: expose session list and per-user login history to
+admins.
