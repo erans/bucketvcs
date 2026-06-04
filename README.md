@@ -4,7 +4,7 @@
 
 **bucketvcs is a Git server backed directly by cloud object storage** — Amazon S3, Cloudflare R2, Google Cloud Storage, or Azure Blob. No database cluster holding your Git objects. No ever-growing block-storage volume to snapshot and babysit. The bucket *is* the repository.
 
-Point stock `git` at it over HTTPS or SSH, push, and your history lands in object storage that's effectively infinite, eleven-nines durable, and priced by the gigabyte.
+Point stock `git` at it over HTTPS or SSH, push, and your history lands in object storage that's effectively infinite, eleven-nines durable, and priced by the gigabyte. Then open the built-in **web UI** to browse it.
 
 ---
 
@@ -22,14 +22,17 @@ Native **HTTPS and SSH**, Git **protocol v2**, and full compatibility with stock
 ### ⚡ Fast clones at scale
 Protocol-v2 **bundle-URI** and **packfile-URI** acceleration offload heavy initial clones to signed object-storage URLs (CDN-frontable on cloud backends), so the gateway isn't streaming gigabytes on every onboarding.
 
+### 🖥️ A web UI in the same binary
+Log in with a password or **OIDC single sign-on** and browse your code — syntax-highlighted file views with line-anchor links, commit logs, diffs, rendered READMEs. Self-service token and SSH-key management for every user; repo settings (grants, deploy keys, webhooks, protected refs/paths) delegated to repo admins; user/repo/quota administration for operators. No JavaScript build, no separate service — templates and assets are compiled into the binary, and every page works without JS.
+
 ### 🔋 Batteries included
 Not a toy. bucketvcs ships the things a real Git host needs:
 
 - **Git LFS** — batch transfer, file locks, per-tenant quotas, and LFS garbage collection
-- **Web UI** — browser login (password or **OIDC SSO**), syntax-highlighted code browsing with diffs and READMEs, and full settings/admin: tokens, SSH keys, grants, webhooks, policies, users, repos, and quotas — all from the browser
 - **Keyless CI** — OIDC token exchange (RFC 8693): your pipeline trades its IdP identity for a short-lived, repo-scoped token, so there are no long-lived secrets to leak
 - **Fine-grained auth** — scoped access tokens with rotation, SSH user & deploy keys, and per-IP rate-limiting on credential failures
 - **Policy & governance** — protected refs, protected paths, custom pre/post-receive hooks, and signed, retryable **webhooks**
+- **Audit & observability** — structured audit events and metrics for every push, policy decision, and admin action
 - **Self-maintaining** — background repack, commit-graph/reachability maintenance, and operator-driven garbage collection keep storage tight
 
 ### 🛠️ Operationally boring (the good kind)
@@ -62,7 +65,7 @@ to every [GitHub Release](https://github.com/erans/bucketvcs/releases), alongsid
 a `checksums.txt`. Pick the version you want, then grab the matching artifact:
 
 ```bash
-VER=0.1.0   # latest: https://github.com/erans/bucketvcs/releases/latest
+VER=0.2.0   # latest: https://github.com/erans/bucketvcs/releases/latest
 ```
 
 **Linux** — `.deb`, `.rpm`, or a portable tarball (swap `amd64` → `arm64` on ARM):
@@ -93,7 +96,7 @@ xattr -d com.apple.quarantine /usr/local/bin/bucketvcs 2>/dev/null || true
 **Windows** (PowerShell) — zip:
 
 ```powershell
-$ver = "0.1.0"
+$ver = "0.2.0"
 Invoke-WebRequest "https://github.com/erans/bucketvcs/releases/download/v$ver/bucketvcs_${ver}_windows_amd64.zip" -OutFile bucketvcs.zip
 Expand-Archive bucketvcs.zip -DestinationPath $Env:LOCALAPPDATA\bucketvcs
 # then add %LOCALAPPDATA%\bucketvcs to your PATH
@@ -121,6 +124,10 @@ bucketvcs init   --store s3://my-bucket my-org my-repo
 bucketvcs serve  --store s3://my-bucket --addr :8080
 git push https://my-host/my-org/my-repo main
 ```
+
+Then open `http://my-host:8080/` in a browser — the web UI serves on the same
+listener (log in with a user created via `bucketvcs user add` + `user set-password`,
+or wire up OIDC; see the [web UI guide](docs/operator-guides/web-ui.md)).
 
 ---
 
