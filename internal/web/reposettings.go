@@ -70,8 +70,10 @@ func (s *server) handleRepoSettings(w http.ResponseWriter, r *http.Request, sr s
 		s.repoSettingsDelete(w, r, sr)
 	case "access":
 		s.repoSettingsAccess(w, r, sr)
-	case "webhooks", "policy", "hooks":
-		// Tasks 10-12 replace these cases one by one.
+	case "webhooks":
+		s.repoSettingsWebhooks(w, r, sr)
+	case "policy", "hooks":
+		// Tasks 11-12 replace these cases one by one.
 		s.renderError(w, r, http.StatusNotFound, "not found")
 	default:
 		s.renderError(w, r, http.StatusNotFound, "not found")

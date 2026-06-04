@@ -1,0 +1,68 @@
+{{define "title"}}{{.Tenant}}/{{.Repo}} webhooks · bucketvcs{{end}}
+{{define "content"}}
+<div class="settings">
+  <div class="repohdr"><span class="path"><a href="/{{.Tenant}}/{{.Repo}}">{{.Tenant}}/{{.Repo}}</a></span></div>
+  {{template "reposettingsnav" .}}
+  <h2>webhooks</h2>
+  {{if not .Enabled}}
+  <p class="hint">webhooks are not enabled on this server.</p>
+  {{else}}
+  {{if .Flash}}<p class="flash">{{.Flash}}</p>{{end}}
+  {{if .Endpoints}}
+  <table>
+    <thead>
+      <tr><th>id</th><th>url</th><th>events</th><th>active</th><th>secret preview</th><th>created</th><th>actions</th></tr>
+    </thead>
+    <tbody>
+    {{range .Endpoints}}
+    <tr>
+      <td>{{.ID}}</td>
+      <td class="mono">{{.URL}}</td>
+      <td>{{.EventsStr}}</td>
+      <td>{{if .Active}}yes{{else}}no{{end}}</td>
+      <td class="mono">{{.SecretPreview}}</td>
+      <td title="{{abstime .CreatedAt.Unix}}">{{.CreatedRel}}</td>
+      <td>
+        <a href="/{{$.Tenant}}/{{$.Repo}}/settings/webhooks/deliveries?endpoint={{.ID}}">deliveries</a>
+        {{if .Active}}
+        <form method="post" action="/{{$.Tenant}}/{{$.Repo}}/settings/webhooks/disable" class="inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="hidden" name="id" value="{{.ID}}">
+          <button type="submit">disable</button>
+        </form>
+        {{else}}
+        <form method="post" action="/{{$.Tenant}}/{{$.Repo}}/settings/webhooks/enable" class="inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="hidden" name="id" value="{{.ID}}">
+          <button type="submit">enable</button>
+        </form>
+        {{end}}
+        <form method="post" action="/{{$.Tenant}}/{{$.Repo}}/settings/webhooks/rotate" class="inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="hidden" name="id" value="{{.ID}}">
+          <button type="submit">rotate secret</button>
+        </form>
+        <form method="post" action="/{{$.Tenant}}/{{$.Repo}}/settings/webhooks/remove" class="inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="hidden" name="id" value="{{.ID}}">
+          <button type="submit">remove</button>
+        </form>
+      </td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="empty">no webhook endpoints configured.</p>
+  {{end}}
+  <h3>add endpoint</h3>
+  <form method="post" action="/{{.Tenant}}/{{.Repo}}/settings/webhooks/add">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label>url <input type="text" name="url" required placeholder="https://example.com/hook"></label>
+    <label>events <input type="text" name="events" required placeholder="all, push, lfs.*, repo.*, or comma-separated names"></label>
+    <button type="submit">add endpoint</button>
+  </form>
+  {{end}}
+</div>
+{{end}}
+{{template "base" .}}
