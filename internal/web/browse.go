@@ -173,9 +173,10 @@ func (s *server) handleTree(w http.ResponseWriter, r *http.Request, br browseRou
 		s.browseError(w, r, err)
 		return
 	}
+	h := s.header(w, r, br, refs, res.Ref, res.OID)
+	h.Path = res.Path
 	s.renderBrowse(w, r, "tree.html", treeData{
-		browseHeader: s.header(w, r, br, refs, res.Ref, res.OID),
-		Path:         res.Path,
+		browseHeader: h,
 		Entries:      entries,
 	})
 }

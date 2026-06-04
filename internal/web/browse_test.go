@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -455,5 +456,27 @@ func TestCommit_DiffLineClasses(t *testing.T) {
 	}
 	if strings.Contains(body, `class="dl k`) {
 		t.Errorf("old k-class scheme still present")
+	}
+}
+
+func TestRenderPartial_TreeRows(t *testing.T) {
+	r, err := newRenderer("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := treeData{
+		browseHeader: browseHeader{Tenant: "acme", Repo: "demo", Ref: "main"},
+		Entries:      []browsemodel.TreeEntry{{Name: "a.txt", Path: "a.txt", Type: "blob", Size: 6, OID: "x"}},
+	}
+	var buf bytes.Buffer
+	if err := r.renderPartial(&buf, "treeRows", data); err != nil {
+		t.Fatalf("renderPartial: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, `id="tree"`) || !strings.Contains(out, "a.txt") {
+		t.Fatalf("partial missing container/entry: %s", out)
+	}
+	if strings.Contains(out, "<html") {
+		t.Fatalf("partial must not include the base layout: %s", out)
 	}
 }

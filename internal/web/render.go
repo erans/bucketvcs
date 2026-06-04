@@ -44,11 +44,13 @@ type errorData struct {
 
 type browseHeader struct {
 	base
-	Tenant string
-	Repo   string
-	Ref    string // current ref display name
-	OID    string // resolved OID; used by RefOrOID when Ref is empty
-	Refs   browsemodel.Refs
+	Tenant   string
+	Repo     string
+	Ref      string // current ref display name
+	OID      string // resolved OID; used by RefOrOID when Ref is empty
+	Refs     browsemodel.Refs
+	Path     string                            // current directory path ("" at repo root)
+	Activity map[string]browsemodel.CommitMeta // entry path -> last commit (best-effort; nil => "—")
 }
 
 // RefOrOID returns the ref name for links, falling back to the resolved OID
@@ -68,7 +70,6 @@ type repoHomeData struct {
 
 type treeData struct {
 	browseHeader
-	Path    string
 	Entries []browsemodel.TreeEntry
 }
 
@@ -95,8 +96,9 @@ type commitData struct {
 // assets once; with a non-empty dir it re-parses from disk on every render so
 // designers can hot-iterate (templates/ under the given dir).
 type renderer struct {
-	dir   string
-	cache map[string]*template.Template
+	dir      string
+	cache    map[string]*template.Template
+	partials *template.Template
 }
 
 func newRenderer(dir string) (*renderer, error) {
@@ -110,21 +112,18 @@ func newRenderer(dir string) (*renderer, error) {
 			}
 			r.cache[page] = t
 		}
+		p, err := partialsSet(assetsFS, "templates")
+		if err != nil {
+			return nil, err
+		}
+		r.partials = p
 	}
 	return r, nil
 }
 
-// parsePage parses base.html and the named page file from fsys. The dir
-// argument is the path prefix within fsys (e.g. "templates" or ".").
-// Each page file ends with {{template "base" .}}, which means executing
-// the template named after the page file produces the full rendered page.
-func parsePage(fsys fs.FS, dir, page string) (*template.Template, error) {
-	base, pg := "base.html", page
-	if dir != "" && dir != "." {
-		base = dir + "/base.html"
-		pg = dir + "/" + page
-	}
-	funcs := template.FuncMap{
+// templateFuncs returns the FuncMap used by all page and partial templates.
+func templateFuncs() template.FuncMap {
+	return template.FuncMap{
 		"plus1": func(n int) int { return n + 1 },
 		"minus1": func(n int) int {
 			if n <= 0 {
@@ -144,7 +143,42 @@ func parsePage(fsys fs.FS, dir, page string) (*template.Template, error) {
 		"humansize": humanSize,
 		"diffclass": func(kind byte) string { return diffClass(kind) },
 	}
-	return template.New("").Funcs(funcs).ParseFS(fsys, base, pg)
+}
+
+// parsePage parses base.html, _partials.html, and the named page file from fsys.
+// The dir argument is the path prefix within fsys (e.g. "templates" or ".").
+// Each page file ends with {{template "base" .}}, which means executing
+// the template named after the page file produces the full rendered page.
+func parsePage(fsys fs.FS, dir, page string) (*template.Template, error) {
+	base, pg := "base.html", page
+	partials := "_partials.html"
+	if dir != "" && dir != "." {
+		base = dir + "/base.html"
+		pg = dir + "/" + page
+		partials = dir + "/_partials.html"
+	}
+	return template.New("").Funcs(templateFuncs()).ParseFS(fsys, base, partials, pg)
+}
+
+// partialsSet parses just _partials.html (no base/page) for fragment rendering.
+func partialsSet(fsys fs.FS, dir string) (*template.Template, error) {
+	p := "_partials.html"
+	if dir != "" && dir != "." {
+		p = dir + "/_partials.html"
+	}
+	return template.New("").Funcs(templateFuncs()).ParseFS(fsys, p)
+}
+
+// renderPartial renders a named fragment from _partials.html (htmx swaps).
+func (r *renderer) renderPartial(w io.Writer, name string, data any) error {
+	if r.dir != "" {
+		t, err := partialsSet(os.DirFS(filepath.Join(r.dir, "templates")), ".")
+		if err != nil {
+			return err
+		}
+		return t.ExecuteTemplate(w, name, data)
+	}
+	return r.partials.ExecuteTemplate(w, name, data)
 }
 
 func (r *renderer) lookup(page string) (*template.Template, error) {
