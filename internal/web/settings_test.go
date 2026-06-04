@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -257,8 +258,12 @@ func TestPasswordChange(t *testing.T) {
 		if revokedExcept != "test-sess-user1" {
 			t.Fatalf("happy: DeleteSessionsForUser exceptRawID %q, want current cookie", revokedExcept)
 		}
-		if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
+		if fc := findCookie(rec.Result().Cookies(), flashCookieName); fc == nil {
 			t.Fatal("happy: no flash cookie set")
+		} else if got := decodeFlash(fc); got != "password changed; 2 other session(s) signed out" {
+			// Count-driven message (roborev round 13): revocation is only
+			// mentioned when other sessions were actually deleted.
+			t.Fatalf("happy: flash %q, want count-based revocation message", got)
 		}
 		if !sink.Has("auth.user.password_changed", map[string]string{
 			"actor":  "user",
@@ -266,6 +271,34 @@ func TestPasswordChange(t *testing.T) {
 			"user":   "user",
 		}) {
 			t.Fatal("happy: audit event auth.user.password_changed not logged with expected attrs")
+		}
+	})
+
+	t.Run("zeroRevokedPlainFlash", func(t *testing.T) {
+		// Common single-session case: nothing else to revoke, so the flash
+		// must not claim "other sessions signed out" (roborev round 13).
+		store := newFakeStore()
+		store.verify = func(ctx context.Context, u, p string) (*auth.Actor, error) {
+			return &auth.Actor{UserID: "user1", Name: u}, nil
+		}
+		store.setPassword = func(ctx context.Context, u, p string) error { return nil }
+		store.deleteSessionsFor = func(ctx context.Context, userID, exceptRawID string) (int64, error) {
+			return 0, nil
+		}
+		h := NewHandler(Deps{Store: store, Logger: slog.Default()})
+		req := csrfPost(t, "/settings/password", cloneValues(baseForm))
+		addSessionCookie(t, req, store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status %d, want 303", rec.Code)
+		}
+		fc := findCookie(rec.Result().Cookies(), flashCookieName)
+		if fc == nil {
+			t.Fatal("no flash cookie set")
+		}
+		if got := decodeFlash(fc); got != "password changed" {
+			t.Fatalf("flash %q, want plain %q", got, "password changed")
 		}
 	})
 

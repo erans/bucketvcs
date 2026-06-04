@@ -1,6 +1,7 @@
 package web
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -89,9 +90,7 @@ func (s *server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 	// exclusion) so the user is not logged out. Cleanup is best-effort — the
 	// rotation already succeeded, so a failure here is logged but not fatal.
 	var revoked int64
-	revokeRan := false
 	if c, err := r.Cookie(sessionCookieName); err == nil && c.Value != "" {
-		revokeRan = true
 		n, derr := s.store.DeleteSessionsForUser(r.Context(), sess.UserID, c.Value)
 		if derr != nil {
 			s.logger.Warn("password change: revoke other sessions", "user", sess.Name, "err", derr)
@@ -102,9 +101,12 @@ func (s *server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 	s.emitAdmin(r.Context(), "auth.user.password_changed",
 		slog.String("user", sess.Name), slog.Int64("sessions_revoked", revoked))
 	EmitAdminActionMetric(r.Context(), s.logger, "user", "password_change", "ok")
+	// The flash reports what actually happened: only mention revocation when
+	// other sessions existed and were deleted (the common single-session case
+	// just says "password changed").
 	flashMsg := "password changed"
-	if revokeRan {
-		flashMsg = "password changed; other sessions signed out"
+	if revoked > 0 {
+		flashMsg = fmt.Sprintf("password changed; %d other session(s) signed out", revoked)
 	}
 	s.redirectFlash(w, r, "/settings", flashMsg)
 }

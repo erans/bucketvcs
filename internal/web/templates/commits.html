@@ -1,7 +1,7 @@
 {{define "title"}}commits · {{.Tenant}}/{{.Repo}}{{end}}
 {{define "content"}}
 <div class="browse">
-  <div class="repohdr"><span class="path">{{.Tenant}}/{{.Repo}}</span></div>
+  <div class="repohdr"><span class="path">{{.Tenant}}/{{.Repo}}</span>{{if .CanAdmin}}&nbsp;<a href="/{{.Tenant}}/{{.Repo}}/settings">[settings]</a>{{end}}</div>
   <table class="commits">
     {{range .Commits}}
     <tr>

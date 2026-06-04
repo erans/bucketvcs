@@ -1,7 +1,7 @@
 {{define "title"}}{{.Path}} · {{.Tenant}}/{{.Repo}}{{end}}
 {{define "content"}}
 <div class="browse">
-  <div class="repohdr"><span class="path">{{.Tenant}}/{{.Repo}}</span></div>
+  <div class="repohdr"><span class="path">{{.Tenant}}/{{.Repo}}</span>{{if .CanAdmin}}&nbsp;<a href="/{{.Tenant}}/{{.Repo}}/settings">[settings]</a>{{end}}</div>
   <div class="path">{{.Path}}{{if .Markdown}}{{if .Rendered}} &nbsp;<a href="/{{.Tenant}}/{{.Repo}}/blob/{{urlpath .RefOrOID}}/{{urlpath .Path}}">[source]</a>{{else}} &nbsp;<a href="/{{.Tenant}}/{{.Repo}}/blob/{{urlpath .RefOrOID}}/{{urlpath .Path}}?view=rendered">[rendered]</a>{{end}}{{end}}{{if not .Blob.TooLarge}} &nbsp;<a href="/{{.Tenant}}/{{.Repo}}/raw/{{urlpath .RefOrOID}}/{{urlpath .Path}}">[raw]</a>{{end}}</div>
   {{if .Blob.TooLarge}}
     <p class="empty">file too large to display ({{humansize .Blob.Size}})</p>
