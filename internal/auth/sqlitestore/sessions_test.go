@@ -48,6 +48,42 @@ func TestSessionLifecycle(t *testing.T) {
 	}
 }
 
+func TestLookupSession_RejectsDisabledUser(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+
+	// Two admins so disabling one does not trip the last-admin guard.
+	if _, err := s.CreateUser(ctx, "keeper", true); err != nil {
+		t.Fatalf("CreateUser keeper: %v", err)
+	}
+	uid, err := s.CreateUser(ctx, "dave", true)
+	if err != nil {
+		t.Fatalf("CreateUser dave: %v", err)
+	}
+	if err := s.SetPassword(ctx, "dave", "pw"); err != nil {
+		t.Fatalf("SetPassword: %v", err)
+	}
+
+	raw, err := s.CreateSession(ctx, uid, "password", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	// Sanity: the session works while the user is enabled.
+	if _, err := s.LookupSession(ctx, raw); err != nil {
+		t.Fatalf("LookupSession (enabled): %v", err)
+	}
+
+	if err := s.SetUserDisabled(ctx, "dave", true); err != nil {
+		t.Fatalf("SetUserDisabled: %v", err)
+	}
+
+	// A disabled user's session must no longer resolve.
+	if _, err := s.LookupSession(ctx, raw); !errors.Is(err, auth.ErrNoSession) {
+		t.Fatalf("disabled-user lookup: want ErrNoSession, got %v", err)
+	}
+}
+
 func TestSessionExpiryAndSweep(t *testing.T) {
 	s := mustOpen(t)
 	defer s.Close()
