@@ -13,16 +13,16 @@ import (
 type azureOp int
 
 const (
-	opGet           azureOp = iota
-	opHead                  // HEAD request
-	opGetRange              // GET with Range header
-	opList                  // list pages
-	opPutIfAbsent           // PUT with If-None-Match: *  -> 412/409 = ErrAlreadyExists
-	opPutIfMatch            // PUT with If-Match: <etag>  -> 412 = ErrVersionMismatch
-	opDeleteIfMatch         // DELETE with If-Match: <etag> -> 412 = ErrVersionMismatch
-	opStageBlock            // StageBlock (PutBlock)
-	opCommitIfAbsent        // CommitBlockList with If-None-Match: *
-	opSignedURL             // SAS URL generation
+	opGet            azureOp = iota
+	opHead                   // HEAD request
+	opGetRange               // GET with Range header
+	opList                   // list pages
+	opPutIfAbsent            // PUT with If-None-Match: *  -> 412/409 = ErrAlreadyExists
+	opPutIfMatch             // PUT with If-Match: <etag>  -> 412 = ErrVersionMismatch
+	opDeleteIfMatch          // DELETE with If-Match: <etag> -> 412 = ErrVersionMismatch
+	opStageBlock             // StageBlock (PutBlock)
+	opCommitIfAbsent         // CommitBlockList with If-None-Match: *
+	opSignedURL              // SAS URL generation
 )
 
 // classify maps an SDK error to a storage sentinel. The original error

@@ -27,8 +27,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/bucketvcs/bucketvcs/internal/maintenance/mtest"
 	maintpkg "github.com/bucketvcs/bucketvcs/internal/maintenance"
+	"github.com/bucketvcs/bucketvcs/internal/maintenance/mtest"
 	"github.com/bucketvcs/bucketvcs/internal/pack"
 	"github.com/bucketvcs/bucketvcs/internal/reachability"
 	"github.com/bucketvcs/bucketvcs/internal/reachability/deltaindex"
@@ -137,11 +137,11 @@ func TestM10_ImportPushCompactNegotiate_RoundTrip(t *testing.T) {
 	// deltas exceeds the threshold and the compact-only path fires.
 	opts := maintpkg.RunOptions{
 		Thresholds: maintpkg.Thresholds{
-			TotalPackCount:            10000,
-			ManifestPackBytes:         8 << 20,
-			ReachabilityDeltaPushes:   3, // fires when nDelta > 3
-			ReachabilityDeltaCommits:  1000,
-			ReachabilityDeltaBytes:    64 << 20,
+			TotalPackCount:           10000,
+			ManifestPackBytes:        8 << 20,
+			ReachabilityDeltaPushes:  3, // fires when nDelta > 3
+			ReachabilityDeltaCommits: 1000,
+			ReachabilityDeltaBytes:   64 << 20,
 		},
 	}
 	report, err := maintpkg.Run(ctx, s, r, k, opts)

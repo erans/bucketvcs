@@ -1,13 +1,13 @@
-# M11 Operator Guide: Bundle-URI and Packfile-URI Acceleration
+# Operator Guide: Bundle-URI and Packfile-URI Acceleration
 
-This guide is for operators who deploy, tune, monitor, and roll back M11
+This guide is for operators who deploy, tune, monitor, and roll back
 bundle-uri and packfile-uri acceleration in production. It covers what
 bundle-uri and packfile-uri are, the bundle freshness state machine, how to
 schedule bundle generation alongside `bucketvcs maintenance`, when to use
-signed-URL vs gateway-proxied delivery, how the M11 TTL rule interacts with
-M8 retention, the eleven observability metrics and four audit events
-shipped in M11, an eight-entry troubleshooting matrix, the pre-M11 → M11
-migration recipe, post-incident forensics, and the deferred-work tracker
+signed-URL vs gateway-proxied delivery, how the URL TTL rule interacts with
+GC retention, the eleven observability metrics and four audit events,
+an eight-entry troubleshooting matrix, the migration recipe for enabling
+acceleration, post-incident forensics, and the deferred-work tracker
 so operators can plan around what is not yet production-ready.
 
 ---
@@ -17,11 +17,11 @@ so operators can plan around what is not yet production-ready.
 | Mode | `--bundle-uri-mode` | `--pack-uri-mode` |
 |------|---------------------|-------------------|
 | `direct` | **GA** | **GA** |
-| `proxied` | **GA (multi-tenant since M19).** The proxied handler keys URLs as `/_bundle/<tenant>/<repo>/<hash>?token=...` and the HMAC binds the composite `(tenant, repo, hash)` so cross-tenant URL tampering is rejected. One `bucketvcs serve` may host many tenants. | Same — `/_pack/<tenant>/<repo>/<hash>?token=...` with the same composite binding. |
-| `auto` | **GA on direct-capable backends** (S3, R2, GCS, Azure Blob). On localfs, `auto` falls back to proxied behavior — multi-tenant safe since M19. | Same as bundle. |
-| `off` | **GA.** Behavior reverts to pre-M11 (standard `upload-pack`); M9/M10 paths unchanged. | Same. |
+| `proxied` | **GA (multi-tenant).** The proxied handler keys URLs as `/_bundle/<tenant>/<repo>/<hash>?token=...` and the HMAC binds the composite `(tenant, repo, hash)` so cross-tenant URL tampering is rejected. One `bucketvcs serve` may host many tenants. | Same — `/_pack/<tenant>/<repo>/<hash>?token=...` with the same composite binding. |
+| `auto` | **GA on direct-capable backends** (S3, R2, GCS, Azure Blob). On localfs, `auto` falls back to proxied behavior — multi-tenant safe. | Same as bundle. |
+| `off` | **GA.** Behavior reverts to standard `upload-pack`; reachability and negotiation paths unchanged. | Same. |
 
-Proxied mode in M11 was single-repo only because the original `ProxiedKeyResolver` looked up objects by hash alone, so two repos with the same hash (or a forged hash request) could not be safely distinguished. M19 closed that gap: URLs now embed `<tenant>/<repo>` segments and the HMAC is computed over the composite `tenant/repo/hash`, so any segment swap fails token verification with HTTP 403. See §4 for the full tradeoff and §9 for troubleshooting.
+The proxied handler keys URLs by `<tenant>/<repo>` segments and computes the HMAC over the composite `tenant/repo/hash`, so any segment swap fails token verification with HTTP 403. This is what lets a single proxied gateway safely host many repositories. See §4 for the full tradeoff and §9 for troubleshooting.
 
 ---
 
@@ -39,12 +39,12 @@ the full reachability walk and pack assembly on the server.
 Packfile-uri (Git protocol v2 §16.4) is a complementary mechanism for
 full-clone requests where the repository manifest contains exactly one
 canonical pack. Instead of running `pack-objects` to stream a new pack, the
-gateway advertises a URL for the existing `.pack` file on storage. M11 ships
-with `--keep-pack` elision so the inline pack alongside the advertised URI is
+gateway advertises a URL for the existing `.pack` file on storage. Packfile-uri
+uses `--keep-pack` elision so the inline pack alongside the advertised URI is
 reduced to whatever objects are not covered by the URI; the bulk bytes are not
 shipped twice.
 
-The cold-clone win is the primary motivation for M11. Without bundle-uri, a
+The cold-clone win is the primary motivation for acceleration. Without bundle-uri, a
 fresh `git clone` of a large repository causes the gateway to run
 `upload-pack`, walk all reachable objects, and stream a full pack through the
 gateway VM. With bundle-uri active and a current bundle, the heavy bytes flow
@@ -161,7 +161,7 @@ than full maintenance allows (e.g., hourly bundles with 4-hourly repacks), a
 separate `--bundle-only` invocation is appropriate; otherwise keep them
 together.
 
-The M11 bundle phase has its own threshold logic for skipping bundle generation
+The bundle phase has its own threshold logic for skipping bundle generation
 when the prior bundle is still current (the freshness state machine described
 in §2). You almost never need to gate maintenance externally; let the pipeline
 decide whether bundle work runs.
@@ -255,8 +255,8 @@ Useful for single-host deployments that may reboot mid-window.
 | Mode | Backend | Bandwidth path | Audit visibility | Multi-tenant ready? | When |
 |------|---------|----------------|------------------|---------------------|------|
 | `direct` | cloud (S3, R2, GCS, Azure Blob) | client → bucket | none at gateway | yes | public-internet repos; lowest gateway cost; egress charged to bucket |
-| `proxied` | localfs OR cloud | client → gateway → bucket | full (every serve emits `proxied.url.served` audit event with `tenant`+`repo` labels) | **yes (since M19)** — URLs embed `<tenant>/<repo>` and HMAC binds the composite | audit-strict deployments; localfs deployments (no signed URLs available); multi-tenant gateways that want one mount per cluster |
-| `auto` | any | direct if backend supports signed URLs; proxied otherwise | partial (direct serves are invisible to gateway audit) | yes (direct-capable backends always; localfs since M19) | default for most operators; covers both backends without per-deploy config |
+| `proxied` | localfs OR cloud | client → gateway → bucket | full (every serve emits `proxied.url.served` audit event with `tenant`+`repo` labels) | **yes** — URLs embed `<tenant>/<repo>` and HMAC binds the composite | audit-strict deployments; localfs deployments (no signed URLs available); multi-tenant gateways that want one mount per cluster |
+| `auto` | any | direct if backend supports signed URLs; proxied otherwise | partial (direct serves are invisible to gateway audit) | yes (both direct-capable backends and localfs) | default for most operators; covers both backends without per-deploy config |
 | `off` | any | n/a (capability disabled) | n/a | yes | fall back to standard fetch; useful for rollback or known-incompatible clients |
 
 ### 4.2 Direct mode
@@ -265,7 +265,7 @@ Direct mode mints a signed URL (S3-style presigned GET, GCS V4 signature,
 Azure SAS, R2 presigned). The client downloads from the bucket directly. The
 gateway sees the advertise request but never sees the bytes. TTL is bounded
 by `--proxied-url-bundle-ttl` (4h default) and `--proxied-url-pack-ttl` (1h
-default). The TTL must also satisfy the M8 retention rule:
+default). The TTL must also satisfy the retention rule:
 `TTL ≤ retention / 24` (see §5).
 
 ### 4.3 Proxied mode
@@ -277,8 +277,8 @@ composite `tenant/repo/hash`, so any segment swap (different tenant,
 different repo, or different hash) on a stolen URL fails verification with
 HTTP 403. The client downloads from the gateway, which streams from the
 bucket. Every serve emits `proxied.url.served` with `tenant` + `repo`
-attribution labels. Since M19 a single `bucketvcs serve` may host many
-tenants under one mount; the earlier single-repo restriction is retired.
+attribution labels. A single `bucketvcs serve` may host many
+tenants under one mount.
 
 ### 4.4 Auto mode
 
@@ -304,11 +304,11 @@ naturally (max `--proxied-url-bundle-ttl`).
 
 ---
 
-## 5. TTL vs M8 Retention
+## 5. TTL vs Retention
 
 ### 5.1 The hard rule
 
-M11 TTLs must be tuned against the M8 retention window:
+TTLs must be tuned against the GC retention window:
 
 ```
 TTL ≤ retention / 24
@@ -321,14 +321,14 @@ hard pre-deploy lint.
 
 ### 5.2 Relevant flags
 
-M11 TTL flags:
+TTL flags:
 
 - `--proxied-url-bundle-ttl` — default `4h`. Maximum lifetime of a minted
   bundle URL (direct or proxied).
 - `--proxied-url-pack-ttl` — default `1h`. Maximum lifetime of a minted pack
   URL.
 
-M8 retention flag:
+Retention flag:
 
 - `bucketvcs gc --retention` — default `168h` (7 days).
 
@@ -348,7 +348,7 @@ enough that any outstanding URL expires well before the retention window could
 elapse on the referenced bundle or pack. Otherwise, a client could receive a
 URL, hold it through a GC cycle, and find the object gone when finally
 downloading. The 24× safety factor accommodates GC scheduling jitter and the
-§43.6 race window (see [M8 §4](gc.md#4-the-436-race-window)).
+§43.6 race window (see [GC race window](gc.md#4-the-436-race-window)).
 
 ### 5.5 Adjusting retention
 
@@ -371,15 +371,15 @@ proportionally:
 
 ## 6. Bandwidth and Cost Economics
 
-### 6.1 The shift from pre-M11
+### 6.1 The shift to acceleration
 
-- **Pre-M11**: every clone's bytes flow through `bucketvcs serve` → gateway
+- **Without acceleration**: every clone's bytes flow through `bucketvcs serve` → gateway
   VM/container egress, with gateway CPU running upload-pack. Bandwidth is billed
   gateway-side.
-- **M11 direct mode**: bytes flow client → bucket directly via a signed URL.
+- **Direct mode**: bytes flow client → bucket directly via a signed URL.
   Egress is billed by the object-storage provider. The gateway VM only sees
   the small advertise-bundle response.
-- **M11 proxied mode**: bytes flow client → gateway → bucket. The gateway VM
+- **Proxied mode**: bytes flow client → gateway → bucket. The gateway VM
   sees full egress AND bucket egress — effectively 2× bandwidth for the same
   clone. The benefit is full audit visibility via `proxied.url.served` events.
 
@@ -408,7 +408,7 @@ stays small.
 
 For air-gapped or audit-strict OSS deployments, `proxied` is the only option
 that gives you a `proxied.url.served` audit event per clone. Accept the 2×
-bandwidth cost for the audit benefit. Since M19, proxied mode is multi-tenant
+bandwidth cost for the audit benefit. Proxied mode is multi-tenant
 safe — a single gateway may host many tenants and the `proxied.url.served`
 events carry `tenant` + `repo` labels so operators can attribute serve volume
 per repository.
@@ -427,8 +427,8 @@ bucketvcs serve --bundle-uri-mode=off --pack-uri-mode=off  ...other flags...
 
 - `command=bundle-uri` requests return an empty response (no URL advertised).
 - `bundle_advertised_total{freshness=disabled}` increments per request.
-- Clients fall back to standard `command=fetch`. M9/M10 paths (reachability
-  index, delta chain, repack-aware pack walk) are unchanged.
+- Clients fall back to standard `command=fetch`. Reachability and negotiation
+  paths (reachability index, delta chain, repack-aware pack walk) are unchanged.
 - Maintenance still generates bundles. The bundle entries accumulate in the
   manifest; they are simply not advertised. If you later re-enable bundle-uri,
   the freshness state machine evaluates them as-is — no special re-warming is
@@ -442,16 +442,16 @@ bucketvcs serve --bundle-uri-mode=off --pack-uri-mode=off  ...other flags...
 
 ### 7.4 Rollback safety
 
-Rollback is fully reversible. M11 manifest fields are `omitempty`; the manifest
+Rollback is fully reversible. Bundle/pack manifest fields are `omitempty`; the manifest
 schema does not change shape based on whether the gateway advertises or not. If
-you disable M11 in production, redeploy with the modes back to `auto` (or
+you disable acceleration in production, redeploy with the modes back to `auto` (or
 `direct`) and behavior resumes immediately — no manifest migration is needed.
 
 ---
 
 ## 8. Observability Reference
 
-M11 ships eleven metrics (three maintenance-side, eight gateway-side) and four
+Acceleration ships eleven metrics (three maintenance-side, eight gateway-side) and four
 audit events (two maintenance-side, two gateway-side). All metrics and audit
 events emit via slog. The format is one JSON line per metric or event;
 operators ingest into Loki, Vector, or any slog-compatible pipeline.
@@ -480,14 +480,14 @@ paths reach the same metric names; operators do not need to distinguish them.
 |--------|--------|--------------------------------|
 | `bundle_advertised_total` | `repo_id`, `freshness` ∈ {`disabled`, `no_bundle`, `no_ref`, `current`, `warm`, `stale`} | Per `command=bundle-uri` dispatch. **Includes the encode-error path** — this counts dispatch attempts, not successful encodes. **Rate-amplification: rogue or misconfigured clients can pump this at arbitrary rate.** Alert on the per-freshness rates for legitimate advertise traffic (`current` + `warm`); do not alert on the raw total. |
 | `bundle_uri_advertised_total` | `repo_id`, `via` ∈ {`proxied`, `direct`} | Only emitted when the bundle-uri response actually contains URLs (`freshness ∈ {current, warm}`). The `via` label is derived from the URL path (`/_bundle/` → `proxied`, otherwise → `direct`). |
-| `bundle_uri_served_total` | `via`, `tenant`, `repo` | Per successful proxied bundle serve. **Counts truncated serves too** — `io.Copy` mid-stream errors still emit. Pair with `bundle_uri_served_bytes` and the `proxied.url.served` audit event's `status_code` field to distinguish full from truncated. The `tenant` + `repo` labels (added M19) carry the URL's `/_bundle/<tenant>/<repo>/<hash>` segments. |
-| `bundle_uri_served_bytes` | `via`, `tenant`, `repo` | Actual bytes written via `countingWriter`. May be less than the bundle's full size on client disconnect. `tenant` + `repo` added M19. |
+| `bundle_uri_served_total` | `via`, `tenant`, `repo` | Per successful proxied bundle serve. **Counts truncated serves too** — `io.Copy` mid-stream errors still emit. Pair with `bundle_uri_served_bytes` and the `proxied.url.served` audit event's `status_code` field to distinguish full from truncated. The `tenant` + `repo` labels carry the URL's `/_bundle/<tenant>/<repo>/<hash>` segments. |
+| `bundle_uri_served_bytes` | `via`, `tenant`, `repo` | Actual bytes written via `countingWriter`. May be less than the bundle's full size on client disconnect. |
 | `pack_uri_advertised_total` | `repo_id`, `via` | Emitted when the `packfile-uris` stanza fires. |
-| `pack_uri_served_total` | `via`, `tenant`, `repo` | Per successful proxied pack serve. Truncation semantics same as `bundle_uri_served_total`. `tenant` + `repo` added M19. |
-| `pack_uri_served_bytes` | `via`, `tenant`, `repo` | Same shape as `bundle_uri_served_bytes`. `tenant` + `repo` added M19. |
-| `proxied_url_token_invalid_total` | `reason` ∈ {`missing`, `expired`, `kind_mismatch`, `invalid`} | Per token-validation failure on `/_bundle/` or `/_pack/`. `missing` = no `token` query parameter. `expired` = signature past TTL. `kind_mismatch` = bundle token presented to `/_pack/` (or vice versa). `invalid` = signature failure (including M19 cross-tenant URL tamper — the composite HMAC mismatches when any segment is swapped). The user-facing 403 body collapses `kind_mismatch` to "invalid token" — do not rely on the response body to distinguish; use this metric. |
+| `pack_uri_served_total` | `via`, `tenant`, `repo` | Per successful proxied pack serve. Truncation semantics same as `bundle_uri_served_total`. |
+| `pack_uri_served_bytes` | `via`, `tenant`, `repo` | Same shape as `bundle_uri_served_bytes`. |
+| `proxied_url_token_invalid_total` | `reason` ∈ {`missing`, `expired`, `kind_mismatch`, `invalid`} | Per token-validation failure on `/_bundle/` or `/_pack/`. `missing` = no `token` query parameter. `expired` = signature past TTL. `kind_mismatch` = bundle token presented to `/_pack/` (or vice versa). `invalid` = signature failure (including cross-tenant URL tamper — the composite HMAC mismatches when any segment is swapped). The user-facing 403 body collapses `kind_mismatch` to "invalid token" — do not rely on the response body to distinguish; use this metric. |
 
-**Cardinality note.** Since M19 the served-* metrics (`bundle_uri_served_*`,
+**Cardinality note.** The served-* metrics (`bundle_uri_served_*`,
 `pack_uri_served_*`) carry `tenant` + `repo` labels — both values are
 validated by the URL parser before reaching the metric emit, so values are
 safe and bounded by the registered-repos set. Operators with thousands of
@@ -506,7 +506,7 @@ All four events use the flat-attrs shape (`slog.Bool("audit", true)` +
 jq 'select(.audit == true and (.event | startswith("bundle.")))'
 ```
 
-to extract all M11 bundle audit events.
+to extract all bundle audit events.
 
 #### 8.2.1 Maintenance-side audit events
 
@@ -524,7 +524,7 @@ before-generated emission order pairs the events atomically.
   CAS-merge supersedes an existing `full_default` entry.
   Fields: `repo_id`, `bundle_id` (the retired bundle's ID), `reason`,
   `replaced_by` (the new bundle ID from the paired `bundle.generated`).
-  M11 `reason` vocabulary: `"replaced"` only. Future work will add
+  Current `reason` vocabulary: `"replaced"` only. Future work will add
   `"gc_swept"` when the full bundle GC pipeline lands (see §12).
 
 DryRun mode emits no audit events.
@@ -533,8 +533,8 @@ DryRun mode emits no audit events.
 
 - **`bundle.uri.advertised`** — emitted from `serveBundleURI` when the
   response contains URLs (`freshness ∈ {current, warm}`).
-  Fields: `repo_id`, `freshness`, `via`, `bundle_count` (= 1 in M11;
-  pluralized in a future milestone), `first_tip_oid` (matches the
+  Fields: `repo_id`, `freshness`, `via`, `bundle_count` (= 1 today;
+  pluralized in a future release), `first_tip_oid` (matches the
   `bundle.generated.tip_oid` of the advertised bundle — operators correlate
   the two events).
 
@@ -547,7 +547,7 @@ DryRun mode emits no audit events.
 
 ### 8.3 Rate-amplification gotchas
 
-Three properties of the M11 observability surface that operators must factor
+Three properties of the observability surface that operators must factor
 into alerting:
 
 1. `bundle_advertised_total` increments per `command=bundle-uri` dispatch,
@@ -567,16 +567,16 @@ into alerting:
    `proxied.url.served` audit event's `status_code` and `bytes_served`
    fields).
 
-3. All served-* metrics carry `tenant` + `repo` labels since M19. Multi-repo
+3. All served-* metrics carry `tenant` + `repo` labels. Multi-repo
    proxied deployments can be observed per-repo by selecting on
-   `tenant=...,repo=...`. Pre-M19 deployments lacked these labels; if you are
+   `tenant=...,repo=...`. Deployments that predate these labels lacked them; if you are
    parsing historical metrics, join via the `proxied.url.served` audit event
    (which carries the same fields in both eras: the labels and the audit-event
    attribute names match).
 
 ### 8.4 Example slog grep recipes
 
-Grep all M11 audit events from a slog JSON-line stream:
+Grep all bundle audit events from a slog JSON-line stream:
 
 ```bash
 jq -c 'select(.audit == true and ((.event | startswith("bundle.")) or .event == "proxied.url.served"))' \
@@ -629,7 +629,7 @@ reachability data available to the bundle phase on the next run.
 ### 9.2 Clone is slow despite bundle being current
 
 **Symptom.** `bundle_advertised_total{freshness="current"}` is nonzero, but
-client-side clone times have not improved relative to the pre-M11 baseline.
+client-side clone times have not improved relative to the standard-fetch baseline.
 
 **Likely cause.** The client did not opt in to bundle-uri. By default, git
 clients require explicit configuration to use bundle-uri.
@@ -714,8 +714,8 @@ during full-clone sessions. `bundle_uri_advertised_total` may be nonzero
 
 **Likely cause.** The packfile-uri gate requires two conditions:
 `len(manifest.Packs) == 1` AND `manifest.Packs[0].PackChecksum != ""`.
-Pre-M11 manifests have an empty `PackChecksum` field. If no maintenance run
-has occurred since deploying M11, `PackChecksum` remains empty and pack-uri
+Manifests written before pack-uri support have an empty `PackChecksum` field. If no maintenance run
+has occurred since enabling pack-uri, `PackChecksum` remains empty and pack-uri
 is gated off. Operator action: run `bucketvcs maintenance --force` once per
 affected repo to backfill `PackChecksum`.
 
@@ -756,39 +756,39 @@ Note that raising the warm threshold widens the gap clients must bridge with
 an incremental fetch; there is a tradeoff between metric noise and actual
 clone performance.
 
-### 9.8 Multi-repo deployment, proxied mode, intermittent wrong-repo serves (historical, pre-M19)
+### 9.8 Multi-repo deployment, proxied mode, intermittent wrong-repo serves (historical)
 
-**Status.** Closed by M19. This section is retained for operators upgrading
-from pre-M19 binaries who may have seen the symptom historically.
+**Status.** Fixed. This section is retained for operators upgrading from older
+binaries who may have seen the symptom historically.
 
-**Symptom (pre-M19).** In a multi-repository deployment with
+**Symptom (older binaries).** In a multi-repository deployment with
 `--bundle-uri-mode=proxied`, some clients received bundle or pack content that
 did not match the repository they cloned. The symptom was typically a Git
 object consistency error on the client after the bundle download.
 
-**Cause (pre-M19).** The proxied handler was hash-keyed via a single-repo
-`ProxiedKeyResolver` that mapped `/_bundle/<hash>` to a storage key without
+**Cause (older binaries).** The proxied handler was hash-keyed via a single-repo
+resolver that mapped `/_bundle/<hash>` to a storage key without
 per-repo discrimination. If two repositories produced a bundle with the same
 content hash, the resolver picked one deterministically — which might not be
 the requested repository.
 
-**M19 fix.** URLs now embed `<tenant>/<repo>` segments (`/_bundle/<t>/<r>/<h>`,
+**Fix.** URLs now embed `<tenant>/<repo>` segments (`/_bundle/<t>/<r>/<h>`,
 `/_pack/<t>/<r>/<h>`), the proxied handler resolves the storage key from the
 URL path directly (no hash-only lookup), and the HMAC token is bound to the
 composite `tenant/repo/hash` so segment swaps fail token verification with
 HTTP 403. No operator action required after upgrade — restart of
-`bucketvcs serve` is sufficient. Verify with the M19 smoke
-(`scripts/m19-multitenant-proxied-smoke.sh`).
+`bucketvcs serve` is sufficient. Verify with a multi-tenant proxied clone
+against two distinct repositories that produce identically-hashed bundles.
 
 ---
 
-## 10. Migration from Pre-M11
+## 10. Migration to Acceleration
 
 ### 10.1 Three-step migration sequence
 
-**Step 1 — Deploy M11 binaries.** Replace the `bucketvcs` binary across
+**Step 1 — Deploy acceleration-capable binaries.** Replace the `bucketvcs` binary across
 maintenance hosts and gateway hosts. Roll the deployment as you normally would;
-the M11 binary handles pre-M11 manifests identically except for the
+the binary handles older manifests identically except for the
 `PackChecksum` backfill.
 
 **Step 2 — Run `bucketvcs maintenance --force` once per repository.** This
@@ -819,12 +819,12 @@ invocations and restart the gateway:
 
 ### 10.2 Rollback safety
 
-- M11 manifest fields are `omitempty` — pre-M11 binaries read M11-shaped
-  manifests without error.
-- `bundle.generated` and `bundle.retired` audit events are additive; pre-M11
+- Bundle/pack manifest fields are `omitempty` — older binaries read
+  acceleration-shaped manifests without error.
+- `bundle.generated` and `bundle.retired` audit events are additive; older
   log consumers ignore them.
 - To roll back, redeploy the old binary; manifest state remains compatible.
-  The `BundleEntry` array stays in place (pre-M11 binaries ignore it). On the
+  The `BundleEntry` array stays in place (older binaries ignore it). On the
   next maintenance run with the old binary, bundle entries do not refresh —
   they become `stale` and eventually `retired` per the freshness rules, but
   they do not corrupt anything.
@@ -861,11 +861,11 @@ Example output:
 
 - `ID` — unique identifier for the entry; matches `bundle.generated.bundle_id`
   audit field.
-- `Kind` — `"full_default"` in M11. Other kinds (e.g. release-tag bundles)
+- `Kind` — `"full_default"` today. Other kinds (e.g. release-tag bundles)
   are out of scope.
 - `BundleHash` — content hash of the bundle file; appears in proxied URLs as
-  `/_bundle/<tenant>/<repo>/<BundleHash>` (URL also embeds the
-  `<tenant>/<repo>` segments since M19).
+  `/_bundle/<tenant>/<repo>/<BundleHash>` (the URL also embeds the
+  `<tenant>/<repo>` segments).
 - `BundleKey` — storage key of the bundle blob.
 - `SidecarKey` — storage key of the JSON sidecar with per-OID bundle metadata.
 - `TipOID` — Git OID of the ref tip the bundle was generated against; matches
@@ -911,17 +911,8 @@ For incidents involving a specific client clone failure, grep in this order:
 
 ## 12. Deferred Work
 
-M11 ships the bundle-uri + packfile-uri minimum viable acceleration. Several
-follow-up items are deferred to successor milestones; operators should plan
-around them:
-
-- **Multi-tenant proxied mode.** _Shipped in M19._ URLs now embed
-  `/_bundle/<tenant>/<repo>/<hash>` (and `/_pack/<tenant>/<repo>/<hash>`); the
-  HMAC token is bound to the composite `tenant/repo/hash`, so cross-tenant URL
-  tampering is rejected with HTTP 403. `bundle_uri_served_*` and
-  `pack_uri_served_*` metrics gained `tenant` + `repo` labels; the
-  `proxied.url.served` audit event gained `tenant` + `repo` attribute fields.
-  Proxied mode is now GA for multi-tenant deployments.
+Bundle-uri + packfile-uri provide the minimum viable acceleration. Several
+follow-up items are deferred; operators should plan around them:
 
 - **Full bundle GC pipeline.** `bucketvcs gc` does not yet sweep retired bundle
   blobs. Retired bundles linger in object storage at zero serve cost but nonzero
@@ -935,7 +926,7 @@ around them:
   `pack-objects` entirely when `FullPackRequested` holds. Cost-relevant for
   full-clone-heavy deployments.
 
-- **Legacy `gateway.Options` URI fields.** The Phase 8 closure-pattern API
+- **Legacy `gateway.Options` URI fields.** The closure-pattern API
   (`BundleURIBuildURL`, `PackURIBuildURL`) coexists with the legacy fields
   (`BundleURIMode`, `BundleURITTL`, `ProxiedURLSigningKey`, etc.). The legacy
   fields are deprecated and will be removed once the closure pattern has soaked
@@ -944,7 +935,7 @@ around them:
 - **Concurrent bundle-safety conformance.** The `RunPropertyBundleSafety`
   factory ships solo localfs green; three concurrent sub-cases
   (`push_during_bundle`, `bundle_during_compaction`, `sweep_after_retire`) ship
-  as `t.Skip` stubs deferred to M11.x. These test the manifest's atomicity
+  as `t.Skip` stubs. These test the manifest's atomicity
   guarantees under concurrent bundle generation + push + GC sweep; their absence
   does not affect production correctness today.
 

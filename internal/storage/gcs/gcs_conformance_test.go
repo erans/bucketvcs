@@ -113,6 +113,17 @@ func TestGCS_Signing(t *testing.T) {
 	if bucket == "" {
 		t.Skip("BUCKETVCS_GCS_BUCKET unset — skipping live GCS signing conformance")
 	}
+	// fake-gcs-server (and any signing-incapable emulator) ignores the
+	// cryptographic signature entirely: it returns 200 for expired or
+	// tampered URLs, which RunCapabilitySigning correctly flags as a
+	// signing failure. Signing semantics can only be validated against a
+	// backend that actually verifies V4 signatures, so the emulator
+	// conformance script sets BUCKETVCS_CONFORMANCE_NO_SIGNING to opt
+	// this test out. The nightly real-cloud job leaves the marker unset
+	// and runs the full signing suite against live GCS.
+	if os.Getenv("BUCKETVCS_CONFORMANCE_NO_SIGNING") != "" {
+		t.Skip("BUCKETVCS_CONFORMANCE_NO_SIGNING set — emulator cannot verify URL signatures; signing is covered by the real-cloud job")
+	}
 	base := gcs.Config{
 		Bucket:          bucket,
 		Endpoint:        os.Getenv("BUCKETVCS_GCS_ENDPOINT"),

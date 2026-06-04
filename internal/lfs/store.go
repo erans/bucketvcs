@@ -120,7 +120,7 @@ func (s *Store) PresignGet(ctx context.Context, oid string, ttl time.Duration) (
 //
 // Returns the same Store so the call can be chained:
 //
-//     lfs.NewStore(backend, prefix).WithProxied(key, baseURL, t, r)
+//	lfs.NewStore(backend, prefix).WithProxied(key, baseURL, t, r)
 //
 // If signingKey is empty (zero-length), proxied methods continue to
 // return empty URLs — useful for tests that exercise only the presign

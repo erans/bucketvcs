@@ -10,9 +10,9 @@ import (
 // MatchPath reports whether p matches pattern. Patterns extend stdlib
 // path.Match with `**`:
 //   - `**`    matches one or more path segments greedily. (Non-trailing
-//             `**` matches zero or more — only trailing `**` requires at
-//             least one segment, so `secrets/**` matches files IN secrets/
-//             but not the bare directory entry.)
+//     `**` matches zero or more — only trailing `**` requires at
+//     least one segment, so `secrets/**` matches files IN secrets/
+//     but not the bare directory entry.)
 //   - `*`     matches anything within one segment (no `/`)
 //   - `?`     matches one byte (no `/`)
 //   - `[abc]` character class

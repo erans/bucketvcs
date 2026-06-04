@@ -1,12 +1,11 @@
-# M23 B2 — Multi-node concurrency hardening (operator guide)
+# Multi-node concurrency hardening (operator guide)
 
-This guide covers M23 Phase B2: making the PostgreSQL-backed metadata/auth DB
-safe to run behind **multiple gateway nodes simultaneously**. It explains what
-changed, how to enable multi-node deployments, what is now race-safe (and how),
-and the caveats that remain.
+This guide covers running the PostgreSQL-backed metadata/auth DB safely behind
+**multiple gateway nodes simultaneously**. It explains how to enable multi-node
+deployments, what is race-safe (and how), and the caveats that remain.
 
 SQLite and libSQL backends are unaffected: they remain single-node. This guide
-applies only to the `postgres://` / `postgresql://` backend introduced in B1.
+applies only to the `postgres://` / `postgresql://` backend.
 
 Production readiness summary:
 
@@ -27,11 +26,11 @@ Production readiness summary:
 
 ## 1. Overview
 
-B1 moved the auth DB to PostgreSQL but held `MaxOpenConns(1)` so the existing
-webhook-claim loop and in-process quota dedup ring kept working correctly on a
-single gateway node. B2 removes that constraint.
+The Postgres backend can run behind a single gateway node with
+`MaxOpenConns(1)`, which keeps the webhook-claim loop and in-process quota dedup
+ring correct on one node. Multi-node operation removes that constraint.
 
-With B2 you can run **N gateway nodes** (any N ≥ 1) all pointing at the same
+You can run **N gateway nodes** (any N ≥ 1) all pointing at the same
 `postgres://…` DB. No leader election, no extra coordination service, and no
 configuration beyond the flags below is needed. Each node is a fully active
 worker for every operation.
@@ -127,11 +126,11 @@ serialized-write approach, which is correct for single-node deployments.
 
 ### 3.2 LFS quota counting — `quota_credits` unique PK
 
-Before B2 the in-process dedup ring prevented a verify-replay from incrementing
-`used_bytes` twice. That dedup was node-local, so two concurrent nodes could
-each count the same upload.
+Before this hardening, an in-process dedup ring prevented a verify-replay from
+incrementing `used_bytes` twice. That dedup was node-local, so two concurrent
+nodes could each count the same upload.
 
-B2 introduces a `quota_credits` table with a unique PK on `(tenant, oid)`:
+A `quota_credits` table provides a unique PK on `(tenant, oid)`:
 
 ```sql
 INSERT INTO quota_credits (tenant, oid, bytes)
@@ -147,17 +146,17 @@ the INSERT silently does nothing, and `used_bytes` is not incremented again.
 This guarantee holds across all N nodes simultaneously. The in-process ring is
 removed entirely.
 
-**Upgrade note:** objects pushed and verified *before* B2 have no
-`quota_credits` rows. Their subsequent deletion by `gc --lfs` will not
-decrement `used_bytes`. Run `bucketvcs quota reconcile` immediately after
-upgrading (and periodically thereafter) to correct any drift — see §4.3.
+**Upgrade note:** objects pushed and verified *before* the `quota_credits` table
+existed have no `quota_credits` rows. Their subsequent deletion by `gc --lfs`
+will not decrement `used_bytes`. Run `bucketvcs quota reconcile` immediately
+after upgrading (and periodically thereafter) to correct any drift — see §4.3.
 
 ### 3.3 Repo rename — `RowsAffected` guard
 
 Under Postgres `READ COMMITTED` (the default isolation level), a `SELECT
 COUNT(*)` existence check acquires no row lock, so two concurrent renames of the
-same repo could both observe the repo as existing and both proceed. B2 replaces
-the existence pre-check with a guarded `UPDATE`:
+same repo could both observe the repo as existing and both proceed. The
+existence pre-check is replaced with a guarded `UPDATE`:
 
 ```sql
 UPDATE repos SET name = $new WHERE tenant = $t AND name = $old
@@ -175,7 +174,7 @@ Postgres supports.
 
 ### 4.1 Rate limiter remains per-node
 
-The M18 credential-failure rate limiter (token-bucket per client IP) is
+The credential-failure rate limiter (token-bucket per client IP) is
 in-memory per gateway node. With N nodes the effective burst a single IP can
 reach before being throttled is approximately **N × Burst** (default Burst=10,
 so 2 nodes → up to 20 failures before either node throttles).
@@ -184,27 +183,26 @@ To enforce a cluster-wide rate limit, front the gateways with a rate-limiting
 reverse proxy or load balancer (nginx `limit_req_zone`, HAProxy stick-tables,
 cloud WAF, etc.).
 
-This is unchanged from B1 and is by design — the cost of a distributed rate
-limiter outweighs the benefit for most deployments. The recommendation has been
-present since M18.
+This is by design — the cost of a distributed rate limiter outweighs the
+benefit for most deployments.
 
 ### 4.2 SQLite / libSQL remain single-node
 
 Regardless of the `--auth-db-max-conns` value, SQLite and libSQL backends are
-always opened with `MaxOpenConns(1)`. This is not a B2 limitation; it is a
-fundamental property of SQLite's file-level locking model and of the libSQL
-remote-write-serialization contract.
+always opened with `MaxOpenConns(1)`. This is not a limitation of the multi-node
+support; it is a fundamental property of SQLite's file-level locking model and
+of the libSQL remote-write-serialization contract.
 
 Do not run multiple gateways against the same SQLite file or the same libSQL
 endpoint. Use the Postgres backend for multi-node deployments.
 
-### 4.3 Quota drift after upgrading from B1 (or earlier)
+### 4.3 Quota drift after upgrading from a single-node release
 
-The `quota_credits` table was introduced in B2. Objects uploaded and verified
-with B1 (or any earlier release) have no corresponding `quota_credits` rows.
-When those objects are later swept by `gc --lfs`, their bytes will not be
-decremented from `used_bytes`, causing `used_bytes` to drift above the true
-value.
+The `quota_credits` table was introduced with multi-node support. Objects
+uploaded and verified by an earlier single-node release have no corresponding
+`quota_credits` rows. When those objects are later swept by `gc --lfs`, their
+bytes will not be decremented from `used_bytes`, causing `used_bytes` to drift
+above the true value.
 
 Correct this with:
 
@@ -214,8 +212,8 @@ bucketvcs quota reconcile --auth-db 'postgres://bv@host/bucketvcs_auth?sslmode=r
   --tenant <tenant>
 ```
 
-Run this command once immediately after upgrading from B1, and schedule it
-periodically (e.g. weekly) as an ongoing correction. `reconcile` walks live LFS
+Run this command once immediately after upgrading from a single-node release,
+and schedule it periodically (e.g. weekly) as an ongoing correction. `reconcile` walks live LFS
 objects in object storage, recomputes the true byte total, and updates
 `used_bytes` atomically. It is safe to run while the gateway is live.
 
@@ -257,7 +255,8 @@ Both jobs run the full conformance suite plus a set of live concurrency tests:
 - **Rename winner:** two concurrent rename requests for the same repo are
   issued; exactly one succeeds, the other returns `ErrNoSuchRepo`.
 
-These tests reproduce the race conditions B2 fixes and prove they cannot recur.
+These tests reproduce the race conditions multi-node operation eliminates and
+prove they cannot recur.
 
 ---
 

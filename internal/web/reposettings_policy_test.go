@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -246,7 +247,11 @@ func TestRepoSettingsPolicyRefsAdd(t *testing.T) {
 
 	t.Run("service ErrInvalidInput → flash surfaced verbatim", func(t *testing.T) {
 		store := policyStore()
-		svcErr := errors.New("policy: invalid refname_pattern \"[\": syntax error in pattern")
+		// Mirrors policy.Add's real validation wrap: fmt.Errorf("%w: invalid
+		// refname_pattern %q: %v", ErrInvalidInput, ...). flashableErr matches
+		// the sentinel, not the message text.
+		svcErr := fmt.Errorf("%w: invalid refname_pattern %q: syntax error in pattern",
+			policy.ErrInvalidInput, "[")
 		pol := &fakePolicy{
 			addFn: func(ctx context.Context, r policy.ProtectedRef) error {
 				return svcErr

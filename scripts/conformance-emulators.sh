@@ -54,6 +54,18 @@ docker run --rm --network host \
 # Export env for the Go test process. Each adapter's loadConfigFromEnv
 # helper reads these.
 
+# Signing conformance (RunCapabilitySigning) verifies that expired and
+# tampered presigned URLs are rejected and that excessive TTLs do not
+# mint a working URL. MinIO and fake-gcs-server cannot honor those
+# semantics — fake-gcs ignores the V4 signature outright (returns 200
+# for expired/tampered URLs) and MinIO rejects the >7-day TTL the suite
+# probes with. The S3 and GCS signing tests therefore opt out when this
+# marker is set; the nightly real-cloud job leaves it unset and runs the
+# full signing suite against live backends. Azurite implements real SAS
+# signing, so the Azure signing test deliberately ignores this marker
+# and keeps running here.
+export BUCKETVCS_CONFORMANCE_NO_SIGNING=1
+
 # MinIO -> s3compat
 export BUCKETVCS_S3_BUCKET=bucketvcs-conformance
 export BUCKETVCS_S3_REGION=us-east-1

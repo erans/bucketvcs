@@ -1,8 +1,8 @@
-# M15 — Webhooks (operator guide)
+# Webhooks (operator guide)
 
-This guide covers the M15 Tier 1 webhooks feature. It explains what M15 ships, how to register and manage endpoints with the `bucketvcs webhook` CLI, how the gateway enqueues and delivers events, how to verify signatures on the receiver side, and how to read the metrics + audit events.
+This guide covers the webhooks feature. It explains how to register and manage endpoints with the `bucketvcs webhook` CLI, how the gateway enqueues and delivers events, how to verify signatures on the receiver side, and how to read the metrics + audit events.
 
-The companion design document is `docs/superpowers/specs/2026-05-21-m15-webhooks-design.md`; the implementation plan is `docs/superpowers/plans/2026-05-21-m15-webhooks.md`.
+The companion design document is `docs/superpowers/specs/2026-05-22-m15-webhooks-design.md`; the implementation plan is `docs/superpowers/plans/2026-05-22-m15-webhooks.md`.
 
 Production readiness summary:
 
@@ -11,14 +11,14 @@ Production readiness summary:
 - At-least-once delivery with bounded retries + dead-letter — **shipped**.
 - Single-writer worker per gateway process (in-process sqlite queue) — **shipped**.
 - Manual operator replay via CLI — **shipped**.
-- Tier 2 (cross-tenant fan-out, configurable per-endpoint retry policy, alternate signing schemes) — **deferred**.
+- Cross-tenant fan-out, configurable per-endpoint retry policy, alternate signing schemes — **deferred**.
 - Schema 5 → 6 (`0006_webhooks.sql`) is forward-only and applied by the existing `RunMigrations`.
 
 ---
 
 ## 1. Overview
 
-M15 introduces an outbound webhook subsystem layered on top of the existing audit emitters. Each tenant/repo can register one or more endpoints subscribing to a subset of the canonical event taxonomy (`push`, `lfs.upload`, `lfs.lock.created`, `lfs.lock.released`, `repo.created`, `policy.ref.rejected`, …). Gateway operations that succeed and need to be advertised externally call `webhooks.Service.Enqueue`, which writes a `webhook_deliveries` row keyed off the matching endpoints.
+The webhook subsystem provides outbound delivery layered on top of the existing audit emitters. Each tenant/repo can register one or more endpoints subscribing to a subset of the canonical event taxonomy (`push`, `lfs.upload`, `lfs.lock.created`, `lfs.lock.released`, `repo.created`, `policy.ref.rejected`, …). Gateway operations that succeed and need to be advertised externally call `webhooks.Service.Enqueue`, which writes a `webhook_deliveries` row keyed off the matching endpoints.
 
 A background worker (`StartWorker`) loops over `pending` deliveries every second, claims a batch, POSTs the JSON payload to each endpoint URL, and updates the row to `delivered`, back to `pending` (with a backoff), or to `dead_letter` once the retry budget is exhausted. Each attempt re-signs the payload with the current Unix timestamp so the BucketVCS-Signature header always fits inside a tight replay window on the receiver.
 
@@ -36,7 +36,7 @@ What ships:
 What does not ship (full list in §11):
 
 - `repo.deleted` and `repo.renamed` events are reserved in the taxonomy but have no CLI emission today (`bucketvcs repo` has no `delete` or `rename` subcommand).
-- The `storage_backend` field on `PushPayload` is wired through the API but currently always empty — set to the live backend in a future tier.
+- The `storage_backend` field on `PushPayload` is wired through the API but currently always empty — set to the live backend in a future release.
 - Per-endpoint retry policy / per-endpoint backoff override (every endpoint uses the global schedule).
 - Multi-process worker / horizontal scale-out (single writer per gateway process; see §11 for the upgrade path).
 - HMAC-SHA256 is the only signing scheme; v2/ed25519 is reserved in the header format but not emitted.
@@ -110,7 +110,7 @@ Remove any unwanted carry-overs:
 bucketvcs webhook endpoint remove --auth-db=auth.db --id=<N>
 ```
 
-A future milestone will add an automated webhook-prune sweep for endpoints whose (tenant, repo) has no matching `repos` row AND zero pending deliveries.
+A future release will add an automated webhook-prune sweep for endpoints whose (tenant, repo) has no matching `repos` row AND zero pending deliveries.
 
 ### 2.5 Inspect and replay deliveries
 
@@ -156,7 +156,7 @@ Extra fields:
 |---|---|---|
 | `tx_id` | string | The repo-tx ID associated with the push. |
 | `manifest_version` | int64 | Manifest version after the push. |
-| `storage_backend` | string | Always empty in Tier 1 (reserved for future). |
+| `storage_backend` | string | Always empty currently (reserved for future). |
 | `ref_updates` | `[]{refname, old_oid, new_oid}` | One entry per accepted update; `old_oid == "0000…"` means create; `new_oid == "0000…"` means delete. |
 | `commits_summary.count` | int | Number of accepted ref updates (NOT commits walked). |
 | `commits_summary.head` | string | OID of the push's head ref, best-effort. |
@@ -174,7 +174,7 @@ Triggered when an LFS verify returns 200 (object stored, size matches batch clai
 
 ### lfs.lock.created / lfs.lock.released
 
-Triggered when the M13.3 LFS locks API records a successful POST `/locks` or a successful `verify+unlock` cycle. One event per lock state transition.
+Triggered when the LFS locks API records a successful POST `/locks` or a successful `verify+unlock` cycle. One event per lock state transition.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -184,7 +184,7 @@ Triggered when the M13.3 LFS locks API records a successful POST `/locks` or a s
 
 ### policy.ref.rejected
 
-Triggered when M14's step 8b receive-pack guard rejects a ref update (force-push or deletion blocked by a `protected_refs` rule). Emitted once per rejected ref; not emitted for accepted refs.
+Triggered when the receive-pack ref-protection guard rejects a ref update (force-push or deletion blocked by a `protected_refs` rule). Emitted once per rejected ref; not emitted for accepted refs.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -198,11 +198,11 @@ Triggered when M14's step 8b receive-pack guard rejects a ref update (force-push
 
 Triggered when `bucketvcs repo register` registers a tenant/repo for the first time. Re-registration of an existing repo is a no-op and does NOT enqueue.
 
-Carries only the envelope — no extra fields in Tier 1.
+Carries only the envelope — no extra fields.
 
 ### repo.deleted / repo.renamed (reserved)
 
-Listed in the taxonomy and `--events=all` will match them, but no CLI exists to emit them today. They are reserved for a future tier when `bucketvcs repo delete` / `bucketvcs repo rename` ship.
+Listed in the taxonomy and `--events=all` will match them, but no CLI exists to emit them today. They are reserved for when `bucketvcs repo delete` / `bucketvcs repo rename` ship.
 
 ---
 
@@ -212,7 +212,7 @@ Every POST carries:
 
 ```
 Content-Type: application/json
-User-Agent: bucketvcs-webhook/M15
+User-Agent: bucketvcs-webhook/1
 X-BucketVCS-Event: push
 X-BucketVCS-Delivery-ID: <uuid>
 BucketVCS-Signature: t=1747934201,v1=4b3f…
@@ -321,7 +321,7 @@ The 5-minute window bounds an attacker's ability to replay a captured payload, b
 
 ## 5. Retry semantics
 
-Every endpoint shares the same retry policy in Tier 1:
+Every endpoint shares the same retry policy:
 
 | Attempt | Trigger | Delay before next | Cumulative wall time |
 |---|---|---|---|
@@ -331,7 +331,7 @@ Every endpoint shares the same retry policy in Tier 1:
 | 4 | retry | + ~12 hours | ~2.5 hours |
 | 5 | final retry | dead_letter | ~14.5 hours |
 
-Backoff intervals carry ±25 % uniform jitter to avoid synchronised thundering-herd retries when a popular receiver flaps. The schedule is hard-coded in `DefaultWorkerConfig()`; per-endpoint overrides are deferred to Tier 2.
+Backoff intervals carry ±25 % uniform jitter to avoid synchronised thundering-herd retries when a popular receiver flaps. The schedule is hard-coded in `DefaultWorkerConfig()`; per-endpoint overrides are deferred.
 
 A 2xx response advances the delivery to `delivered` (terminal). Any non-2xx (including 1xx, 3xx, 4xx, 5xx), connect error, TLS handshake failure, or 10-second HTTP timeout counts as a failed attempt. After the 5th failure, the row moves to `dead_letter` and stays there until an operator inspects and (optionally) replays.
 
@@ -358,7 +358,7 @@ Four metrics, all emitted as structured slog records with `msg="metric"` and a `
 | `webhooks_queue_depth` | gauge | `status={pending,in_flight,dead_letter}` | reserved for periodic gauge emission (see §6.4) |
 | `webhooks_endpoints_active` | gauge | none | reserved for periodic gauge emission |
 
-The point-sample shape matches policy + LFS metrics in earlier milestones; a scraping sidecar can aggregate by `(name, outcome)` from the raw slog stream.
+The point-sample shape matches the policy + LFS metrics; a scraping sidecar can aggregate by `(name, outcome)` from the raw slog stream.
 
 ### 6.2 Audit events
 
@@ -370,10 +370,10 @@ Six structured events:
 | `webhooks.failed` | WARN | delivery_id, endpoint_id, event_type, attempts, status_code, error, next_attempt_at | one per non-terminal failure |
 | `webhooks.dead_letter` | ERROR | delivery_id, endpoint_id, event_type, total_attempts, final_status_code | one per retry-budget exhaustion |
 | `webhooks.enqueue_failed` | ERROR | tenant, repo, event_type, error | one per fail-open enqueue failure |
-| `webhooks.endpoint_created` | INFO | endpoint_id, tenant, repo, url, events | reserved for future CLI hook (the M15 CLI currently writes the row but does not call the emitter) |
+| `webhooks.endpoint_created` | INFO | endpoint_id, tenant, repo, url, events | reserved for future CLI hook (the CLI currently writes the row but does not call the emitter) |
 | `webhooks.endpoint_removed` | INFO | endpoint_id, tenant, repo | reserved for future CLI hook |
 
-The two `endpoint_*` emitters are exported and tested; wiring them into the `webhook endpoint add` / `remove` CLI is a small Task-7-follow-up and intentionally deferred to keep the emitter API stable.
+The two `endpoint_*` emitters are exported and tested; wiring them into the `webhook endpoint add` / `remove` CLI is a small follow-up and intentionally deferred to keep the emitter API stable.
 
 ### 6.3 Quick log filter
 
@@ -395,7 +395,7 @@ journalctl -u bucketvcs --since "1 hour ago" \
 `EmitQueueDepthGauge` is exported but not currently invoked by the worker on a timer. Operators who want a `webhooks_queue_depth` time series should either:
 
 1. Sample the gauge from a sidecar via `SELECT status, COUNT(*) FROM webhook_deliveries GROUP BY status`; or
-2. Add a goroutine wrapper in their `bucketvcs serve` fork that calls `webhooks.EmitQueueDepthGauge` every 30 s. The function is stable across Tier 1 / Tier 2.
+2. Add a goroutine wrapper in their `bucketvcs serve` fork that calls `webhooks.EmitQueueDepthGauge` every 30 s. The function is stable.
 
 The queue-depth + endpoints-active samplers are deferred to a follow-up because the right cadence depends on the scraper.
 
@@ -509,7 +509,7 @@ Three usual culprits:
 
 ### 10.4 `webhooks.enqueue_failed` keeps firing
 
-Indicates the gateway's sqlite (authdb) is unhealthy — usually disk full, schema-gate failure, or a stale FK. Run `bucketvcs inspect-manifest` and check `sqlite_master` schema_version. If the migration didn't apply on first boot, the table won't exist and every enqueue fails. Re-run with `--auth-db=<same path>` and confirm the M15 boot log shows `migration 0006_webhooks applied`.
+Indicates the gateway's sqlite (authdb) is unhealthy — usually disk full, schema-gate failure, or a stale FK. Run `bucketvcs inspect-manifest` and check `sqlite_master` schema_version. If the migration didn't apply on first boot, the table won't exist and every enqueue fails. Re-run with `--auth-db=<same path>` and confirm the boot log shows `migration 0006_webhooks applied`.
 
 ### 10.5 An endpoint is firing into the wrong tenant
 
@@ -517,11 +517,11 @@ Endpoints are keyed by `(tenant, repo)`, not by URL. An operator who created two
 
 ---
 
-## 11. Tier 1 limits
+## 11. Limits
 
-- **Single-writer worker.** One `StartWorker` per gateway process. Horizontal scale-out (multiple gateway processes against the same authdb) is not safe in Tier 1; the claim transaction relies on sqlite's serialised writer.
+- **Single-writer worker.** One `StartWorker` per gateway process. Horizontal scale-out (multiple gateway processes against the same authdb) is not safe; the claim transaction relies on sqlite's serialised writer.
 - **No CLI for `repo.deleted` / `repo.renamed`.** The events are reserved in the taxonomy and `--events=all` will subscribe to them, but no code path emits them today.
-- **`storage_backend` field is empty.** Wired through the payload struct but always `""` in M15 — populated in a future tier when receivepack knows the live backend.
+- **`storage_backend` field is empty.** Wired through the payload struct but always `""` currently — populated in a future release when receivepack knows the live backend.
 - **Per-endpoint retry policy is not configurable.** Every endpoint shares the global schedule.
 - **No webhook secret rotation.** To rotate, remove + re-add the endpoint; receivers must be updated in lockstep.
 - **No per-endpoint event-mask edit.** To change the subscription list, remove + re-add (the secret will rotate too).
@@ -531,15 +531,15 @@ Endpoints are keyed by `(tenant, repo)`, not by URL. An operator who created two
 - **HMAC-SHA256 only.** The header reserves `v1=` for SHA256; `v2=` is parked for future schemes.
 - **No egress allowlist on endpoint URLs (SSRF surface).** Endpoint registration was operator-CLI-only when this was designed, but the web UI now lets any repo-admin register endpoint URLs — including ones that resolve to internal addresses (link-local metadata services, RFC 1918 hosts, `localhost`). The worker will dutifully POST to whatever it is given. Operators who delegate repo-admin to semi-trusted users SHOULD front the worker's egress with network policy (firewall rules, an egress proxy, or a locked-down network namespace) so it cannot reach internal targets. A built-in egress deny-list is a known deferral; until then, network-level isolation is the only control.
 
-The companion design document (§9 "Out of scope") enumerates the Tier 2 path: multi-process worker via a leader-elected sqlite row, per-endpoint backoff schedules, signed-URL artefacts in the payload, and cross-tenant fan-out.
+The companion design document (§9 "Out of scope") enumerates the future path: multi-process worker via a leader-elected sqlite row, per-endpoint backoff schedules, signed-URL artefacts in the payload, and cross-tenant fan-out.
 
 ---
 
-## 12. Webhook delivery retention (M21)
+## 12. Webhook delivery retention
 
 The `webhook_deliveries` table grows monotonically: every push, lock, lfs.upload, repo.created/deleted/renamed, and policy.ref.rejected adds one row per subscribed endpoint, and rows in terminal states (`delivered`, `dead_letter`) are never removed by the worker itself. On a high-traffic monorepo this table can reach millions of rows in weeks and degrade the worker's claim query (which scans `(status, next_attempt_at)`).
 
-M21 ships `bucketvcs webhook prune` to sweep terminal-state rows past a retention window.
+`bucketvcs webhook prune` sweeps terminal-state rows past a retention window.
 
 ### 12.1 What it does
 
@@ -589,7 +589,7 @@ Both signals land in the CLI process's slog stderr — the prune CLI runs out-of
 
 ---
 
-## 13. Repo rename: auth-only semantics (M21)
+## 13. Repo rename: auth-only semantics
 
 ```
 bucketvcs repo rename <tenant>/<old-name> <new-name> \
@@ -602,16 +602,16 @@ The rename CLI updates **auth.db only**. Storage keys at `tenants/<tenant>/repos
 
 ### 13.1 What the CLI does atomically
 
-A single sqlite transaction over the M21 `RenameRepo` helper updates every FK-bearing dependent table plus a small set of repo-scoped tables without FKs:
+A single sqlite transaction over the `RenameRepo` helper updates every FK-bearing dependent table plus a small set of repo-scoped tables without FKs:
 
 - `repos(tenant, name)` — the primary row
 - `repo_permissions` — user grants (FK)
 - `ssh_keys` — per-repo deploy keys (FK; column names: `scope_tenant`, `scope_repo`)
-- `protected_refs` — M14 ref protection rules (FK)
-- `protected_paths` — M16 path protection rules (FK)
-- `hooks` — M20 Tier 3 pre/post-receive hook rules (FK)
-- `webhook_endpoints` — M15 endpoint registrations (FK)
-- `lfs_locks` — M13.3 active locks (no FK to `repos`; updated for value consistency)
+- `protected_refs` — ref protection rules (FK)
+- `protected_paths` — path protection rules (FK)
+- `hooks` — pre/post-receive hook rules (FK)
+- `webhook_endpoints` — endpoint registrations (FK)
+- `lfs_locks` — active locks (no FK to `repos`; updated for value consistency)
 - `webhook_deliveries` — historical webhook delivery rows are joined by `endpoint_id` FK; they follow the endpoint row automatically (no separate UPDATE)
 
 NOT touched by `RenameRepo`:
@@ -627,13 +627,13 @@ The CLI refuses (exit 1, no auth mutation, no webhook delivery) if any of these 
 - Source `<tenant>/<old-name>` does not exist in auth.db (`not_found` outcome metric).
 - Destination `<tenant>/<new-name>` already exists in auth.db (`collision_auth` outcome metric).
 - Destination storage prefix `tenants/<tenant>/repos/<new-name>/` is non-empty — the CLI does a `List(prefix, MaxKeys=1)` probe to detect leftover blobs (`collision_storage` outcome metric).
-- The `<new-name>` argument contains `/` or `\` — cross-tenant rename is not supported in M21 (`cross_tenant` outcome metric). Future "transfer" milestone will support cross-tenant motion with a separate verb.
+- The `<new-name>` argument contains `/` or `\` — cross-tenant rename is not supported (`cross_tenant` outcome metric). A future "transfer" verb will support cross-tenant motion separately.
 
 Successful rename emits the `ok` outcome metric.
 
 ### 13.3 Webhook ordering — at-least-once before commit
 
-The `repo.renamed` webhook is enqueued **BEFORE** the auth transaction runs. This matches the M15.1 `repo.deleted` precedent: endpoints scoped to `(tenant, old-name)` are still present in `webhook_endpoints` when `Enqueue` resolves subscribers — the rename would move those rows to the new name in the same transaction, and a worker reading `webhook_endpoints` AFTER the rename would not match the old `(tenant, repo)` payload key.
+The `repo.renamed` webhook is enqueued **BEFORE** the auth transaction runs. This matches the `repo.deleted` precedent: endpoints scoped to `(tenant, old-name)` are still present in `webhook_endpoints` when `Enqueue` resolves subscribers — the rename would move those rows to the new name in the same transaction, and a worker reading `webhook_endpoints` AFTER the rename would not match the old `(tenant, repo)` payload key.
 
 Consequence: if the auth transaction subsequently fails (sqlite I/O error, constraint violation that wasn't caught by pre-check), the webhook still delivers. Operators must treat `repo.renamed` as an **at-least-once** signal and reconcile by querying current state (`bucketvcs repo list` against the destination name) rather than assuming the rename committed.
 
@@ -648,11 +648,11 @@ After `bucketvcs repo rename <tenant>/<old> <new>` succeeds:
 3. Rewrite absolute path references in the manifest body — every `pack_key`, `idx_key`, and `indexes.*.key` field currently embeds the old prefix. The simplest operator-side approach is to download `tenants/<tenant>/repos/<new>/manifest/root.json`, sed-replace `tenants/<tenant>/repos/<old>/` to `tenants/<tenant>/repos/<new>/`, and PUT it back atomically.
 4. Restart the gateway. Push/clone against the new name should now succeed; the old name returns 404 from the auth layer.
 
-A future milestone may automate this storage step via a `bucketvcs storage rename` helper that respects the manifest indirection. For now it is an operator runbook.
+A future release may automate this storage step via a `bucketvcs storage rename` helper that respects the manifest indirection. For now it is an operator runbook.
 
 ### 13.5 Limits
 
-- Same-tenant only. Cross-tenant motion requires a separate verb (not in M21).
+- Same-tenant only. Cross-tenant motion requires a separate verb.
 - No undo. The rename is committed when the sqlite transaction commits; reverse direction must be done with a second `repo rename` call.
 - LFS quotas are per-tenant (`quotas(tenant)` from migration 0004 has no `repo` column), so a same-tenant rename leaves the tenant-wide byte counter unaffected. If you complete an out-of-band storage migration afterwards, run `bucketvcs quota reconcile --tenant=<tenant>` to correct for any tenant-level drift that accumulated during the cutover.
 - The `webhook_endpoints` row for the old name is migrated to the new name; subscribers continue to receive events under their existing endpoint ID. The endpoint secret is NOT rotated. If you want the new name to surface as a different endpoint, `webhook endpoint rotate-secret --id=<N>` after the rename.

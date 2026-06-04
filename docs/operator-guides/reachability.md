@@ -1,11 +1,11 @@
-# M10 Operator Guide: Reachability Index and Delta-Chain Compaction
+# Operator Guide: Reachability Index and Delta-Chain Compaction
 
-This guide is for operators who deploy, schedule, and monitor M10 reachability
+This guide is for operators who deploy, schedule, and monitor reachability
 compaction in production. It covers what `.bvrd` files are, how the base-index
 / delta-chain model works, how to tune the three reachability thresholds, how to
 schedule compaction alongside `bucketvcs gc`, how to inspect the delta chain,
 how to diagnose fallback warnings, how to use `bucketvcs negotiate` for ad-hoc
-debugging, and the known limits of the M10 implementation.
+debugging, and the known limits of the reachability implementation.
 
 ---
 
@@ -46,11 +46,11 @@ During `git fetch` negotiation (`upload-pack`), bucketvcs first tries the base
 index. If the client's `have` commits are covered by the base, negotiation
 completes in O(1). If the client has commits that arrived after the base was
 built, negotiation walks the delta chain to find them. If neither covers the
-commit, bucketvcs falls back to a full pack walk (the pre-M10 path).
+commit, bucketvcs falls back to a full pack walk (the non-indexed path).
 
 ### 1.3 The cold-fetch SLO contract
 
-The M10 cold-fetch SLO is:
+The cold-fetch SLO is:
 
 **A fresh `git clone` or `git fetch` on a repository with a current base index
 and a delta chain of ≤ 100 pushes completes negotiation in O(1) plus O(delta
@@ -76,7 +76,7 @@ compact-only phase is pack-walk-bound until the optimization ships.
 
 ### 2.1 The three reachability thresholds
 
-M10 adds three threshold flags to `bucketvcs maintenance`:
+Reachability compaction adds three threshold flags to `bucketvcs maintenance`:
 
 | Flag | Default | What it measures | When compaction fires |
 |------|---------|-----------------|----------------------|
@@ -160,7 +160,7 @@ appropriate for idle repos.
 ### 3.2 Example crontab
 
 ```cron
-# /etc/cron.d/bucketvcs-maintenance-m10
+# /etc/cron.d/bucketvcs-maintenance
 #
 # Hot repos: hourly, thresholds gate compaction.
 0 * * * * bucketvcs /usr/local/bin/bucketvcs maintenance \
@@ -335,7 +335,7 @@ Note: `reachability` lives under `indexes` (raw manifest field), while
 }
 ```
 
-For a pre-M10 repo (no reachability index), both the `indexes.reachability` and
+For a repo without a reachability index, both the `indexes.reachability` and
 `reachability_summary` keys will be absent.
 
 ### 4.2 Extracting just the chain length and byte count
@@ -392,7 +392,7 @@ push rate × threshold push count, a manual `--force` compaction run is warrante
 ## 5. Diagnosing Fallback Warnings
 
 When `upload-pack` cannot resolve a client `have` commit from the base index or
-the delta chain, it falls back to a full pack walk (the pre-M10 negotiation
+the delta chain, it falls back to a full pack walk (the non-indexed negotiation
 path). A structured fallback log line is emitted:
 
 ```
@@ -403,11 +403,11 @@ event=reachability.fallback reason=<reason> oid=<short-hash>
 
 | `reason` label | What it means | Remediation |
 |----------------|---------------|-------------|
-| `no_index` | The repo has no base index (`.bvom` / `.bvcg` absent). The repo has never been through a maintenance run, or was imported before M10 shipped. | Run `bucketvcs maintenance --repo=... --force` to build the initial base index. |
+| `no_index` | The repo has no base index (`.bvom` / `.bvcg` absent). The repo has never been through a maintenance run, or was imported before reachability indexing was available. | Run `bucketvcs maintenance --repo=... --force` to build the initial base index. |
 | `delta_decode` | A `.bvrd` delta file failed to parse (`deltaindex.ErrMalformed`). Storage corruption or wire-format drift. | Check store connectivity. Verify the delta key in the manifest exists and is intact. Run `bucketvcs maintenance --repo=... --force` to rebuild the base index and drop the corrupt delta from the chain. |
 | `unknown` | Any other error (storage read failure, network timeout, unexpected state). | Check store connectivity and server logs. The structured log line includes the underlying error. |
 
-> **Note**: The labels `oid_not_found`, `base_read_error`, `walk_depth_exceeded`, and `delta_read_error` are reserved for future use and are not emitted by the M10 classifier.
+> **Note**: The labels `oid_not_found`, `base_read_error`, `walk_depth_exceeded`, and `delta_read_error` are reserved for future use and are not emitted by the classifier.
 
 ### 5.2 High-frequency `unknown` fallbacks
 
@@ -443,7 +443,7 @@ restoring connectivity or confirming the file is intact:
 
 ## 6. `bucketvcs negotiate` for Ad-Hoc Debugging
 
-`bucketvcs negotiate` is a debug subcommand that exercises the M10 negotiation
+`bucketvcs negotiate` is a debug subcommand that exercises the negotiation
 path against a specific repo and client want/have set, without a real git
 client.
 
@@ -514,16 +514,16 @@ Exit codes:
 
 ### 6.3 Per-commit generation numbers
 
-The `--verbose` flag is not implemented in M10. Generation-number details are
+The `--verbose` flag is not implemented. Generation-number details are
 visible in the structured fallback log lines emitted by `upload-pack`
 (see §5) and in the `.bvrd` binary delta files (not human-readable directly).
-A `--verbose` flag for `negotiate` is tracked in the M10.5 backlog.
+A `--verbose` flag for `negotiate` is tracked in the backlog.
 
 ---
 
 ## 7. Expected `.bvrd` Sizes
 
-Empirical observations from M10 development and testing:
+Empirical observations from development and testing:
 
 | Push type | Typical `.bvrd` size |
 |-----------|---------------------|
@@ -567,7 +567,7 @@ reclaims on the same scheduling cycle.
 Two concurrent `bucketvcs maintenance` runs against the same repo are safe: the
 CAS-merge model ensures neither corrupts the manifest. The first to win the CAS
 commits its new pack + refreshed indexes. The loser's uploaded artifacts become
-GC targets. In M10, both runs rebuild the base index; the duplicate work is
+GC targets. Both runs rebuild the base index; the duplicate work is
 wasted IO.
 
 `concurrencyPolicy: Forbid` in Kubernetes CronJobs prevents accidental
@@ -610,11 +610,11 @@ than necessary.
 
 The deferred optimization (a pure-Go index rebuild path that reads the existing
 `.bvom` + `.bvcg` and incrementally extends them using the delta chain, without
-spawning `git repack`) is tracked in the M10.5 backlog.
+spawning `git repack`) is tracked in the backlog.
 
 ### 9.2 Monolithic only; no warm pool
 
-The M10 reachability set is monolithic: it covers all commits reachable from
+The reachability set is monolithic: it covers all commits reachable from
 all refs in the current manifest pack set. There is no warm pool or tiered
 index (e.g., a "recent" sub-index for the last N pushes and a "cold" full
 index). This means:
@@ -624,7 +624,7 @@ index). This means:
 - The base index must be rebuilt from scratch when compaction runs. There is no
   incremental base-extension path yet.
 
-Warm-pool / tiered index support is deferred to the M10.5+ backlog.
+Warm-pool / tiered index support is deferred to the backlog.
 
 ### 9.3 Commits, trees, blobs, and tags not tracked in deltas
 
@@ -635,13 +635,13 @@ membership is resolved by pack index lookup after negotiation.
 
 Tags (annotated tag objects) are also not tracked in `.bvrd`. A push that
 creates only a new tag (no new commits) does not produce a `.bvrd` delta.
-Future milestones may extend the format to cover tags if tag-negotiation
+A future release may extend the format to cover tags if tag-negotiation
 performance becomes a bottleneck.
 
 ### 9.4 No bitmaps in delta chain
 
-The M10 delta chain format does not include pack bitmaps. Bitmap-accelerated
-negotiation is tracked in the M9.5 / M10.5 backlog and is separate from the
+The delta chain format does not include pack bitmaps. Bitmap-accelerated
+negotiation is tracked in the backlog and is separate from the
 delta-chain approach.
 
 ### 9.5 No Bloom filters
@@ -650,7 +650,7 @@ Bloom-filter acceleration for "does this commit exist in this index?" is not
 implemented. All existence checks are linear scans over the delta file's commit
 list. This is acceptable for chains of ≤ 100 deltas × reasonable per-delta
 commit counts, but would benefit from Bloom filter optimization for large delta
-chains. Deferred to a future milestone.
+chains. Deferred to a future release.
 
 ### 9.6 No auto-compaction inside `bucketvcs serve`
 
@@ -660,14 +660,14 @@ operation. There is no in-process background goroutine that triggers
 compaction when thresholds are exceeded. This is by design: the serve binary
 is stateless across requests and the compaction step (which calls `git
 repack`) is heavyweight enough that it should run outside the serve request
-path. The M10.5 backlog includes a serve-triggered light-weight compaction
+path. The backlog includes a serve-triggered light-weight compaction
 suggestion (no actual repack, just index refresh) as a future enhancement.
 
 ---
 
 ## 10. Flag Reference
 
-The full set of M10 flags on `bucketvcs maintenance`:
+The full set of reachability flags on `bucketvcs maintenance`:
 
 ```
   --reachability-delta-commits=N   Default 1000 (0 disables)
@@ -675,11 +675,11 @@ The full set of M10 flags on `bucketvcs maintenance`:
   --reachability-delta-bytes=SIZE  Default 64M, suffix K/M/G (0 disables)
 ```
 
-These flags are evaluated in addition to the M9 pack thresholds. See
+These flags are evaluated in addition to the pack thresholds. See
 `docs/maintenance.md` for the full flag reference covering
 all maintenance flags.
 
-Exit codes are unchanged from M9:
+Exit codes are unchanged from the base maintenance command:
 
 | Code | Meaning |
 |------|---------|

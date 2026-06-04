@@ -173,4 +173,3 @@ func trimConsumedByHash(prev *manifest.ReachabilityRef, consumedHashes map[strin
 	out.Deltas = kept
 	return out
 }
-

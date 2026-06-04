@@ -22,6 +22,13 @@ const (
 // ErrNotFound is returned by Remove / SetEnabled when no row matches.
 var ErrNotFound = errors.New("hooks: not found")
 
+// ErrInvalidInput is returned by Add when a row fails validation (missing
+// tenant/repo, bad trigger, invalid script name). Callers (e.g. internal/web's
+// flashableErr) use errors.Is to distinguish operator-actionable validation
+// failures from masked DB errors. DB-layer wraps ("hooks.Add: %w", ...) are
+// intentionally NOT wrapped with this sentinel.
+var ErrInvalidInput = errors.New("hooks: invalid input")
+
 // Row is the data shape stored per registered hook.
 type Row struct {
 	Tenant     string
@@ -166,13 +173,13 @@ func scanRows(rows *sql.Rows) ([]Row, error) {
 
 func validateRow(r Row) error {
 	if r.Tenant == "" || r.Repo == "" {
-		return fmt.Errorf("hooks: tenant and repo are required")
+		return fmt.Errorf("%w: tenant and repo are required", ErrInvalidInput)
 	}
 	if r.Trigger != TriggerPreReceive && r.Trigger != TriggerPostReceive {
-		return fmt.Errorf("hooks: trigger must be %q or %q", TriggerPreReceive, TriggerPostReceive)
+		return fmt.Errorf("%w: trigger must be %q or %q", ErrInvalidInput, TriggerPreReceive, TriggerPostReceive)
 	}
 	if !ValidScriptName(r.ScriptName) {
-		return fmt.Errorf("hooks: invalid script_name %q (must be [A-Za-z0-9._-]+, no path separators)", r.ScriptName)
+		return fmt.Errorf("%w: invalid script_name %q (must be [A-Za-z0-9._-]+, no path separators)", ErrInvalidInput, r.ScriptName)
 	}
 	return nil
 }

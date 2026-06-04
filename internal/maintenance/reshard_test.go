@@ -98,7 +98,6 @@ func TestReshard_PreservesBodyFields(t *testing.T) {
 	}
 }
 
-
 func TestReshard_HappyPath(t *testing.T) {
 	refs := map[string]string{
 		"refs/heads/main": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

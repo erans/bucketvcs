@@ -131,10 +131,10 @@ func TestMergeBundleEntry_PreservesOtherKinds(t *testing.T) {
 // real repo into a localfs-backed store, then exercises BOTH branches
 // of MergeBundleEntry through the CAS round-trip (json marshal →
 // manifest write → re-read):
-//   1. Add-when-absent: seeded manifest has Bundles=nil, first call
-//      lands a stub full_default entry.
-//   2. Replace-existing: a second call with a different fresh entry
-//      replaces the prior one (still exactly one full_default after).
+//  1. Add-when-absent: seeded manifest has Bundles=nil, first call
+//     lands a stub full_default entry.
+//  2. Replace-existing: a second call with a different fresh entry
+//     replaces the prior one (still exactly one full_default after).
 func TestRunBundleCASMerge_End2End(t *testing.T) {
 	mtest.GitAvailable(t)
 	s := mtest.LocalfsStore(t)

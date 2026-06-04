@@ -663,6 +663,7 @@ func TestE2E_SSHEndToEnd(t *testing.T) {
 		}
 	})
 }
+
 // skipIfNoOpenSSH skips a test when no `ssh` client is on PATH. Used by
 // LFS git-lfs-authenticate tests, which invoke ssh directly instead of
 // going through `git`.

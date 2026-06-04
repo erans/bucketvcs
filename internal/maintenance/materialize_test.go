@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	mtest "github.com/bucketvcs/bucketvcs/internal/maintenance/mtest"
 	"github.com/bucketvcs/bucketvcs/internal/gitcli"
+	mtest "github.com/bucketvcs/bucketvcs/internal/maintenance/mtest"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 )
 

@@ -83,17 +83,18 @@ Subcommands:
   import             Round-trip a bare git repo into bucketvcs storage
   export             Materialize a bare git repo from bucketvcs storage
   cat-object         Read a Git object from a bucketvcs repo
-  serve              Run the HTTP smart-Git gateway
+  serve              Run the Git gateway (HTTPS/SSH) and embedded web UI
   ssh                SSH subcommands (fingerprint)
-  user               Manage users (add/list/disable/enable/delete)
-  token              Manage tokens (create/list/revoke)
-  repo               Manage repository registry and permissions
+  user               Manage users (add/list/disable/enable/delete/set-password/set-email/key)
+  token              Manage tokens (create/list/revoke/rotate)
+  repo               Manage repository registry and permissions (register/grant/public/rename/delete)
   gc                 Garbage-collect orphan and unreachable storage
   maintenance        Run repack maintenance against repos
   negotiate          Debug: compute shipping plan via pure-Go reachability index
-  reshard-refs       Convert a repo from inline refs to sharded refs (M12)
+  reshard-refs       Convert a repo from inline refs to sharded refs
   oidc               Manage OIDC issuers + trust rules (issuer/rule add/list/remove)
-  policy             Manage protected refs (refs add/list/remove)
+  policy             Manage push policies (refs/paths/hooks subcommands)
+  webhook            Manage webhook endpoints and deliveries (endpoint/delivery subcommands)
   quota              Manage LFS storage quotas (set/show/reconcile/clear)
 
 Run "bucketvcs <subcommand> --help" for subcommand flags.

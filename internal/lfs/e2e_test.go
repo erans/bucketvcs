@@ -39,10 +39,10 @@ func (f *fakeAuthE2E) ListSSHKeysForUser(context.Context, string) ([]auth.SSHKey
 func (f *fakeAuthE2E) ListSSHKeysForRepo(_ context.Context, _, _ string) ([]auth.SSHKey, error) {
 	return nil, nil
 }
-func (f *fakeAuthE2E) RevokeSSHKey(context.Context, string) error                 { return nil }
-func (f *fakeAuthE2E) TouchSSHKeyUsage(context.Context, string) error             { return nil }
-func (f *fakeAuthE2E) GetUserByName(context.Context, string) (*auth.User, error)  { return nil, nil }
-func (f *fakeAuthE2E) Close() error                                               { return nil }
+func (f *fakeAuthE2E) RevokeSSHKey(context.Context, string) error                { return nil }
+func (f *fakeAuthE2E) TouchSSHKeyUsage(context.Context, string) error            { return nil }
+func (f *fakeAuthE2E) GetUserByName(context.Context, string) (*auth.User, error) { return nil, nil }
+func (f *fakeAuthE2E) Close() error                                              { return nil }
 
 func TestE2E_LFS_LocalfsProxiedTransfer(t *testing.T) {
 	dir := t.TempDir()

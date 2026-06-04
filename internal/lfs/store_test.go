@@ -24,8 +24,10 @@ type fakeStore struct {
 	signHdr http.Header
 }
 
-func (f *fakeStore) Name() string                       { return "fake" }
-func (f *fakeStore) Capabilities() storage.Capabilities { return storage.Capabilities{SignedURLs: true} }
+func (f *fakeStore) Name() string { return "fake" }
+func (f *fakeStore) Capabilities() storage.Capabilities {
+	return storage.Capabilities{SignedURLs: true}
+}
 func (f *fakeStore) Get(context.Context, string, *storage.GetOptions) (*storage.Object, error) {
 	return nil, errors.New("nope")
 }

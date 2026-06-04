@@ -1,4 +1,4 @@
-# M9 Operator Guide: `bucketvcs maintenance`
+# Operator Guide: `bucketvcs maintenance`
 
 This guide is for operators who deploy, schedule, and monitor `bucketvcs maintenance`
 in production. It covers what the command does, when to run it, how to schedule it
@@ -23,14 +23,14 @@ After a successful run:
 - `manifest.Indexes.ObjectMap` and `.CommitGraph` are fresh, covering the new pack.
 - The new canonical pack carries a `.bitmap` sidecar at
   `packs/canonical/<pack-id>.bitmap`, recorded as `PackEntry.BitmapKey` on the
-  manifest (M9.5+). The lazy mirror's real `git upload-pack` reads it on clone to
+  manifest. The lazy mirror's real `git upload-pack` reads it on clone to
   short-circuit the per-object reachability walk. `receive-pack`-written packs do
   NOT carry bitmaps — they are small, recent, and replaced by the next repack.
-  Note: the first maintenance run after upgrading from M9 → M9.5 produces a new
-  pack-id for every repo, even on identical input — M9.5 invokes
-  `pack-objects --revs --all` directly while M9 piped through `rev-list`, and
-  the two paths choose different delta encodings. Downstream tooling that pins
-  pack-ids across milestones should refresh after upgrade.
+  Note: the first maintenance run after bitmap writing is enabled produces a new
+  pack-id for every repo, even on identical input — the bitmap path invokes
+  `pack-objects --revs --all` directly while the non-bitmap path piped through
+  `rev-list`, and the two paths choose different delta encodings. Downstream
+  tooling that pins pack-ids across that transition should refresh afterward.
 - The old canonical packs and their old indexes (and any orphaned `.bitmap` files
   from earlier maintenance runs) become unreachable from the manifest.
 - `bucketvcs gc`, on its next scheduled run after the retention window elapses, sweeps
@@ -266,7 +266,7 @@ with `outcome=noop`.
 | `--recent-pack-threshold` | 1000 | Count of canonical packs created within `--recent-window` (default 24h) | More than N packs arrived in the last 24 hours |
 | `--total-pack-threshold` | 10000 | Total count of canonical packs in the manifest | Manifest has more than N packs total |
 | `--manifest-pack-bytes-threshold` | 8388608 (8 MiB) | JSON byte size of `manifest.Packs` | Pack metadata alone exceeds 8 MiB |
-| `--bitmap-coverage-pct` (M9.5+) | 100 | Percent of canonical packs carrying a `.bitmap` sidecar | Fewer than N% of packs have a bitmap |
+| `--bitmap-coverage-pct` | 100 | Percent of canonical packs carrying a `.bitmap` sidecar | Fewer than N% of packs have a bitmap |
 
 The first trigger that fires is reported in the text and JSON output as the `trigger`
 reason. Triggers are evaluated cheap-first: `total_pack_count` and `manifest_pack_bytes`
@@ -281,7 +281,7 @@ short-circuit returned. The other two pack-count fields (`total_pack_count`,
 `bitmap_coverage_pct` is also always populated for observability (it's a cheap O(N) scan
 of `manifest.Packs`), but it sets `triggered`/`reason` only when no higher-priority
 trigger has already fired. The reason string is `bitmap_coverage(<pct>%<<threshold>%)`,
-e.g. `bitmap_coverage(0%<100%)` for a pre-M9.5 manifest with the default threshold.
+e.g. `bitmap_coverage(0%<100%)` for a manifest without bitmaps and the default threshold.
 
 Setting any threshold to `0` disables that specific trigger. Setting all three to `0`
 makes every run a no-op unless `--force` is also set — this is a valid configuration
@@ -353,39 +353,40 @@ makes the trigger more sensitive to short burst activity. Widening it (e.g.,
 `--recent-window=168h`) smooths over weekly cycles. Values below `1h` are rejected
 with exit code 2.
 
-### Reachability thresholds (M10)
+### Reachability thresholds
 
-M10 adds three thresholds (`--reachability-delta-commits`, `--reachability-delta-pushes`,
-`--reachability-delta-bytes`) and a new "compact-only" outcome — maintenance refreshes
+Maintenance also evaluates three reachability thresholds
+(`--reachability-delta-commits`, `--reachability-delta-pushes`,
+`--reachability-delta-bytes`) with a "compact-only" outcome — maintenance refreshes
 `.bvom` and `.bvcg` without producing a new pack. See `docs/reachability.md`
 for tuning guidance and the cold-fetch SLO contract.
 
-### Bundle thresholds (M11)
+### Bundle thresholds
 
-Maintenance also generates default-branch bundles when M11 is enabled. The
-bundle-specific flags (`--bundle-warm-commits`, `--bundle-warm-age`, the
+Maintenance also generates default-branch bundles when bundle acceleration is
+enabled. The bundle-specific flags (`--bundle-warm-commits`, `--bundle-warm-age`, the
 freshness state machine that decides when a bundle counts as `current` /
 `warm` / `stale` / `retired`) are documented separately. See
-[M11 Bundles Operator Guide](bundles.md), particularly
+[Bundles Operator Guide](bundles.md), particularly
 §2 Bundle Freshness Model for the tuning detail.
 
-### Bitmap-coverage threshold (M9.5)
+### Bitmap-coverage threshold
 
-M9.5 adds `--bitmap-coverage-pct` (default 100). The trigger fires when fewer
+`--bitmap-coverage-pct` (default 100). The trigger fires when fewer
 than N% of canonical packs carry a `.bitmap` sidecar — i.e. when
 `PackEntry.BitmapKey` is empty on more packs than the threshold tolerates.
 
 | Coverage % | Default behavior | When to dial down |
 |---|---|---|
-| `100` | Strictest. Suitable for production. Pre-M9.5 manifests drain to fully-bitmapped on the next maintenance run. | Default; do not change without a reason. |
+| `100` | Strictest. Suitable for production. Manifests without bitmaps drain to fully-bitmapped on the next maintenance run. | Default; do not change without a reason. |
 | `50-99` | Tolerant of one or two bitmap-less packs. | A repo where `pack-objects` occasionally declines to emit a bitmap (rare; usually indicates a degenerate ref set). |
-| `0` | Disabled. No coverage check. | Repos where bitmap coverage should NOT drive repack scheduling — e.g. testing the other triggers in isolation, or during a controlled rollout of M9.5 across a fleet where you want to enable per-cluster after observing the metric. |
+| `0` | Disabled. No coverage check. | Repos where bitmap coverage should NOT drive repack scheduling — e.g. testing the other triggers in isolation, or during a controlled rollout of bitmaps across a fleet where you want to enable per-cluster after observing the metric. |
 
 Operationally, bitmaps are produced by `git pack-objects --write-bitmap-index` during
 the repack phase and uploaded alongside `.pack`/`.idx` to
 `packs/canonical/<id>.bitmap`. The lazy mirror's real `git upload-pack` consumes them
 on clone to short-circuit the per-object reachability walk; this is upstream-tooling
-acceleration only — the pure-Go upload-pack negotiator (M10) does not read `.bitmap`.
+acceleration only — the pure-Go upload-pack negotiator does not read `.bitmap`.
 
 `pack-objects` can decline to emit a bitmap in degenerate cases (empty pack, `--all`
 resolving to no refs). The repack phase tolerates a missing `.bitmap` file and records
@@ -619,7 +620,7 @@ issues, verify that the store URL and credentials are valid, then re-run.
 
 ## 8. Interaction with `bucketvcs gc`
 
-M9 maintenance and M8 GC are complementary operations. They share the same
+`bucketvcs maintenance` and `bucketvcs gc` are complementary operations. They share the same
 correctness foundation (the §43.6 CAS-merge model with retention dominance) and are
 both safe to run concurrently, but they do different things:
 

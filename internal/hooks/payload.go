@@ -25,8 +25,9 @@ type PreReceivePayload struct {
 }
 
 // PreReceiveStdin formats the native git pre-receive contract:
-//   <oldoid> <newoid> <refname>\n
-//   ...
+//
+//	<oldoid> <newoid> <refname>\n
+//	...
 func PreReceiveStdin(p PreReceivePayload) []byte {
 	var buf bytes.Buffer
 	for _, u := range p.Updates {
