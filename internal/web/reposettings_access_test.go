@@ -97,6 +97,29 @@ func TestRepoSettingsAccessGrant(t *testing.T) {
 		}
 	})
 
+	t.Run("empty username → flash, Grant not called", func(t *testing.T) {
+		store := accessStore()
+		var called bool
+		store.grant = func(ctx context.Context, userName, tenant, repo, perm string) error {
+			called = true
+			return nil
+		}
+		h := newTestHandlerWith(store, nil)
+		req := csrfPost(t, "/acme/demo/settings/access/grant", url.Values{"username": {""}, "perm": {"write"}})
+		addSessionCookie(t, req, store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status %d, want 303; body=%s", rec.Code, rec.Body.String())
+		}
+		if called {
+			t.Fatal("Grant must not be called for an empty username")
+		}
+		if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
+			t.Fatal("expected flash cookie for empty username")
+		}
+	})
+
 	t.Run("no such user → flash", func(t *testing.T) {
 		store := accessStore()
 		store.grant = func(ctx context.Context, userName, tenant, repo, perm string) error {

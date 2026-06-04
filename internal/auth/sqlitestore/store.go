@@ -592,6 +592,9 @@ func (s *Store) SetRepoPublic(ctx context.Context, tenant, repo string, public b
 // Grant creates or replaces a permission row. perm must be "read", "write",
 // or "admin". Refuses if the (tenant, repo) is not registered.
 func (s *Store) Grant(ctx context.Context, userName, tenant, repo, perm string) error {
+	if userName == oidcSystemUserID {
+		return ErrReservedUser
+	}
 	if perm != "read" && perm != "write" && perm != "admin" {
 		return fmt.Errorf("grant: invalid perm %q", perm)
 	}

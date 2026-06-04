@@ -97,6 +97,11 @@ func (s *server) accessGrant(w http.ResponseWriter, r *http.Request, sr settings
 	}
 	userName := r.PostFormValue("username")
 	perm := r.PostFormValue("perm")
+	if userName == "" {
+		EmitAdminActionMetric(r.Context(), s.logger, "repo_access", "grant", "invalid")
+		s.redirectFlash(w, r, sr.accessBase(), "username required")
+		return
+	}
 	if perm != "read" && perm != "write" && perm != "admin" {
 		EmitAdminActionMetric(r.Context(), s.logger, "repo_access", "grant", "invalid")
 		s.redirectFlash(w, r, sr.accessBase(), "permission must be read, write, or admin")
