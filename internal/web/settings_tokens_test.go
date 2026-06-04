@@ -293,13 +293,16 @@ func TestTokenCreateHappy(t *testing.T) {
 }
 
 func TestTokenCreateLegacyScopes(t *testing.T) {
+	logger, sink := newTestLogger()
 	store := newFakeStore()
+	var capturedID string
 	var capturedScopes auth.TokenScope
 	store.createToken = func(ctx context.Context, id, userID, secretHash, label string, expiresAt *int64, scopes auth.TokenScope) error {
+		capturedID = id
 		capturedScopes = scopes
 		return nil
 	}
-	h := newTestHandler(store)
+	h := NewHandler(Deps{Store: store, Logger: logger})
 
 	// empty scopes field => legacy (ScopeLegacy == 0)
 	req := csrfPost(t, "/settings/tokens/create", url.Values{
@@ -315,6 +318,14 @@ func TestTokenCreateLegacyScopes(t *testing.T) {
 	}
 	if capturedScopes != auth.ScopeLegacy {
 		t.Fatalf("legacy scopes: scopes %v, want ScopeLegacy", capturedScopes)
+	}
+
+	// audit parity: the elevated legacy grant must be flagged.
+	if !sink.Has("auth.token.created", map[string]string{
+		"token_id": capturedID,
+		"legacy":   "true",
+	}) {
+		t.Fatal("legacy scopes: audit event auth.token.created missing legacy=true attr")
 	}
 }
 

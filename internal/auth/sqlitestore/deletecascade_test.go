@@ -113,3 +113,86 @@ func TestDeleteRepoCascade_SweepsDependentsKeepsWebhooks(t *testing.T) {
 		t.Errorf("webhook_endpoints count=%d after delete, want 1 (must survive)", wh)
 	}
 }
+
+// fkEnforced reports whether the connection currently enforces foreign keys by
+// attempting an FK-violating insert (a repo_permissions row for a nonexistent
+// repo) and observing whether it is rejected. repo_permissions carries
+// FOREIGN KEY (tenant, repo) REFERENCES repos(tenant, name) ON DELETE CASCADE
+// (migration 0001), so with enforcement ON the insert MUST fail. The probe
+// references a real user to isolate the repos FK from the users FK.
+func fkEnforced(t *testing.T, s *Store, userID string) bool {
+	t.Helper()
+	_, err := s.db.ExecContext(context.Background(),
+		`INSERT INTO repo_permissions (user_id, tenant, repo, perm, granted_at)
+		 VALUES (?, 'ghost-tenant', 'ghost-repo', 'read', 1)`, userID)
+	if err == nil {
+		// Insert succeeded => FK NOT enforced. Clean it up so it can't leak.
+		_, _ = s.db.ExecContext(context.Background(),
+			`DELETE FROM repo_permissions WHERE tenant='ghost-tenant' AND repo='ghost-repo'`)
+		return false
+	}
+	return true
+}
+
+// TestDeleteRepoCascade_RestoresFKEnforcement is the concurrency-safety
+// regression guard. The cascade pins one connection, flips foreign_keys=OFF for
+// the destructive sweep, and MUST restore foreign_keys=ON before that
+// connection returns to the (single-conn) pool. We can't pause the sweep
+// mid-flight without hooks, so we assert the OBSERVABLE post-condition: after a
+// successful DeleteRepoCascade, a subsequent FK-violating insert is still
+// rejected. Before connection pinning, a failed/raced restore could leave the
+// shared connection stuck FK-off, and this insert would silently succeed.
+func TestDeleteRepoCascade_RestoresFKEnforcement(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+
+	userID, err := s.CreateUser(ctx, "probe", false)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if err := s.RegisterRepo(ctx, "acme", "foo"); err != nil {
+		t.Fatalf("RegisterRepo: %v", err)
+	}
+
+	if err := s.DeleteRepoCascade(ctx, "acme", "foo"); err != nil {
+		t.Fatalf("DeleteRepoCascade: %v", err)
+	}
+
+	if !fkEnforced(t, s, userID) {
+		t.Fatal("foreign_keys NOT enforced after successful cascade: connection left FK-off")
+	}
+}
+
+// TestDeleteRepoCascade_RestoresFKOnMidSequenceError verifies the restore path
+// runs even when a DELETE errors mid-sweep. We DROP the hooks table (third in
+// the sweep) so the hooks DELETE fails; the cascade must still return the error
+// AND re-enable foreign_keys before the connection is pooled.
+func TestDeleteRepoCascade_RestoresFKOnMidSequenceError(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+
+	userID, err := s.CreateUser(ctx, "probe", false)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if err := s.RegisterRepo(ctx, "acme", "foo"); err != nil {
+		t.Fatalf("RegisterRepo: %v", err)
+	}
+
+	// Force the mid-sweep DELETE to fail: drop the hooks table so
+	// `DELETE FROM hooks ...` errors with "no such table".
+	if _, err := s.db.ExecContext(ctx, `DROP TABLE hooks`); err != nil {
+		t.Fatalf("DROP TABLE hooks: %v", err)
+	}
+
+	if err := s.DeleteRepoCascade(ctx, "acme", "foo"); err == nil {
+		t.Fatal("DeleteRepoCascade: want error after dropping hooks table, got nil")
+	}
+
+	// Despite the mid-sweep failure, FK enforcement must be restored.
+	if !fkEnforced(t, s, userID) {
+		t.Fatal("foreign_keys NOT enforced after mid-sequence error: restore path skipped")
+	}
+}

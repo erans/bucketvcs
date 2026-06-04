@@ -115,11 +115,19 @@ func (s *server) handleTokenCreate(w http.ResponseWriter, r *http.Request) {
 		s.renderError(w, r, http.StatusInternalServerError, "internal error")
 		return
 	}
-	s.emitAdmin(r.Context(), "auth.token.created",
+	createAttrs := []slog.Attr{
 		slog.String("token_id", id),
 		slog.String("label", label),
 		slog.String("scopes", scopesStr),
-	)
+	}
+	// Audit parity with the M17 CLI: an empty scopes field mints a
+	// ScopeLegacy (full-access) token. This UX is spec-sanctioned (the form
+	// warns "empty = legacy, full access"), but the elevated grant must be
+	// flagged in the audit trail so operators can spot it.
+	if scopes == auth.ScopeLegacy {
+		createAttrs = append(createAttrs, slog.Bool("legacy", true))
+	}
+	s.emitAdmin(r.Context(), "auth.token.created", createAttrs...)
 	EmitAdminActionMetric(r.Context(), s.logger, "token", "create", "ok")
 	s.renderSecretOnce(w, r, "token created", plaintext, "/settings/tokens")
 }

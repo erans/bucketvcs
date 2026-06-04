@@ -2,8 +2,10 @@ package sqlitestore
 
 import (
 	"context"
+	"database/sql/driver"
 	"errors"
 	"fmt"
+	"log/slog"
 )
 
 // ErrCascadeUnsupportedBackend: DeleteRepoCascade relies on toggling sqlite's
@@ -43,28 +45,47 @@ func (s *Store) DeleteRepoCascade(ctx context.Context, tenant, repo string) erro
 		return ErrCascadeUnsupportedBackend
 	}
 
-	db := s.db
-	// POOL-SAFETY: the PRAGMA-per-connection sequence below is only safe
-	// because the sqlite (internal/auth/sqlitestore/backend.go:150) and libsql
-	// (backend_libsql.go:60) backends ALWAYS SetMaxOpenConns(1). With a single
-	// pooled connection, the foreign_keys=OFF set here, every DELETE, and the
-	// deferred foreign_keys=ON restore all run on the SAME connection — no
-	// other statement can borrow a second conn that still has FK enforcement
-	// on. On a multi-connection pool (postgres, N=10) this would race; the
-	// backend gate above rejects postgres before we get here.
+	db := s.db.raw()
+	// POOL-SAFETY: the PRAGMA-per-connection sequence below must run entirely on
+	// ONE pinned connection. database/sql RELEASES a pooled connection between
+	// separate ExecContext calls, so issuing PRAGMA foreign_keys=OFF on the pool
+	// and then the DELETEs as independent calls would let another goroutine
+	// borrow the connection inside the OFF window and run FK-unenforced
+	// statements — and a failed restore would leave the SHARED connection stuck
+	// FK-off forever. We therefore pin a single connection via db.Conn and route
+	// PRAGMA OFF, every DELETE, and PRAGMA ON through it, so FK enforcement is
+	// suppressed only for this one connection and only for this sequence.
 	//
+	// MaxOpenConns(1) (sqlite backend.go:150, libsql backend_libsql.go:60) is NOT
+	// what provides the isolation — connection pinning is. The single-conn pool
+	// is an ADDITIONAL property: pinning the lone connection quiesces the whole
+	// authdb for the (rare, fast) duration of the delete, serializing any
+	// concurrent writer behind it.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("pin connection: %w", err)
+	}
+	// restored tracks whether PRAGMA foreign_keys=ON succeeded. If it did not,
+	// the connection is FK-off and MUST NOT return to the pool reusable: we
+	// force-discard it (driver.ErrBadConn tells database/sql to drop the
+	// underlying connection instead of recycling it) before Close.
+	restored := false
+	defer func() {
+		if !restored {
+			// Best-effort poison so a connection left at foreign_keys=OFF is
+			// dropped rather than pooled. The Raw callback returning
+			// driver.ErrBadConn makes database/sql discard the driver conn.
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
+		_ = conn.Close()
+	}()
+
 	// Drop FK enforcement for the destructive sequence so cascades on
 	// webhook_endpoints (ON DELETE CASCADE) and webhook_deliveries (via
 	// endpoint_id) do not fire.
-	if _, err := db.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
 		return fmt.Errorf("disable foreign_keys: %w", err)
 	}
-	// Re-enable on every exit. We do NOT wrap in a tx because PRAGMA
-	// foreign_keys is a no-op inside an open tx in sqlite; the safe path
-	// is auto-commit statements bracketed by the pragma toggle.
-	defer func() {
-		_, _ = db.ExecContext(ctx, `PRAGMA foreign_keys=ON`)
-	}()
 
 	// Cascade the non-webhook dependents manually so they're cleaned up
 	// even though FK is off. protected_paths + hooks are swept explicitly
@@ -82,9 +103,27 @@ func (s *Store) DeleteRepoCascade(ctx context.Context, tenant, repo string) erro
 		{"repos", `DELETE FROM repos WHERE tenant=? AND name=?`},
 	}
 	for _, st := range stmts {
-		if _, err := db.ExecContext(ctx, st.sql, tenant, repo); err != nil {
+		if _, err := conn.ExecContext(ctx, st.sql, tenant, repo); err != nil {
+			// Restore FK enforcement before returning so the connection is
+			// safe to pool. If the restore itself fails the deferred discard
+			// poisons the connection.
+			if _, rerr := conn.ExecContext(ctx, `PRAGMA foreign_keys=ON`); rerr == nil {
+				restored = true
+			} else {
+				slog.Default().Error("DeleteRepoCascade: restore foreign_keys after delete error; discarding connection",
+					"table", st.name, "delete_err", err, "restore_err", rerr)
+			}
 			return fmt.Errorf("delete from %s: %w", st.name, err)
 		}
 	}
+
+	// Re-enable FK enforcement on the pinned connection before it returns to the
+	// pool. A failure here must NOT silently leave the connection FK-off: surface
+	// the error and let the deferred discard drop the connection.
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys=ON`); err != nil {
+		slog.Default().Error("DeleteRepoCascade: restore foreign_keys; discarding connection", "restore_err", err)
+		return fmt.Errorf("restore foreign_keys: %w", err)
+	}
+	restored = true
 	return nil
 }
