@@ -2,8 +2,17 @@ package sqlitestore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
+
+// ErrCascadeUnsupportedBackend: DeleteRepoCascade relies on toggling sqlite's
+// per-connection foreign_keys pragma to keep webhook_endpoints rows alive
+// (M15.1 drain design). Postgres FK actions (ON DELETE CASCADE on
+// webhook_endpoints) cannot be suppressed, so the operation is refused rather
+// than silently destroying pending repo.deleted deliveries. Requires a
+// postgres schema change (drop the webhook_endpoints→repos FK) — deferred.
+var ErrCascadeUnsupportedBackend = errors.New("sqlitestore: repo delete cascade not supported on this backend")
 
 // DeleteRepoCascade deletes the repos row and its non-webhook dependents
 // (protected_refs, repo_permissions, deploy-scoped ssh_keys, lfs_locks,
@@ -23,7 +32,27 @@ import (
 // known limitation; a webhook-prune sweeper can clean it up after the worker
 // has drained any associated deliveries.
 func (s *Store) DeleteRepoCascade(ctx context.Context, tenant, repo string) error {
+	// Backend gate: this function's correctness depends on suppressing the
+	// webhook_endpoints ON DELETE CASCADE via the sqlite per-connection
+	// foreign_keys pragma. On postgres the pragma is a syntax error AND the FK
+	// is REFERENCES repos ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
+	// (migrations_postgres/0006_webhooks.sql:11) — it cannot be suppressed, so
+	// the M15.1 "orphan endpoints so deliveries drain" design cannot hold.
+	// Refuse rather than silently destroy pending repo.deleted deliveries.
+	if s.backend.Name() == "postgres" {
+		return ErrCascadeUnsupportedBackend
+	}
+
 	db := s.db
+	// POOL-SAFETY: the PRAGMA-per-connection sequence below is only safe
+	// because the sqlite (internal/auth/sqlitestore/backend.go:150) and libsql
+	// (backend_libsql.go:60) backends ALWAYS SetMaxOpenConns(1). With a single
+	// pooled connection, the foreign_keys=OFF set here, every DELETE, and the
+	// deferred foreign_keys=ON restore all run on the SAME connection — no
+	// other statement can borrow a second conn that still has FK enforcement
+	// on. On a multi-connection pool (postgres, N=10) this would race; the
+	// backend gate above rejects postgres before we get here.
+	//
 	// Drop FK enforcement for the destructive sequence so cascades on
 	// webhook_endpoints (ON DELETE CASCADE) and webhook_deliveries (via
 	// endpoint_id) do not fire.

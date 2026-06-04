@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
+	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/webhooks"
 )
@@ -497,6 +498,11 @@ func repoDelete(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	// explicitly, then drop the repos row. PRAGMA foreign_keys is per-
 	// connection in sqlite, so we set/restore around the transaction.
 	if err := s.DeleteRepoCascade(ctx, tenant, repo); err != nil {
+		if errors.Is(err, sqlitestore.ErrCascadeUnsupportedBackend) {
+			fmt.Fprintf(stderr, "%v\n", err)
+			fmt.Fprintln(stderr, "hint: repo delete requires a sqlite/libsql auth-db today")
+			return 1
+		}
 		fmt.Fprintf(stderr, "delete: %v\n", err)
 		return 1
 	}

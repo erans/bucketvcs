@@ -617,6 +617,57 @@ func TestRepoSettingsDelete(t *testing.T) {
 			t.Fatal("DeleteRepoCascade must run even when Enqueue fails (fail-open)")
 		}
 	})
+
+	t.Run("unsupported backend (postgres) → flash, not 500", func(t *testing.T) {
+		store := newFakeStore()
+		store.deleteRepo = func(ctx context.Context, tenant, repo string) error {
+			return sqlitestore.ErrCascadeUnsupportedBackend
+		}
+		h := newTestHandlerWith(store, nil)
+		req := csrfPost(t, "/acme/demo/settings/delete", url.Values{"confirm": {"acme/demo"}})
+		addSessionCookie(t, req, store, adminSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		// Operator-environment limitation, not a server fault: redirect+flash,
+		// never a 500.
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status %d, want 303 (flash, not 500); body=%s", rec.Code, rec.Body.String())
+		}
+		if loc := rec.Header().Get("Location"); loc != "/acme/demo/settings" {
+			t.Fatalf("Location %q, want /acme/demo/settings", loc)
+		}
+		if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
+			t.Fatal("expected flash cookie for unsupported-backend error")
+		}
+	})
+
+	t.Run("double-submit delete is idempotent (303+flash both times)", func(t *testing.T) {
+		// DeleteRepoCascade returns nil even when the repo row is already gone
+		// (its DELETEs are no-ops on a missing repo). The handler therefore
+		// treats a second POST exactly like the first: 303 + success flash. This
+		// locks the current idempotent semantics — a double-click or browser
+		// re-submit must NOT surface an error.
+		store := newFakeStore()
+		store.deleteRepo = func(ctx context.Context, tenant, repo string) error {
+			return nil // silent success regardless of whether the repo exists
+		}
+		h := newTestHandlerWith(store, nil)
+		for i := 0; i < 2; i++ {
+			req := csrfPost(t, "/acme/demo/settings/delete", url.Values{"confirm": {"acme/demo"}})
+			addSessionCookie(t, req, store, adminSession())
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusSeeOther {
+				t.Fatalf("submit %d: status %d, want 303; body=%s", i+1, rec.Code, rec.Body.String())
+			}
+			if loc := rec.Header().Get("Location"); loc != "/" {
+				t.Fatalf("submit %d: Location %q, want /", i+1, loc)
+			}
+			if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
+				t.Fatalf("submit %d: expected success flash cookie", i+1)
+			}
+		}
+	})
 }
 
 func TestRepoSettingsDangerZoneRender(t *testing.T) {

@@ -339,6 +339,30 @@ func TestPGConcurrentRename(t *testing.T) {
 
 func fmtID(i int) string { return "dlv" + strconv.Itoa(i) }
 
+// TestPGDeleteRepoCascadeRefused asserts the M15.1 webhook-drain cascade is
+// REFUSED on postgres: the function depends on suppressing the
+// webhook_endpoints ON DELETE CASCADE via sqlite's per-connection foreign_keys
+// pragma, which is both a postgres syntax error and semantically impossible
+// (the FK is DEFERRABLE INITIALLY DEFERRED, not suppressible). The backend gate
+// must short-circuit with ErrCascadeUnsupportedBackend BEFORE any PRAGMA runs,
+// so the repo row must survive.
+func TestPGDeleteRepoCascadeRefused(t *testing.T) {
+	s := openPostgres(t)
+	ctx := context.Background()
+
+	if err := s.RegisterRepo(ctx, "cascade", "refused"); err != nil {
+		t.Fatalf("register repo: %v", err)
+	}
+	err := s.DeleteRepoCascade(ctx, "cascade", "refused")
+	if !errors.Is(err, ErrCascadeUnsupportedBackend) {
+		t.Fatalf("DeleteRepoCascade on postgres: got %v, want ErrCascadeUnsupportedBackend", err)
+	}
+	// The repo row must still exist — the gate returns before any DELETE.
+	if err := s.RegisterRepo(ctx, "cascade", "refused"); !errors.Is(err, auth.ErrConflict) {
+		t.Fatalf("repo should still exist after refused cascade: re-register got %v, want ErrConflict", err)
+	}
+}
+
 // TestPGQuotaBigInt is the regression for the 32-bit INTEGER overflow on the
 // quota byte columns (migration 0012 widens them to BIGINT). On PostgreSQL
 // INTEGER is 32-bit (max 2147483647 ≈ 2.0 GiB); LFS objects and tenant totals

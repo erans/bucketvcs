@@ -215,6 +215,15 @@ func (s *server) repoSettingsDelete(w http.ResponseWriter, r *http.Request, sr s
 		}
 	}
 	if err := s.store.DeleteRepoCascade(r.Context(), sr.tenant, sr.repo); err != nil {
+		if errors.Is(err, sqlitestore.ErrCascadeUnsupportedBackend) {
+			// Postgres can't suppress the webhook_endpoints cascade (M15.1
+			// drain design). Refuse with a flash rather than a 500 — this is an
+			// operator-environment limitation, not a server fault.
+			EmitAdminActionMetric(r.Context(), s.logger, "repo", "delete", "error")
+			s.redirectFlash(w, r, "/"+sr.tenant+"/"+sr.repo+"/settings",
+				"repo delete is not supported on this server's database backend (postgres); use the CLI on a sqlite/libsql deployment")
+			return
+		}
 		s.logger.Error("repo delete", "tenant", sr.tenant, "repo", sr.repo, "err", err)
 		EmitAdminActionMetric(r.Context(), s.logger, "repo", "delete", "error")
 		s.renderError(w, r, http.StatusInternalServerError, "internal error")
