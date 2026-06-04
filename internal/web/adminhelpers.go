@@ -76,6 +76,9 @@ type secretData struct {
 // so the secret never transits a header/cookie). Refresh re-submits the form;
 // the page says so.
 func (s *server) renderSecretOnce(w http.ResponseWriter, r *http.Request, title, secret, back string) {
+	// The page carries a plaintext credential; keep it out of browser and
+	// proxy caches so it cannot be retrieved after the user navigates away.
+	w.Header().Set("Cache-Control", "no-store, private")
 	d := secretData{
 		base:   base{Session: SessionFromContext(r.Context())},
 		Title:  title,

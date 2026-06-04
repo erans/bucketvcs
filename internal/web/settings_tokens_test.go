@@ -285,6 +285,11 @@ func TestTokenCreateHappy(t *testing.T) {
 			t.Fatalf("happy create: plaintext token leaked into Set-Cookie %s=%s", c.Name, c.Value)
 		}
 	}
+
+	// secret page must not be cached
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-store, private" {
+		t.Fatalf("happy create: Cache-Control %q, want \"no-store, private\"", cc)
+	}
 }
 
 func TestTokenCreateLegacyScopes(t *testing.T) {
@@ -475,5 +480,36 @@ func TestTokenRotateHappy(t *testing.T) {
 		if strings.Contains(c.Value, "bvts_") {
 			t.Fatalf("happy rotate: plaintext token leaked into Set-Cookie %s=%s", c.Name, c.Value)
 		}
+	}
+
+	// secret page must not be cached
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-store, private" {
+		t.Fatalf("happy rotate: Cache-Control %q, want \"no-store, private\"", cc)
+	}
+}
+
+func TestTokenRotateRevoked(t *testing.T) {
+	// Simulates rotating a token whose revoked_at IS NOT NULL in the DB:
+	// GetTokenOwner succeeds (row exists), but RotateToken returns
+	// ErrNoSuchToken (sqlitestore's guard on revoked_at IS NULL).
+	store := newFakeStore()
+	store.getTokenOwner = func(ctx context.Context, id string) (string, error) {
+		return "user1", nil // owned by the session user
+	}
+	store.rotateToken = func(ctx context.Context, id, newHash string) error {
+		return auth.ErrNoSuchToken // token is revoked; cannot rotate
+	}
+	h := newTestHandler(store)
+
+	req := csrfPost(t, "/settings/tokens/rotate", url.Values{"id": {"tok1AAAAAAAAAAAAAAAAAAA"}})
+	addSessionCookie(t, req, store, userSession())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("rotate revoked: status %d, want 404; body:\n%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "bvts_") {
+		t.Fatalf("rotate revoked: plaintext token must not appear in 404 body:\n%s", rec.Body.String())
 	}
 }
