@@ -22,6 +22,7 @@ var errNotVisible = errors.New("not visible")
 // All methods return zero values except GetVisibleRepo, which consults `visible`.
 type browseDataStore struct {
 	visible map[string]bool // "tenant/name" -> visible
+	perm    auth.Perm       // returned by LookupRepoPerm (default PermNone)
 }
 
 func (b *browseDataStore) VerifyPassword(ctx context.Context, u, p string) (*auth.Actor, error) {
@@ -37,6 +38,9 @@ func (b *browseDataStore) TouchSession(ctx context.Context, raw string, ttl time
 	return nil
 }
 func (b *browseDataStore) DeleteSession(ctx context.Context, raw string) error { return nil }
+func (b *browseDataStore) DeleteSessionsForUser(ctx context.Context, userID, exceptRawID string) (int64, error) {
+	return 0, nil
+}
 func (b *browseDataStore) ListAccessibleRepos(ctx context.Context, a *auth.Actor) ([]Repo, error) {
 	return nil, nil
 }
@@ -46,6 +50,24 @@ func (b *browseDataStore) GetVisibleRepo(ctx context.Context, a *auth.Actor, ten
 	}
 	return nil, errNotVisible
 }
+func (b *browseDataStore) LookupRepoPerm(ctx context.Context, a *auth.Actor, tenant, repo string) (auth.Perm, error) {
+	return b.perm, nil
+}
+func (b *browseDataStore) GetRepoFlags(ctx context.Context, tenant, repo string) (auth.RepoFlags, error) {
+	return auth.RepoFlags{}, nil
+}
+func (b *browseDataStore) SetRepoPublic(ctx context.Context, tenant, repo string, public bool) error {
+	return nil
+}
+func (b *browseDataStore) RenameRepo(ctx context.Context, tenant, oldName, newName string) error {
+	panic("browseDataStore.RenameRepo not implemented")
+}
+func (b *browseDataStore) DeleteRepoCascade(ctx context.Context, tenant, repo string) error {
+	panic("browseDataStore.DeleteRepoCascade not implemented")
+}
+func (b *browseDataStore) RegisterRepoIfNew(ctx context.Context, tenant, name string) (bool, error) {
+	panic("browseDataStore.RegisterRepoIfNew not implemented")
+}
 func (b *browseDataStore) FindUserByEmail(ctx context.Context, email string) (*auth.Actor, error) {
 	return nil, errors.New("none")
 }
@@ -54,6 +76,66 @@ func (b *browseDataStore) FindIdentity(ctx context.Context, issuer, subject stri
 }
 func (b *browseDataStore) LinkIdentity(ctx context.Context, userID, issuer, subject, email string) error {
 	return nil
+}
+func (b *browseDataStore) GetUserByName(ctx context.Context, name string) (*auth.User, error) {
+	panic("browseDataStore.GetUserByName not implemented")
+}
+func (b *browseDataStore) SetPassword(ctx context.Context, userName, plaintext string) error {
+	panic("browseDataStore.SetPassword not implemented")
+}
+func (b *browseDataStore) HasPassword(ctx context.Context, userName string) (bool, error) {
+	panic("browseDataStore.HasPassword not implemented")
+}
+func (b *browseDataStore) ListTokensForUser(ctx context.Context, name string) ([]TokenInfo, error) {
+	panic("browseDataStore.ListTokensForUser not implemented")
+}
+func (b *browseDataStore) GetTokenOwner(ctx context.Context, id string) (string, error) {
+	panic("browseDataStore.GetTokenOwner not implemented")
+}
+func (b *browseDataStore) CreateToken(ctx context.Context, id, userID, secretHash, label string, expiresAt *int64, scopes auth.TokenScope) error {
+	panic("browseDataStore.CreateToken not implemented")
+}
+func (b *browseDataStore) RevokeToken(ctx context.Context, id string) error {
+	panic("browseDataStore.RevokeToken not implemented")
+}
+func (b *browseDataStore) RotateToken(ctx context.Context, id, newSecretHash string) error {
+	panic("browseDataStore.RotateToken not implemented")
+}
+func (b *browseDataStore) ListSSHKeysForUser(ctx context.Context, userID string) ([]auth.SSHKey, error) {
+	panic("browseDataStore.ListSSHKeysForUser not implemented")
+}
+func (b *browseDataStore) AddSSHKey(ctx context.Context, k auth.SSHKey) error {
+	panic("browseDataStore.AddSSHKey not implemented")
+}
+func (b *browseDataStore) RevokeSSHKey(ctx context.Context, keyIDOrPrefix string) error {
+	panic("browseDataStore.RevokeSSHKey not implemented")
+}
+func (b *browseDataStore) ListRepoGrants(ctx context.Context, tenant, repo string) ([]RepoGrant, error) {
+	panic("browseDataStore.ListRepoGrants not implemented")
+}
+func (b *browseDataStore) Grant(ctx context.Context, userName, tenant, repo, perm string) error {
+	panic("browseDataStore.Grant not implemented")
+}
+func (b *browseDataStore) RevokeRepoPermission(ctx context.Context, userName, tenant, repo string) error {
+	panic("browseDataStore.RevokeRepoPermission not implemented")
+}
+func (b *browseDataStore) ListSSHKeysForRepo(ctx context.Context, tenant, repo string) ([]auth.SSHKey, error) {
+	panic("browseDataStore.ListSSHKeysForRepo not implemented")
+}
+func (b *browseDataStore) ListUsers(ctx context.Context) ([]UserInfo, error) {
+	panic("browseDataStore.ListUsers not implemented")
+}
+func (b *browseDataStore) CreateUser(ctx context.Context, name string, isAdmin bool) (string, error) {
+	panic("browseDataStore.CreateUser not implemented")
+}
+func (b *browseDataStore) SetUserDisabled(ctx context.Context, name string, disabled bool) error {
+	panic("browseDataStore.SetUserDisabled not implemented")
+}
+func (b *browseDataStore) DeleteUser(ctx context.Context, name string) error {
+	panic("browseDataStore.DeleteUser not implemented")
+}
+func (b *browseDataStore) SetEmail(ctx context.Context, userName, email string) error {
+	panic("browseDataStore.SetEmail not implemented")
 }
 
 // fakeContent is a configurable ContentStore for browse tests.

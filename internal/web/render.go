@@ -21,6 +21,7 @@ import (
 type base struct {
 	Session *auth.Session
 	CSRF    string
+	Flash   string
 }
 
 type landingData struct {
@@ -51,6 +52,7 @@ type browseHeader struct {
 	Refs     browsemodel.Refs
 	Path     string                            // current directory path ("" at repo root)
 	Activity map[string]browsemodel.CommitMeta // entry path -> last commit (best-effort; nil => "—")
+	CanAdmin bool                              // session may manage this repo (shows [settings] link)
 }
 
 // RefOrOID returns the ref name for links, falling back to the resolved OID
@@ -108,7 +110,7 @@ func newRenderer(dir string) (*renderer, error) {
 	r := &renderer{dir: dir}
 	if dir == "" {
 		r.cache = map[string]*template.Template{}
-		for _, page := range []string{"landing.html", "login.html", "error.html", "repo.html", "tree.html", "blob.html", "commits.html", "commit.html"} {
+		for _, page := range []string{"landing.html", "login.html", "error.html", "repo.html", "tree.html", "blob.html", "commits.html", "commit.html", "settings.html", "settings_tokens.html", "settings_keys.html", "secret.html", "reposettings.html", "reposettings_access.html", "reposettings_webhooks.html", "reposettings_deliveries.html", "reposettings_policy.html", "reposettings_hooks.html", "admin.html", "admin_users.html", "admin_repos.html", "admin_quotas.html"} {
 			t, err := parsePage(assetsFS, "templates", page)
 			if err != nil {
 				return nil, err
@@ -145,6 +147,26 @@ func templateFuncs() template.FuncMap {
 		"abstime":   absTime,
 		"humansize": humanSize,
 		"diffclass": func(kind byte) string { return diffClass(kind) },
+		"scopestr": func(sc auth.TokenScope) string {
+			if sc == auth.ScopeLegacy {
+				return "legacy (full access)"
+			}
+			var parts []string
+			for _, p := range []struct {
+				bit  auth.TokenScope
+				name string
+			}{
+				{auth.ScopeRepoAdmin, "repo:admin"}, {auth.ScopeRepoWrite, "repo:write"},
+				{auth.ScopeRepoRead, "repo:read"}, {auth.ScopeLFSWrite, "lfs:write"},
+				{auth.ScopeLFSRead, "lfs:read"}, {auth.ScopeWebhookAdmin, "webhook:admin"},
+				{auth.ScopeStorageAdmin, "storage:admin"},
+			} {
+				if sc&p.bit != 0 {
+					parts = append(parts, p.name)
+				}
+			}
+			return strings.Join(parts, ",")
+		},
 	}
 }
 

@@ -37,6 +37,16 @@ type Deps struct {
 	TrustProxy bool               // for Secure-cookie / client-IP decisions
 	OIDC       *OIDCProvider      // nil => OIDC login disabled
 	Content    ContentStore       // nil => code browse disabled (routes 404)
+
+	// Phase 3 admin services. All nil-able; nil disables the corresponding
+	// settings pages (they render a "not enabled" notice or 404).
+	Webhooks       WebhookAdmin
+	Policy         PolicyAdmin
+	Hooks          HookAdmin
+	Quotas         QuotaAdmin
+	QuotaReconcile QuotaReconciler
+	RepoInit       RepoInitializer
+	RenameCheck    RepoRenameCheck
 }
 
 type server struct {
@@ -51,6 +61,15 @@ type server struct {
 	content    ContentStore
 	oauthCfg   *oauth2.Config
 	verifier   idTokenVerifier
+
+	// Phase 3 admin services.
+	webhooks       WebhookAdmin
+	policy         PolicyAdmin
+	hooks          HookAdmin
+	quotas         QuotaAdmin
+	quotaReconcile QuotaReconciler
+	repoInit       RepoInitializer
+	renameCheck    RepoRenameCheck
 }
 
 // NewHandler builds the web UI http.Handler. Panics only on an unrecoverable
@@ -67,14 +86,21 @@ func NewHandler(d Deps) http.Handler {
 		panic("web: parse templates: " + err.Error())
 	}
 	s := &server{
-		store:      d.Store,
-		logger:     d.Logger,
-		limiter:    d.Limiter,
-		render:     r,
-		ttl:        d.SessionTTL,
-		trustProxy: d.TrustProxy,
-		content:    d.Content,
-		mux:        http.NewServeMux(),
+		store:          d.Store,
+		logger:         d.Logger,
+		limiter:        d.Limiter,
+		render:         r,
+		ttl:            d.SessionTTL,
+		trustProxy:     d.TrustProxy,
+		content:        d.Content,
+		mux:            http.NewServeMux(),
+		webhooks:       d.Webhooks,
+		policy:         d.Policy,
+		hooks:          d.Hooks,
+		quotas:         d.Quotas,
+		quotaReconcile: d.QuotaReconcile,
+		repoInit:       d.RepoInit,
+		renameCheck:    d.RenameCheck,
 	}
 	if d.OIDC != nil {
 		if len(d.OIDC.HMACKey) < 16 {
@@ -96,6 +122,28 @@ func NewHandler(d Deps) http.Handler {
 		s.mux.HandleFunc("/login/oidc", s.handleOIDCAuthorize)
 		s.mux.HandleFunc("/login/oidc/callback", s.handleOIDCCallback)
 	}
+	s.mux.HandleFunc("/settings", s.handleSettings)
+	s.mux.HandleFunc("/settings/password", s.handlePasswordChange)
+	s.mux.HandleFunc("/settings/tokens", s.handleTokensPage)
+	s.mux.HandleFunc("/settings/tokens/create", s.handleTokenCreate)
+	s.mux.HandleFunc("/settings/tokens/revoke", s.handleTokenRevoke)
+	s.mux.HandleFunc("/settings/tokens/rotate", s.handleTokenRotate)
+	s.mux.HandleFunc("/settings/keys", s.handleKeysPage)
+	s.mux.HandleFunc("/settings/keys/add", s.handleKeyAdd)
+	s.mux.HandleFunc("/settings/keys/revoke", s.handleKeyRevoke)
+	s.mux.HandleFunc("/admin", s.handleAdminIndex)
+	s.mux.HandleFunc("/admin/users", s.handleAdminUsers)
+	s.mux.HandleFunc("/admin/users/create", s.handleAdminUserCreate)
+	s.mux.HandleFunc("/admin/users/disable", s.handleAdminUserDisable)
+	s.mux.HandleFunc("/admin/users/enable", s.handleAdminUserEnable)
+	s.mux.HandleFunc("/admin/users/delete", s.handleAdminUserDelete)
+	s.mux.HandleFunc("/admin/users/email", s.handleAdminUserEmail)
+	s.mux.HandleFunc("/admin/repos", s.handleAdminRepos)
+	s.mux.HandleFunc("/admin/repos/register", s.handleAdminRepoRegister)
+	s.mux.HandleFunc("/admin/quotas", s.handleAdminQuotas)
+	s.mux.HandleFunc("/admin/quotas/set", s.handleAdminQuotaSet)
+	s.mux.HandleFunc("/admin/quotas/clear", s.handleAdminQuotaClear)
+	s.mux.HandleFunc("/admin/quotas/reconcile", s.handleAdminQuotaReconcile)
 	s.mux.HandleFunc("/", s.handleLanding)
 
 	return sessionMiddleware(s.store, s.ttl)(cspMiddleware(s.mux))

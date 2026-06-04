@@ -49,12 +49,12 @@ func (s *Store) CreateSession(ctx context.Context, userID, provider string, ttl 
 }
 
 // LookupSession returns the live session for rawID, joining users for identity.
-// Expired or absent sessions return auth.ErrNoSession.
+// Expired, absent, or disabled-user sessions return auth.ErrNoSession.
 func (s *Store) LookupSession(ctx context.Context, rawID string) (*auth.Session, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT s.user_id, u.name, u.is_admin, s.provider, s.created_at, s.expires_at
 		   FROM sessions s JOIN users u ON u.id = s.user_id
-		  WHERE s.id_hash = ? AND s.expires_at > ?`,
+		  WHERE s.id_hash = ? AND s.expires_at > ? AND u.disabled_at IS NULL`,
 		hashSessionID(rawID), time.Now().Unix())
 	var (
 		userID, name, provider string
@@ -93,6 +93,28 @@ func (s *Store) TouchSession(ctx context.Context, rawID string, ttl time.Duratio
 func (s *Store) DeleteSession(ctx context.Context, rawID string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE id_hash = ?`, hashSessionID(rawID))
 	return err
+}
+
+// DeleteSessionsForUser deletes all of a user's sessions except the one
+// identified by exceptRawID ("" = delete all). Returns the number deleted.
+// Used on password change so credential rotation revokes attacker-held cookies.
+func (s *Store) DeleteSessionsForUser(ctx context.Context, userID, exceptRawID string) (int64, error) {
+	var (
+		res sql.Result
+		err error
+	)
+	if exceptRawID == "" {
+		res, err = s.db.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ?`, userID)
+	} else {
+		res, err = s.db.ExecContext(ctx,
+			`DELETE FROM sessions WHERE user_id = ? AND id_hash != ?`,
+			userID, hashSessionID(exceptRawID))
+	}
+	if err != nil {
+		return 0, fmt.Errorf("delete sessions for user: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // SweepExpiredSessions deletes sessions whose expiry is at or before `now`.

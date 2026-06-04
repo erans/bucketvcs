@@ -1,0 +1,63 @@
+{{define "title"}}users · admin · bucketvcs{{end}}
+{{define "content"}}
+<div class="settings">
+  {{template "adminnav" .}}
+  <h2>users</h2>
+  {{if .Users}}
+  <table>
+    <thead>
+      <tr><th>name</th><th>email</th><th>role</th><th>state</th><th>created</th><th>actions</th></tr>
+    </thead>
+    <tbody>
+    {{range .Users}}
+    <tr>
+      <td class="mono">{{.Name}}</td>
+      <td>{{.Email}}</td>
+      <td>{{if .IsAdmin}}<span class="badge">[admin]</span>{{else}}user{{end}}</td>
+      <td>{{if .Disabled}}<span class="badge">disabled</span>{{else}}active{{end}}</td>
+      <td title="{{abstime .CreatedAt}}">{{reltime .CreatedAt}}</td>
+      <td>
+        {{if .Disabled}}
+        <form method="post" action="/admin/users/enable" class="inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="hidden" name="name" value="{{.Name}}">
+          <button type="submit">enable</button>
+        </form>
+        {{else}}
+        <form method="post" action="/admin/users/disable" class="inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="hidden" name="name" value="{{.Name}}">
+          <button type="submit">disable</button>
+        </form>
+        {{end}}
+        <form method="post" action="/admin/users/email" class="inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="hidden" name="name" value="{{.Name}}">
+          <input type="email" name="email" value="{{.Email}}" placeholder="email">
+          <button type="submit">set email</button>
+        </form>
+        <form method="post" action="/admin/users/delete" class="inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="hidden" name="name" value="{{.Name}}">
+          <input type="text" name="confirm" placeholder="type name to confirm">
+          <button type="submit">delete</button>
+        </form>
+      </td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="empty">no users yet.</p>
+  {{end}}
+  <h2>create user</h2>
+  <form method="post" action="/admin/users/create">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label>name <input type="text" name="name" required autocomplete="off"></label>
+    <label>password <input type="password" name="password" autocomplete="new-password" placeholder="leave empty to set later"></label>
+    <label><input type="checkbox" name="is_admin"> admin</label>
+    <button type="submit">create user</button>
+  </form>
+</div>
+{{end}}
+{{template "base" .}}

@@ -1,7 +1,7 @@
 {{define "title"}}{{.Tenant}}/{{.Repo}}: {{.Path}}{{end}}
 {{define "content"}}
 <div class="browse">
-  <div class="repohdr"><span class="path">{{.Tenant}}/{{.Repo}}</span>{{template "refswitcher" .}}</div>
+  <div class="repohdr"><span class="path">{{.Tenant}}/{{.Repo}}</span>{{if .CanAdmin}}&nbsp;<a href="/{{.Tenant}}/{{.Repo}}/settings">[settings]</a>{{end}}{{template "refswitcher" .}}</div>
   <div class="refs">
     {{if .Refs.Branches}}branches: {{range .Refs.Branches}}<a href="/{{$.Tenant}}/{{$.Repo}}/tree/{{urlpath .Name}}">{{.Name}}</a> {{end}}{{end}}
     {{if .Refs.Tags}}&nbsp;&middot;&nbsp;tags: {{range .Refs.Tags}}<a href="/{{$.Tenant}}/{{$.Repo}}/tree/{{urlpath .Name}}">{{.Name}}</a> {{end}}{{end}}

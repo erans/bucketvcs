@@ -224,6 +224,14 @@ func TestReservedOIDCUserProtected(t *testing.T) {
 	if err := s.DeleteUser(ctx, "_oidc"); !errors.Is(err, ErrReservedUser) {
 		t.Fatalf("delete _oidc: want ErrReservedUser, got %v", err)
 	}
+	// Granting repo permissions to the reserved system user is refused — the
+	// guard fires before user/repo resolution, so a missing repo doesn't mask it.
+	if err := s.RegisterRepo(ctx, "acme", "foo"); err != nil {
+		t.Fatalf("RegisterRepo: %v", err)
+	}
+	if err := s.Grant(ctx, "_oidc", "acme", "foo", "read"); !errors.Is(err, ErrReservedUser) {
+		t.Fatalf("grant to _oidc: want ErrReservedUser, got %v", err)
+	}
 	// And it is hidden from ListUsers.
 	users, err := s.ListUsers(ctx)
 	if err != nil {

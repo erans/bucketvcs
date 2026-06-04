@@ -29,6 +29,11 @@ var ErrConflict = errors.New("webhooks: endpoint already exists")
 // errors.Is to set exit code 2.
 var ErrInvalidInput = errors.New("webhooks: invalid input")
 
+// ErrReplayInFlight is returned by ReplayDelivery when the target row is
+// currently in_flight (a worker is mid-delivery). The caller should wait for
+// the attempt to finish before replaying.
+var ErrReplayInFlight = errors.New("webhooks: delivery is in_flight; wait for the attempt to finish")
+
 // Service exposes webhook endpoint management against the M4 authdb.
 type Service struct {
 	db sqlitestore.Querier
@@ -434,7 +439,7 @@ func (s *Service) ReplayDelivery(ctx context.Context, id string) error {
 		if err != nil {
 			return fmt.Errorf("webhooks: replay %s post-check: %w", id, err)
 		}
-		return fmt.Errorf("webhooks: cannot replay %s: row is in_flight", id)
+		return fmt.Errorf("%w (id=%s)", ErrReplayInFlight, id)
 	}
 	return nil
 }

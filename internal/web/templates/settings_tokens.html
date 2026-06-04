@@ -1,0 +1,51 @@
+{{define "title"}}tokens · bucketvcs{{end}}
+{{define "content"}}
+<div class="settings">
+  {{template "settingsnav" .}}
+  <h2>personal access tokens</h2>
+  {{if .Tokens}}
+  <table>
+    <thead>
+      <tr><th>id</th><th>label</th><th>scopes</th><th>created</th><th>state</th><th>actions</th></tr>
+    </thead>
+    <tbody>
+    {{range .Tokens}}
+    <tr>
+      <td class="mono">{{.ID}}</td>
+      <td>{{.Label}}</td>
+      <td>{{scopestr .Scopes}}</td>
+      <td title="{{abstime .CreatedAt}}">{{reltime .CreatedAt}}</td>
+      <td>{{.State}}</td>
+      <td>
+        {{if eq .State "active"}}
+        <form method="post" action="/settings/tokens/rotate" class="inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="hidden" name="id" value="{{.ID}}">
+          <button type="submit">rotate</button>
+        </form>
+        <form method="post" action="/settings/tokens/revoke" class="inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="hidden" name="id" value="{{.ID}}">
+          <button type="submit">revoke</button>
+        </form>
+        {{end}}
+      </td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="empty">no tokens yet.</p>
+  {{end}}
+  <h2>create token</h2>
+  <form method="post" action="/settings/tokens/create">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label>label <input type="text" name="label" required></label>
+    <label>scopes <input type="text" name="scopes" placeholder="repo:read,repo:write,lfs:read,... or 'all' for full access" required></label>
+    <p class="hint">scope names: repo:read, repo:write, repo:admin, lfs:read, lfs:write, webhook:admin, storage:admin. use 'all' for full access. required.</p>
+    <label>expires <input type="text" name="expires" placeholder="720h, empty = never"></label>
+    <button type="submit">create token</button>
+  </form>
+</div>
+{{end}}
+{{template "base" .}}

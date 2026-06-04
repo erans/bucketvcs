@@ -19,7 +19,9 @@ func (s *server) handleLanding(w http.ResponseWriter, r *http.Request) {
 	}
 	tok := issueCSRF(w, requestIsTLS(r, s.trustProxy)) // for the logout form in the layout
 	_ = s.render.render(w, "landing.html", landingData{
-		base:  base{Session: sess, CSRF: tok},
+		// takeFlash: redirect targets like repo delete land on "/" — consume
+		// the notice here so it shows once instead of going stale.
+		base:  base{Session: sess, CSRF: tok, Flash: takeFlash(w, r)},
 		Repos: grouped,
 	})
 	EmitRequestMetric(r.Context(), s.logger, "landing", 200)

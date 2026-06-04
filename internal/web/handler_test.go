@@ -149,3 +149,83 @@ func extractHidden(html, field string) string {
 	}
 	return rest[:j]
 }
+
+// TestNavbarLinks verifies the base-template nav exposes /settings to any
+// logged-in user and /admin only to admins (and neither to anonymous visitors).
+func TestNavbarLinks(t *testing.T) {
+	const settingsLink = `href="/settings"`
+	const adminLink = `href="/admin"`
+
+	t.Run("anon: neither link", func(t *testing.T) {
+		store := newFakeStore()
+		h := newTestHandler(store)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		body := rec.Body.String()
+		if strings.Contains(body, settingsLink) {
+			t.Errorf("anon landing should not link to /settings; body:\n%s", body)
+		}
+		if strings.Contains(body, adminLink) {
+			t.Errorf("anon landing should not link to /admin; body:\n%s", body)
+		}
+	})
+
+	t.Run("non-admin: settings only", func(t *testing.T) {
+		store := newFakeStore()
+		h := newTestHandler(store)
+		req := addSessionCookie(t, httptest.NewRequest(http.MethodGet, "/", nil), store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		body := rec.Body.String()
+		if !strings.Contains(body, settingsLink) {
+			t.Errorf("non-admin landing missing /settings link; body:\n%s", body)
+		}
+		if strings.Contains(body, adminLink) {
+			t.Errorf("non-admin landing should not link to /admin; body:\n%s", body)
+		}
+	})
+
+	t.Run("admin: both links", func(t *testing.T) {
+		store := newFakeStore()
+		h := newTestHandler(store)
+		req := addSessionCookie(t, httptest.NewRequest(http.MethodGet, "/", nil), store, adminSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		body := rec.Body.String()
+		if !strings.Contains(body, settingsLink) {
+			t.Errorf("admin landing missing /settings link; body:\n%s", body)
+		}
+		if !strings.Contains(body, adminLink) {
+			t.Errorf("admin landing missing /admin link; body:\n%s", body)
+		}
+	})
+}
+
+// TestLandingConsumesFlash locks the round-9 fix: redirect targets like repo
+// delete land on "/", which must render and clear the pending flash instead
+// of leaving it to surface stale on a later settings page.
+func TestLandingConsumesFlash(t *testing.T) {
+	store := newFakeStore()
+	h := newTestHandler(store)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	setRec := httptest.NewRecorder()
+	setFlash(setRec, "repo acme/demo deleted", false)
+	req.AddCookie(setRec.Result().Cookies()[0])
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "repo acme/demo deleted") {
+		t.Fatal("landing page did not render the pending flash")
+	}
+	cleared := false
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == flashCookieName && c.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Fatal("landing page did not clear the flash cookie")
+	}
+}

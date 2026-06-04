@@ -1,7 +1,7 @@
 {{define "title"}}{{.Detail.Meta.ShortOID}} · {{.Tenant}}/{{.Repo}}{{end}}
 {{define "content"}}
 <div class="browse">
-  <div class="repohdr"><span class="path">{{.Tenant}}/{{.Repo}}</span></div>
+  <div class="repohdr"><span class="path">{{.Tenant}}/{{.Repo}}</span>{{if .CanAdmin}}&nbsp;<a href="/{{.Tenant}}/{{.Repo}}/settings">[settings]</a>{{end}}</div>
   <div class="commitmeta">
     <div class="summary"><strong>{{.Detail.Meta.Summary}}</strong></div>
     <div class="who">{{.Detail.Meta.ShortOID}} · {{.Detail.Meta.AuthorName}} &lt;{{.Detail.Meta.AuthorEmail}}&gt; · <span title="{{abstime .Detail.Meta.AuthorTime}}">{{reltime .Detail.Meta.AuthorTime}}</span></div>

@@ -1,0 +1,40 @@
+{{define "title"}}{{.Tenant}}/{{.Repo}} webhook deliveries · bucketvcs{{end}}
+{{define "content"}}
+<div class="settings">
+  <div class="repohdr"><span class="path"><a href="/{{.Tenant}}/{{.Repo}}">{{.Tenant}}/{{.Repo}}</a></span></div>
+  {{template "reposettingsnav" .}}
+  <h2>deliveries for endpoint {{.Endpoint.ID}}</h2>
+  <p class="hint">url: <span class="mono">{{.Endpoint.URL}}</span> · events: {{.Endpoint.EventMask.String}} · <a href="/{{.Tenant}}/{{.Repo}}/settings/webhooks">← back to webhooks</a></p>
+  {{if .Deliveries}}
+  <table>
+    <thead>
+      <tr><th>id</th><th>event</th><th>status</th><th>attempts</th><th>last code</th><th>last error</th><th>created</th><th>actions</th></tr>
+    </thead>
+    <tbody>
+    {{range .Deliveries}}
+    <tr>
+      <td class="mono">{{.ID}}</td>
+      <td>{{.EventType}}</td>
+      <td>{{.Status}}</td>
+      <td>{{.Attempts}}</td>
+      <td>{{if .LastStatusCode}}{{.LastStatusCode}}{{else}}—{{end}}</td>
+      <td>{{if .LastErrorTrunc}}<span class="mono">{{.LastErrorTrunc}}</span>{{else}}—{{end}}</td>
+      <td title="{{abstime .CreatedAt.Unix}}">{{.CreatedRel}}</td>
+      <td>
+        <form method="post" action="/{{$.Tenant}}/{{$.Repo}}/settings/webhooks/replay" class="inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="hidden" name="delivery_id" value="{{.ID}}">
+          <input type="hidden" name="endpoint_id" value="{{$.Endpoint.ID}}">
+          <button type="submit">replay</button>
+        </form>
+      </td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="empty">no deliveries found.</p>
+  {{end}}
+</div>
+{{end}}
+{{template "base" .}}

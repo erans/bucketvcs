@@ -208,6 +208,38 @@ func TestListUsers(t *testing.T) {
 	}
 }
 
+func TestListUsers_EmailSurfaced(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+	_, _ = s.CreateUser(ctx, "alice", false)
+	_, _ = s.CreateUser(ctx, "bob", false)
+	// Set email on alice only.
+	if err := s.SetEmail(ctx, "alice", "alice@example.com"); err != nil {
+		t.Fatalf("SetEmail: %v", err)
+	}
+	users, err := s.ListUsers(ctx)
+	if err != nil {
+		t.Fatalf("ListUsers: %v", err)
+	}
+	byName := map[string]*User{}
+	for _, u := range users {
+		byName[u.Name] = u
+	}
+	if byName["alice"] == nil {
+		t.Fatal("alice not in ListUsers")
+	}
+	if byName["alice"].Email != "alice@example.com" {
+		t.Fatalf("alice email = %q, want alice@example.com", byName["alice"].Email)
+	}
+	if byName["bob"] == nil {
+		t.Fatal("bob not in ListUsers")
+	}
+	if byName["bob"].Email != "" {
+		t.Fatalf("bob email = %q, want empty", byName["bob"].Email)
+	}
+}
+
 func TestCreateToken_AndGet(t *testing.T) {
 	s := mustOpen(t)
 	defer s.Close()

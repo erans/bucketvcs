@@ -73,3 +73,38 @@ func TestSetPassword_UnknownUser(t *testing.T) {
 		t.Fatalf("want ErrNoSuchUser, got %v", err)
 	}
 }
+
+func TestHasPassword(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+
+	// absent user → ErrNoSuchUser
+	if _, err := s.HasPassword(ctx, "ghost"); !errors.Is(err, auth.ErrNoSuchUser) {
+		t.Fatalf("absent user: want ErrNoSuchUser, got %v", err)
+	}
+
+	// user without password → false, nil
+	if _, err := s.CreateUser(ctx, "nopw", false); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	got, err := s.HasPassword(ctx, "nopw")
+	if err != nil {
+		t.Fatalf("HasPassword (no pw): %v", err)
+	}
+	if got {
+		t.Fatal("HasPassword (no pw): want false, got true")
+	}
+
+	// after SetPassword → true
+	if err := s.SetPassword(ctx, "nopw", "secretpassword"); err != nil {
+		t.Fatalf("SetPassword: %v", err)
+	}
+	got, err = s.HasPassword(ctx, "nopw")
+	if err != nil {
+		t.Fatalf("HasPassword (with pw): %v", err)
+	}
+	if !got {
+		t.Fatal("HasPassword (with pw): want true, got false")
+	}
+}

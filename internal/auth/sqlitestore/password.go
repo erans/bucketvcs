@@ -9,6 +9,21 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 )
 
+// HasPassword reports whether the user has a password hash set (false for
+// OIDC-only accounts). Returns auth.ErrNoSuchUser if the user is absent.
+func (s *Store) HasPassword(ctx context.Context, userName string) (bool, error) {
+	var hash sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT password_hash FROM users WHERE name = ?`, userName).Scan(&hash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, auth.ErrNoSuchUser
+	}
+	if err != nil {
+		return false, fmt.Errorf("has password: %w", err)
+	}
+	return hash.Valid && hash.String != "", nil
+}
+
 // SetPassword hashes plaintext (argon2id PHC) and stores it on the user.
 // Returns auth.ErrNoSuchUser if the user does not exist.
 func (s *Store) SetPassword(ctx context.Context, userName, plaintext string) error {

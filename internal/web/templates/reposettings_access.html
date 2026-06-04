@@ -1,0 +1,90 @@
+{{define "title"}}{{.Tenant}}/{{.Repo}} access · bucketvcs{{end}}
+{{define "content"}}
+<div class="settings">
+  <div class="repohdr"><span class="path"><a href="/{{.Tenant}}/{{.Repo}}">{{.Tenant}}/{{.Repo}}</a></span></div>
+  {{template "reposettingsnav" .}}
+  <h2>user access</h2>
+  {{if .Grants}}
+  <table>
+    <thead>
+      <tr><th>user</th><th>permission</th><th>actions</th></tr>
+    </thead>
+    <tbody>
+    {{range .Grants}}
+    <tr>
+      <td>{{.UserName}}</td>
+      <td>{{.Perm}}</td>
+      <td>
+        <form method="post" action="/{{$.Tenant}}/{{$.Repo}}/settings/access/revoke" class="inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="hidden" name="username" value="{{.UserName}}">
+          <button type="submit">revoke</button>
+        </form>
+      </td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="empty">no explicit grants.</p>
+  {{end}}
+  <h3>grant access</h3>
+  <form method="post" action="/{{.Tenant}}/{{.Repo}}/settings/access/grant">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label>user <input type="text" name="username" required placeholder="username"></label>
+    <label>permission
+      <select name="perm">
+        <option value="read">read</option>
+        <option value="write">write</option>
+        <option value="admin">admin</option>
+      </select>
+    </label>
+    <button type="submit">grant</button>
+  </form>
+
+  <h2>deploy keys</h2>
+  {{if .DeployKeys}}
+  <table>
+    <thead>
+      <tr><th>fingerprint</th><th>type</th><th>label</th><th>permission</th><th>state</th><th>actions</th></tr>
+    </thead>
+    <tbody>
+    {{range .DeployKeys}}
+    <tr>
+      <td class="mono">{{.Fingerprint}}</td>
+      <td>{{.KeyType}}</td>
+      <td>{{.Label}}</td>
+      <td>{{.PermText}}</td>
+      <td>{{.State}}</td>
+      <td>
+        {{if eq .State "active"}}
+        <form method="post" action="/{{$.Tenant}}/{{$.Repo}}/settings/access/deploykey/revoke" class="inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="hidden" name="id" value="{{.ID}}">
+          <button type="submit">revoke</button>
+        </form>
+        {{end}}
+      </td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="empty">no deploy keys.</p>
+  {{end}}
+  <h3>add deploy key</h3>
+  <form method="post" action="/{{.Tenant}}/{{.Repo}}/settings/access/deploykey/add">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label>public key <textarea name="pubkey" rows="3" required placeholder="ssh-ed25519 AAAA..."></textarea></label>
+    <label>label <input type="text" name="label" placeholder="ci, build-bot..."></label>
+    <label>permission
+      <select name="perm">
+        <option value="read">read</option>
+        <option value="write">write</option>
+      </select>
+    </label>
+    <button type="submit">add deploy key</button>
+  </form>
+</div>
+{{end}}
+{{template "base" .}}

@@ -1,0 +1,84 @@
+{{define "title"}}{{.Tenant}}/{{.Repo}} policy · bucketvcs{{end}}
+{{define "content"}}
+<div class="settings">
+  <div class="repohdr"><span class="path"><a href="/{{.Tenant}}/{{.Repo}}">{{.Tenant}}/{{.Repo}}</a></span></div>
+  {{template "reposettingsnav" .}}
+  <h2>policy</h2>
+  {{if not .Enabled}}
+  <p class="hint">policy enforcement is not enabled on this server.</p>
+  {{else}}
+  <h3>protected refs (Tier 1)</h3>
+  <p class="hint">rules block deletion and/or non-fast-forward pushes on matching refs.</p>
+  {{if .Refs}}
+  <table>
+    <thead>
+      <tr><th>pattern</th><th>block deletion</th><th>block force-push</th><th>created</th><th>actions</th></tr>
+    </thead>
+    <tbody>
+    {{range .Refs}}
+    <tr>
+      <td class="mono">{{.RefnamePattern}}</td>
+      <td>{{if .BlockDeletion}}yes{{else}}no{{end}}</td>
+      <td>{{if .BlockForcePush}}yes{{else}}no{{end}}</td>
+      <td title="{{abstime .CreatedAt.Unix}}">{{reltime .CreatedAt.Unix}}</td>
+      <td>
+        <form method="post" action="/{{$.Tenant}}/{{$.Repo}}/settings/policy/refs/remove" class="inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="hidden" name="pattern" value="{{.RefnamePattern}}">
+          <button type="submit">remove</button>
+        </form>
+      </td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="empty">no protected ref rules configured.</p>
+  {{end}}
+  <h4>add ref rule</h4>
+  <form method="post" action="/{{.Tenant}}/{{.Repo}}/settings/policy/refs/add">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label>pattern <input type="text" name="pattern" required placeholder="refs/heads/main"></label>
+    <label><input type="checkbox" name="block_deletion"> block deletion</label>
+    <label><input type="checkbox" name="block_force_push"> block force-push</label>
+    <button type="submit">add ref rule</button>
+  </form>
+  <h3>protected paths (Tier 2)</h3>
+  <p class="hint">rules block changes to matching paths on matching refs.</p>
+  {{if .Paths}}
+  <table>
+    <thead>
+      <tr><th>ref pattern</th><th>path pattern</th><th>created</th><th>actions</th></tr>
+    </thead>
+    <tbody>
+    {{range .Paths}}
+    <tr>
+      <td class="mono">{{.RefnamePattern}}</td>
+      <td class="mono">{{.PathPattern}}</td>
+      <td title="{{abstime .CreatedAt.Unix}}">{{reltime .CreatedAt.Unix}}</td>
+      <td>
+        <form method="post" action="/{{$.Tenant}}/{{$.Repo}}/settings/policy/paths/remove" class="inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="hidden" name="refname_pattern" value="{{.RefnamePattern}}">
+          <input type="hidden" name="path_pattern" value="{{.PathPattern}}">
+          <button type="submit">remove</button>
+        </form>
+      </td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="empty">no protected path rules configured.</p>
+  {{end}}
+  <h4>add path rule</h4>
+  <form method="post" action="/{{.Tenant}}/{{.Repo}}/settings/policy/paths/add">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label>ref pattern <input type="text" name="refname_pattern" required placeholder="refs/heads/main"></label>
+    <label>path pattern <input type="text" name="path_pattern" required placeholder="secrets/**"></label>
+    <button type="submit">add path rule</button>
+  </form>
+  {{end}}
+</div>
+{{end}}
+{{template "base" .}}

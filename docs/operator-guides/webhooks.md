@@ -529,6 +529,7 @@ Endpoints are keyed by `(tenant, repo)`, not by URL. An operator who created two
 - **Queue-depth and endpoints-active gauges are emitter-only** until an operator wires a sampler.
 - **No backpressure.** If the worker can't drain the queue, deliveries accumulate in `pending` indefinitely. Operators should alert on backlog (§8) and either scale the receiver or temporarily `endpoint disable` the slow one.
 - **HMAC-SHA256 only.** The header reserves `v1=` for SHA256; `v2=` is parked for future schemes.
+- **No egress allowlist on endpoint URLs (SSRF surface).** Endpoint registration was operator-CLI-only when this was designed, but the web UI now lets any repo-admin register endpoint URLs — including ones that resolve to internal addresses (link-local metadata services, RFC 1918 hosts, `localhost`). The worker will dutifully POST to whatever it is given. Operators who delegate repo-admin to semi-trusted users SHOULD front the worker's egress with network policy (firewall rules, an egress proxy, or a locked-down network namespace) so it cannot reach internal targets. A built-in egress deny-list is a known deferral; until then, network-level isolation is the only control.
 
 The companion design document (§9 "Out of scope") enumerates the Tier 2 path: multi-process worker via a leader-elected sqlite row, per-endpoint backoff schedules, signed-URL artefacts in the payload, and cross-tenant fan-out.
 

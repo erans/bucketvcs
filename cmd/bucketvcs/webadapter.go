@@ -31,6 +31,9 @@ func (a *webAdapter) TouchSession(ctx context.Context, raw string, ttl time.Dura
 func (a *webAdapter) DeleteSession(ctx context.Context, raw string) error {
 	return a.s.DeleteSession(ctx, raw)
 }
+func (a *webAdapter) DeleteSessionsForUser(ctx context.Context, userID, exceptRawID string) (int64, error) {
+	return a.s.DeleteSessionsForUser(ctx, userID, exceptRawID)
+}
 func (a *webAdapter) ListAccessibleRepos(ctx context.Context, actor *auth.Actor) ([]web.Repo, error) {
 	rs, err := a.s.ListAccessibleRepos(ctx, actor)
 	if err != nil {
@@ -51,6 +54,30 @@ func (a *webAdapter) GetVisibleRepo(ctx context.Context, actor *auth.Actor, tena
 	return &web.Repo{Tenant: r.Tenant, Name: r.Name, PublicRead: r.PublicRead, CreatedAt: r.CreatedAt}, nil
 }
 
+func (a *webAdapter) LookupRepoPerm(ctx context.Context, actor *auth.Actor, tenant, repo string) (auth.Perm, error) {
+	return a.s.LookupRepoPerm(ctx, actor, tenant, repo)
+}
+
+func (a *webAdapter) GetRepoFlags(ctx context.Context, tenant, repo string) (auth.RepoFlags, error) {
+	return a.s.GetRepoFlags(ctx, tenant, repo)
+}
+
+func (a *webAdapter) SetRepoPublic(ctx context.Context, tenant, repo string, public bool) error {
+	return a.s.SetRepoPublic(ctx, tenant, repo, public)
+}
+
+func (a *webAdapter) RenameRepo(ctx context.Context, tenant, oldName, newName string) error {
+	return a.s.RenameRepo(ctx, tenant, oldName, newName)
+}
+
+func (a *webAdapter) DeleteRepoCascade(ctx context.Context, tenant, repo string) error {
+	return a.s.DeleteRepoCascade(ctx, tenant, repo)
+}
+
+func (a *webAdapter) RegisterRepoIfNew(ctx context.Context, tenant, name string) (bool, error) {
+	return a.s.RegisterRepoIfNew(ctx, tenant, name)
+}
+
 func (a *webAdapter) FindUserByEmail(ctx context.Context, email string) (*auth.Actor, error) {
 	return a.s.FindUserByEmail(ctx, email)
 }
@@ -59,4 +86,124 @@ func (a *webAdapter) FindIdentity(ctx context.Context, issuer, subject string) (
 }
 func (a *webAdapter) LinkIdentity(ctx context.Context, userID, issuer, subject, email string) error {
 	return a.s.LinkIdentity(ctx, userID, issuer, subject, email)
+}
+func (a *webAdapter) GetUserByName(ctx context.Context, name string) (*auth.User, error) {
+	return a.s.GetUserByName(ctx, name)
+}
+func (a *webAdapter) SetPassword(ctx context.Context, userName, plaintext string) error {
+	return a.s.SetPassword(ctx, userName, plaintext)
+}
+func (a *webAdapter) HasPassword(ctx context.Context, userName string) (bool, error) {
+	return a.s.HasPassword(ctx, userName)
+}
+
+func (a *webAdapter) ListTokensForUser(ctx context.Context, name string) ([]web.TokenInfo, error) {
+	rows, err := a.s.ListTokensForUser(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]web.TokenInfo, 0, len(rows))
+	for _, t := range rows {
+		out = append(out, web.TokenInfo{
+			ID:         t.ID,
+			Label:      t.Label,
+			Scopes:     t.Scopes,
+			CreatedAt:  t.CreatedAt,
+			ExpiresAt:  t.ExpiresAt,
+			LastUsedAt: t.LastUsedAt,
+			RevokedAt:  t.RevokedAt,
+		})
+	}
+	return out, nil
+}
+
+func (a *webAdapter) GetTokenOwner(ctx context.Context, id string) (string, error) {
+	t, err := a.s.GetTokenByID(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	return t.UserID, nil
+}
+
+func (a *webAdapter) CreateToken(ctx context.Context, id, userID, secretHash, label string, expiresAt *int64, scopes auth.TokenScope) error {
+	return a.s.CreateToken(ctx, id, userID, secretHash, label, expiresAt, scopes, "", "", "")
+}
+
+func (a *webAdapter) RevokeToken(ctx context.Context, id string) error {
+	return a.s.RevokeToken(ctx, id)
+}
+
+func (a *webAdapter) RotateToken(ctx context.Context, id, newSecretHash string) error {
+	return a.s.RotateToken(ctx, id, newSecretHash)
+}
+
+func (a *webAdapter) ListSSHKeysForUser(ctx context.Context, userID string) ([]auth.SSHKey, error) {
+	return a.s.ListSSHKeysForUser(ctx, userID)
+}
+
+func (a *webAdapter) AddSSHKey(ctx context.Context, k auth.SSHKey) error {
+	return a.s.AddSSHKey(ctx, k)
+}
+
+func (a *webAdapter) RevokeSSHKey(ctx context.Context, keyIDOrPrefix string) error {
+	return a.s.RevokeSSHKey(ctx, keyIDOrPrefix)
+}
+
+func (a *webAdapter) ListRepoGrants(ctx context.Context, tenant, repo string) ([]web.RepoGrant, error) {
+	rows, err := a.s.ListRepoGrants(ctx, tenant, repo)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]web.RepoGrant, len(rows))
+	for i, r := range rows {
+		out[i] = web.RepoGrant{UserName: r.UserName, Perm: r.Perm}
+	}
+	return out, nil
+}
+
+func (a *webAdapter) Grant(ctx context.Context, userName, tenant, repo, perm string) error {
+	return a.s.Grant(ctx, userName, tenant, repo, perm)
+}
+
+func (a *webAdapter) RevokeRepoPermission(ctx context.Context, userName, tenant, repo string) error {
+	return a.s.RevokeRepoPermission(ctx, userName, tenant, repo)
+}
+
+func (a *webAdapter) ListSSHKeysForRepo(ctx context.Context, tenant, repo string) ([]auth.SSHKey, error) {
+	return a.s.ListSSHKeysForRepo(ctx, tenant, repo)
+}
+
+func (a *webAdapter) ListUsers(ctx context.Context) ([]web.UserInfo, error) {
+	users, err := a.s.ListUsers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]web.UserInfo, 0, len(users))
+	for _, u := range users {
+		out = append(out, web.UserInfo{
+			ID:        u.ID,
+			Name:      u.Name,
+			Email:     u.Email,
+			IsAdmin:   u.IsAdmin,
+			Disabled:  u.DisabledAt != nil,
+			CreatedAt: u.CreatedAt,
+		})
+	}
+	return out, nil
+}
+
+func (a *webAdapter) CreateUser(ctx context.Context, name string, isAdmin bool) (string, error) {
+	return a.s.CreateUser(ctx, name, isAdmin)
+}
+
+func (a *webAdapter) SetUserDisabled(ctx context.Context, name string, disabled bool) error {
+	return a.s.SetUserDisabled(ctx, name, disabled)
+}
+
+func (a *webAdapter) DeleteUser(ctx context.Context, name string) error {
+	return a.s.DeleteUser(ctx, name)
+}
+
+func (a *webAdapter) SetEmail(ctx context.Context, userName, email string) error {
+	return a.s.SetEmail(ctx, userName, email)
 }

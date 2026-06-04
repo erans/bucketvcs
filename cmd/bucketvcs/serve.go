@@ -28,10 +28,14 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/hooks"
 	"github.com/bucketvcs/bucketvcs/internal/lfs"
 	"github.com/bucketvcs/bucketvcs/internal/lfs/locks"
+	"github.com/bucketvcs/bucketvcs/internal/lfs/quota"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/oidc"
 	"github.com/bucketvcs/bucketvcs/internal/policy"
+	"github.com/bucketvcs/bucketvcs/internal/repo"
+	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/sshd"
+	"github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/web"
 	"github.com/bucketvcs/bucketvcs/internal/webhooks"
 )
@@ -276,6 +280,20 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	// webhook_deliveries tables added by migration 0006). The worker is
 	// started below once HTTP and SSH listeners are configured.
 	webhookSvc := webhooks.New(authS.DB())
+
+	// M24 Phase 3 web admin services. Both are db-backed and cheap to
+	// construct unconditionally; the web layer only invokes them on demand
+	// from the settings/admin pages. hooksStore is the CRUD Store (distinct
+	// from the optional hooksSvc Runner constructed below for receive-pack).
+	// quotaSvc is gated on --lfs: M13.5 quota enforcement lives in the LFS
+	// Batch handler, so with LFS off a configured quota would be inert —
+	// leaving the web Deps nil makes the quota pages degrade to their
+	// "unavailable" notices instead of offering unenforceable knobs.
+	hooksStore := hooks.NewStore(authS.DB())
+	var quotaSvc *quota.Service
+	if *lfsEnabled {
+		quotaSvc = quota.New(authS.DB(), logger)
+	}
 
 	// M20 Tier 3 hooks service (optional). Constructed only when
 	// --hooks-enabled=true. bwrap detection: on Linux, the binary must
@@ -576,7 +594,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 				logger.Info("oidc browser login enabled", "issuer", *oidcIssuer)
 			}
 			browseSvc := gitbrowse.NewService(store, srv.MirrorManager(), *uiBrowseTimeout, logger)
-			uiHandler = web.NewHandler(web.Deps{
+			webDeps := web.Deps{
 				Store:      newWebAdapter(authS),
 				Logger:     logger,
 				Limiter:    rateLimiter,
@@ -585,7 +603,50 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 				TrustProxy: *trustProxyHeaders,
 				OIDC:       oidcProvider,
 				Content:    browseSvc,
-			})
+				Webhooks:   webhookSvc,
+				Policy:     policySvc,
+				Hooks:      hooksStore,
+				RepoInit: func(ctx context.Context, tenant, repoName, actor string) error {
+					// Mirrors `bucketvcs init` defaults (cmd/bucketvcs/init.go).
+					_, err := repo.Create(ctx, store, tenant, repoName, repo.CreateOptions{
+						DefaultBranch: "refs/heads/main",
+						Actor:         actor,
+					})
+					return err
+				},
+				RenameCheck: func(ctx context.Context, tenant, newName string) error {
+					// Mirrors `bucketvcs repo rename` pre-check 3
+					// (cmd/bucketvcs/repo_rename.go): M21 rename does NOT migrate
+					// storage keys, so refuse if any object already lives under the
+					// destination prefix to avoid a confused read after rename.
+					// keys.NewRepo(...).Prefix() == "tenants/<t>/repos/<new>/", the
+					// SAME literal the CLI builds.
+					rk, kerr := keys.NewRepo(tenant, newName)
+					if kerr != nil {
+						return fmt.Errorf("rename: storage key: %w", kerr)
+					}
+					destPrefix := rk.Prefix()
+					page, lerr := store.List(ctx, destPrefix, &storage.ListOptions{MaxKeys: 1})
+					if lerr != nil {
+						return fmt.Errorf("rename: storage collision check: %w", lerr)
+					}
+					if page != nil && len(page.Objects) > 0 {
+						return fmt.Errorf("rename: storage prefix %s is non-empty (first key: %s); refusing to rename",
+							destPrefix, page.Objects[0].Key)
+					}
+					return nil
+				},
+			}
+			// Quota pages only when LFS is on (see quotaSvc construction).
+			// Assigned conditionally: a typed-nil *quota.Service stored in the
+			// QuotaAdmin interface would defeat the web layer's nil checks.
+			if quotaSvc != nil {
+				webDeps.Quotas = quotaSvc
+				webDeps.QuotaReconcile = func(ctx context.Context, tenant string, dryRun bool) (quota.Report, error) {
+					return quotaSvc.Reconcile(ctx, store, tenant, dryRun)
+				}
+			}
+			uiHandler = web.NewHandler(webDeps)
 		}
 
 		var mainHandler http.Handler = srv // gateway

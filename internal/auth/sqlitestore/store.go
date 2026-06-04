@@ -61,6 +61,7 @@ var ErrReservedUser = errors.New("sqlitestore: cannot modify reserved system use
 type User struct {
 	ID         string
 	Name       string
+	Email      string // empty when NULL
 	IsAdmin    bool
 	CreatedAt  int64
 	DisabledAt *int64
@@ -129,7 +130,7 @@ func (s *Store) GetUserByName(ctx context.Context, name string) (*auth.User, err
 // output or CLI listings.
 func (s *Store) ListUsers(ctx context.Context) ([]*User, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, is_admin, created_at, disabled_at FROM users WHERE name != ? ORDER BY name`,
+		`SELECT id, name, COALESCE(email,''), is_admin, created_at, disabled_at FROM users WHERE name != ? ORDER BY name`,
 		oidcSystemUserID,
 	)
 	if err != nil {
@@ -141,7 +142,7 @@ func (s *Store) ListUsers(ctx context.Context) ([]*User, error) {
 		u := &User{}
 		var adminInt int
 		var disabled sql.NullInt64
-		if err := rows.Scan(&u.ID, &u.Name, &adminInt, &u.CreatedAt, &disabled); err != nil {
+		if err := rows.Scan(&u.ID, &u.Name, &u.Email, &adminInt, &u.CreatedAt, &disabled); err != nil {
 			return nil, err
 		}
 		u.IsAdmin = adminInt != 0
@@ -592,6 +593,9 @@ func (s *Store) SetRepoPublic(ctx context.Context, tenant, repo string, public b
 // Grant creates or replaces a permission row. perm must be "read", "write",
 // or "admin". Refuses if the (tenant, repo) is not registered.
 func (s *Store) Grant(ctx context.Context, userName, tenant, repo, perm string) error {
+	if userName == oidcSystemUserID {
+		return ErrReservedUser
+	}
 	if perm != "read" && perm != "write" && perm != "admin" {
 		return fmt.Errorf("grant: invalid perm %q", perm)
 	}
@@ -624,6 +628,42 @@ func (s *Store) RevokeRepoPermission(ctx context.Context, userName, tenant, repo
 		u.ID, tenant, repo,
 	)
 	return err
+}
+
+// RepoGrant is one explicit (user, perm) permission row on a repo.
+type RepoGrant struct {
+	UserName string
+	Perm     string // "read" | "write" | "admin"
+}
+
+// ListRepoGrants returns the explicit permission rows on (tenant, repo),
+// ordered by user name. ErrNoSuchRepo if the repo is unregistered.
+func (s *Store) ListRepoGrants(ctx context.Context, tenant, repo string) ([]RepoGrant, error) {
+	// Existence probe — distinguishes an unregistered repo (ErrNoSuchRepo)
+	// from a registered repo with no grants (empty slice, nil error).
+	if _, err := s.GetRepoFlags(ctx, tenant, repo); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT u.name, rp.perm
+		FROM repo_permissions rp
+		JOIN users u ON u.id = rp.user_id
+		WHERE rp.tenant = ? AND rp.repo = ?
+		ORDER BY u.name
+	`, tenant, repo)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []RepoGrant
+	for rows.Next() {
+		var g RepoGrant
+		if err := rows.Scan(&g.UserName, &g.Perm); err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
 }
 
 // DeleteRepo removes a (tenant, name) from repos. SSH deploy keys bound to

@@ -1,0 +1,14 @@
+{{define "title"}}admin · bucketvcs{{end}}
+{{define "content"}}
+<div class="settings">
+  {{template "adminnav" .}}
+  <h2>instance admin</h2>
+  <p>Manage users, repositories, and storage quotas.</p>
+  <ul>
+    <li><a href="/admin/users">users</a></li>
+    <li><a href="/admin/repos">repos</a></li>
+    <li><a href="/admin/quotas">quotas</a></li>
+  </ul>
+</div>
+{{end}}
+{{template "base" .}}

@@ -328,4 +328,3 @@ func TestRunMaintenance_AllRepos_BundleOnlySummary(t *testing.T) {
 		t.Errorf("unexpected summary divergence warning: %s", stderr.String())
 	}
 }
-

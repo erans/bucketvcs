@@ -44,3 +44,19 @@ func EmitRequestMetric(ctx context.Context, logger *slog.Logger, route string, s
 		slog.Int("value", 1),
 	)
 }
+
+// EmitAdminActionMetric records a settings/admin form outcome.
+// result ∈ "ok"|"invalid"|"error". (Authz denials emit no action metric —
+// they 404 before reaching a handler; web_requests_total carries those.)
+func EmitAdminActionMetric(ctx context.Context, logger *slog.Logger, domain, action, result string) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.LogAttrs(ctx, slog.LevelInfo, "metric",
+		slog.String("name", "web_admin_actions_total"),
+		slog.String("domain", domain),
+		slog.String("action", action),
+		slog.String("result", result),
+		slog.Int("value", 1),
+	)
+}
