@@ -210,6 +210,22 @@ func TestRequireUserRedirectsAnon(t *testing.T) {
 	}
 }
 
+func TestRequireUserRedirectsAnonPreservesQuery(t *testing.T) {
+	s := newTestServerStruct(newFakeStore())
+
+	req := httptest.NewRequest(http.MethodGet, "/settings/tokens?page=2", nil)
+	rec := httptest.NewRecorder()
+	if s.requireUser(rec, req) {
+		t.Fatal("requireUser returned true for anonymous request")
+	}
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status %d, want 303", rec.Code)
+	}
+	if got := rec.Header().Get("Location"); got != "/login?next=%2Fsettings%2Ftokens%3Fpage%3D2" {
+		t.Fatalf("Location %q, want /login?next=%%2Fsettings%%2Ftokens%%3Fpage%%3D2", got)
+	}
+}
+
 func TestRequireUserAllowsSession(t *testing.T) {
 	s := newTestServerStruct(newFakeStore())
 	req := withTestSession(httptest.NewRequest(http.MethodGet, "/settings", nil), userSession())

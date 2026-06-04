@@ -13,7 +13,12 @@ func (s *server) requireUser(w http.ResponseWriter, r *http.Request) bool {
 	if SessionFromContext(r.Context()) != nil {
 		return true
 	}
-	http.Redirect(w, r, "/login?next="+url.QueryEscape(r.URL.Path), http.StatusSeeOther)
+	// RequestURI() preserves the query string (e.g. ?endpoint=3) so post-login
+	// redirect retains page state. It is open-redirect-safe: RequestURI always
+	// begins with the request path ("/..."), and safeNext (handler.go) rejects
+	// any ?next= value that is not "/"-prefixed, is "//"-prefixed, or contains a
+	// backslash — so the round-trip through the login form stays confined to this host.
+	http.Redirect(w, r, "/login?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
 	return false
 }
 
