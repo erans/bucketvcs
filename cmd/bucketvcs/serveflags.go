@@ -2,6 +2,9 @@ package main
 
 import (
 	"flag"
+	"fmt"
+	"net/netip"
+	"strings"
 	"time"
 )
 
@@ -77,6 +80,10 @@ type serveFlags struct {
 	oidcRedirect   *string
 	oidcScopes     *string
 	oidcLabel      *string
+
+	// M25 webhook egress policy (populated by repeatable fs.Func flags).
+	webhookAllowCIDRs []netip.Prefix
+	webhookDenyHosts  []string
 }
 
 // registerServeFlags registers the full serve flag surface on fs. The flag
@@ -130,6 +137,30 @@ func registerServeFlags(fs *flag.FlagSet) *serveFlags {
 			"a single attacker can fill the shared bucket and 429 every client.")
 	sf.authRateLimitDisabled = fs.Bool("auth-rate-limit-disabled", false,
 		"Disable auth rate-limiting entirely")
+
+	// M25 webhook egress policy. The delivery worker denies loopback,
+	// link-local (incl. cloud metadata), and private/ULA ranges by default;
+	// these flags punch holes / add hostname deny patterns.
+	fs.Func("webhook-allow-cidr",
+		"CIDR webhook deliveries may reach despite the private-range deny default, e.g. 192.168.1.0/24 (repeatable; 0.0.0.0/0 restores the pre-M25 open behavior)",
+		func(v string) error {
+			p, err := netip.ParsePrefix(strings.TrimSpace(v))
+			if err != nil {
+				return fmt.Errorf("--webhook-allow-cidr: %w", err)
+			}
+			sf.webhookAllowCIDRs = append(sf.webhookAllowCIDRs, p)
+			return nil
+		})
+	fs.Func("webhook-deny-host",
+		"hostname glob webhook deliveries may never target: exact name or *.suffix, e.g. *.internal.example.com (repeatable; policy aid, not a security boundary — raw IPs bypass it)",
+		func(v string) error {
+			v = strings.TrimSpace(v)
+			if v == "" || v == "*." || v == "*" {
+				return fmt.Errorf("--webhook-deny-host: pattern must be an exact hostname or *.suffix, got %q", v)
+			}
+			sf.webhookDenyHosts = append(sf.webhookDenyHosts, v)
+			return nil
+		})
 
 	// M20 Tier 3 hooks. Default disabled; flip with --hooks-enabled=true and
 	// pass --hooks-root=<abs-dir>. On Linux the binary requires `bwrap` on

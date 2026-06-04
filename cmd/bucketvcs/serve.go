@@ -202,6 +202,15 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	// started below once HTTP and SSH listeners are configured.
 	webhookSvc := webhooks.New(authS.DB())
 
+	// M25 egress policy: shared by the delivery worker (dial-time gate) and
+	// Create's registration-time pre-check (web UI rejects literal denied
+	// IPs up front).
+	webhookEgress := &webhooks.EgressPolicy{
+		DenyHosts:  sf.webhookDenyHosts,
+		AllowCIDRs: sf.webhookAllowCIDRs,
+	}
+	webhookSvc.Egress = webhookEgress
+
 	// M24 Phase 3 web admin services. Both are db-backed and cheap to
 	// construct unconditionally; the web layer only invokes them on demand
 	// from the settings/admin pages. hooksStore is the CRUD Store (distinct
@@ -368,7 +377,9 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	// M15 webhook delivery worker. Runs for the lifetime of serveCtx;
 	// returns when ctx is cancelled at shutdown. Backed by the same
 	// authdb as enqueue, so no extra DB handle is needed.
-	go webhooks.StartWorker(serveCtx, webhookSvc, webhooks.DefaultWorkerConfig())
+	wcfg := webhooks.DefaultWorkerConfig()
+	wcfg.Egress = webhookEgress
+	go webhooks.StartWorker(serveCtx, webhookSvc, wcfg)
 
 	// M22 OIDC expired-token sweep goroutine.
 	if *oidcEnabled {
