@@ -609,7 +609,7 @@ affected.
 
 | Domain | Events |
 |---|---|
-| Users | `auth.user.created`, `auth.user.disabled`, `auth.user.enabled`, `auth.user.deleted`, `auth.user.email_set`, `auth.password.changed` |
+| Users | `auth.user.created`, `auth.user.disabled`, `auth.user.enabled`, `auth.user.deleted`, `auth.user.email_set`, `auth.user.password_changed` |
 | Tokens | `auth.token.created`, `auth.token.revoked`, `auth.token.rotated` |
 | SSH keys | `auth.sshkey.added`, `auth.sshkey.revoked` (user vs deploy keys distinguished by a `kind` attr) |
 | Repos | `repo.created`, `repo.deleted`, `repo.renamed`, `repo.public_set`, `repo.grant.added`, `repo.grant.removed` |
