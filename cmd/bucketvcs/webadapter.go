@@ -64,3 +64,12 @@ func (a *webAdapter) FindIdentity(ctx context.Context, issuer, subject string) (
 func (a *webAdapter) LinkIdentity(ctx context.Context, userID, issuer, subject, email string) error {
 	return a.s.LinkIdentity(ctx, userID, issuer, subject, email)
 }
+func (a *webAdapter) GetUserByName(ctx context.Context, name string) (*auth.User, error) {
+	return a.s.GetUserByName(ctx, name)
+}
+func (a *webAdapter) SetPassword(ctx context.Context, userName, plaintext string) error {
+	return a.s.SetPassword(ctx, userName, plaintext)
+}
+func (a *webAdapter) HasPassword(ctx context.Context, userName string) (bool, error) {
+	return a.s.HasPassword(ctx, userName)
+}

@@ -22,3 +22,9 @@
   </select>
   <noscript><button type="submit">go</button></noscript>
 </form>{{end}}
+
+{{define "settingsnav"}}
+<nav class="tabs">
+  <a href="/settings">profile</a> · <a href="/settings/tokens">tokens</a> · <a href="/settings/keys">ssh keys</a>
+</nav>
+{{end}}

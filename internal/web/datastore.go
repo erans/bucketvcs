@@ -37,4 +37,9 @@ type DataStore interface {
 	FindUserByEmail(ctx context.Context, email string) (*auth.Actor, error)
 	FindIdentity(ctx context.Context, issuer, subject string) (*auth.Actor, error)
 	LinkIdentity(ctx context.Context, userID, issuer, subject, email string) error
+
+	// User profile (Phase 3 settings pages)
+	GetUserByName(ctx context.Context, name string) (*auth.User, error)
+	SetPassword(ctx context.Context, userName, plaintext string) error
+	HasPassword(ctx context.Context, userName string) (bool, error)
 }

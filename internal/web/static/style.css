@@ -78,3 +78,12 @@ table.commits td.age { text-align: right; }
 pre.blob { background: #111; border: 1px solid #333; padding: .5rem; overflow-x: auto; }
 
 .flash { border: 1px solid #8fd98f; padding: .35rem .6rem; color: #8fd98f; }
+
+/* ── Phase 3 settings pages ─────────────────────────────────────────────── */
+.settings table { border-collapse: collapse; margin-bottom: 1rem; }
+.settings table td { padding: .15rem .8rem .15rem 0; vertical-align: baseline; }
+.settings label { display: block; margin: .5rem 0; }
+.settings input[type="password"] { background: #111; color: var(--fg); border: 1px solid var(--dim); font: inherit; padding: .2rem .4rem; }
+.tabs { margin-bottom: 1rem; color: var(--dim); }
+.tabs a { color: var(--accent); }
+.badge { color: var(--accent); margin-left: .4ch; }

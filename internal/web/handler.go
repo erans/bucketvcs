@@ -119,6 +119,8 @@ func NewHandler(d Deps) http.Handler {
 		s.mux.HandleFunc("/login/oidc", s.handleOIDCAuthorize)
 		s.mux.HandleFunc("/login/oidc/callback", s.handleOIDCCallback)
 	}
+	s.mux.HandleFunc("/settings", s.handleSettings)
+	s.mux.HandleFunc("/settings/password", s.handlePasswordChange)
 	s.mux.HandleFunc("/", s.handleLanding)
 
 	return sessionMiddleware(s.store, s.ttl)(cspMiddleware(s.mux))

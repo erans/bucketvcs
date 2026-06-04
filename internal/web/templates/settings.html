@@ -1,0 +1,23 @@
+{{define "title"}}settings · bucketvcs{{end}}
+{{define "content"}}
+<div class="settings">
+  {{template "settingsnav" .}}
+  <h2>profile</h2>
+  <table>
+    <tr><td>user</td><td>{{.User.Name}}{{if .User.IsAdmin}} <span class="badge">[admin]</span>{{end}}</td></tr>
+  </table>
+  {{if .HasPassword}}
+  <h2>change password</h2>
+  <form method="post" action="/settings/password">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label>current <input type="password" name="current" required></label>
+    <label>new <input type="password" name="new1" required></label>
+    <label>repeat <input type="password" name="new2" required></label>
+    <button type="submit">change password</button>
+  </form>
+  {{else}}
+  <p class="empty">password login not configured for this account (OIDC-only); use the CLI to set one.</p>
+  {{end}}
+</div>
+{{end}}
+{{template "base" .}}

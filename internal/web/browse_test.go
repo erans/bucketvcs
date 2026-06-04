@@ -58,6 +58,15 @@ func (b *browseDataStore) FindIdentity(ctx context.Context, issuer, subject stri
 func (b *browseDataStore) LinkIdentity(ctx context.Context, userID, issuer, subject, email string) error {
 	return nil
 }
+func (b *browseDataStore) GetUserByName(ctx context.Context, name string) (*auth.User, error) {
+	panic("browseDataStore.GetUserByName not implemented")
+}
+func (b *browseDataStore) SetPassword(ctx context.Context, userName, plaintext string) error {
+	panic("browseDataStore.SetPassword not implemented")
+}
+func (b *browseDataStore) HasPassword(ctx context.Context, userName string) (bool, error) {
+	panic("browseDataStore.HasPassword not implemented")
+}
 
 // fakeContent is a configurable ContentStore for browse tests.
 type fakeContent struct {
