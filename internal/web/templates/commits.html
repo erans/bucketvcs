@@ -8,6 +8,7 @@
       <td class="oid"><a href="/{{$.Tenant}}/{{$.Repo}}/commit/{{.OID}}">{{.ShortOID}}</a></td>
       <td class="summary">{{.Summary}}</td>
       <td class="who">{{.AuthorName}}</td>
+      <td class="age" title="{{abstime .AuthorTime}}">{{reltime .AuthorTime}}</td>
     </tr>
     {{end}}
   </table>

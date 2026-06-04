@@ -524,6 +524,34 @@ func TestRenderPartial_TreeRows(t *testing.T) {
 	}
 }
 
+func TestCommits_AgeColumn(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+		log:  []browsemodel.CommitMeta{{OID: "c2", ShortOID: "c2", Summary: "update a", AuthorName: "Ann", AuthorTime: time.Now().Add(-2 * time.Hour).Unix()}},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/commits/main", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), "2h ago") {
+		t.Fatalf("commit log missing relative age: %s", rec.Body.String())
+	}
+}
+
+func TestBlob_HumanizedSize(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+		blob: browsemodel.Blob{Path: "bin.dat", Size: 4 << 20, Binary: true, Bytes: []byte{0}},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/blob/main/bin.dat", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), "4.0 MiB") {
+		t.Fatalf("binary notice missing humanized size: %s", rec.Body.String())
+	}
+}
+
 func TestTree_ActivityColumnRendered(t *testing.T) {
 	content := &fakeContent{
 		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},

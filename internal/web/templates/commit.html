@@ -4,7 +4,7 @@
   <div class="repohdr"><span class="path">{{.Tenant}}/{{.Repo}}</span></div>
   <div class="commitmeta">
     <div class="summary"><strong>{{.Detail.Meta.Summary}}</strong></div>
-    <div class="who">{{.Detail.Meta.ShortOID}} · {{.Detail.Meta.AuthorName}} &lt;{{.Detail.Meta.AuthorEmail}}&gt;</div>
+    <div class="who">{{.Detail.Meta.ShortOID}} · {{.Detail.Meta.AuthorName}} &lt;{{.Detail.Meta.AuthorEmail}}&gt; · <span title="{{abstime .Detail.Meta.AuthorTime}}">{{reltime .Detail.Meta.AuthorTime}}</span></div>
     <pre class="message">{{.Detail.Message}}</pre>
   </div>
   {{range .Detail.Files}}
