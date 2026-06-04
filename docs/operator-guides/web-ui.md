@@ -363,6 +363,8 @@ links the stylesheet automatically.
 The old "white-box" symptom (highlighted text invisible on a dark background) is
 gone — the monokai dark theme is embedded in the generated stylesheet.
 
+Line numbers in highlighted blobs are anchors (`#L42`); visiting a URL with that fragment (or clicking a line number) highlights the target line and scrolls it into view.
+
 Blob and tree views also show relative times ("2h ago") with absolute UTC
 tooltips, and file sizes are displayed in binary units (e.g. "1.2 KiB").
 

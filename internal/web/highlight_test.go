@@ -29,3 +29,20 @@ func TestChromaCSS_NonEmpty(t *testing.T) {
 		t.Fatalf("dark override missing/inert: %.200s", css)
 	}
 }
+
+func TestHighlight_LinkableLineAnchors(t *testing.T) {
+	out := string(highlight("main.go", []byte("package main\nfunc main() {}\n")))
+	if !strings.Contains(out, `id="L1"`) || !strings.Contains(out, `href="#L1"`) {
+		t.Fatalf("expected linkable line anchors: %s", out)
+	}
+	if !strings.Contains(out, `id="L2"`) {
+		t.Fatalf("expected anchor for line 2: %s", out)
+	}
+}
+
+func TestChromaCSS_HighlightRule(t *testing.T) {
+	css := string(chromaCSS())
+	if !strings.Contains(css, ".hl") {
+		t.Fatalf("chroma CSS missing line-highlight rule: %.200s", css)
+	}
+}

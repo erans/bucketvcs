@@ -649,3 +649,13 @@ func TestBlob_NonMarkdownNoRenderToggle(t *testing.T) {
 		t.Fatalf("source view broken: %s", body)
 	}
 }
+
+func TestLineNumsJSServed(t *testing.T) {
+	h := newBrowseServer(&fakeContent{}, map[string]bool{})
+	req := httptest.NewRequest("GET", "/_ui/static/linenums.js", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "hashchange") {
+		t.Fatalf("linenums.js not served: code=%d", rec.Code)
+	}
+}

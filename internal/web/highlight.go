@@ -35,6 +35,7 @@ func chromaFormatter() *chromahtml.Formatter {
 		chromahtml.WithLineNumbers(true),
 		chromahtml.LineNumbersInTable(true),
 		chromahtml.Standalone(false),
+		chromahtml.WithLinkableLineNumbers(true, "L"),
 	)
 }
 
@@ -52,6 +53,9 @@ func chromaCSS() []byte {
 		b.WriteString("\n/* bucketvcs overrides */\n")
 		b.WriteString(".chroma,.chroma.dark{background-color:#111;border:1px solid #333;padding:.5rem;overflow-x:auto}\n")
 		b.WriteString(".chroma .lnt,.chroma .ln,.chroma.dark .lnt,.chroma.dark .ln{color:#666;-webkit-user-select:none;user-select:none}\n")
+		b.WriteString(".chroma .lnt.hl,.chroma.dark .lnt.hl,.chroma .line.hl,.chroma.dark .line.hl{background-color:rgba(143,217,143,.18)}\n")
+		b.WriteString(".chroma .lnt a,.chroma.dark .lnt a{color:inherit;text-decoration:none}\n")
+		b.WriteString(".chroma .lnt a:hover,.chroma.dark .lnt a:hover{color:#8fd98f}\n")
 		chromaCSSBytes = b.Bytes()
 	})
 	return chromaCSSBytes
