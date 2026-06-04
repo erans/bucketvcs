@@ -3,6 +3,8 @@ package web
 import (
 	"testing"
 	"time"
+
+	"github.com/bucketvcs/bucketvcs/internal/auth"
 )
 
 func TestRelTimeAt(t *testing.T) {
@@ -59,6 +61,27 @@ func TestDiffClass(t *testing.T) {
 	for in, want := range cases {
 		if got := diffClass(in); got != want {
 			t.Errorf("diffClass(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestScopeStr(t *testing.T) {
+	fns := templateFuncs()
+	fn := fns["scopestr"].(func(auth.TokenScope) string)
+
+	cases := []struct {
+		scope auth.TokenScope
+		want  string
+	}{
+		{auth.ScopeLegacy, "legacy (full access)"},
+		{auth.ScopeRepoRead | auth.ScopeLFSRead, "repo:read,lfs:read"},
+		{auth.ScopeRepoAdmin | auth.ScopeRepoWrite | auth.ScopeRepoRead, "repo:admin,repo:write,repo:read"},
+		{auth.ScopeWebhookAdmin, "webhook:admin"},
+		{auth.ScopeStorageAdmin, "storage:admin"},
+	}
+	for _, tc := range cases {
+		if got := fn(tc.scope); got != tc.want {
+			t.Errorf("scopestr(%v) = %q, want %q", tc.scope, got, tc.want)
 		}
 	}
 }

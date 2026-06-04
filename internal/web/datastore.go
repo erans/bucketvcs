@@ -15,6 +15,17 @@ type Repo struct {
 	CreatedAt  int64
 }
 
+// TokenInfo is the web view of a token row (no secret hash).
+type TokenInfo struct {
+	ID         string
+	Label      string
+	Scopes     auth.TokenScope
+	CreatedAt  int64
+	ExpiresAt  *int64
+	LastUsedAt *int64
+	RevokedAt  *int64
+}
+
 // DataStore is the read/identity surface the web UI needs. It is implemented in
 // the composition root (cmd/bucketvcs) by an adapter over *sqlitestore.Store, and
 // by a fake in tests.
@@ -42,4 +53,12 @@ type DataStore interface {
 	GetUserByName(ctx context.Context, name string) (*auth.User, error)
 	SetPassword(ctx context.Context, userName, plaintext string) error
 	HasPassword(ctx context.Context, userName string) (bool, error)
+
+	// Tokens (self-service; ownership enforced by handlers).
+	ListTokensForUser(ctx context.Context, name string) ([]TokenInfo, error)
+	GetTokenOwner(ctx context.Context, id string) (userID string, err error)
+	CreateToken(ctx context.Context, id, userID, secretHash, label string,
+		expiresAt *int64, scopes auth.TokenScope) error
+	RevokeToken(ctx context.Context, id string) error
+	RotateToken(ctx context.Context, id, newSecretHash string) error
 }

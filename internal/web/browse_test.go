@@ -67,6 +67,21 @@ func (b *browseDataStore) SetPassword(ctx context.Context, userName, plaintext s
 func (b *browseDataStore) HasPassword(ctx context.Context, userName string) (bool, error) {
 	panic("browseDataStore.HasPassword not implemented")
 }
+func (b *browseDataStore) ListTokensForUser(ctx context.Context, name string) ([]TokenInfo, error) {
+	panic("browseDataStore.ListTokensForUser not implemented")
+}
+func (b *browseDataStore) GetTokenOwner(ctx context.Context, id string) (string, error) {
+	panic("browseDataStore.GetTokenOwner not implemented")
+}
+func (b *browseDataStore) CreateToken(ctx context.Context, id, userID, secretHash, label string, expiresAt *int64, scopes auth.TokenScope) error {
+	panic("browseDataStore.CreateToken not implemented")
+}
+func (b *browseDataStore) RevokeToken(ctx context.Context, id string) error {
+	panic("browseDataStore.RevokeToken not implemented")
+}
+func (b *browseDataStore) RotateToken(ctx context.Context, id, newSecretHash string) error {
+	panic("browseDataStore.RotateToken not implemented")
+}
 
 // fakeContent is a configurable ContentStore for browse tests.
 type fakeContent struct {

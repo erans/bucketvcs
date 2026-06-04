@@ -73,3 +73,43 @@ func (a *webAdapter) SetPassword(ctx context.Context, userName, plaintext string
 func (a *webAdapter) HasPassword(ctx context.Context, userName string) (bool, error) {
 	return a.s.HasPassword(ctx, userName)
 }
+
+func (a *webAdapter) ListTokensForUser(ctx context.Context, name string) ([]web.TokenInfo, error) {
+	rows, err := a.s.ListTokensForUser(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]web.TokenInfo, 0, len(rows))
+	for _, t := range rows {
+		out = append(out, web.TokenInfo{
+			ID:         t.ID,
+			Label:      t.Label,
+			Scopes:     t.Scopes,
+			CreatedAt:  t.CreatedAt,
+			ExpiresAt:  t.ExpiresAt,
+			LastUsedAt: t.LastUsedAt,
+			RevokedAt:  t.RevokedAt,
+		})
+	}
+	return out, nil
+}
+
+func (a *webAdapter) GetTokenOwner(ctx context.Context, id string) (string, error) {
+	t, err := a.s.GetTokenByID(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	return t.UserID, nil
+}
+
+func (a *webAdapter) CreateToken(ctx context.Context, id, userID, secretHash, label string, expiresAt *int64, scopes auth.TokenScope) error {
+	return a.s.CreateToken(ctx, id, userID, secretHash, label, expiresAt, scopes, "", "", "")
+}
+
+func (a *webAdapter) RevokeToken(ctx context.Context, id string) error {
+	return a.s.RevokeToken(ctx, id)
+}
+
+func (a *webAdapter) RotateToken(ctx context.Context, id, newSecretHash string) error {
+	return a.s.RotateToken(ctx, id, newSecretHash)
+}

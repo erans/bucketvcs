@@ -64,3 +64,23 @@ func (s *server) renderBuffered(w http.ResponseWriter, page string, data any) er
 	_, _ = w.Write(buf.Bytes())
 	return nil
 }
+
+type secretData struct {
+	base
+	Title  string
+	Secret string // plaintext credential; rendered exactly once, never logged
+	Back   string // link target after the user copies it
+}
+
+// renderSecretOnce renders the one-time credential page directly (no redirect,
+// so the secret never transits a header/cookie). Refresh re-submits the form;
+// the page says so.
+func (s *server) renderSecretOnce(w http.ResponseWriter, r *http.Request, title, secret, back string) {
+	d := secretData{
+		base:   base{Session: SessionFromContext(r.Context())},
+		Title:  title,
+		Secret: secret,
+		Back:   back,
+	}
+	_ = s.renderBuffered(w, "secret.html", d)
+}

@@ -121,6 +121,10 @@ func NewHandler(d Deps) http.Handler {
 	}
 	s.mux.HandleFunc("/settings", s.handleSettings)
 	s.mux.HandleFunc("/settings/password", s.handlePasswordChange)
+	s.mux.HandleFunc("/settings/tokens", s.handleTokensPage)
+	s.mux.HandleFunc("/settings/tokens/create", s.handleTokenCreate)
+	s.mux.HandleFunc("/settings/tokens/revoke", s.handleTokenRevoke)
+	s.mux.HandleFunc("/settings/tokens/rotate", s.handleTokenRotate)
 	s.mux.HandleFunc("/", s.handleLanding)
 
 	return sessionMiddleware(s.store, s.ttl)(cspMiddleware(s.mux))

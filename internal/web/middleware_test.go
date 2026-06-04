@@ -23,6 +23,13 @@ type fakeStore struct {
 	getUserByName func(ctx context.Context, name string) (*auth.User, error)
 	setPassword   func(ctx context.Context, userName, plaintext string) error
 	hasPassword   func(ctx context.Context, userName string) (bool, error)
+
+	// token methods
+	listTokensForUser func(ctx context.Context, name string) ([]TokenInfo, error)
+	getTokenOwner     func(ctx context.Context, id string) (string, error)
+	createToken       func(ctx context.Context, id, userID, secretHash, label string, expiresAt *int64, scopes auth.TokenScope) error
+	revokeToken       func(ctx context.Context, id string) error
+	rotateToken       func(ctx context.Context, id, newSecretHash string) error
 }
 
 func newFakeStore() *fakeStore { return &fakeStore{sessions: map[string]*auth.Session{}} }
@@ -99,6 +106,36 @@ func (f *fakeStore) HasPassword(ctx context.Context, userName string) (bool, err
 		return f.hasPassword(ctx, userName)
 	}
 	return true, nil
+}
+func (f *fakeStore) ListTokensForUser(ctx context.Context, name string) ([]TokenInfo, error) {
+	if f.listTokensForUser != nil {
+		return f.listTokensForUser(ctx, name)
+	}
+	return nil, nil
+}
+func (f *fakeStore) GetTokenOwner(ctx context.Context, id string) (string, error) {
+	if f.getTokenOwner != nil {
+		return f.getTokenOwner(ctx, id)
+	}
+	return "", auth.ErrNoSuchToken
+}
+func (f *fakeStore) CreateToken(ctx context.Context, id, userID, secretHash, label string, expiresAt *int64, scopes auth.TokenScope) error {
+	if f.createToken != nil {
+		return f.createToken(ctx, id, userID, secretHash, label, expiresAt, scopes)
+	}
+	return nil
+}
+func (f *fakeStore) RevokeToken(ctx context.Context, id string) error {
+	if f.revokeToken != nil {
+		return f.revokeToken(ctx, id)
+	}
+	return nil
+}
+func (f *fakeStore) RotateToken(ctx context.Context, id, newSecretHash string) error {
+	if f.rotateToken != nil {
+		return f.rotateToken(ctx, id, newSecretHash)
+	}
+	return nil
 }
 
 func TestSessionMiddleware_LoadsAndAnon(t *testing.T) {

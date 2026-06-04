@@ -109,7 +109,7 @@ func newRenderer(dir string) (*renderer, error) {
 	r := &renderer{dir: dir}
 	if dir == "" {
 		r.cache = map[string]*template.Template{}
-		for _, page := range []string{"landing.html", "login.html", "error.html", "repo.html", "tree.html", "blob.html", "commits.html", "commit.html", "settings.html"} {
+		for _, page := range []string{"landing.html", "login.html", "error.html", "repo.html", "tree.html", "blob.html", "commits.html", "commit.html", "settings.html", "settings_tokens.html", "secret.html"} {
 			t, err := parsePage(assetsFS, "templates", page)
 			if err != nil {
 				return nil, err
@@ -146,6 +146,26 @@ func templateFuncs() template.FuncMap {
 		"abstime":   absTime,
 		"humansize": humanSize,
 		"diffclass": func(kind byte) string { return diffClass(kind) },
+		"scopestr": func(sc auth.TokenScope) string {
+			if sc == auth.ScopeLegacy {
+				return "legacy (full access)"
+			}
+			var parts []string
+			for _, p := range []struct {
+				bit  auth.TokenScope
+				name string
+			}{
+				{auth.ScopeRepoAdmin, "repo:admin"}, {auth.ScopeRepoWrite, "repo:write"},
+				{auth.ScopeRepoRead, "repo:read"}, {auth.ScopeLFSWrite, "lfs:write"},
+				{auth.ScopeLFSRead, "lfs:read"}, {auth.ScopeWebhookAdmin, "webhook:admin"},
+				{auth.ScopeStorageAdmin, "storage:admin"},
+			} {
+				if sc&p.bit != 0 {
+					parts = append(parts, p.name)
+				}
+			}
+			return strings.Join(parts, ",")
+		},
 	}
 }
 
