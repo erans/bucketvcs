@@ -51,6 +51,17 @@ type DataStore interface {
 	// SetRepoPublic toggles anonymous-read visibility for (tenant, repo).
 	SetRepoPublic(ctx context.Context, tenant, repo string, public bool) error
 
+	// RenameRepo renames (tenant, oldName) to (tenant, newName), propagating
+	// the new name to every dependent table. Returns auth.ErrNoSuchRepo when
+	// the source is absent, or sqlitestore.ErrRepoExists when the destination
+	// already exists.
+	RenameRepo(ctx context.Context, tenant, oldName, newName string) error
+
+	// DeleteRepoCascade deletes the repos row and its non-webhook dependents,
+	// leaving webhook_endpoints/_deliveries intact so a pending repo.deleted
+	// delivery can drain. Storage objects are NOT purged.
+	DeleteRepoCascade(ctx context.Context, tenant, repo string) error
+
 	// OIDC (Phase 1.5)
 	FindUserByEmail(ctx context.Context, email string) (*auth.Actor, error)
 	FindIdentity(ctx context.Context, issuer, subject string) (*auth.Actor, error)

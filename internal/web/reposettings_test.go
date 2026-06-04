@@ -2,16 +2,20 @@ package web
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
+	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
 	"github.com/bucketvcs/bucketvcs/internal/lfs/quota"
+	"github.com/bucketvcs/bucketvcs/internal/webhooks"
 )
 
 // fakeQuotas implements QuotaAdmin. Only Get is used by Task 7.
@@ -320,4 +324,343 @@ func TestBrowseSettingsLink(t *testing.T) {
 	if strings.Contains(body, "[settings]") {
 		t.Fatalf("plain reader must NOT see [settings] link; body=%s", body)
 	}
+}
+
+// fakeWebhooks implements WebhookAdmin. The danger-zone handlers only call
+// Enqueue; the rest are stubs. enqueue records each call so tests can assert
+// the event/tenant/repo and the relative ordering against DeleteRepoCascade.
+type fakeWebhooks struct {
+	enqueue func(ctx context.Context, event webhooks.Event, tenant, repo, actor string, payload any) error
+}
+
+func (w *fakeWebhooks) Create(ctx context.Context, in webhooks.EndpointInput) (webhooks.Endpoint, error) {
+	return webhooks.Endpoint{}, nil
+}
+func (w *fakeWebhooks) List(ctx context.Context, tenant, repo string) ([]webhooks.Endpoint, error) {
+	return nil, nil
+}
+func (w *fakeWebhooks) Remove(ctx context.Context, id int64) error  { return nil }
+func (w *fakeWebhooks) Enable(ctx context.Context, id int64) error  { return nil }
+func (w *fakeWebhooks) Disable(ctx context.Context, id int64) error { return nil }
+func (w *fakeWebhooks) RotateSecret(ctx context.Context, id int64) (string, error) {
+	return "", nil
+}
+func (w *fakeWebhooks) ListDeliveries(ctx context.Context, f webhooks.ListDeliveriesFilter) ([]webhooks.Delivery, error) {
+	return nil, nil
+}
+func (w *fakeWebhooks) ReplayDelivery(ctx context.Context, id string) error { return nil }
+func (w *fakeWebhooks) Enqueue(ctx context.Context, event webhooks.Event, tenant, repo, actor string, payload any) error {
+	if w.enqueue != nil {
+		return w.enqueue(ctx, event, tenant, repo, actor, payload)
+	}
+	return nil
+}
+
+func TestRepoSettingsRename(t *testing.T) {
+	// Security matrix: reader (PermRead) WITH valid CSRF → 404.
+	t.Run("form security", func(t *testing.T) {
+		store := newFakeStore()
+		store.perm = auth.PermRead
+		h := newTestHandlerWith(store, nil)
+		assertFormSecurity(t, h, secOpts{
+			store:     store,
+			path:      "/acme/demo/settings/rename",
+			form:      url.Values{"newname": {"demo2"}},
+			asSession: userSession(),
+		})
+	})
+
+	t.Run("invalid name → flash, RenameRepo not called", func(t *testing.T) {
+		store := newFakeStore()
+		store.perm = auth.PermAdmin
+		var called bool
+		store.renameRepo = func(ctx context.Context, tenant, oldName, newName string) error {
+			called = true
+			return nil
+		}
+		h := newTestHandlerWith(store, nil)
+		req := csrfPost(t, "/acme/demo/settings/rename", url.Values{"newname": {"bad name!"}})
+		addSessionCookie(t, req, store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status %d, want 303; body=%s", rec.Code, rec.Body.String())
+		}
+		if called {
+			t.Fatal("RenameRepo must not be called for an invalid name")
+		}
+		if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
+			t.Fatal("expected flash cookie for invalid-name error")
+		}
+	})
+
+	t.Run("conflict → flash name already taken", func(t *testing.T) {
+		store := newFakeStore()
+		store.perm = auth.PermAdmin
+		store.renameRepo = func(ctx context.Context, tenant, oldName, newName string) error {
+			return sqlitestore.ErrRepoExists
+		}
+		h := newTestHandlerWith(store, nil)
+		req := csrfPost(t, "/acme/demo/settings/rename", url.Values{"newname": {"taken"}})
+		addSessionCookie(t, req, store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status %d, want 303; body=%s", rec.Code, rec.Body.String())
+		}
+		if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
+			t.Fatal("expected flash cookie for conflict error")
+		}
+	})
+
+	t.Run("no such repo → 404", func(t *testing.T) {
+		store := newFakeStore()
+		store.perm = auth.PermAdmin
+		store.renameRepo = func(ctx context.Context, tenant, oldName, newName string) error {
+			return auth.ErrNoSuchRepo
+		}
+		h := newTestHandlerWith(store, nil)
+		req := csrfPost(t, "/acme/demo/settings/rename", url.Values{"newname": {"demo2"}})
+		addSessionCookie(t, req, store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status %d, want 404; body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("happy path: rename + webhook + audit + metric + redirect", func(t *testing.T) {
+		store := newFakeStore()
+		store.perm = auth.PermAdmin
+		var gotTenant, gotOld, gotNew string
+		store.renameRepo = func(ctx context.Context, tenant, oldName, newName string) error {
+			gotTenant, gotOld, gotNew = tenant, oldName, newName
+			return nil
+		}
+		var whEvent webhooks.Event
+		var whTenant, whRepo string
+		var whPayload any
+		wh := &fakeWebhooks{enqueue: func(ctx context.Context, event webhooks.Event, tenant, repo, actor string, payload any) error {
+			whEvent, whTenant, whRepo, whPayload = event, tenant, repo, payload
+			return nil
+		}}
+		logger, sink := newTestLogger()
+		h := newTestHandlerWith(store, func(d *Deps) {
+			d.Logger = logger
+			d.Webhooks = wh
+		})
+		req := csrfPost(t, "/acme/demo/settings/rename", url.Values{"newname": {"demo2"}})
+		addSessionCookie(t, req, store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status %d, want 303; body=%s", rec.Code, rec.Body.String())
+		}
+		if loc := rec.Header().Get("Location"); loc != "/acme/demo2/settings" {
+			t.Fatalf("Location %q, want /acme/demo2/settings", loc)
+		}
+		if gotTenant != "acme" || gotOld != "demo" || gotNew != "demo2" {
+			t.Fatalf("RenameRepo(%q,%q,%q), want (acme,demo,demo2)", gotTenant, gotOld, gotNew)
+		}
+		if whEvent != webhooks.EventRepoRenamed || whTenant != "acme" || whRepo != "demo" {
+			t.Fatalf("Enqueue(event=%v,%q,%q), want (EventRepoRenamed,acme,demo)", whEvent, whTenant, whRepo)
+		}
+		pl, ok := whPayload.(webhooks.RepoRenamedPayload)
+		if !ok || pl.OldName != "demo" || pl.NewName != "demo2" {
+			t.Fatalf("payload %#v, want RepoRenamedPayload{OldName:demo,NewName:demo2}", whPayload)
+		}
+		if !sink.Has("repo.renamed", map[string]string{"tenant": "acme", "from": "demo", "to": "demo2"}) {
+			t.Fatal("missing repo.renamed audit event with from/to attrs")
+		}
+	})
+
+	t.Run("nil webhooks → still succeeds", func(t *testing.T) {
+		store := newFakeStore()
+		store.perm = auth.PermAdmin
+		var called bool
+		store.renameRepo = func(ctx context.Context, tenant, oldName, newName string) error {
+			called = true
+			return nil
+		}
+		h := newTestHandlerWith(store, nil) // d.Webhooks stays nil
+		req := csrfPost(t, "/acme/demo/settings/rename", url.Values{"newname": {"demo2"}})
+		addSessionCookie(t, req, store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status %d, want 303; body=%s", rec.Code, rec.Body.String())
+		}
+		if !called {
+			t.Fatal("RenameRepo must be called even when webhooks is nil")
+		}
+	})
+}
+
+func TestRepoSettingsDelete(t *testing.T) {
+	t.Run("repo-admin (non-global) → 404, DeleteRepoCascade not called", func(t *testing.T) {
+		store := newFakeStore()
+		store.perm = auth.PermAdmin // repo-admin but session is not global admin
+		var called bool
+		store.deleteRepo = func(ctx context.Context, tenant, repo string) error {
+			called = true
+			return nil
+		}
+		h := newTestHandlerWith(store, nil)
+		req := csrfPost(t, "/acme/demo/settings/delete", url.Values{"confirm": {"acme/demo"}})
+		addSessionCookie(t, req, store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status %d, want 404; body=%s", rec.Code, rec.Body.String())
+		}
+		if called {
+			t.Fatal("DeleteRepoCascade must not be called for a non-global admin")
+		}
+	})
+
+	t.Run("global admin wrong confirm → flash, not called", func(t *testing.T) {
+		store := newFakeStore()
+		var called bool
+		store.deleteRepo = func(ctx context.Context, tenant, repo string) error {
+			called = true
+			return nil
+		}
+		h := newTestHandlerWith(store, nil)
+		req := csrfPost(t, "/acme/demo/settings/delete", url.Values{"confirm": {"wrong/name"}})
+		addSessionCookie(t, req, store, adminSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status %d, want 303; body=%s", rec.Code, rec.Body.String())
+		}
+		if loc := rec.Header().Get("Location"); loc != "/acme/demo/settings" {
+			t.Fatalf("Location %q, want /acme/demo/settings", loc)
+		}
+		if called {
+			t.Fatal("DeleteRepoCascade must not be called on a wrong confirm")
+		}
+		if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
+			t.Fatal("expected flash cookie for wrong-confirm error")
+		}
+	})
+
+	t.Run("global admin correct confirm: enqueue-before-delete, audit, metric, redirect", func(t *testing.T) {
+		store := newFakeStore()
+		var order []string
+		var mu sync.Mutex
+		store.deleteRepo = func(ctx context.Context, tenant, repo string) error {
+			mu.Lock()
+			order = append(order, "delete")
+			mu.Unlock()
+			return nil
+		}
+		var whEvent webhooks.Event
+		var whTenant, whRepo string
+		wh := &fakeWebhooks{enqueue: func(ctx context.Context, event webhooks.Event, tenant, repo, actor string, payload any) error {
+			mu.Lock()
+			order = append(order, "enqueue")
+			mu.Unlock()
+			whEvent, whTenant, whRepo = event, tenant, repo
+			return nil
+		}}
+		logger, sink := newTestLogger()
+		h := newTestHandlerWith(store, func(d *Deps) {
+			d.Logger = logger
+			d.Webhooks = wh
+		})
+		req := csrfPost(t, "/acme/demo/settings/delete", url.Values{"confirm": {"acme/demo"}})
+		addSessionCookie(t, req, store, adminSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status %d, want 303; body=%s", rec.Code, rec.Body.String())
+		}
+		if loc := rec.Header().Get("Location"); loc != "/" {
+			t.Fatalf("Location %q, want /", loc)
+		}
+		if len(order) != 2 || order[0] != "enqueue" || order[1] != "delete" {
+			t.Fatalf("call order %v, want [enqueue delete]", order)
+		}
+		if whEvent != webhooks.EventRepoDeleted || whTenant != "acme" || whRepo != "demo" {
+			t.Fatalf("Enqueue(event=%v,%q,%q), want (EventRepoDeleted,acme,demo)", whEvent, whTenant, whRepo)
+		}
+		if !sink.Has("repo.deleted", map[string]string{"tenant": "acme", "repo": "demo"}) {
+			t.Fatal("missing repo.deleted audit event")
+		}
+		flash := findCookie(rec.Result().Cookies(), flashCookieName)
+		if flash == nil {
+			t.Fatal("expected flash cookie on delete")
+		}
+	})
+
+	t.Run("enqueue error → delete proceeds (fail-open)", func(t *testing.T) {
+		store := newFakeStore()
+		var deleted bool
+		store.deleteRepo = func(ctx context.Context, tenant, repo string) error {
+			deleted = true
+			return nil
+		}
+		wh := &fakeWebhooks{enqueue: func(ctx context.Context, event webhooks.Event, tenant, repo, actor string, payload any) error {
+			return errors.New("boom")
+		}}
+		h := newTestHandlerWith(store, func(d *Deps) { d.Webhooks = wh })
+		req := csrfPost(t, "/acme/demo/settings/delete", url.Values{"confirm": {"acme/demo"}})
+		addSessionCookie(t, req, store, adminSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status %d, want 303; body=%s", rec.Code, rec.Body.String())
+		}
+		if !deleted {
+			t.Fatal("DeleteRepoCascade must run even when Enqueue fails (fail-open)")
+		}
+	})
+}
+
+func TestRepoSettingsDangerZoneRender(t *testing.T) {
+	mkStore := func() *fakeStore {
+		s := newFakeStore()
+		s.getRepoFlags = func(ctx context.Context, tenant, repo string) (auth.RepoFlags, error) {
+			return auth.RepoFlags{}, nil
+		}
+		return s
+	}
+
+	t.Run("global admin sees rename + delete forms", func(t *testing.T) {
+		store := mkStore()
+		h := newTestHandlerWith(store, nil)
+		req := httptest.NewRequest(http.MethodGet, "/acme/demo/settings", nil)
+		addSessionCookie(t, req, store, adminSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		body := rec.Body.String()
+		if !strings.Contains(body, "/acme/demo/settings/rename") {
+			t.Fatalf("expected rename form; body=%s", body)
+		}
+		if !strings.Contains(body, "/acme/demo/settings/delete") {
+			t.Fatalf("global admin must see delete form; body=%s", body)
+		}
+		if !strings.Contains(body, `name="confirm"`) {
+			t.Fatalf("delete form must have a confirm input; body=%s", body)
+		}
+	})
+
+	t.Run("repo-admin sees rename but NOT delete", func(t *testing.T) {
+		store := mkStore()
+		store.perm = auth.PermAdmin
+		h := newTestHandlerWith(store, nil)
+		req := httptest.NewRequest(http.MethodGet, "/acme/demo/settings", nil)
+		addSessionCookie(t, req, store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		body := rec.Body.String()
+		if !strings.Contains(body, "/acme/demo/settings/rename") {
+			t.Fatalf("repo-admin must see rename form; body=%s", body)
+		}
+		if strings.Contains(body, "/acme/demo/settings/delete") {
+			t.Fatalf("repo-admin must NOT see delete form; body=%s", body)
+		}
+	})
 }

@@ -22,6 +22,8 @@ type fakeStore struct {
 	permErr       error     // when non-nil, LookupRepoPerm returns it
 	getRepoFlags  func(ctx context.Context, tenant, repo string) (auth.RepoFlags, error)
 	setRepoPublic func(ctx context.Context, tenant, repo string, public bool) error
+	renameRepo    func(ctx context.Context, tenant, oldName, newName string) error
+	deleteRepo    func(ctx context.Context, tenant, repo string) error
 	getUserByName func(ctx context.Context, name string) (*auth.User, error)
 	setPassword   func(ctx context.Context, userName, plaintext string) error
 	hasPassword   func(ctx context.Context, userName string) (bool, error)
@@ -87,6 +89,18 @@ func (f *fakeStore) GetRepoFlags(ctx context.Context, tenant, repo string) (auth
 func (f *fakeStore) SetRepoPublic(ctx context.Context, tenant, repo string, public bool) error {
 	if f.setRepoPublic != nil {
 		return f.setRepoPublic(ctx, tenant, repo, public)
+	}
+	return nil
+}
+func (f *fakeStore) RenameRepo(ctx context.Context, tenant, oldName, newName string) error {
+	if f.renameRepo != nil {
+		return f.renameRepo(ctx, tenant, oldName, newName)
+	}
+	return nil
+}
+func (f *fakeStore) DeleteRepoCascade(ctx context.Context, tenant, repo string) error {
+	if f.deleteRepo != nil {
+		return f.deleteRepo(ctx, tenant, repo)
 	}
 	return nil
 }

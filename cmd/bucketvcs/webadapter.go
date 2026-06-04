@@ -63,6 +63,14 @@ func (a *webAdapter) SetRepoPublic(ctx context.Context, tenant, repo string, pub
 	return a.s.SetRepoPublic(ctx, tenant, repo, public)
 }
 
+func (a *webAdapter) RenameRepo(ctx context.Context, tenant, oldName, newName string) error {
+	return a.s.RenameRepo(ctx, tenant, oldName, newName)
+}
+
+func (a *webAdapter) DeleteRepoCascade(ctx context.Context, tenant, repo string) error {
+	return a.s.DeleteRepoCascade(ctx, tenant, repo)
+}
+
 func (a *webAdapter) FindUserByEmail(ctx context.Context, email string) (*auth.Actor, error) {
 	return a.s.FindUserByEmail(ctx, email)
 }

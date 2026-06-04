@@ -7,8 +7,10 @@ import (
 	"strings"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
+	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
 	"github.com/bucketvcs/bucketvcs/internal/gateway/routenames"
 	"github.com/bucketvcs/bucketvcs/internal/lfs/quota"
+	"github.com/bucketvcs/bucketvcs/internal/webhooks"
 )
 
 // settingsRoute is the parsed shape of "/{tenant}/{repo}/settings[/{tab}[/{action...}]]".
@@ -62,8 +64,12 @@ func (s *server) handleRepoSettings(w http.ResponseWriter, r *http.Request, sr s
 		s.repoSettingsGeneral(w, r, sr)
 	case "public":
 		s.repoSettingsSetPublic(w, r, sr)
-	case "rename", "delete", "access", "webhooks", "policy", "hooks":
-		// Tasks 8-12 replace these cases one by one.
+	case "rename":
+		s.repoSettingsRename(w, r, sr)
+	case "delete":
+		s.repoSettingsDelete(w, r, sr)
+	case "access", "webhooks", "policy", "hooks":
+		// Tasks 9-12 replace these cases one by one.
 		s.renderError(w, r, http.StatusNotFound, "not found")
 	default:
 		s.renderError(w, r, http.StatusNotFound, "not found")
@@ -132,4 +138,90 @@ func (s *server) repoSettingsSetPublic(w http.ResponseWriter, r *http.Request, s
 		msg = "repo is now public"
 	}
 	s.redirectFlash(w, r, "/"+sr.tenant+"/"+sr.repo+"/settings", msg)
+}
+
+// repoSettingsRename renames (tenant, repo) to (tenant, newName)
+// (POST /settings/rename). Repo-admin or global-admin (chassis-gated).
+func (s *server) repoSettingsRename(w http.ResponseWriter, r *http.Request, sr settingsRoute) {
+	if !s.postGuard(w, r) {
+		return
+	}
+	newName := r.PostFormValue("newname")
+	if !routenames.ValidateName(newName) {
+		EmitAdminActionMetric(r.Context(), s.logger, "repo", "rename", "invalid")
+		s.redirectFlash(w, r, "/"+sr.tenant+"/"+sr.repo+"/settings", "invalid repo name")
+		return
+	}
+	if err := s.store.RenameRepo(r.Context(), sr.tenant, sr.repo, newName); err != nil {
+		switch {
+		case errors.Is(err, auth.ErrNoSuchRepo):
+			s.renderError(w, r, http.StatusNotFound, "not found")
+		case errors.Is(err, sqlitestore.ErrRepoExists):
+			EmitAdminActionMetric(r.Context(), s.logger, "repo", "rename", "conflict")
+			s.redirectFlash(w, r, "/"+sr.tenant+"/"+sr.repo+"/settings", "name already taken")
+		default:
+			s.logger.Error("repo rename", "tenant", sr.tenant, "repo", sr.repo, "err", err)
+			EmitAdminActionMetric(r.Context(), s.logger, "repo", "rename", "error")
+			s.renderError(w, r, http.StatusInternalServerError, "internal error")
+		}
+		return
+	}
+	sess := SessionFromContext(r.Context())
+	actor := ""
+	if sess != nil {
+		actor = sess.Name
+	}
+	if s.webhooks != nil {
+		payload := webhooks.RepoRenamedPayload{OldName: sr.repo, NewName: newName}
+		if err := s.webhooks.Enqueue(r.Context(), webhooks.EventRepoRenamed, sr.tenant, sr.repo, actor, payload); err != nil {
+			s.logger.Warn("webhooks.enqueue_failed", "event", "repo.renamed", "err", err)
+		}
+	}
+	s.emitAdmin(r.Context(), "repo.renamed",
+		slog.String("tenant", sr.tenant), slog.String("from", sr.repo), slog.String("to", newName))
+	EmitAdminActionMetric(r.Context(), s.logger, "repo", "rename", "ok")
+	s.redirectFlash(w, r, "/"+sr.tenant+"/"+newName+"/settings", "repo renamed")
+}
+
+// repoSettingsDelete deletes (tenant, repo) (POST /settings/delete). This is
+// global-admin-only — repo-admins get a uniform 404 BEFORE the CSRF check so
+// the surface is indistinguishable from a non-existent route. Storage objects
+// are NOT purged (operator must run the CLI with --purge-storage).
+func (s *server) repoSettingsDelete(w http.ResponseWriter, r *http.Request, sr settingsRoute) {
+	if !isGlobalAdmin(r) {
+		s.renderError(w, r, http.StatusNotFound, "not found")
+		return
+	}
+	if !s.postGuard(w, r) {
+		return
+	}
+	if r.PostFormValue("confirm") != sr.tenant+"/"+sr.repo {
+		EmitAdminActionMetric(r.Context(), s.logger, "repo", "delete", "invalid")
+		s.redirectFlash(w, r, "/"+sr.tenant+"/"+sr.repo+"/settings", "type the repo name to confirm")
+		return
+	}
+	sess := SessionFromContext(r.Context())
+	actor := ""
+	if sess != nil {
+		actor = sess.Name
+	}
+	// Enqueue BEFORE the row delete so Enqueue's endpoint SELECT still finds
+	// the (tenant, repo) rows; DeleteRepoCascade leaves webhook tables intact
+	// so the repo.deleted delivery can drain. Fail-open: an enqueue error must
+	// not block the delete (mirrors the CLI).
+	if s.webhooks != nil {
+		if err := s.webhooks.Enqueue(r.Context(), webhooks.EventRepoDeleted, sr.tenant, sr.repo, actor, webhooks.RepoLifecyclePayload{}); err != nil {
+			s.logger.Warn("webhooks.enqueue_failed", "event", "repo.deleted", "err", err)
+		}
+	}
+	if err := s.store.DeleteRepoCascade(r.Context(), sr.tenant, sr.repo); err != nil {
+		s.logger.Error("repo delete", "tenant", sr.tenant, "repo", sr.repo, "err", err)
+		EmitAdminActionMetric(r.Context(), s.logger, "repo", "delete", "error")
+		s.renderError(w, r, http.StatusInternalServerError, "internal error")
+		return
+	}
+	s.emitAdmin(r.Context(), "repo.deleted",
+		slog.String("tenant", sr.tenant), slog.String("repo", sr.repo))
+	EmitAdminActionMetric(r.Context(), s.logger, "repo", "delete", "ok")
+	s.redirectFlash(w, r, "/", "repo "+sr.tenant+"/"+sr.repo+" deleted (storage not purged; see CLI --purge-storage)")
 }

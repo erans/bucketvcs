@@ -56,6 +56,12 @@ func (b *browseDataStore) GetRepoFlags(ctx context.Context, tenant, repo string)
 func (b *browseDataStore) SetRepoPublic(ctx context.Context, tenant, repo string, public bool) error {
 	return nil
 }
+func (b *browseDataStore) RenameRepo(ctx context.Context, tenant, oldName, newName string) error {
+	panic("browseDataStore.RenameRepo not implemented")
+}
+func (b *browseDataStore) DeleteRepoCascade(ctx context.Context, tenant, repo string) error {
+	panic("browseDataStore.DeleteRepoCascade not implemented")
+}
 func (b *browseDataStore) FindUserByEmail(ctx context.Context, email string) (*auth.Actor, error) {
 	return nil, errors.New("none")
 }
