@@ -15,6 +15,16 @@ type Repo struct {
 	CreatedAt  int64
 }
 
+// UserInfo is the web view of a user row for the admin area.
+type UserInfo struct {
+	ID        string
+	Name      string
+	Email     string
+	IsAdmin   bool
+	Disabled  bool
+	CreatedAt int64
+}
+
 // TokenInfo is the web view of a token row (no secret hash).
 type TokenInfo struct {
 	ID         string
@@ -96,4 +106,11 @@ type DataStore interface {
 	Grant(ctx context.Context, userName, tenant, repo, perm string) error
 	RevokeRepoPermission(ctx context.Context, userName, tenant, repo string) error
 	ListSSHKeysForRepo(ctx context.Context, tenant, repo string) ([]auth.SSHKey, error)
+
+	// Admin area: global user management.
+	ListUsers(ctx context.Context) ([]UserInfo, error)
+	CreateUser(ctx context.Context, name string, isAdmin bool) (string, error)
+	SetUserDisabled(ctx context.Context, name string, disabled bool) error
+	DeleteUser(ctx context.Context, name string) error
+	SetEmail(ctx context.Context, userName, email string) error
 }

@@ -45,6 +45,13 @@ type fakeStore struct {
 	grant                func(ctx context.Context, userName, tenant, repo, perm string) error
 	revokeRepoPermission func(ctx context.Context, userName, tenant, repo string) error
 	listSSHKeysForRepo   func(ctx context.Context, tenant, repo string) ([]auth.SSHKey, error)
+
+	// admin area: global user management
+	listUsers       func(ctx context.Context) ([]UserInfo, error)
+	createUser      func(ctx context.Context, name string, isAdmin bool) (string, error)
+	setUserDisabled func(ctx context.Context, name string, disabled bool) error
+	deleteUser      func(ctx context.Context, name string) error
+	setEmail        func(ctx context.Context, userName, email string) error
 }
 
 func newFakeStore() *fakeStore { return &fakeStore{sessions: map[string]*auth.Session{}} }
@@ -217,6 +224,36 @@ func (f *fakeStore) ListSSHKeysForRepo(ctx context.Context, tenant, repo string)
 		return f.listSSHKeysForRepo(ctx, tenant, repo)
 	}
 	return nil, nil
+}
+func (f *fakeStore) ListUsers(ctx context.Context) ([]UserInfo, error) {
+	if f.listUsers != nil {
+		return f.listUsers(ctx)
+	}
+	return nil, nil
+}
+func (f *fakeStore) CreateUser(ctx context.Context, name string, isAdmin bool) (string, error) {
+	if f.createUser != nil {
+		return f.createUser(ctx, name, isAdmin)
+	}
+	return "fakeid-" + name, nil
+}
+func (f *fakeStore) SetUserDisabled(ctx context.Context, name string, disabled bool) error {
+	if f.setUserDisabled != nil {
+		return f.setUserDisabled(ctx, name, disabled)
+	}
+	return nil
+}
+func (f *fakeStore) DeleteUser(ctx context.Context, name string) error {
+	if f.deleteUser != nil {
+		return f.deleteUser(ctx, name)
+	}
+	return nil
+}
+func (f *fakeStore) SetEmail(ctx context.Context, userName, email string) error {
+	if f.setEmail != nil {
+		return f.setEmail(ctx, userName, email)
+	}
+	return nil
 }
 
 func TestSessionMiddleware_LoadsAndAnon(t *testing.T) {

@@ -116,6 +116,21 @@ func (b *browseDataStore) RevokeRepoPermission(ctx context.Context, userName, te
 func (b *browseDataStore) ListSSHKeysForRepo(ctx context.Context, tenant, repo string) ([]auth.SSHKey, error) {
 	panic("browseDataStore.ListSSHKeysForRepo not implemented")
 }
+func (b *browseDataStore) ListUsers(ctx context.Context) ([]UserInfo, error) {
+	panic("browseDataStore.ListUsers not implemented")
+}
+func (b *browseDataStore) CreateUser(ctx context.Context, name string, isAdmin bool) (string, error) {
+	panic("browseDataStore.CreateUser not implemented")
+}
+func (b *browseDataStore) SetUserDisabled(ctx context.Context, name string, disabled bool) error {
+	panic("browseDataStore.SetUserDisabled not implemented")
+}
+func (b *browseDataStore) DeleteUser(ctx context.Context, name string) error {
+	panic("browseDataStore.DeleteUser not implemented")
+}
+func (b *browseDataStore) SetEmail(ctx context.Context, userName, email string) error {
+	panic("browseDataStore.SetEmail not implemented")
+}
 
 // fakeContent is a configurable ContentStore for browse tests.
 type fakeContent struct {

@@ -28,6 +28,20 @@ func isGlobalAdmin(r *http.Request) bool {
 	return sess != nil && sess.IsAdmin
 }
 
+// requireAdmin ensures a logged-in global admin; anonymous users are sent to
+// login, non-admins get a uniform 404 (the admin area's existence is not
+// advertised).
+func (s *server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
+	if !s.requireUser(w, r) {
+		return false
+	}
+	if !isGlobalAdmin(r) {
+		s.renderError(w, r, http.StatusNotFound, "not found")
+		return false
+	}
+	return true
+}
+
 // canAdminRepo reports whether the session may manage (tenant, repo) settings:
 // global admin, or holder of the repo-level admin permission. Errors (including
 // no-such-repo) deny — callers respond with uniform 404.

@@ -165,3 +165,38 @@ func (a *webAdapter) RevokeRepoPermission(ctx context.Context, userName, tenant,
 func (a *webAdapter) ListSSHKeysForRepo(ctx context.Context, tenant, repo string) ([]auth.SSHKey, error) {
 	return a.s.ListSSHKeysForRepo(ctx, tenant, repo)
 }
+
+func (a *webAdapter) ListUsers(ctx context.Context) ([]web.UserInfo, error) {
+	users, err := a.s.ListUsers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]web.UserInfo, 0, len(users))
+	for _, u := range users {
+		out = append(out, web.UserInfo{
+			ID:        u.ID,
+			Name:      u.Name,
+			Email:     u.Email,
+			IsAdmin:   u.IsAdmin,
+			Disabled:  u.DisabledAt != nil,
+			CreatedAt: u.CreatedAt,
+		})
+	}
+	return out, nil
+}
+
+func (a *webAdapter) CreateUser(ctx context.Context, name string, isAdmin bool) (string, error) {
+	return a.s.CreateUser(ctx, name, isAdmin)
+}
+
+func (a *webAdapter) SetUserDisabled(ctx context.Context, name string, disabled bool) error {
+	return a.s.SetUserDisabled(ctx, name, disabled)
+}
+
+func (a *webAdapter) DeleteUser(ctx context.Context, name string) error {
+	return a.s.DeleteUser(ctx, name)
+}
+
+func (a *webAdapter) SetEmail(ctx context.Context, userName, email string) error {
+	return a.s.SetEmail(ctx, userName, email)
+}

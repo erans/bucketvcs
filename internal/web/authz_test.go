@@ -289,6 +289,45 @@ type permError struct{ s string }
 
 func (e *permError) Error() string { return e.s }
 
+// TestRequireAdmin verifies the three paths of requireAdmin.
+func TestRequireAdmin(t *testing.T) {
+	t.Run("anon redirects to login", func(t *testing.T) {
+		s := newTestServerStruct(newFakeStore())
+		req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+		rec := httptest.NewRecorder()
+		if s.requireAdmin(rec, req) {
+			t.Fatal("requireAdmin returned true for anonymous request")
+		}
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status %d, want 303", rec.Code)
+		}
+		if loc := rec.Header().Get("Location"); !strings.HasPrefix(loc, "/login") {
+			t.Fatalf("Location %q, want /login...", loc)
+		}
+	})
+	t.Run("non-admin gets 404", func(t *testing.T) {
+		// requireAdmin needs s.render to write the 404 page; use the full handler.
+		store := newFakeStore()
+		h := newTestHandler(store)
+		req := addSessionCookie(t, httptest.NewRequest(http.MethodGet, "/admin", nil), store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status %d, want 404", rec.Code)
+		}
+	})
+	t.Run("admin returns true", func(t *testing.T) {
+		s := newTestServerStruct(newFakeStore())
+		req := withTestSession(httptest.NewRequest(http.MethodGet, "/admin", nil), adminSession())
+		rec := httptest.NewRecorder()
+		// No renderer attached — requireAdmin succeeds before renderError is
+		// needed, so it returns true without panicking.
+		if !s.requireAdmin(rec, req) {
+			t.Fatal("requireAdmin returned false for admin")
+		}
+	})
+}
+
 // Compile/smoke coverage for the shared form-security kit. The full matrix is
 // exercised by later Phase 3 form tasks once real form routes exist; here we
 // confirm the kit's anonymous-redirect arm works against an existing POST route

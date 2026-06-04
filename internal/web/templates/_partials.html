@@ -38,3 +38,11 @@
   <a href="/{{.Tenant}}/{{.Repo}}/settings/hooks">hooks</a>{{end}}
 </nav>
 {{end}}
+
+{{define "adminnav"}}
+<nav class="tabs">
+  <a href="/admin/users">users</a> ·
+  <a href="/admin/repos">repos</a> ·
+  <a href="/admin/quotas">quotas</a>
+</nav>
+{{end}}
