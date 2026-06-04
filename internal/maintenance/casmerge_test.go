@@ -204,7 +204,6 @@ func TestTrimConsumedByHash_RepackPathWithEmptyConsumed_AdvancesBase(t *testing.
 	}
 }
 
-
 func TestBuildMergedBody_TrimsConsumedDeltas(t *testing.T) {
 	prev := manifest.Body{
 		DefaultBranch: "main",
@@ -222,11 +221,11 @@ func TestBuildMergedBody_TrimsConsumedDeltas(t *testing.T) {
 		},
 	}
 	in := mergeInput{
-		P0Keys:         []string{"K1"},
-		NewPack:        manifest.PackEntry{PackID: "new1", PackKey: "Knew"},
-		NewObjectMap:   manifest.IndexRef{Key: "bvom", Hash: "h1"},
-		NewCommitGraph: manifest.IndexRef{Key: "bvcg", Hash: "h2"},
-		ConsumedHashes: map[string]struct{}{"d1": {}, "d2": {}, "d3": {}}, // consumed d1, d2, d3; d4 was concurrent
+		P0Keys:             []string{"K1"},
+		NewPack:            manifest.PackEntry{PackID: "new1", PackKey: "Knew"},
+		NewObjectMap:       manifest.IndexRef{Key: "bvom", Hash: "h1"},
+		NewCommitGraph:     manifest.IndexRef{Key: "bvcg", Hash: "h2"},
+		ConsumedHashes:     map[string]struct{}{"d1": {}, "d2": {}, "d3": {}}, // consumed d1, d2, d3; d4 was concurrent
 		ConsumedDeltaCount: 3,
 		BaseManifest:       "v00000010",
 	}
@@ -323,7 +322,7 @@ func TestBuildCompactOnlyBody_ConcurrentPushDeltasPreserved(t *testing.T) {
 			Reachability: &manifest.ReachabilityRef{
 				Deltas: []manifest.IndexRef{
 					{Hash: "d1"}, {Hash: "d2"}, // consumed
-					{Hash: "d_concurrent"},      // concurrent push, NOT consumed
+					{Hash: "d_concurrent"}, // concurrent push, NOT consumed
 				},
 			},
 		},

@@ -18,9 +18,9 @@ import (
 
 // Format versions:
 //
-//   v1 (pre-M10) — no generation numbers; reader returns 0.
-//   v2 (M10)     — adds u32 generation_number after the oid in each
-//                  commit record.
+//	v1 (pre-M10) — no generation numbers; reader returns 0.
+//	v2 (M10)     — adds u32 generation_number after the oid in each
+//	               commit record.
 const (
 	VersionV1      uint32 = 1
 	VersionV2      uint32 = 2
@@ -32,7 +32,7 @@ const (
 	tipSize     = 24
 	trailerSize = 32
 	currentVer  = VersionCurrent // v2: includes generation number in each commit record
-	maxParents  = 255 // n_parents is uint8
+	maxParents  = 255            // n_parents is uint8
 )
 
 var magic = []byte{'B', 'V', 'C', 'G'}

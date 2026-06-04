@@ -62,4 +62,3 @@ func readDeltaHeader(ctx context.Context, store storage.ObjectStore, key string)
 	}
 	return deltaindex.ParseHeader(buf)
 }
-

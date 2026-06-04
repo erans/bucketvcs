@@ -138,5 +138,5 @@ func deref[T any](p *T) T {
 	}
 	return *p
 }
-func derefStr(p *string) string    { return deref(p) }
+func derefStr(p *string) string        { return deref(p) }
 func derefTime(p *time.Time) time.Time { return deref(p) }

@@ -183,4 +183,3 @@ func evaluateReachabilityPure(body manifest.Body, thresh Thresholds, rep *Trigge
 		}
 	}
 }
-

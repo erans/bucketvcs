@@ -15,17 +15,17 @@ type gcsOp int
 
 const (
 	opGet              gcsOp = iota
-	opHead                    // HEAD request, no conditional headers
-	opGetRange                // GET with Range header
-	opList                    // list pages
-	opPutIfAbsent             // PUT with If-None-Match: *  -> 412 = ErrAlreadyExists
-	opPutIfMatch              // PUT with If-Match: <etag>  -> 412 = ErrVersionMismatch
-	opDeleteIfMatch           // DELETE with If-Match: <etag> -> 412 = ErrVersionMismatch
-	opCreateMultipart         // CreateMultipartUpload
-	opUploadPart              // UploadPart
-	opCompleteIfAbsent        // CompleteMultipartUpload with If-None-Match: *
-	opAbortMultipart          // AbortMultipartUpload
-	opSignedURL               // SignedURL generation
+	opHead                   // HEAD request, no conditional headers
+	opGetRange               // GET with Range header
+	opList                   // list pages
+	opPutIfAbsent            // PUT with If-None-Match: *  -> 412 = ErrAlreadyExists
+	opPutIfMatch             // PUT with If-Match: <etag>  -> 412 = ErrVersionMismatch
+	opDeleteIfMatch          // DELETE with If-Match: <etag> -> 412 = ErrVersionMismatch
+	opCreateMultipart        // CreateMultipartUpload
+	opUploadPart             // UploadPart
+	opCompleteIfAbsent       // CompleteMultipartUpload with If-None-Match: *
+	opAbortMultipart         // AbortMultipartUpload
+	opSignedURL              // SignedURL generation
 )
 
 // classify maps an SDK error to a storage sentinel. The original error

@@ -85,10 +85,10 @@ type RunOptions struct {
 	// blobs are unreferenced from the manifest and are GC'd by M8 on
 	// the next sweep. Operators who require a true zero-side-effect
 	// probe should not combine DryRun with BundleOnly.
-	DryRun       bool
-	Actor        string        // tx record actor; "u_op" if empty
-	Logger       *slog.Logger  // defaults to slog.Default()
-	Now          func() time.Time
+	DryRun bool
+	Actor  string       // tx record actor; "u_op" if empty
+	Logger *slog.Logger // defaults to slog.Default()
+	Now    func() time.Time
 
 	// BundleOnly skips repack + compact phases; only the bundle-refresh
 	// phase runs. Mutually exclusive with NoBundle.
@@ -212,8 +212,8 @@ type Report struct {
 	NewPackBytes      int64         `json:"new_pack_bytes,omitempty"`
 	NewObjectMapKey   string        `json:"new_object_map_key,omitempty"`
 	NewCommitGraphKey string        `json:"new_commit_graph_key,omitempty"`
-	NewBitmapKey      string        `json:"new_bitmap_key,omitempty"`        // M9.5; empty when pack-objects did not emit a bitmap OR the upload failed
-	BitmapUploadError string        `json:"bitmap_upload_error,omitempty"`   // M9.5; populated only when pipeline attempted the upload and it failed (non-fatal — pack/idx still committed). Operators reading the report can distinguish "no bitmap produced" (both empty) from "bitmap upload failed" (this set).
+	NewBitmapKey      string        `json:"new_bitmap_key,omitempty"`      // M9.5; empty when pack-objects did not emit a bitmap OR the upload failed
+	BitmapUploadError string        `json:"bitmap_upload_error,omitempty"` // M9.5; populated only when pipeline attempted the upload and it failed (non-fatal — pack/idx still committed). Operators reading the report can distinguish "no bitmap produced" (both empty) from "bitmap upload failed" (this set).
 	RepackedPackKeys  []string      `json:"repacked_pack_keys"`
 	CASAttempts       int           `json:"cas_attempts"`
 	DurationMS        int64         `json:"duration_ms"`

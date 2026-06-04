@@ -9,7 +9,7 @@ import (
 // tags must match the on-the-wire shape exactly; M3 reads buckets
 // produced by M2 and the wire format is the contract.
 type Body struct {
-	DefaultBranch string            `json:"default_branch"`
+	DefaultBranch string `json:"default_branch"`
 	// Refs is the v1 inline ref map (refname → 40-hex OID). Mutually
 	// exclusive with RefShards. As of M12 (schema_version=2), an empty
 	// map serializes to NO `refs` field on the wire — the omitempty
@@ -18,12 +18,12 @@ type Body struct {
 	// the delta is benign because Go's json.Unmarshal handles both
 	// (absent → nil map; `{}` → empty map; both yield zero-iteration
 	// `range` and the zero value for any lookup).
-	Refs          map[string]string `json:"refs,omitempty"`         // v1; mutually exclusive with RefShards
-	RefShards     []RefShard        `json:"ref_shards,omitempty"`   // v2; mutually exclusive with Refs
-	RefSharding   string            `json:"ref_sharding,omitempty"` // v2; "hash_v1" today
-	Packs         []PackEntry       `json:"packs"`
-	Indexes       Indexes           `json:"indexes"`
-	Bundles       []BundleEntry     `json:"bundles"`
+	Refs        map[string]string `json:"refs,omitempty"`         // v1; mutually exclusive with RefShards
+	RefShards   []RefShard        `json:"ref_shards,omitempty"`   // v2; mutually exclusive with Refs
+	RefSharding string            `json:"ref_sharding,omitempty"` // v2; "hash_v1" today
+	Packs       []PackEntry       `json:"packs"`
+	Indexes     Indexes           `json:"indexes"`
+	Bundles     []BundleEntry     `json:"bundles"`
 }
 
 // BundleEntry references one bundle file (default-branch full bundle in
@@ -152,7 +152,6 @@ type ReachabilityRef struct {
 	BaseManifest string     `json:"base_manifest"`
 	Deltas       []IndexRef `json:"deltas"`
 }
-
 
 // MarshalBody emits canonical Body JSON. Pretty-printed (2-space indent)
 // to keep on-disk diffs readable; the indent is part of the wire format.

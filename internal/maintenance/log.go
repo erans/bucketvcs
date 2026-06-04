@@ -52,10 +52,13 @@ func emitCompleted(ctx context.Context, logger *slog.Logger, r Report) {
 //
 //   - bundle_generated_total (value 1): always emitted. The "outcome" label
 //     is one of four values:
+//
 //   - "success": Generated=true (the bundle was uploaded and CAS-merged).
+//
 //   - "noop": Generated=false AND either no error OR a "skipped_*"
 //     TriggerReason (phase ran but generation wasn't attempted or wasn't
 //     needed). The recoverable cause is preserved in "trigger_reason".
+//
 //   - "failure": Generated=false AND non-"skipped_*" TriggerReason with a
 //     non-empty ErrorMessage (generation/upload/CAS-merge failed).
 //     Labels also include "repo_id" and "trigger_reason" for per-repo

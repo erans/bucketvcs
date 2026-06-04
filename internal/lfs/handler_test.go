@@ -70,14 +70,18 @@ func (f *fakeAuth) VerifyCredential(_ context.Context, c auth.Credential) (*auth
 
 // The remaining auth.Store methods are stubs — the LFS handler never
 // calls them.
-func (f *fakeAuth) TouchTokenUsage(context.Context, string) error                            { return nil }
-func (f *fakeAuth) AddSSHKey(context.Context, auth.SSHKey) error                             { return nil }
-func (f *fakeAuth) ListSSHKeysForUser(context.Context, string) ([]auth.SSHKey, error)        { return nil, nil }
-func (f *fakeAuth) ListSSHKeysForRepo(_ context.Context, _, _ string) ([]auth.SSHKey, error) { return nil, nil }
-func (f *fakeAuth) RevokeSSHKey(context.Context, string) error                               { return nil }
-func (f *fakeAuth) TouchSSHKeyUsage(context.Context, string) error                           { return nil }
-func (f *fakeAuth) GetUserByName(context.Context, string) (*auth.User, error)                { return nil, nil }
-func (f *fakeAuth) Close() error                                                             { return nil }
+func (f *fakeAuth) TouchTokenUsage(context.Context, string) error { return nil }
+func (f *fakeAuth) AddSSHKey(context.Context, auth.SSHKey) error  { return nil }
+func (f *fakeAuth) ListSSHKeysForUser(context.Context, string) ([]auth.SSHKey, error) {
+	return nil, nil
+}
+func (f *fakeAuth) ListSSHKeysForRepo(_ context.Context, _, _ string) ([]auth.SSHKey, error) {
+	return nil, nil
+}
+func (f *fakeAuth) RevokeSSHKey(context.Context, string) error                { return nil }
+func (f *fakeAuth) TouchSSHKeyUsage(context.Context, string) error            { return nil }
+func (f *fakeAuth) GetUserByName(context.Context, string) (*auth.User, error) { return nil, nil }
+func (f *fakeAuth) Close() error                                              { return nil }
 
 // newHandlerForTest stands up an httptest server with a handler-only mux
 // mounting LFS at the same path the gateway will use. The given actor
@@ -355,9 +359,9 @@ func TestHandler_Batch_RequestBodyTooLarge(t *testing.T) {
 // separator (/), which routenames.ValidateName rejects.
 func TestParseLFSPath_RejectsAdversarialNames(t *testing.T) {
 	cases := []struct {
-		path     string
+		path      string
 		wantRoute lfsRoute
-		reason   string
+		reason    string
 	}{
 		{"/acme/..git/info/lfs/objects/batch", lfsRouteBatch, "..git is syntactically valid per routenames.ValidateName"},
 		{"/../acme.git/info/lfs/objects/batch", lfsRouteNone, "tenant is '..' but path is not clean (/../)"},

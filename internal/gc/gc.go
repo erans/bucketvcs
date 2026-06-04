@@ -27,9 +27,9 @@ type RunOptions struct {
 
 // RunReport summarizes one Run.
 type RunReport struct {
-	RepoID          string        // "<tenant>/<repo>"
-	MarkID          string        // empty if mark phase did not run
-	SweepID         string        // empty if sweep phase did not run
+	RepoID          string // "<tenant>/<repo>"
+	MarkID          string // empty if mark phase did not run
+	SweepID         string // empty if sweep phase did not run
 	ManifestVersion uint64
 	MarkRecord      marks.Record  // populated when mark phase ran
 	SweepRecord     sweeps.Record // populated when sweep phase ran
