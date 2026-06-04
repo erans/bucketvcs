@@ -53,7 +53,11 @@ func (s *server) emitAdmin(ctx context.Context, event string, attrs ...slog.Attr
 func (s *server) renderBuffered(w http.ResponseWriter, page string, data any) error {
 	var buf bytes.Buffer
 	if err := s.render.render(&buf, page, data); err != nil {
-		s.logger.Error("web: render", "page", page, "err", err)
+		logger := s.logger
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.Error("web: render", "page", page, "err", err)
 		return err
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

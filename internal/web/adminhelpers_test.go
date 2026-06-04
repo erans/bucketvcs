@@ -122,3 +122,19 @@ func TestEmitAdmin(t *testing.T) {
 	s2.emitAdmin(context.Background(), "admin.nillogger.event")
 	// Just confirm it did not panic.
 }
+
+func TestRenderBufferedNilLogger(t *testing.T) {
+	r, err := newRenderer("")
+	if err != nil {
+		t.Fatalf("newRenderer: %v", err)
+	}
+	// Hand-constructed server with nil logger — mirrors the code-review scenario.
+	s := &server{render: r, logger: nil}
+	rec := httptest.NewRecorder()
+	// "nonexistent.html" is not in the embedded cache, so render() returns an
+	// error and renderBuffered must log it without panicking.
+	gotErr := s.renderBuffered(rec, "nonexistent.html", nil)
+	if gotErr == nil {
+		t.Fatal("renderBuffered: expected error for unknown page, got nil")
+	}
+}
