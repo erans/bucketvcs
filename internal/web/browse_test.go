@@ -22,6 +22,7 @@ var errNotVisible = errors.New("not visible")
 // All methods return zero values except GetVisibleRepo, which consults `visible`.
 type browseDataStore struct {
 	visible map[string]bool // "tenant/name" -> visible
+	perm    auth.Perm       // returned by LookupRepoPerm (default PermNone)
 }
 
 func (b *browseDataStore) VerifyPassword(ctx context.Context, u, p string) (*auth.Actor, error) {
@@ -47,7 +48,13 @@ func (b *browseDataStore) GetVisibleRepo(ctx context.Context, a *auth.Actor, ten
 	return nil, errNotVisible
 }
 func (b *browseDataStore) LookupRepoPerm(ctx context.Context, a *auth.Actor, tenant, repo string) (auth.Perm, error) {
-	return auth.PermNone, nil
+	return b.perm, nil
+}
+func (b *browseDataStore) GetRepoFlags(ctx context.Context, tenant, repo string) (auth.RepoFlags, error) {
+	return auth.RepoFlags{}, nil
+}
+func (b *browseDataStore) SetRepoPublic(ctx context.Context, tenant, repo string, public bool) error {
+	return nil
 }
 func (b *browseDataStore) FindUserByEmail(ctx context.Context, email string) (*auth.Actor, error) {
 	return nil, errors.New("none")

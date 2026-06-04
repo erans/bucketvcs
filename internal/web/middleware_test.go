@@ -20,6 +20,8 @@ type fakeStore struct {
 	linkIdentity  func(userID, issuer, subject, email string) error
 	perm          auth.Perm // returned by LookupRepoPerm
 	permErr       error     // when non-nil, LookupRepoPerm returns it
+	getRepoFlags  func(ctx context.Context, tenant, repo string) (auth.RepoFlags, error)
+	setRepoPublic func(ctx context.Context, tenant, repo string, public bool) error
 	getUserByName func(ctx context.Context, name string) (*auth.User, error)
 	setPassword   func(ctx context.Context, userName, plaintext string) error
 	hasPassword   func(ctx context.Context, userName string) (bool, error)
@@ -75,6 +77,18 @@ func (f *fakeStore) LookupRepoPerm(ctx context.Context, actor *auth.Actor, tenan
 		return auth.PermNone, f.permErr
 	}
 	return f.perm, nil
+}
+func (f *fakeStore) GetRepoFlags(ctx context.Context, tenant, repo string) (auth.RepoFlags, error) {
+	if f.getRepoFlags != nil {
+		return f.getRepoFlags(ctx, tenant, repo)
+	}
+	return auth.RepoFlags{}, nil
+}
+func (f *fakeStore) SetRepoPublic(ctx context.Context, tenant, repo string, public bool) error {
+	if f.setRepoPublic != nil {
+		return f.setRepoPublic(ctx, tenant, repo, public)
+	}
+	return nil
 }
 func (f *fakeStore) FindUserByEmail(ctx context.Context, email string) (*auth.Actor, error) {
 	if f.findByEmail != nil {

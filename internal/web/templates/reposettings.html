@@ -1,0 +1,18 @@
+{{define "title"}}{{.Tenant}}/{{.Repo}} settings · bucketvcs{{end}}
+{{define "content"}}
+<div class="settings">
+  <div class="repohdr"><span class="path"><a href="/{{.Tenant}}/{{.Repo}}">{{.Tenant}}/{{.Repo}}</a></span></div>
+  {{template "reposettingsnav" .}}
+  <h2>general</h2>
+  <form method="post" action="/{{.Tenant}}/{{.Repo}}/settings/public">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label><input type="checkbox" name="public"{{if .Public}} checked{{end}}> public (anonymous read)</label>
+    <button type="submit">save</button>
+  </form>
+  {{if .Quota}}
+  <h2>storage</h2>
+  <p class="hint">lfs storage: {{humansize .Quota.UsedBytes}} used{{if .Quota.Exists}} of {{humansize .Quota.LimitBytes}} cap{{else}} (no quota configured){{end}} — managed by the server admin</p>
+  {{end}}
+</div>
+{{end}}
+{{template "base" .}}

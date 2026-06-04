@@ -55,6 +55,14 @@ func (a *webAdapter) LookupRepoPerm(ctx context.Context, actor *auth.Actor, tena
 	return a.s.LookupRepoPerm(ctx, actor, tenant, repo)
 }
 
+func (a *webAdapter) GetRepoFlags(ctx context.Context, tenant, repo string) (auth.RepoFlags, error) {
+	return a.s.GetRepoFlags(ctx, tenant, repo)
+}
+
+func (a *webAdapter) SetRepoPublic(ctx context.Context, tenant, repo string, public bool) error {
+	return a.s.SetRepoPublic(ctx, tenant, repo, public)
+}
+
 func (a *webAdapter) FindUserByEmail(ctx context.Context, email string) (*auth.Actor, error) {
 	return a.s.FindUserByEmail(ctx, email)
 }

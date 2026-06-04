@@ -52,6 +52,7 @@ type browseHeader struct {
 	Refs     browsemodel.Refs
 	Path     string                            // current directory path ("" at repo root)
 	Activity map[string]browsemodel.CommitMeta // entry path -> last commit (best-effort; nil => "—")
+	CanAdmin bool                              // session may manage this repo (shows [settings] link)
 }
 
 // RefOrOID returns the ref name for links, falling back to the resolved OID
@@ -109,7 +110,7 @@ func newRenderer(dir string) (*renderer, error) {
 	r := &renderer{dir: dir}
 	if dir == "" {
 		r.cache = map[string]*template.Template{}
-		for _, page := range []string{"landing.html", "login.html", "error.html", "repo.html", "tree.html", "blob.html", "commits.html", "commit.html", "settings.html", "settings_tokens.html", "settings_keys.html", "secret.html"} {
+		for _, page := range []string{"landing.html", "login.html", "error.html", "repo.html", "tree.html", "blob.html", "commits.html", "commit.html", "settings.html", "settings_tokens.html", "settings_keys.html", "secret.html", "reposettings.html"} {
 			t, err := parsePage(assetsFS, "templates", page)
 			if err != nil {
 				return nil, err

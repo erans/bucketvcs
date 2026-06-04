@@ -60,6 +60,12 @@ func parseBrowsePath(p string) (browseRoute, bool) {
 // handleBrowse is the catch-all entry for repo paths. It authorizes the repo
 // (uniform 404 on not-visible) then dispatches by verb.
 func (s *server) handleBrowse(w http.ResponseWriter, r *http.Request) {
+	// Repo-settings paths ("/{tenant}/{repo}/settings...") are not browse verbs;
+	// dispatch them before the content guard (settings does not require Content).
+	if sr, ok := parseSettingsPath(r.URL.Path); ok {
+		s.handleRepoSettings(w, r, sr)
+		return
+	}
 	if s.content == nil {
 		s.renderError(w, r, http.StatusNotFound, "not found")
 		return
@@ -376,6 +382,7 @@ func (s *server) header(w http.ResponseWriter, r *http.Request, br browseRoute, 
 	return browseHeader{
 		base:   base{Session: sess, CSRF: tok},
 		Tenant: br.tenant, Repo: br.repo, Ref: ref, OID: oid, Refs: refs,
+		CanAdmin: s.canAdminRepo(r, br.tenant, br.repo),
 	}
 }
 

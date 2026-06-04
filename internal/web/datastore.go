@@ -44,6 +44,13 @@ type DataStore interface {
 	// Used by the repo-settings authz gate (PermAdmin or global admin).
 	LookupRepoPerm(ctx context.Context, actor *auth.Actor, tenant, repo string) (auth.Perm, error)
 
+	// GetRepoFlags returns the per-repo authorization-relevant flags (public-read).
+	// Returns auth.ErrNoSuchRepo when the repo is not registered.
+	GetRepoFlags(ctx context.Context, tenant, repo string) (auth.RepoFlags, error)
+
+	// SetRepoPublic toggles anonymous-read visibility for (tenant, repo).
+	SetRepoPublic(ctx context.Context, tenant, repo string, public bool) error
+
 	// OIDC (Phase 1.5)
 	FindUserByEmail(ctx context.Context, email string) (*auth.Actor, error)
 	FindIdentity(ctx context.Context, issuer, subject string) (*auth.Actor, error)

@@ -28,3 +28,13 @@
   <a href="/settings">profile</a> · <a href="/settings/tokens">tokens</a> · <a href="/settings/keys">ssh keys</a>
 </nav>
 {{end}}
+
+{{define "reposettingsnav"}}
+<nav class="tabs">
+  <a href="/{{.Tenant}}/{{.Repo}}/settings">general</a> ·
+  <a href="/{{.Tenant}}/{{.Repo}}/settings/access">access</a> ·
+  <a href="/{{.Tenant}}/{{.Repo}}/settings/webhooks">webhooks</a> ·
+  <a href="/{{.Tenant}}/{{.Repo}}/settings/policy">policy</a>{{if .IsAdmin}} ·
+  <a href="/{{.Tenant}}/{{.Repo}}/settings/hooks">hooks</a>{{end}}
+</nav>
+{{end}}
