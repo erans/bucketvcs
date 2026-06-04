@@ -659,3 +659,44 @@ func TestLineNumsJSServed(t *testing.T) {
 		t.Fatalf("linenums.js not served: code=%d", rec.Code)
 	}
 }
+
+func TestTreeRoot_RendersReadme(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+		tree: []browsemodel.TreeEntry{{Name: "README.md", Path: "README.md", Type: "blob", Size: 10, OID: "x"}},
+		blob: browsemodel.Blob{Path: "README.md", Size: 10, Bytes: []byte("# Hello Readme\n")},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+
+	// Full tree page at ref root renders the README.
+	req := httptest.NewRequest("GET", "/acme/demo/tree/?ref=main", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), "Hello Readme") {
+		t.Fatalf("tree root missing rendered README: %s", rec.Body.String())
+	}
+
+	// htmx fragment at ref root includes the README (inside #tree).
+	req = httptest.NewRequest("GET", "/acme/demo/tree/main", nil)
+	req.Header.Set("HX-Request", "true")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), "Hello Readme") {
+		t.Fatalf("htmx fragment missing README: %s", rec.Body.String())
+	}
+}
+
+func TestTreeSubdir_NoReadme(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+		tree: []browsemodel.TreeEntry{{Name: "README.md", Path: "sub/README.md", Type: "blob", Size: 10, OID: "x"}},
+		blob: browsemodel.Blob{Path: "sub/README.md", Size: 10, Bytes: []byte("# Sub Readme\n")},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/tree/main/sub", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if strings.Contains(rec.Body.String(), "Sub Readme") {
+		t.Fatalf("subdirectory tree should not render README: %s", rec.Body.String())
+	}
+}

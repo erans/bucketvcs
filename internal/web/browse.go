@@ -196,7 +196,11 @@ func (s *server) handleTree(w http.ResponseWriter, r *http.Request, br browseRou
 		activity = nil
 	}
 	h.Activity = activity
-	data := treeData{browseHeader: h, Entries: entries}
+	var readme template.HTML
+	if res.Path == "" {
+		readme = s.renderReadme(r.Context(), br, res.OID, entries)
+	}
+	data := treeData{browseHeader: h, Entries: entries, ReadmeHTML: readme}
 	if r.Header.Get("HX-Request") == "true" {
 		var buf bytes.Buffer
 		if err := s.render.renderPartial(&buf, "treeRows", data); err != nil {

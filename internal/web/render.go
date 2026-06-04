@@ -70,7 +70,8 @@ type repoHomeData struct {
 
 type treeData struct {
 	browseHeader
-	Entries []browsemodel.TreeEntry
+	Entries    []browsemodel.TreeEntry
+	ReadmeHTML template.HTML
 }
 
 type blobData struct {

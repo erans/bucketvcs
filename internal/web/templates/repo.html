@@ -7,7 +7,6 @@
     {{if .Refs.Tags}}&nbsp;&middot;&nbsp;tags: {{range .Refs.Tags}}<a href="/{{$.Tenant}}/{{$.Repo}}/tree/{{urlpath .Name}}">{{.Name}}</a> {{end}}{{end}}
   </div>
   {{template "treeRows" .}}
-  {{if .ReadmeHTML}}<div class="readme">── README ──{{.ReadmeHTML}}</div>{{end}}
 </div>
 {{end}}
 {{template "base" .}}

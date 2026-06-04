@@ -10,6 +10,7 @@
     {{end}}
   </table>
   {{else}}<p class="empty">{{if .Path}}empty directory{{else}}empty repository{{end}}</p>{{end}}
+  {{if .ReadmeHTML}}<div class="readme">{{.ReadmeHTML}}</div>{{end}}
 </div>{{end}}
 
 {{define "treeAge"}}{{if .OID}}<td class="age" title="{{abstime .AuthorTime}}"><span class="lastmsg">{{.Summary}}</span> · {{reltime .AuthorTime}}</td>{{else}}<td class="age">—</td>{{end}}{{end}}
