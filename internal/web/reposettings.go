@@ -75,8 +75,7 @@ func (s *server) handleRepoSettings(w http.ResponseWriter, r *http.Request, sr s
 	case "policy":
 		s.repoSettingsPolicy(w, r, sr)
 	case "hooks":
-		// Task 12 replaces this case.
-		s.renderError(w, r, http.StatusNotFound, "not found")
+		s.repoSettingsHooks(w, r, sr)
 	default:
 		s.renderError(w, r, http.StatusNotFound, "not found")
 	}

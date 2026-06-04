@@ -1,0 +1,71 @@
+{{define "title"}}{{.Tenant}}/{{.Repo}} hooks · bucketvcs{{end}}
+{{define "content"}}
+<div class="settings">
+  <div class="repohdr"><span class="path"><a href="/{{.Tenant}}/{{.Repo}}">{{.Tenant}}/{{.Repo}}</a></span></div>
+  {{template "reposettingsnav" .}}
+  <h2>hooks (Tier 3)</h2>
+  <p class="hint">scripts live in the server's --hooks-dir; registration here only references them by name.</p>
+  {{if not .Enabled}}
+  <p class="hint">hooks are not enabled on this server.</p>
+  {{else}}
+  {{if .Flash}}<p class="flash">{{.Flash}}</p>{{end}}
+  {{if .Hooks}}
+  <table>
+    <thead>
+      <tr><th>trigger</th><th>script</th><th>sort order</th><th>enabled</th><th>updated</th><th>actions</th></tr>
+    </thead>
+    <tbody>
+    {{range .Hooks}}
+    <tr>
+      <td class="mono">{{.Trigger}}</td>
+      <td class="mono">{{.ScriptName}}</td>
+      <td>{{.SortOrder}}</td>
+      <td>{{if .Enabled}}yes{{else}}no{{end}}</td>
+      <td title="{{abstime .UpdatedAt.Unix}}">{{reltime .UpdatedAt.Unix}}</td>
+      <td>
+        {{if .Enabled}}
+        <form method="post" action="/{{$.Tenant}}/{{$.Repo}}/settings/hooks/disable" class="inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="hidden" name="trigger" value="{{.Trigger}}">
+          <input type="hidden" name="script_name" value="{{.ScriptName}}">
+          <button type="submit">disable</button>
+        </form>
+        {{else}}
+        <form method="post" action="/{{$.Tenant}}/{{$.Repo}}/settings/hooks/enable" class="inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="hidden" name="trigger" value="{{.Trigger}}">
+          <input type="hidden" name="script_name" value="{{.ScriptName}}">
+          <button type="submit">enable</button>
+        </form>
+        {{end}}
+        <form method="post" action="/{{$.Tenant}}/{{$.Repo}}/settings/hooks/remove" class="inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="hidden" name="trigger" value="{{.Trigger}}">
+          <input type="hidden" name="script_name" value="{{.ScriptName}}">
+          <button type="submit">remove</button>
+        </form>
+      </td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="empty">no hooks configured.</p>
+  {{end}}
+  <h4>add hook</h4>
+  <form method="post" action="/{{.Tenant}}/{{.Repo}}/settings/hooks/add">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label>trigger
+      <select name="trigger">
+        <option value="pre-receive">pre-receive</option>
+        <option value="post-receive">post-receive</option>
+      </select>
+    </label>
+    <label>script name <input type="text" name="script_name" required placeholder="check-policy.sh"></label>
+    <label>sort order <input type="number" name="sort_order" value="0"></label>
+    <button type="submit">add hook</button>
+  </form>
+  {{end}}
+</div>
+{{end}}
+{{template "base" .}}
