@@ -150,8 +150,16 @@ func (s *server) handleRepoHome(w http.ResponseWriter, r *http.Request, br brows
 		return
 	}
 	readme := s.renderReadme(r.Context(), br, res.OID, entries)
+	h := s.header(w, r, br, refs, refs.Default, res.OID)
+	activity, aerr := s.content.TreeActivity(r.Context(), br.tenant, br.repo, res.OID, "")
+	if aerr != nil {
+		// Best-effort column: log and render "—" rather than failing the page.
+		s.logger.WarnContext(r.Context(), "tree activity failed", "tenant", br.tenant, "repo", br.repo, "err", aerr)
+		activity = nil
+	}
+	h.Activity = activity
 	s.renderBrowse(w, r, "repo.html", repoHomeData{
-		browseHeader: s.header(w, r, br, refs, refs.Default, res.OID),
+		browseHeader: h,
 		Entries:      entries,
 		ReadmeHTML:   readme,
 	})
@@ -181,6 +189,13 @@ func (s *server) handleTree(w http.ResponseWriter, r *http.Request, br browseRou
 	}
 	h := s.header(w, r, br, refs, res.Ref, res.OID)
 	h.Path = res.Path
+	activity, aerr := s.content.TreeActivity(r.Context(), br.tenant, br.repo, res.OID, res.Path)
+	if aerr != nil {
+		// Best-effort column: log and render "—" rather than failing the page.
+		s.logger.WarnContext(r.Context(), "tree activity failed", "tenant", br.tenant, "repo", br.repo, "err", aerr)
+		activity = nil
+	}
+	h.Activity = activity
 	data := treeData{browseHeader: h, Entries: entries}
 	if r.Header.Get("HX-Request") == "true" {
 		var buf bytes.Buffer

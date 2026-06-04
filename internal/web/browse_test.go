@@ -58,13 +58,14 @@ func (b *browseDataStore) LinkIdentity(ctx context.Context, userID, issuer, subj
 
 // fakeContent is a configurable ContentStore for browse tests.
 type fakeContent struct {
-	refs   browsemodel.Refs
-	warm   bool
-	tree   []browsemodel.TreeEntry
-	blob   browsemodel.Blob
-	log    []browsemodel.CommitMeta
-	more   bool
-	commit browsemodel.CommitDetail
+	refs     browsemodel.Refs
+	warm     bool
+	tree     []browsemodel.TreeEntry
+	blob     browsemodel.Blob
+	log      []browsemodel.CommitMeta
+	more     bool
+	commit   browsemodel.CommitDetail
+	activity map[string]browsemodel.CommitMeta
 }
 
 func (f *fakeContent) ListRefs(ctx context.Context, t, r string) (browsemodel.Refs, error) {
@@ -96,6 +97,9 @@ func (f *fakeContent) Commit(ctx context.Context, t, r, oid string) (browsemodel
 		return browsemodel.CommitDetail{}, browsemodel.ErrWarming
 	}
 	return f.commit, nil
+}
+func (f *fakeContent) TreeActivity(ctx context.Context, t, r, oid, p string) (map[string]browsemodel.CommitMeta, error) {
+	return f.activity, nil
 }
 
 func newBrowseServer(content ContentStore, visible map[string]bool) http.Handler {
@@ -517,5 +521,29 @@ func TestRenderPartial_TreeRows(t *testing.T) {
 	}
 	if strings.Contains(out, "<html") {
 		t.Fatalf("partial must not include the base layout: %s", out)
+	}
+}
+
+func TestTree_ActivityColumnRendered(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+		tree: []browsemodel.TreeEntry{
+			{Name: "a.txt", Path: "a.txt", Type: "blob", Size: 6, OID: "x"},
+			{Name: "old.txt", Path: "old.txt", Type: "blob", Size: 1, OID: "y"},
+		},
+		activity: map[string]browsemodel.CommitMeta{
+			"a.txt": {OID: "abc", Summary: "update a", AuthorTime: 1700000000},
+		},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/tree/main", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, "update a") {
+		t.Fatalf("attributed entry missing summary: %s", body)
+	}
+	if !strings.Contains(body, "—") {
+		t.Fatalf("unattributed entry should render —: %s", body)
 	}
 }
