@@ -8,33 +8,61 @@ import (
 	"log/slog"
 )
 
-// ErrCascadeUnsupportedBackend: DeleteRepoCascade relies on toggling sqlite's
-// per-connection foreign_keys pragma to keep webhook_endpoints rows alive
-// (M15.1 drain design). Postgres FK actions (ON DELETE CASCADE on
-// webhook_endpoints) cannot be suppressed, so the operation is refused rather
-// than silently destroying pending repo.deleted deliveries. Requires a
-// postgres schema change (drop the webhook_endpoints→repos FK) — deferred.
+// ErrCascadeUnsupportedBackend is reserved for future auth-db backends on
+// which DeleteRepoCascade cannot preserve the M15.1 drain design (webhook
+// endpoint rows must survive repo deletion). As of M25 every shipped backend
+// (sqlite, libsql, postgres) supports the cascade and this error is not
+// returned; callers keep their errors.Is branches as cheap insurance.
 var ErrCascadeUnsupportedBackend = errors.New("sqlitestore: repo delete cascade not supported on this backend")
+
+// cascadeStmts is the ordered child-table sweep shared by the sqlite and
+// postgres paths of DeleteRepoCascade. webhook_endpoints/_deliveries are
+// deliberately absent — those rows survive (M15.1 drain design).
+var cascadeStmts = []struct {
+	name string
+	sql  string
+}{
+	{"protected_refs", `DELETE FROM protected_refs WHERE tenant=? AND repo=?`},
+	{"protected_paths", `DELETE FROM protected_paths WHERE tenant=? AND repo=?`},
+	{"hooks", `DELETE FROM hooks WHERE tenant=? AND repo=?`},
+	{"oidc_rule_claims", `DELETE FROM oidc_rule_claims WHERE rule_id IN
+		(SELECT id FROM oidc_trust_rules WHERE tenant=? AND repo=?)`},
+	{"oidc_trust_rules", `DELETE FROM oidc_trust_rules WHERE tenant=? AND repo=?`},
+	{"repo_permissions", `DELETE FROM repo_permissions WHERE tenant=? AND repo=?`},
+	{"ssh_keys (deploy-scope)", `DELETE FROM ssh_keys WHERE scope_tenant=? AND scope_repo=?`},
+	{"lfs_locks", `DELETE FROM lfs_locks WHERE tenant=? AND repo=?`},
+	{"repos", `DELETE FROM repos WHERE tenant=? AND name=?`},
+}
 
 // DeleteRepoCascade deletes the repos row and its non-webhook dependents
 // (protected_refs, repo_permissions, deploy-scoped ssh_keys, lfs_locks,
-// protected_paths, hooks) while leaving webhook_endpoints/_deliveries intact
-// so a pending repo.deleted delivery can drain. Moved from cmd/bucketvcs
-// (M15.1, formerly deleteRepoKeepingWebhooks); behavior preserved except the
-// sweep list was extended — see below.
+// protected_paths, hooks, oidc_trust_rules + oidc_rule_claims) while leaving
+// webhook_endpoints/_deliveries intact so a pending repo.deleted delivery can
+// drain. Moved from cmd/bucketvcs (M15.1, formerly deleteRepoKeepingWebhooks);
+// behavior preserved except the sweep list was extended — see below.
 //
-// FK NOTE: this runs with PRAGMA foreign_keys=OFF so the ON DELETE CASCADE on
-// webhook_endpoints does NOT fire (we want those rows to survive). But with FK
-// enforcement off, the cascades on protected_paths (migration 0007) and hooks
-// (migration 0009) — both of which declare FOREIGN KEY (tenant, repo)
-// REFERENCES repos ON DELETE CASCADE — do not fire either, so those rows would
-// be ORPHANED. The original M15.1 sweep predates those two tables and never
-// swept them. They are therefore deleted manually here alongside the other
-// dependents. The orphan webhook_endpoints row produced here is the intended
-// known limitation; a webhook-prune sweeper can clean it up after the worker
-// has drained any associated deliveries.
+// FK NOTE: on sqlite this runs with PRAGMA foreign_keys=OFF so the ON DELETE
+// CASCADE on webhook_endpoints does NOT fire (we want those rows to survive).
+// But with FK enforcement off, the cascades on protected_paths (migration
+// 0007), hooks (migration 0009), and oidc_trust_rules (migration 0010, M25
+// fix) — all of which declare FOREIGN KEY (tenant, repo) REFERENCES repos ON
+// DELETE CASCADE — do not fire either, so those rows would be ORPHANED. The
+// original M15.1 sweep predates these post-M15.1 tables and never swept them.
+// They are therefore deleted manually here alongside the other dependents
+// (oidc_rule_claims, the child of oidc_trust_rules, is swept first via a
+// subselect so no claim rows dangle once their parent rule is gone). The orphan
+// webhook_endpoints row produced here is the intended known limitation; a
+// webhook-prune sweeper can clean it up after the worker has drained any
+// associated deliveries.
 //
-// ATOMICITY: the seven DELETEs run inside a single transaction on the pinned
+// On postgres (M25) the path is deleteRepoCascadePostgres: migration 0015
+// dropped the webhook_endpoints→repos FK, so endpoint rows survive by
+// construction and a plain transaction running the same explicit child-table
+// sweep suffices (no pragma gymnastics). The remaining child-table FKs still
+// declare ON DELETE CASCADE on postgres, so the explicit DELETEs are redundant
+// there — they are kept so both backends read identically.
+//
+// ATOMICITY: the child-table DELETEs run inside a single transaction on the pinned
 // connection, so a mid-sweep failure rolls the whole sweep back — there is no
 // partial-failure window in which (e.g.) protected_refs is gone but repos
 // survives. PRAGMA foreign_keys=OFF is issued on the connection OUTSIDE the
@@ -43,15 +71,11 @@ var ErrCascadeUnsupportedBackend = errors.New("sqlitestore: repo delete cascade 
 // anyway. On any DELETE error the tx is rolled back before the existing
 // FK-restore / connection-poison logic runs.
 func (s *Store) DeleteRepoCascade(ctx context.Context, tenant, repo string) error {
-	// Backend gate: this function's correctness depends on suppressing the
-	// webhook_endpoints ON DELETE CASCADE via the sqlite per-connection
-	// foreign_keys pragma. On postgres the pragma is a syntax error AND the FK
-	// is REFERENCES repos ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
-	// (migrations_postgres/0006_webhooks.sql:11) — it cannot be suppressed, so
-	// the M15.1 "orphan endpoints so deliveries drain" design cannot hold.
-	// Refuse rather than silently destroy pending repo.deleted deliveries.
+	// Postgres path (M25): migration 0015 dropped the webhook_endpoints→repos
+	// FK, so a plain transaction suffices — endpoint rows survive by
+	// construction and no pragma gymnastics are needed.
 	if s.backend.Name() == "postgres" {
-		return ErrCascadeUnsupportedBackend
+		return s.deleteRepoCascadePostgres(ctx, tenant, repo)
 	}
 
 	db := s.db.raw()
@@ -97,22 +121,9 @@ func (s *Store) DeleteRepoCascade(ctx context.Context, tenant, repo string) erro
 	}
 
 	// Cascade the non-webhook dependents manually so they're cleaned up
-	// even though FK is off. protected_paths + hooks are swept explicitly
-	// because their FK-cascade can't fire with foreign_keys=OFF (see godoc).
-	// All seven DELETEs run in a single transaction so a mid-sweep failure
-	// rolls the whole sweep back (no partial-failure window).
-	stmts := []struct {
-		name string
-		sql  string
-	}{
-		{"protected_refs", `DELETE FROM protected_refs WHERE tenant=? AND repo=?`},
-		{"protected_paths", `DELETE FROM protected_paths WHERE tenant=? AND repo=?`},
-		{"hooks", `DELETE FROM hooks WHERE tenant=? AND repo=?`},
-		{"repo_permissions", `DELETE FROM repo_permissions WHERE tenant=? AND repo=?`},
-		{"ssh_keys (deploy-scope)", `DELETE FROM ssh_keys WHERE scope_tenant=? AND scope_repo=?`},
-		{"lfs_locks", `DELETE FROM lfs_locks WHERE tenant=? AND repo=?`},
-		{"repos", `DELETE FROM repos WHERE tenant=? AND name=?`},
-	}
+	// even though FK is off. protected_paths + hooks + oidc_trust_rules are
+	// swept explicitly because their FK-cascade can't fire with foreign_keys=OFF
+	// (see godoc).
 
 	// restoreFK re-enables FK enforcement on the pinned connection, marking
 	// `restored` so the deferred poison is skipped, or logging+leaving it false
@@ -131,7 +142,9 @@ func (s *Store) DeleteRepoCascade(ctx context.Context, tenant, repo string) erro
 		restoreFK("begin tx", err)
 		return fmt.Errorf("begin delete tx: %w", err)
 	}
-	for _, st := range stmts {
+	// All child-table DELETEs run in a single transaction so a mid-sweep failure
+	// rolls the whole sweep back (no partial-failure window).
+	for _, st := range cascadeStmts {
 		if _, err := tx.ExecContext(ctx, st.sql, tenant, repo); err != nil {
 			// Roll back so no partial sweep is committed, then restore FK
 			// enforcement before returning so the connection is safe to pool.
@@ -154,4 +167,21 @@ func (s *Store) DeleteRepoCascade(ctx context.Context, tenant, repo string) erro
 	}
 	restored = true
 	return nil
+}
+
+// deleteRepoCascadePostgres sweeps the same child tables as the sqlite path,
+// in one transaction. The remaining child-table FKs still declare ON DELETE
+// CASCADE on postgres, so the explicit DELETEs are redundant there — they are
+// kept so both backends read identically and behavior does not silently
+// depend on FK presence. webhook_endpoints is untouched: its FK to repos was
+// dropped by migration 0015 precisely so these rows outlive the repo.
+func (s *Store) deleteRepoCascadePostgres(ctx context.Context, tenant, repo string) error {
+	return s.db.RunInTx(ctx, func(tx Tx) error {
+		for _, st := range cascadeStmts {
+			if _, err := tx.ExecContext(ctx, st.sql, tenant, repo); err != nil {
+				return fmt.Errorf("delete from %s: %w", st.name, err)
+			}
+		}
+		return nil
+	})
 }

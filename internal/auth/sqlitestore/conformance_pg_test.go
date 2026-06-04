@@ -339,27 +339,158 @@ func TestPGConcurrentRename(t *testing.T) {
 
 func fmtID(i int) string { return "dlv" + strconv.Itoa(i) }
 
-// TestPGDeleteRepoCascadeRefused asserts the M15.1 webhook-drain cascade is
-// REFUSED on postgres: the function depends on suppressing the
-// webhook_endpoints ON DELETE CASCADE via sqlite's per-connection foreign_keys
-// pragma, which is both a postgres syntax error and semantically impossible
-// (the FK is DEFERRABLE INITIALLY DEFERRED, not suppressible). The backend gate
-// must short-circuit with ErrCascadeUnsupportedBackend BEFORE any PRAGMA runs,
-// so the repo row must survive.
-func TestPGDeleteRepoCascadeRefused(t *testing.T) {
+// TestPGDeleteRepoCascade asserts the M25 postgres cascade path: every swept
+// child row (protected_refs, protected_paths, hooks, repo_permissions,
+// deploy-scoped ssh_keys, lfs_locks, oidc_trust_rules + its oidc_rule_claims
+// child) is removed, the repos row is gone, and — the M15.1 drain invariant —
+// webhook_endpoints + webhook_deliveries rows SURVIVE so a pending repo.deleted
+// delivery can still be claimed. Seeding one row per swept table is the
+// postgres counterpart to the sqlite
+// TestDeleteRepoCascade_SweepsDependentsKeepsWebhooks regression: it would have
+// caught the M25 bug where oidc_trust_rules (migration 0010) was absent from
+// the shared cascadeStmts sweep.
+func TestPGDeleteRepoCascade(t *testing.T) {
 	s := openPostgres(t)
 	ctx := context.Background()
 
-	if err := s.RegisterRepo(ctx, "cascade", "refused"); err != nil {
+	// Idempotent cleanup so re-runs against a persistent DB don't conflict
+	// on UNIQUE(tenant, repo, url), the repos PK, or ssh_keys.fingerprint.
+	for _, q := range []string{
+		`DELETE FROM webhook_deliveries WHERE endpoint_id IN
+		   (SELECT id FROM webhook_endpoints WHERE tenant=? AND repo=?)`,
+		`DELETE FROM webhook_endpoints WHERE tenant=? AND repo=?`,
+		`DELETE FROM protected_refs WHERE tenant=? AND repo=?`,
+		`DELETE FROM protected_paths WHERE tenant=? AND repo=?`,
+		`DELETE FROM hooks WHERE tenant=? AND repo=?`,
+		`DELETE FROM lfs_locks WHERE tenant=? AND repo=?`,
+		`DELETE FROM repos WHERE tenant=? AND name=?`,
+	} {
+		if _, err := s.db.ExecContext(ctx, q, "cascade", "pgdel"); err != nil {
+			t.Fatalf("cleanup %q: %v", q, err)
+		}
+	}
+	// Cleanups that don't key on (tenant, repo).
+	for _, q := range []string{
+		`DELETE FROM oidc_rule_claims WHERE rule_id='pgdel-r1'`,
+		`DELETE FROM oidc_trust_rules WHERE id='pgdel-r1'`,
+		`DELETE FROM oidc_issuers WHERE alias='pgdel-gh'`,
+		`DELETE FROM ssh_keys WHERE id='pgdel-k1'`,
+		`DELETE FROM users WHERE id='pgdel-u1'`,
+	} {
+		if _, err := s.db.ExecContext(ctx, q); err != nil {
+			t.Fatalf("cleanup %q: %v", q, err)
+		}
+	}
+
+	if err := s.RegisterRepo(ctx, "cascade", "pgdel"); err != nil {
 		t.Fatalf("register repo: %v", err)
 	}
-	err := s.DeleteRepoCascade(ctx, "cascade", "refused")
-	if !errors.Is(err, ErrCascadeUnsupportedBackend) {
-		t.Fatalf("DeleteRepoCascade on postgres: got %v, want ErrCascadeUnsupportedBackend", err)
+	now := time.Now().Unix()
+
+	// A real user to own the lfs_lock and a repo_permissions grant.
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO users (id, name, is_admin, created_at) VALUES (?, ?, 0, ?)`,
+		"pgdel-u1", "pgdel-u1", now); err != nil {
+		t.Fatalf("seed user: %v", err)
 	}
-	// The repo row must still exist — the gate returns before any DELETE.
-	if err := s.RegisterRepo(ctx, "cascade", "refused"); !errors.Is(err, auth.ErrConflict) {
-		t.Fatalf("repo should still exist after refused cascade: re-register got %v, want ErrConflict", err)
+
+	// One row per swept child table (only NOT NULL columns without defaults).
+	seeds := []struct {
+		name string
+		sql  string
+		args []any
+	}{
+		{"protected_refs",
+			`INSERT INTO protected_refs (tenant, repo, refname_pattern, created_at) VALUES (?, ?, ?, ?)`,
+			[]any{"cascade", "pgdel", "refs/heads/main", now}},
+		{"protected_paths",
+			`INSERT INTO protected_paths (tenant, repo, refname_pattern, path_pattern, created_at) VALUES (?, ?, ?, ?, ?)`,
+			[]any{"cascade", "pgdel", "refs/heads/main", "secrets/**", now}},
+		{"hooks",
+			`INSERT INTO hooks (tenant, repo, "trigger", script_name, sort_order, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, 0, 1, ?, ?)`,
+			[]any{"cascade", "pgdel", "pre-receive", "lint.sh", now, now}},
+		{"repo_permissions",
+			`INSERT INTO repo_permissions (user_id, tenant, repo, perm, granted_at) VALUES (?, ?, ?, ?, ?)`,
+			[]any{"pgdel-u1", "cascade", "pgdel", "write", now}},
+		{"ssh_keys",
+			`INSERT INTO ssh_keys (id, fingerprint, public_key, key_type, label, created_at, user_id, scope_tenant, scope_repo, scope_perm)
+			 VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
+			[]any{"pgdel-k1", "pgdel-fp1", []byte{0}, "ssh-rsa", "lbl", now, "cascade", "pgdel", "read"}},
+		{"lfs_locks",
+			`INSERT INTO lfs_locks (id, tenant, repo, path, ref_name, owner_user_id, locked_at) VALUES (?, ?, ?, ?, NULL, ?, ?)`,
+			[]any{"pgdel-l1", "cascade", "pgdel", "file.bin", "pgdel-u1", now}},
+		{"oidc_issuers",
+			`INSERT INTO oidc_issuers (alias, issuer_url, created_at) VALUES (?, ?, ?)`,
+			[]any{"pgdel-gh", "https://pgdel.example/oidc", now}},
+		{"oidc_trust_rules",
+			`INSERT INTO oidc_trust_rules (id, issuer_alias, audience, tenant, repo, scopes, ttl_seconds, created_at) VALUES (?, ?, ?, ?, ?, 0, 900, ?)`,
+			[]any{"pgdel-r1", "pgdel-gh", "aud", "cascade", "pgdel", now}},
+		{"oidc_rule_claims",
+			`INSERT INTO oidc_rule_claims (rule_id, claim_name, claim_value) VALUES (?, ?, ?)`,
+			[]any{"pgdel-r1", "sub", "repo:cascade/pgdel"}},
+	}
+	for _, sd := range seeds {
+		if _, err := s.db.ExecContext(ctx, sd.sql, sd.args...); err != nil {
+			t.Fatalf("seed %s: %v", sd.name, err)
+		}
+	}
+
+	var epID int64
+	err := s.db.RunInTx(ctx, func(tx Tx) error {
+		var e error
+		epID, e = tx.InsertReturningID(ctx,
+			`INSERT INTO webhook_endpoints (tenant, repo, url, secret, event_mask, active, created_at)
+			 VALUES (?, ?, ?, ?, ?, 1, ?)`,
+			"cascade", "pgdel", "https://example.invalid/hook", "shh", 1, now)
+		return e
+	})
+	if err != nil {
+		t.Fatalf("seed endpoint: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO webhook_deliveries (id, endpoint_id, event_type, payload_json, status, next_attempt_at, created_at)
+		 VALUES (?, ?, ?, ?, 'pending', ?, ?)`,
+		"dlv-pgdel-1", epID, "repo.deleted", []byte(`{}`), now, now); err != nil {
+		t.Fatalf("seed delivery: %v", err)
+	}
+
+	if err := s.DeleteRepoCascade(ctx, "cascade", "pgdel"); err != nil {
+		t.Fatalf("DeleteRepoCascade on postgres: %v", err)
+	}
+
+	count := func(q string, args ...any) int {
+		t.Helper()
+		var n int
+		if err := s.db.QueryRowContext(ctx, q, args...).Scan(&n); err != nil {
+			t.Fatalf("count %q: %v", q, err)
+		}
+		return n
+	}
+	if n := count(`SELECT COUNT(*) FROM repos WHERE tenant=? AND name=?`, "cascade", "pgdel"); n != 0 {
+		t.Errorf("repos row survived: %d", n)
+	}
+	// Every repo-scoped child table must be empty for (cascade, pgdel).
+	swept := []struct{ table, where string }{
+		{"protected_refs", `tenant='cascade' AND repo='pgdel'`},
+		{"protected_paths", `tenant='cascade' AND repo='pgdel'`},
+		{"hooks", `tenant='cascade' AND repo='pgdel'`},
+		{"repo_permissions", `tenant='cascade' AND repo='pgdel'`},
+		{"ssh_keys", `scope_tenant='cascade' AND scope_repo='pgdel'`},
+		{"lfs_locks", `tenant='cascade' AND repo='pgdel'`},
+		{"oidc_trust_rules", `tenant='cascade' AND repo='pgdel'`},
+		{"oidc_rule_claims", `rule_id='pgdel-r1'`},
+	}
+	for _, c := range swept {
+		if n := count(`SELECT COUNT(*) FROM ` + c.table + ` WHERE ` + c.where); n != 0 {
+			t.Errorf("%s not swept: %d (want 0)", c.table, n)
+		}
+	}
+	// M15.1 drain invariant: the webhook rows must survive the cascade.
+	if n := count(`SELECT COUNT(*) FROM webhook_endpoints WHERE tenant=? AND repo=?`, "cascade", "pgdel"); n != 1 {
+		t.Errorf("webhook_endpoints did not survive: %d (want 1)", n)
+	}
+	if n := count(`SELECT COUNT(*) FROM webhook_deliveries WHERE endpoint_id=?`, epID); n != 1 {
+		t.Errorf("webhook_deliveries did not survive: %d (want 1)", n)
 	}
 }
 
