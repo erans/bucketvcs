@@ -17,7 +17,7 @@ follow-on phases.
 | CSRF double-submit protection | ✅ shipped | all POST handlers |
 | Per-IP rate-limiting on login failures | ✅ shipped | shares M18 rate limiter |
 | Code browse (tree, blob, diff, log) | ✅ shipped | Phase 2; see §6 |
-| Repo settings / admin screens | ❌ deferred (Phase 3) | |
+| Repo settings / admin screens | ✅ shipped | Phase 3; see §7 |
 | OIDC browser login | ❌ deferred (Phase 1.5) | |
 | Per-session audit trail | ❌ deferred | |
 
@@ -51,7 +51,7 @@ Phase 2 ships read-only git code browsing (see §6):
 - `GET /{tenant}/{repo}/commits/{ref}` — paginated commit log.
 - `GET /{tenant}/{repo}/commit/{oid}` — single commit with diff.
 
-The admin screen (user/repo management) is a planned Phase 3 item.
+Phase 3 ships settings and admin screens (see §7).
 
 ---
 
@@ -499,9 +499,133 @@ No new audit events are emitted for Phase 2. Read operations are not audited.
 
 ---
 
-## 7. Observability
+## 7. Settings and admin (Phase 3)
 
-### 7.1 Metrics
+Phase 3 adds CSRF-protected settings forms for three audiences: any logged-in
+user (self-service), repo admins (per-repo settings), and global admins (instance
+management). No new stores or schema migrations: every operation wraps an
+existing service that can also be driven from the CLI.
+
+### 7.1 Page map
+
+```
+/settings                         self-service (any logged-in user)
+  /settings                       profile: name, email, admin badge; change-password form
+  /settings/tokens                list + create/revoke/rotate API tokens
+  /settings/keys                  SSH public keys: list + add + revoke
+
+/{tenant}/{repo}/settings         repo settings (repo-admin perm OR global admin)
+  /settings                       general: public toggle; tenant LFS usage/cap (read-only);
+                                  danger zone: rename (repo-admin+), delete (global admin only)
+  /settings/access                user grants (add/change/revoke read|write|admin)
+                                  + deploy SSH keys (add/revoke)
+  /settings/webhooks              webhook endpoints (add/enable/disable/rotate-secret/remove)
+                                  + per-endpoint delivery view with replay
+  /settings/policy                protected-ref rules + protected-path rules (add/remove)
+  /settings/hooks                 Tier 3 hook scripts (global admin only — see §7.2)
+
+/admin                            instance admin (global admin only)
+  /admin/users                    list, create, disable/enable, set-email, delete
+  /admin/repos                    list all repos, register (with in-process storage init), delete
+  /admin/quotas                   per-tenant LFS usage/cap: set/clear/reconcile
+```
+
+Navigation: the navbar shows `[ settings ]` when a user is logged in and
+`[ admin ]` when `IsAdmin`; repo browse pages show a `[settings]` link when the
+viewer is repo-admin or global-admin.
+
+### 7.2 Authorization tiers
+
+| Area | Who can access | Why |
+|---|---|---|
+| `/settings` | Any logged-in user | Self-service: own tokens, SSH keys, password |
+| `/{t}/{r}/settings` (all tabs except hooks) | Global admin OR users with `admin` perm on the repo | First web-side meaning of the `admin` perm level |
+| `/{t}/{r}/settings/hooks` | Global admin only | M20 hooks execute operator scripts on the server. Allowing repo-admins to register hooks would be privilege escalation. |
+| `/admin/*` | Global admin only | Instance-wide user, repo, and quota management |
+| **Repo delete** | Global admin only (not repo-admin) | Irreversible; never purges storage from the UI — `--purge-storage` remains a CLI-only path |
+| **Quota set/clear/reconcile** | Global admin only | M13.5 quotas are per-tenant LFS byte caps that constrain operator spend; a repo-admin raising their own cap defeats them |
+
+All authorization failures return a uniform HTTP 404 (same anti-enumeration
+stance as the browse and git gateway handlers). Unauthorized access to any
+settings page or action is indistinguishable from "not found".
+
+`Session.IsAdmin` is re-joined from the `users` table on every session lookup,
+so admin revocation takes effect on the next request without requiring a
+re-login.
+
+### 7.3 Form mechanics
+
+Every settings GET issues a CSRF token embedded in a hidden `csrf_token` form
+field; every POST runs the double-submit CSRF check before anything else. The
+login `bvcs_csrf` cookie is reused (same double-submit model — see §4.2).
+
+**POST-redirect-GET**: after a successful mutation the handler 303-redirects to
+the current tab so that a browser refresh reloads the page, not the form. Flash
+messages are carried in a short-lived `bvcs_flash` cookie (HttpOnly, cleared
+on first render) to cross the redirect.
+
+**Secret-once exception**: token create/rotate and webhook endpoint add/rotate-secret
+render the result page *directly* (no redirect) so the plaintext credential can
+be displayed exactly once. The page carries `Cache-Control: no-store, private`.
+The page warns that refreshing re-submits the form; CSRF makes blind re-POSTs
+unexploitable.
+
+**Destructive actions** (repo delete, user delete, endpoint remove, hook remove)
+require a type-the-name confirm field validated server-side; no JS-only confirms.
+
+### 7.4 SSRF note — webhook endpoint URLs
+
+Repo admins can register webhook endpoint URLs. A malicious URL could cause the
+server to issue HTTP requests to internal services. Restrict outbound egress
+from the bucketvcs process using network policy or an egress firewall; see the
+webhooks operator guide §11 for recommendations.
+
+### 7.5 Nil-service degradation
+
+Each Phase 3 service dependency (`Webhooks`, `Policy`, `Hooks`, `Quotas`) is
+optional. When a service is not wired at startup, the corresponding tab or page
+renders a "not enabled on this server" notice instead of forms; no panic or 500
+occurs. This mirrors the `Content == nil` behavior that disables code browse.
+
+The hooks tab returns HTTP 404 unconditionally for non-admin users regardless of
+service availability (authz check precedes nil check).
+
+### 7.6 Postgres caveat
+
+Repo deletion via the web UI (or `bucketvcs repo delete`) is refused on Postgres
+auth-databases with the error `ErrCascadeUnsupportedBackend`. The webhook-drain
+design for Postgres requires a schema change that is deferred. SQLite is not
+affected.
+
+### 7.7 Phase 3 observability
+
+**Metrics**
+
+| Metric | Labels | Description |
+|---|---|---|
+| `web_admin_actions_total` | `domain`, `action`, `result` | Count of settings-form actions; `result` ∈ `ok`, `invalid`, `denied`, `error`; `domain` matches the settings area (e.g. `token`, `webhook`, `admin_users`, `admin_repos`, `admin_quotas`, `user`) |
+
+**Audit events** — all Phase 3 events carry `source=web`; actor is the session user.
+
+| Domain | Events |
+|---|---|
+| Users | `auth.user.created`, `auth.user.disabled`, `auth.user.enabled`, `auth.user.deleted`, `auth.user.email_set`, `auth.password.changed` |
+| Tokens | `auth.token.created`, `auth.token.revoked`, `auth.token.rotated` |
+| SSH keys | `auth.sshkey.added`, `auth.sshkey.revoked` (user vs deploy keys distinguished by a `kind` attr) |
+| Repos | `repo.created`, `repo.deleted`, `repo.renamed`, `repo.public_set`, `repo.grant.added`, `repo.grant.removed` |
+| Webhooks | `webhooks.endpoint_created`, `webhooks.endpoint_removed`, `webhooks.endpoint_enabled`, `webhooks.endpoint_disabled`, `webhooks.endpoint_secret_rotated`, `webhooks.delivery_replayed` |
+| Policy | `policy.ref.rule_added`, `policy.ref.rule_removed`, `policy.path.rule_added`, `policy.path.rule_removed` |
+| Hooks | `policy.hook.added`, `policy.hook.removed`, `policy.hook.enabled`, `policy.hook.disabled` |
+| Quotas | `quota.set`, `quota.cleared`, `quota.reconciled` |
+
+Existing event names from the CLI and gateway are reused; Phase 3 adds no new
+event names.
+
+---
+
+## 8. Observability
+
+### 8.1 Metrics
 
 | Metric | Labels | Description |
 |---|---|---|
@@ -511,7 +635,7 @@ No new audit events are emitted for Phase 2. Read operations are not audited.
 | `web_browse_total` | `view` | Browse requests by view, counted after authorization (includes reads that subsequently fail with 404/503; per-outcome counts are in web_requests_total); `view` ∈ `repo`, `tree`, `blob`, `raw`, `commits`, `commit` (Phase 2) |
 | `web_browse_mirror_wait_seconds` | — | Mirror open/materialize latency; emitted once per git read operation (a single page may perform several, e.g. repo home = tree + README), not once per request (Phase 2) |
 
-### 7.2 Audit events
+### 8.2 Audit events
 
 | Event | When |
 |---|---|
@@ -521,7 +645,7 @@ No new audit events are emitted for Phase 2. Read operations are not audited.
 
 ---
 
-## 8. Deferred work and planned phases
+## 9. Deferred work and planned phases
 
 - **Phase 1.5 — OIDC browser login**: shipped — see "OIDC browser login
   (Phase 1.5)" above. Remaining OIDC follow-ups (multiple IdPs, auto-provisioning,
@@ -530,8 +654,9 @@ No new audit events are emitted for Phase 2. Read operations are not audited.
   (path-filtered log, blame, search, compare views, cursor pagination, per-read
   audit, web clone/zip, branch/tag management, README remote-image proxy) are
   listed in §6.9.
-- **Phase 3 — settings / admin screens**: manage users, repos, protected-ref
-  policies, webhooks, and token scopes through the UI rather than the CLI.
+- **Phase 3 — settings / admin screens**: shipped — see §7 above. Remaining
+  deferrals: per-session audit trail UI, session list/revocation UI, OIDC
+  identity link/unlink UI, repo transfer between tenants, storage purge from
+  the UI, Postgres repo delete (ErrCascadeUnsupportedBackend).
 - **Per-session audit trail**: expose session list and per-user login history to
   admins.
-- **Rotate-password UI**: self-service password change from within the browser.
