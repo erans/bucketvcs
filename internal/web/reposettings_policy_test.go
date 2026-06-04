@@ -306,8 +306,13 @@ func TestRepoSettingsPolicyRefsAdd(t *testing.T) {
 			t.Fatal("Add BlockForcePush must be true")
 		}
 		// Audit event
-		if !sink.Has("policy.ref.rule_added", map[string]string{"tenant": "acme", "repo": "demo"}) {
-			t.Fatal("missing policy.ref.rule_added audit event")
+		if !sink.Has("policy.ref.rule_added", map[string]string{
+			"tenant": "acme", "repo": "demo",
+			"pattern":          "refs/heads/main",
+			"block_deletion":   "true",
+			"block_force_push": "true",
+		}) {
+			t.Fatal("missing policy.ref.rule_added audit event with full attrs")
 		}
 		if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
 			t.Fatal("expected flash cookie on success")
@@ -346,6 +351,36 @@ func TestRepoSettingsPolicyRefsAdd(t *testing.T) {
 
 // TestRepoSettingsPolicyRefsRemove covers POST .../policy/refs/remove.
 func TestRepoSettingsPolicyRefsRemove(t *testing.T) {
+	t.Run("empty pattern → flash, Remove not called", func(t *testing.T) {
+		store := policyStore()
+		var called bool
+		pol := &fakePolicy{
+			removeFn: func(ctx context.Context, tenant, repo, pattern string) error {
+				called = true
+				return nil
+			},
+		}
+		logger, sink := newTestLogger()
+		h := newTestHandlerWith(store, func(d *Deps) { d.Policy = pol; d.Logger = logger })
+		req := csrfPost(t, "/acme/demo/settings/policy/refs/remove",
+			url.Values{"pattern": {""}})
+		addSessionCookie(t, req, store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status %d, want 303; body=%s", rec.Code, rec.Body.String())
+		}
+		if called {
+			t.Fatal("Remove must not be called for empty pattern")
+		}
+		if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
+			t.Fatal("expected flash cookie for empty pattern")
+		}
+		if sink.Has("policy.ref.rule_removed", nil) {
+			t.Fatal("must not emit audit event for empty pattern")
+		}
+	})
+
 	t.Run("service ErrNotFound → flash 'no such rule'", func(t *testing.T) {
 		store := policyStore()
 		pol := &fakePolicy{
@@ -392,8 +427,11 @@ func TestRepoSettingsPolicyRefsRemove(t *testing.T) {
 		if removedPattern != "refs/heads/main" {
 			t.Fatalf("Remove(%q), want refs/heads/main", removedPattern)
 		}
-		if !sink.Has("policy.ref.rule_removed", map[string]string{"tenant": "acme", "repo": "demo"}) {
-			t.Fatal("missing policy.ref.rule_removed audit event")
+		if !sink.Has("policy.ref.rule_removed", map[string]string{
+			"tenant": "acme", "repo": "demo",
+			"pattern": "refs/heads/main",
+		}) {
+			t.Fatal("missing policy.ref.rule_removed audit event with full attrs")
 		}
 		if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
 			t.Fatal("expected flash cookie on success")
@@ -527,8 +565,12 @@ func TestRepoSettingsPolicyPathsAdd(t *testing.T) {
 		if gotPath.PathPattern != "secrets/**" {
 			t.Fatalf("AddPathRule PathPattern=%q, want secrets/**", gotPath.PathPattern)
 		}
-		if !sink.Has("policy.path.rule_added", map[string]string{"tenant": "acme", "repo": "demo"}) {
-			t.Fatal("missing policy.path.rule_added audit event")
+		if !sink.Has("policy.path.rule_added", map[string]string{
+			"tenant": "acme", "repo": "demo",
+			"refname_pattern": "refs/heads/main",
+			"path_pattern":    "secrets/**",
+		}) {
+			t.Fatal("missing policy.path.rule_added audit event with full attrs")
 		}
 		if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
 			t.Fatal("expected flash cookie on success")
@@ -538,6 +580,70 @@ func TestRepoSettingsPolicyPathsAdd(t *testing.T) {
 
 // TestRepoSettingsPolicyPathsRemove covers POST .../policy/paths/remove.
 func TestRepoSettingsPolicyPathsRemove(t *testing.T) {
+	t.Run("empty refname_pattern → flash, RemovePathRule not called", func(t *testing.T) {
+		store := policyStore()
+		var called bool
+		pol := &fakePolicy{
+			removePathRuleFn: func(ctx context.Context, tenant, repo, refnamePattern, pathPattern string) error {
+				called = true
+				return nil
+			},
+		}
+		logger, sink := newTestLogger()
+		h := newTestHandlerWith(store, func(d *Deps) { d.Policy = pol; d.Logger = logger })
+		req := csrfPost(t, "/acme/demo/settings/policy/paths/remove", url.Values{
+			"refname_pattern": {""},
+			"path_pattern":    {"secrets/**"},
+		})
+		addSessionCookie(t, req, store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status %d, want 303; body=%s", rec.Code, rec.Body.String())
+		}
+		if called {
+			t.Fatal("RemovePathRule must not be called for empty refname_pattern")
+		}
+		if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
+			t.Fatal("expected flash cookie for empty patterns")
+		}
+		if sink.Has("policy.path.rule_removed", nil) {
+			t.Fatal("must not emit audit event for empty patterns")
+		}
+	})
+
+	t.Run("empty path_pattern → flash, RemovePathRule not called", func(t *testing.T) {
+		store := policyStore()
+		var called bool
+		pol := &fakePolicy{
+			removePathRuleFn: func(ctx context.Context, tenant, repo, refnamePattern, pathPattern string) error {
+				called = true
+				return nil
+			},
+		}
+		logger, sink := newTestLogger()
+		h := newTestHandlerWith(store, func(d *Deps) { d.Policy = pol; d.Logger = logger })
+		req := csrfPost(t, "/acme/demo/settings/policy/paths/remove", url.Values{
+			"refname_pattern": {"refs/heads/main"},
+			"path_pattern":    {""},
+		})
+		addSessionCookie(t, req, store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status %d, want 303; body=%s", rec.Code, rec.Body.String())
+		}
+		if called {
+			t.Fatal("RemovePathRule must not be called for empty path_pattern")
+		}
+		if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
+			t.Fatal("expected flash cookie for empty patterns")
+		}
+		if sink.Has("policy.path.rule_removed", nil) {
+			t.Fatal("must not emit audit event for empty patterns")
+		}
+	})
+
 	t.Run("service ErrNotFound → flash 'no such rule'", func(t *testing.T) {
 		store := policyStore()
 		pol := &fakePolicy{
@@ -592,8 +698,12 @@ func TestRepoSettingsPolicyPathsRemove(t *testing.T) {
 		if gotPath != "secrets/**" {
 			t.Fatalf("RemovePathRule path=%q, want secrets/**", gotPath)
 		}
-		if !sink.Has("policy.path.rule_removed", map[string]string{"tenant": "acme", "repo": "demo"}) {
-			t.Fatal("missing policy.path.rule_removed audit event")
+		if !sink.Has("policy.path.rule_removed", map[string]string{
+			"tenant": "acme", "repo": "demo",
+			"refname_pattern": "refs/heads/main",
+			"path_pattern":    "secrets/**",
+		}) {
+			t.Fatal("missing policy.path.rule_removed audit event with full attrs")
 		}
 		if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
 			t.Fatal("expected flash cookie on success")

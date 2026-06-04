@@ -136,6 +136,11 @@ func (s *server) policyRefsRemove(w http.ResponseWriter, r *http.Request, sr set
 		return
 	}
 	pattern := r.PostFormValue("pattern")
+	if pattern == "" {
+		EmitAdminActionMetric(r.Context(), s.logger, "policy", "ref_remove", "invalid")
+		s.redirectFlash(w, r, sr.policyBase(), "pattern required")
+		return
+	}
 	if err := s.policy.Remove(r.Context(), sr.tenant, sr.repo, pattern); err != nil {
 		if errors.Is(err, policy.ErrNotFound) {
 			EmitAdminActionMetric(r.Context(), s.logger, "policy", "ref_remove", "invalid")
@@ -204,6 +209,11 @@ func (s *server) policyPathsRemove(w http.ResponseWriter, r *http.Request, sr se
 	}
 	refnamePattern := r.PostFormValue("refname_pattern")
 	pathPattern := r.PostFormValue("path_pattern")
+	if refnamePattern == "" || pathPattern == "" {
+		EmitAdminActionMetric(r.Context(), s.logger, "policy", "path_remove", "invalid")
+		s.redirectFlash(w, r, sr.policyBase(), "both patterns required")
+		return
+	}
 	if err := s.policy.RemovePathRule(r.Context(), sr.tenant, sr.repo, refnamePattern, pathPattern); err != nil {
 		if errors.Is(err, policy.ErrNotFound) {
 			EmitAdminActionMetric(r.Context(), s.logger, "policy", "path_remove", "invalid")
