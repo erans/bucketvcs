@@ -104,6 +104,18 @@ func (b *browseDataStore) AddSSHKey(ctx context.Context, k auth.SSHKey) error {
 func (b *browseDataStore) RevokeSSHKey(ctx context.Context, keyIDOrPrefix string) error {
 	panic("browseDataStore.RevokeSSHKey not implemented")
 }
+func (b *browseDataStore) ListRepoGrants(ctx context.Context, tenant, repo string) ([]RepoGrant, error) {
+	panic("browseDataStore.ListRepoGrants not implemented")
+}
+func (b *browseDataStore) Grant(ctx context.Context, userName, tenant, repo, perm string) error {
+	panic("browseDataStore.Grant not implemented")
+}
+func (b *browseDataStore) RevokeRepoPermission(ctx context.Context, userName, tenant, repo string) error {
+	panic("browseDataStore.RevokeRepoPermission not implemented")
+}
+func (b *browseDataStore) ListSSHKeysForRepo(ctx context.Context, tenant, repo string) ([]auth.SSHKey, error) {
+	panic("browseDataStore.ListSSHKeysForRepo not implemented")
+}
 
 // fakeContent is a configurable ContentStore for browse tests.
 type fakeContent struct {

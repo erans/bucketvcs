@@ -26,6 +26,12 @@ type TokenInfo struct {
 	RevokedAt  *int64
 }
 
+// RepoGrant mirrors sqlitestore.RepoGrant for the web layer.
+type RepoGrant struct {
+	UserName string
+	Perm     string
+}
+
 // DataStore is the read/identity surface the web UI needs. It is implemented in
 // the composition root (cmd/bucketvcs) by an adapter over *sqlitestore.Store, and
 // by a fake in tests.
@@ -84,4 +90,10 @@ type DataStore interface {
 	ListSSHKeysForUser(ctx context.Context, userID string) ([]auth.SSHKey, error)
 	AddSSHKey(ctx context.Context, k auth.SSHKey) error
 	RevokeSSHKey(ctx context.Context, keyIDOrPrefix string) error
+
+	// Repo access (admin tab): explicit user grants + repo-scoped deploy keys.
+	ListRepoGrants(ctx context.Context, tenant, repo string) ([]RepoGrant, error)
+	Grant(ctx context.Context, userName, tenant, repo, perm string) error
+	RevokeRepoPermission(ctx context.Context, userName, tenant, repo string) error
+	ListSSHKeysForRepo(ctx context.Context, tenant, repo string) ([]auth.SSHKey, error)
 }

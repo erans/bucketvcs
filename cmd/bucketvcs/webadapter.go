@@ -141,3 +141,27 @@ func (a *webAdapter) AddSSHKey(ctx context.Context, k auth.SSHKey) error {
 func (a *webAdapter) RevokeSSHKey(ctx context.Context, keyIDOrPrefix string) error {
 	return a.s.RevokeSSHKey(ctx, keyIDOrPrefix)
 }
+
+func (a *webAdapter) ListRepoGrants(ctx context.Context, tenant, repo string) ([]web.RepoGrant, error) {
+	rows, err := a.s.ListRepoGrants(ctx, tenant, repo)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]web.RepoGrant, len(rows))
+	for i, r := range rows {
+		out[i] = web.RepoGrant{UserName: r.UserName, Perm: r.Perm}
+	}
+	return out, nil
+}
+
+func (a *webAdapter) Grant(ctx context.Context, userName, tenant, repo, perm string) error {
+	return a.s.Grant(ctx, userName, tenant, repo, perm)
+}
+
+func (a *webAdapter) RevokeRepoPermission(ctx context.Context, userName, tenant, repo string) error {
+	return a.s.RevokeRepoPermission(ctx, userName, tenant, repo)
+}
+
+func (a *webAdapter) ListSSHKeysForRepo(ctx context.Context, tenant, repo string) ([]auth.SSHKey, error) {
+	return a.s.ListSSHKeysForRepo(ctx, tenant, repo)
+}

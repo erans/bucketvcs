@@ -39,6 +39,12 @@ type fakeStore struct {
 	listSSHKeysForUser func(ctx context.Context, userID string) ([]auth.SSHKey, error)
 	addSSHKey          func(ctx context.Context, k auth.SSHKey) error
 	revokeSSHKey       func(ctx context.Context, keyIDOrPrefix string) error
+
+	// repo access methods (admin tab)
+	listRepoGrants       func(ctx context.Context, tenant, repo string) ([]RepoGrant, error)
+	grant                func(ctx context.Context, userName, tenant, repo, perm string) error
+	revokeRepoPermission func(ctx context.Context, userName, tenant, repo string) error
+	listSSHKeysForRepo   func(ctx context.Context, tenant, repo string) ([]auth.SSHKey, error)
 }
 
 func newFakeStore() *fakeStore { return &fakeStore{sessions: map[string]*auth.Session{}} }
@@ -187,6 +193,30 @@ func (f *fakeStore) RevokeSSHKey(ctx context.Context, keyIDOrPrefix string) erro
 		return f.revokeSSHKey(ctx, keyIDOrPrefix)
 	}
 	return nil
+}
+func (f *fakeStore) ListRepoGrants(ctx context.Context, tenant, repo string) ([]RepoGrant, error) {
+	if f.listRepoGrants != nil {
+		return f.listRepoGrants(ctx, tenant, repo)
+	}
+	return nil, nil
+}
+func (f *fakeStore) Grant(ctx context.Context, userName, tenant, repo, perm string) error {
+	if f.grant != nil {
+		return f.grant(ctx, userName, tenant, repo, perm)
+	}
+	return nil
+}
+func (f *fakeStore) RevokeRepoPermission(ctx context.Context, userName, tenant, repo string) error {
+	if f.revokeRepoPermission != nil {
+		return f.revokeRepoPermission(ctx, userName, tenant, repo)
+	}
+	return nil
+}
+func (f *fakeStore) ListSSHKeysForRepo(ctx context.Context, tenant, repo string) ([]auth.SSHKey, error) {
+	if f.listSSHKeysForRepo != nil {
+		return f.listSSHKeysForRepo(ctx, tenant, repo)
+	}
+	return nil, nil
 }
 
 func TestSessionMiddleware_LoadsAndAnon(t *testing.T) {
