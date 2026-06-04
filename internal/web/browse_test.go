@@ -82,6 +82,15 @@ func (b *browseDataStore) RevokeToken(ctx context.Context, id string) error {
 func (b *browseDataStore) RotateToken(ctx context.Context, id, newSecretHash string) error {
 	panic("browseDataStore.RotateToken not implemented")
 }
+func (b *browseDataStore) ListSSHKeysForUser(ctx context.Context, userID string) ([]auth.SSHKey, error) {
+	panic("browseDataStore.ListSSHKeysForUser not implemented")
+}
+func (b *browseDataStore) AddSSHKey(ctx context.Context, k auth.SSHKey) error {
+	panic("browseDataStore.AddSSHKey not implemented")
+}
+func (b *browseDataStore) RevokeSSHKey(ctx context.Context, keyIDOrPrefix string) error {
+	panic("browseDataStore.RevokeSSHKey not implemented")
+}
 
 // fakeContent is a configurable ContentStore for browse tests.
 type fakeContent struct {

@@ -30,6 +30,11 @@ type fakeStore struct {
 	createToken       func(ctx context.Context, id, userID, secretHash, label string, expiresAt *int64, scopes auth.TokenScope) error
 	revokeToken       func(ctx context.Context, id string) error
 	rotateToken       func(ctx context.Context, id, newSecretHash string) error
+
+	// SSH key methods
+	listSSHKeysForUser func(ctx context.Context, userID string) ([]auth.SSHKey, error)
+	addSSHKey          func(ctx context.Context, k auth.SSHKey) error
+	revokeSSHKey       func(ctx context.Context, keyIDOrPrefix string) error
 }
 
 func newFakeStore() *fakeStore { return &fakeStore{sessions: map[string]*auth.Session{}} }
@@ -134,6 +139,24 @@ func (f *fakeStore) RevokeToken(ctx context.Context, id string) error {
 func (f *fakeStore) RotateToken(ctx context.Context, id, newSecretHash string) error {
 	if f.rotateToken != nil {
 		return f.rotateToken(ctx, id, newSecretHash)
+	}
+	return nil
+}
+func (f *fakeStore) ListSSHKeysForUser(ctx context.Context, userID string) ([]auth.SSHKey, error) {
+	if f.listSSHKeysForUser != nil {
+		return f.listSSHKeysForUser(ctx, userID)
+	}
+	return nil, nil
+}
+func (f *fakeStore) AddSSHKey(ctx context.Context, k auth.SSHKey) error {
+	if f.addSSHKey != nil {
+		return f.addSSHKey(ctx, k)
+	}
+	return nil
+}
+func (f *fakeStore) RevokeSSHKey(ctx context.Context, keyIDOrPrefix string) error {
+	if f.revokeSSHKey != nil {
+		return f.revokeSSHKey(ctx, keyIDOrPrefix)
 	}
 	return nil
 }

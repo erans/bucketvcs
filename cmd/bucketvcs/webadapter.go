@@ -113,3 +113,15 @@ func (a *webAdapter) RevokeToken(ctx context.Context, id string) error {
 func (a *webAdapter) RotateToken(ctx context.Context, id, newSecretHash string) error {
 	return a.s.RotateToken(ctx, id, newSecretHash)
 }
+
+func (a *webAdapter) ListSSHKeysForUser(ctx context.Context, userID string) ([]auth.SSHKey, error) {
+	return a.s.ListSSHKeysForUser(ctx, userID)
+}
+
+func (a *webAdapter) AddSSHKey(ctx context.Context, k auth.SSHKey) error {
+	return a.s.AddSSHKey(ctx, k)
+}
+
+func (a *webAdapter) RevokeSSHKey(ctx context.Context, keyIDOrPrefix string) error {
+	return a.s.RevokeSSHKey(ctx, keyIDOrPrefix)
+}

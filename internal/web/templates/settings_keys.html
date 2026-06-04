@@ -1,0 +1,44 @@
+{{define "title"}}ssh keys · bucketvcs{{end}}
+{{define "content"}}
+<div class="settings">
+  {{template "settingsnav" .}}
+  <h2>ssh keys</h2>
+  {{if .Keys}}
+  <table>
+    <thead>
+      <tr><th>fingerprint</th><th>type</th><th>label</th><th>added</th><th>state</th><th>actions</th></tr>
+    </thead>
+    <tbody>
+    {{range .Keys}}
+    <tr>
+      <td class="mono">{{.Fingerprint}}</td>
+      <td>{{.KeyType}}</td>
+      <td>{{.Label}}</td>
+      <td title="{{abstime .CreatedAt}}">{{reltime .CreatedAt}}</td>
+      <td>{{.State}}</td>
+      <td>
+        {{if eq .State "active"}}
+        <form method="post" action="/settings/keys/revoke" class="inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="hidden" name="id" value="{{.ID}}">
+          <button type="submit">revoke</button>
+        </form>
+        {{end}}
+      </td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="empty">no ssh keys yet.</p>
+  {{end}}
+  <h2>add ssh key</h2>
+  <form method="post" action="/settings/keys/add">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label>public key <textarea name="pubkey" rows="3" required placeholder="ssh-ed25519 AAAA..."></textarea></label>
+    <label>label <input type="text" name="label" placeholder="laptop, work, ci..."></label>
+    <button type="submit">add key</button>
+  </form>
+</div>
+{{end}}
+{{template "base" .}}

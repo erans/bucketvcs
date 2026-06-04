@@ -61,4 +61,9 @@ type DataStore interface {
 		expiresAt *int64, scopes auth.TokenScope) error
 	RevokeToken(ctx context.Context, id string) error
 	RotateToken(ctx context.Context, id, newSecretHash string) error
+
+	// SSH keys (self-service user keys; ownership enforced by handlers).
+	ListSSHKeysForUser(ctx context.Context, userID string) ([]auth.SSHKey, error)
+	AddSSHKey(ctx context.Context, k auth.SSHKey) error
+	RevokeSSHKey(ctx context.Context, keyIDOrPrefix string) error
 }
