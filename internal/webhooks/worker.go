@@ -3,11 +3,13 @@ package webhooks
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"math/rand"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,7 +27,11 @@ type WorkerConfig struct {
 	BackoffJitterFrac float64         // 0.25 → ±25% jitter per interval
 	ReclaimThreshold  time.Duration
 	HTTPClient        *http.Client // optional override for tests
-	Logger            *slog.Logger // optional; defaults to slog.Default()
+	// Egress is the delivery egress policy. nil means the secure default
+	// (zero-value EgressPolicy: deny loopback/link-local/private/etc.).
+	// Ignored when HTTPClient is set (tests inject their own client).
+	Egress *EgressPolicy
+	Logger *slog.Logger // optional; defaults to slog.Default()
 }
 
 // DefaultWorkerConfig returns the production defaults (spec §6).
@@ -85,7 +91,11 @@ func StartWorker(ctx context.Context, svc *Service, cfg WorkerConfig) {
 
 	client := cfg.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: cfg.HTTPTimeout}
+		pol := cfg.Egress
+		if pol == nil {
+			pol = &EgressPolicy{} // secure default: deny private/loopback/link-local
+		}
+		client = NewHTTPClient(pol, cfg.HTTPTimeout)
 	}
 	sem := make(chan struct{}, cfg.Concurrency)
 	var wg sync.WaitGroup
@@ -242,6 +252,14 @@ func claimSkipLocked(ctx context.Context, db sqlitestore.Querier, batch int) ([]
 func deliver(ctx context.Context, svc *Service, client *http.Client, cfg WorkerConfig, row claimedRow, logger *slog.Logger) {
 	start := time.Now()
 	t := time.Now().Unix()
+
+	if !strings.HasPrefix(row.URL, "http://") && !strings.HasPrefix(row.URL, "https://") {
+		recordResult(ctx, svc, cfg, row, 0,
+			fmt.Errorf("egress denied: endpoint URL scheme must be http or https"),
+			logger, time.Since(start).Milliseconds())
+		return
+	}
+
 	sig := Sign(row.Secret, t, row.PayloadJSON)
 
 	reqCtx, cancel := context.WithTimeout(ctx, cfg.HTTPTimeout)
@@ -259,6 +277,11 @@ func deliver(ctx context.Context, svc *Service, client *http.Client, cfg WorkerC
 	resp, err := client.Do(httpReq)
 	durationMs := time.Since(start).Milliseconds()
 	if err != nil {
+		var denied *EgressDeniedError
+		if errors.As(err, &denied) {
+			EmitEgressDeniedMetric(ctx, logger)
+			EmitEgressDenied(ctx, logger, row.ID, row.EndpointID, denied.Host, denied.IP, denied.DeniedBy, denied.Pattern)
+		}
 		recordResult(ctx, svc, cfg, row, 0, err, logger, durationMs)
 		return
 	}
