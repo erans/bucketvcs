@@ -435,8 +435,13 @@ func TestRepoSettingsRename(t *testing.T) {
 	t.Run("happy path: rename + webhook + audit + metric + redirect", func(t *testing.T) {
 		store := newFakeStore()
 		store.perm = auth.PermAdmin
+		var order []string
+		var mu sync.Mutex
 		var gotTenant, gotOld, gotNew string
 		store.renameRepo = func(ctx context.Context, tenant, oldName, newName string) error {
+			mu.Lock()
+			order = append(order, "rename")
+			mu.Unlock()
 			gotTenant, gotOld, gotNew = tenant, oldName, newName
 			return nil
 		}
@@ -444,6 +449,9 @@ func TestRepoSettingsRename(t *testing.T) {
 		var whTenant, whRepo string
 		var whPayload any
 		wh := &fakeWebhooks{enqueue: func(ctx context.Context, event webhooks.Event, tenant, repo, actor string, payload any) error {
+			mu.Lock()
+			order = append(order, "enqueue")
+			mu.Unlock()
 			whEvent, whTenant, whRepo, whPayload = event, tenant, repo, payload
 			return nil
 		}}
@@ -463,6 +471,12 @@ func TestRepoSettingsRename(t *testing.T) {
 		if loc := rec.Header().Get("Location"); loc != "/acme/demo2/settings" {
 			t.Fatalf("Location %q, want /acme/demo2/settings", loc)
 		}
+		// Enqueue MUST run before RenameRepo: the webhook_endpoints rows are
+		// keyed on the OLD name when Enqueue's SELECT runs; RenameRepo moves
+		// them to the new name, so enqueuing after would match zero endpoints.
+		if len(order) != 2 || order[0] != "enqueue" || order[1] != "rename" {
+			t.Fatalf("call order %v, want [enqueue rename]", order)
+		}
 		if gotTenant != "acme" || gotOld != "demo" || gotNew != "demo2" {
 			t.Fatalf("RenameRepo(%q,%q,%q), want (acme,demo,demo2)", gotTenant, gotOld, gotNew)
 		}
@@ -475,6 +489,41 @@ func TestRepoSettingsRename(t *testing.T) {
 		}
 		if !sink.Has("repo.renamed", map[string]string{"tenant": "acme", "from": "demo", "to": "demo2"}) {
 			t.Fatal("missing repo.renamed audit event with from/to attrs")
+		}
+	})
+
+	t.Run("rename to same name → flash name unchanged, RenameRepo not called", func(t *testing.T) {
+		store := newFakeStore()
+		store.perm = auth.PermAdmin
+		var called bool
+		store.renameRepo = func(ctx context.Context, tenant, oldName, newName string) error {
+			called = true
+			return nil
+		}
+		var enqueued bool
+		wh := &fakeWebhooks{enqueue: func(ctx context.Context, event webhooks.Event, tenant, repo, actor string, payload any) error {
+			enqueued = true
+			return nil
+		}}
+		h := newTestHandlerWith(store, func(d *Deps) { d.Webhooks = wh })
+		req := csrfPost(t, "/acme/demo/settings/rename", url.Values{"newname": {"demo"}})
+		addSessionCookie(t, req, store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status %d, want 303; body=%s", rec.Code, rec.Body.String())
+		}
+		if loc := rec.Header().Get("Location"); loc != "/acme/demo/settings" {
+			t.Fatalf("Location %q, want /acme/demo/settings", loc)
+		}
+		if called {
+			t.Fatal("RenameRepo must not be called when newName == current name")
+		}
+		if enqueued {
+			t.Fatal("webhook must not be enqueued for a same-name no-op")
+		}
+		if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
+			t.Fatal("expected flash cookie for same-name no-op")
 		}
 	})
 

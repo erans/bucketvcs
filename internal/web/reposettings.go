@@ -157,6 +157,33 @@ func (s *server) repoSettingsRename(w http.ResponseWriter, r *http.Request, sr s
 		s.redirectFlash(w, r, "/"+sr.tenant+"/"+sr.repo+"/settings", "invalid repo name")
 		return
 	}
+	if newName == sr.repo {
+		// Benign no-op: renaming to the same name. Short-circuit before the
+		// store call (RenameRepo would return ErrRepoExists/plain error and
+		// fall through to a 500 on otherwise-valid input).
+		EmitAdminActionMetric(r.Context(), s.logger, "repo", "rename", "invalid")
+		s.redirectFlash(w, r, "/"+sr.tenant+"/"+sr.repo+"/settings", "name unchanged")
+		return
+	}
+	sess := SessionFromContext(r.Context())
+	actor := ""
+	if sess != nil {
+		actor = sess.Name
+	}
+	// Enqueue the repo.renamed webhook BEFORE RenameRepo runs, against the OLD
+	// name. RenameRepo propagates the new name into the webhook_endpoints rows;
+	// Enqueue resolves subscribers via a (tenant, repo) SELECT, so enqueuing
+	// after the rename would match ZERO endpoints (the rows now carry newName)
+	// and the delivery would be silently dropped. Mirrors the M21 CLI rename and
+	// the repo.deleted ordering below. Fail-open: an enqueue error must not block
+	// the rename; the accepted tradeoff is that a rename failing after enqueue
+	// sends a spurious event (same as the delete path).
+	if s.webhooks != nil {
+		payload := webhooks.RepoRenamedPayload{OldName: sr.repo, NewName: newName}
+		if err := s.webhooks.Enqueue(r.Context(), webhooks.EventRepoRenamed, sr.tenant, sr.repo, actor, payload); err != nil {
+			s.logger.Warn("webhooks.enqueue_failed", "event", "repo.renamed", "err", err)
+		}
+	}
 	if err := s.store.RenameRepo(r.Context(), sr.tenant, sr.repo, newName); err != nil {
 		switch {
 		case errors.Is(err, auth.ErrNoSuchRepo):
@@ -170,17 +197,6 @@ func (s *server) repoSettingsRename(w http.ResponseWriter, r *http.Request, sr s
 			s.renderError(w, r, http.StatusInternalServerError, "internal error")
 		}
 		return
-	}
-	sess := SessionFromContext(r.Context())
-	actor := ""
-	if sess != nil {
-		actor = sess.Name
-	}
-	if s.webhooks != nil {
-		payload := webhooks.RepoRenamedPayload{OldName: sr.repo, NewName: newName}
-		if err := s.webhooks.Enqueue(r.Context(), webhooks.EventRepoRenamed, sr.tenant, sr.repo, actor, payload); err != nil {
-			s.logger.Warn("webhooks.enqueue_failed", "event", "repo.renamed", "err", err)
-		}
 	}
 	s.emitAdmin(r.Context(), "repo.renamed",
 		slog.String("tenant", sr.tenant), slog.String("from", sr.repo), slog.String("to", newName))

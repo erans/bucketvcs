@@ -1,6 +1,7 @@
 package web
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -187,7 +188,7 @@ func (s *server) handleTokenRotate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.RotateToken(r.Context(), id, hash); err != nil {
-		if err == auth.ErrNoSuchToken {
+		if errors.Is(err, auth.ErrNoSuchToken) {
 			s.renderError(w, r, http.StatusNotFound, "not found")
 			return
 		}

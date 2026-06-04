@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
+	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
 )
 
 // testDeployPubLine is a valid authorized_keys line distinct from the user-key
@@ -136,6 +137,28 @@ func TestRepoSettingsAccessGrant(t *testing.T) {
 		flash := findCookie(rec.Result().Cookies(), flashCookieName)
 		if flash == nil {
 			t.Fatal("expected flash cookie for no-such-user")
+		}
+	})
+
+	t.Run("reserved user → flash, no audit", func(t *testing.T) {
+		store := accessStore()
+		store.grant = func(ctx context.Context, userName, tenant, repo, perm string) error {
+			return sqlitestore.ErrReservedUser
+		}
+		logger, sink := newTestLogger()
+		h := newTestHandlerWith(store, func(d *Deps) { d.Logger = logger })
+		req := csrfPost(t, "/acme/demo/settings/access/grant", url.Values{"username": {"_oidc"}, "perm": {"write"}})
+		addSessionCookie(t, req, store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status %d, want 303 (flash, not 500); body=%s", rec.Code, rec.Body.String())
+		}
+		if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
+			t.Fatal("expected flash cookie for reserved-user")
+		}
+		if sink.Has("repo.grant.added", map[string]string{"tenant": "acme", "repo": "demo"}) {
+			t.Fatal("repo.grant.added must NOT be emitted on a rejected grant")
 		}
 	})
 

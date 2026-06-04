@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
+	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
 )
 
 // deployKeyRow is the per-row view model for the deploy-keys table. State and
@@ -112,6 +113,9 @@ func (s *server) accessGrant(w http.ResponseWriter, r *http.Request, sr settings
 		case errors.Is(err, auth.ErrNoSuchUser):
 			EmitAdminActionMetric(r.Context(), s.logger, "repo_access", "grant", "invalid")
 			s.redirectFlash(w, r, sr.accessBase(), "no such user")
+		case errors.Is(err, sqlitestore.ErrReservedUser):
+			EmitAdminActionMetric(r.Context(), s.logger, "repo_access", "grant", "invalid")
+			s.redirectFlash(w, r, sr.accessBase(), "cannot grant to reserved user")
 		case errors.Is(err, auth.ErrNoSuchRepo):
 			s.renderError(w, r, http.StatusNotFound, "not found")
 		default:
