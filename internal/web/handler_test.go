@@ -149,3 +149,54 @@ func extractHidden(html, field string) string {
 	}
 	return rest[:j]
 }
+
+// TestNavbarLinks verifies the base-template nav exposes /settings to any
+// logged-in user and /admin only to admins (and neither to anonymous visitors).
+func TestNavbarLinks(t *testing.T) {
+	const settingsLink = `href="/settings"`
+	const adminLink = `href="/admin"`
+
+	t.Run("anon: neither link", func(t *testing.T) {
+		store := newFakeStore()
+		h := newTestHandler(store)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		body := rec.Body.String()
+		if strings.Contains(body, settingsLink) {
+			t.Errorf("anon landing should not link to /settings; body:\n%s", body)
+		}
+		if strings.Contains(body, adminLink) {
+			t.Errorf("anon landing should not link to /admin; body:\n%s", body)
+		}
+	})
+
+	t.Run("non-admin: settings only", func(t *testing.T) {
+		store := newFakeStore()
+		h := newTestHandler(store)
+		req := addSessionCookie(t, httptest.NewRequest(http.MethodGet, "/", nil), store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		body := rec.Body.String()
+		if !strings.Contains(body, settingsLink) {
+			t.Errorf("non-admin landing missing /settings link; body:\n%s", body)
+		}
+		if strings.Contains(body, adminLink) {
+			t.Errorf("non-admin landing should not link to /admin; body:\n%s", body)
+		}
+	})
+
+	t.Run("admin: both links", func(t *testing.T) {
+		store := newFakeStore()
+		h := newTestHandler(store)
+		req := addSessionCookie(t, httptest.NewRequest(http.MethodGet, "/", nil), store, adminSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		body := rec.Body.String()
+		if !strings.Contains(body, settingsLink) {
+			t.Errorf("admin landing missing /settings link; body:\n%s", body)
+		}
+		if !strings.Contains(body, adminLink) {
+			t.Errorf("admin landing missing /admin link; body:\n%s", body)
+		}
+	})
+}

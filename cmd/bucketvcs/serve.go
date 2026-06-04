@@ -28,9 +28,11 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/hooks"
 	"github.com/bucketvcs/bucketvcs/internal/lfs"
 	"github.com/bucketvcs/bucketvcs/internal/lfs/locks"
+	"github.com/bucketvcs/bucketvcs/internal/lfs/quota"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/oidc"
 	"github.com/bucketvcs/bucketvcs/internal/policy"
+	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/sshd"
 	"github.com/bucketvcs/bucketvcs/internal/web"
 	"github.com/bucketvcs/bucketvcs/internal/webhooks"
@@ -276,6 +278,13 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	// webhook_deliveries tables added by migration 0006). The worker is
 	// started below once HTTP and SSH listeners are configured.
 	webhookSvc := webhooks.New(authS.DB())
+
+	// M24 Phase 3 web admin services. Both are db-backed and cheap to
+	// construct unconditionally; the web layer only invokes them on demand
+	// from the settings/admin pages. hooksStore is the CRUD Store (distinct
+	// from the optional hooksSvc Runner constructed below for receive-pack).
+	hooksStore := hooks.NewStore(authS.DB())
+	quotaSvc := quota.New(authS.DB(), logger)
 
 	// M20 Tier 3 hooks service (optional). Constructed only when
 	// --hooks-enabled=true. bwrap detection: on Linux, the binary must
@@ -585,6 +594,21 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 				TrustProxy: *trustProxyHeaders,
 				OIDC:       oidcProvider,
 				Content:    browseSvc,
+				Webhooks:   webhookSvc,
+				Policy:     policySvc,
+				Hooks:      hooksStore,
+				Quotas:     quotaSvc,
+				QuotaReconcile: func(ctx context.Context, tenant string, dryRun bool) (quota.Report, error) {
+					return quotaSvc.Reconcile(ctx, store, tenant, dryRun)
+				},
+				RepoInit: func(ctx context.Context, tenant, repoName, actor string) error {
+					// Mirrors `bucketvcs init` defaults (cmd/bucketvcs/init.go).
+					_, err := repo.Create(ctx, store, tenant, repoName, repo.CreateOptions{
+						DefaultBranch: "refs/heads/main",
+						Actor:         actor,
+					})
+					return err
+				},
 			})
 		}
 

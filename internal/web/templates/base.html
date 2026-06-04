@@ -14,6 +14,8 @@
   <span class="brand">┌─ bucketvcs ─┐</span>
   <nav>
     {{if .Session}}<span class="who">[ {{.Session.Name}} ]</span>
+      <a href="/settings">settings</a>
+      {{if .Session.IsAdmin}}<a href="/admin">admin</a>{{end}}
       <form method="post" action="/logout" class="inline">
         <input type="hidden" name="csrf_token" value="{{.CSRF}}">
         <button type="submit">logout</button>
