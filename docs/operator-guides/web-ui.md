@@ -516,7 +516,7 @@ existing service that can also be driven from the CLI.
 
 /{tenant}/{repo}/settings         repo settings (repo-admin perm OR global admin)
   /settings                       general: public toggle; tenant LFS usage/cap (read-only);
-                                  danger zone: rename (repo-admin+), delete (global admin only)
+                                  danger zone: rename (global admin only), delete (global admin only)
   /settings/access                user grants (add/change/revoke read|write|admin)
                                   + deploy SSH keys (add/revoke)
   /settings/webhooks              webhook endpoints (add/enable/disable/rotate-secret/remove)
@@ -542,6 +542,7 @@ viewer is repo-admin or global-admin.
 | `/{t}/{r}/settings` (all tabs except hooks) | Global admin OR users with `admin` perm on the repo | First web-side meaning of the `admin` perm level |
 | `/{t}/{r}/settings/hooks` | Global admin only | M20 hooks execute operator scripts on the server. Allowing repo-admins to register hooks would be privilege escalation. |
 | `/admin/*` | Global admin only | Instance-wide user, repo, and quota management |
+| **Repo rename** | Global admin only (not repo-admin) | M21 rename is auth-only: the auth.db row + dependent tables move atomically, but storage keys are NOT migrated — the operator moves the storage prefix out of band (see §7.3 *Repo rename and storage migration*). A repo-admin can't complete that, and the UI runs the same destination-prefix collision probe as the CLI to refuse renaming onto leftover/foreign objects |
 | **Repo delete** | Global admin only (not repo-admin) | Irreversible; never purges storage from the UI — `--purge-storage` remains a CLI-only path |
 | **Quota set/clear/reconcile** | Global admin only | M13.5 quotas are per-tenant LFS byte caps that constrain operator spend; a repo-admin raising their own cap defeats them |
 
@@ -553,7 +554,32 @@ settings page or action is indistinguishable from "not found".
 so admin revocation takes effect on the next request without requiring a
 re-login.
 
-### 7.3 Form mechanics
+### 7.3 Repo rename and storage migration
+
+A UI rename (global admin only) updates **auth.db only** — the repo row plus
+every FK-bearing dependent table (grants, deploy keys, protected refs/paths,
+webhook endpoints) move atomically. Storage keys at
+`tenants/<tenant>/repos/<old-name>/...` are **NOT** migrated by the rename.
+Before the auth-side rename the UI runs the same destination-prefix collision
+probe as the `bucketvcs repo rename` CLI (`store.List(destPrefix, MaxKeys:1)`)
+and refuses the rename when the prefix is non-empty, so a rename can never point
+a name at leftover/foreign objects (for example after a delete-without-purge).
+
+After a successful rename the new name reads from an **empty** storage prefix
+until you migrate. Move the storage tree out of band:
+
+```
+aws s3 mv s3://<bucket>/tenants/<tenant>/repos/<old>/ \
+          s3://<bucket>/tenants/<tenant>/repos/<new>/ --recursive
+```
+
+(or `gsutil mv` / `az storage blob move` / `mv` on localfs). The manifest body
+also carries absolute key references (`pack_key`, `idx_key`, index keys) that
+contain the old prefix; rewrite them as part of the migration. If LFS quotas
+drifted during the cutover, run `bucketvcs quota reconcile --tenant=<tenant>`.
+See the `repo rename` CLI guide for the full out-of-band procedure.
+
+### 7.4 Form mechanics
 
 Every settings GET issues a CSRF token embedded in a hidden `csrf_token` form
 field; every POST runs the double-submit CSRF check before anything else. The
@@ -579,14 +605,14 @@ cookies die; the current session survives so the operator is not logged out).
 API tokens are NOT auto-revoked — rotate or revoke those separately via
 `/settings/tokens`.
 
-### 7.4 SSRF note — webhook endpoint URLs
+### 7.5 SSRF note — webhook endpoint URLs
 
 Repo admins can register webhook endpoint URLs. A malicious URL could cause the
 server to issue HTTP requests to internal services. Restrict outbound egress
 from the bucketvcs process using network policy or an egress firewall; see the
 webhooks operator guide §11 for recommendations.
 
-### 7.5 Nil-service degradation
+### 7.6 Nil-service degradation
 
 Each Phase 3 service dependency (`Webhooks`, `Policy`, `Hooks`, `Quotas`) is
 optional. When a service is not wired at startup, the corresponding tab or page
@@ -596,14 +622,14 @@ occurs. This mirrors the `Content == nil` behavior that disables code browse.
 The hooks tab returns HTTP 404 unconditionally for non-admin users regardless of
 service availability (authz check precedes nil check).
 
-### 7.6 Postgres caveat
+### 7.7 Postgres caveat
 
 Repo deletion via the web UI (or `bucketvcs repo delete`) is refused on Postgres
 auth-databases with the error `ErrCascadeUnsupportedBackend`. The webhook-drain
 design for Postgres requires a schema change that is deferred. SQLite is not
 affected.
 
-### 7.7 Phase 3 observability
+### 7.8 Phase 3 observability
 
 **Metrics**
 

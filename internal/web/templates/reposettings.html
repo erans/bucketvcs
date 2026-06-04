@@ -14,12 +14,13 @@
   <p class="hint">lfs storage: {{humansize .Quota.UsedBytes}} used{{if .Quota.Exists}} of {{humansize .Quota.LimitBytes}} cap{{else}} (no quota configured){{end}} — managed by the server admin</p>
   {{end}}
   <h2>danger zone</h2>
+  {{if .IsAdmin}}
   <form method="post" action="/{{.Tenant}}/{{.Repo}}/settings/rename">
     <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <p class="hint">renames the registration only — storage objects are NOT migrated. After renaming, move <code>tenants/{{.Tenant}}/repos/{{.Repo}}/</code> to the new name's prefix out of band (see operator guide).</p>
     <label>rename to <input type="text" name="newname" value="{{.Repo}}"></label>
     <button type="submit">rename</button>
   </form>
-  {{if .IsAdmin}}
   <form method="post" action="/{{.Tenant}}/{{.Repo}}/settings/delete" class="danger">
     <input type="hidden" name="csrf_token" value="{{.CSRF}}">
     <p class="hint">deletes registration, grants, policies, locks — storage objects are NOT purged (use the CLI with <code>--purge-storage</code>).</p>

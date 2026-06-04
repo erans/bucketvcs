@@ -32,7 +32,7 @@ audit story.
 
 /{tenant}/{repo}/settings      repo settings (repo-admin perm OR global admin)
   /settings           general: public toggle; tenant LFS usage/cap (read-only);
-                      danger zone: rename (repo-admin+), delete (global admin only)
+                      danger zone: rename (global admin only), delete (global admin only)
   /settings/access    user grants (add/change/revoke read|write|admin) + deploy SSH keys
   /settings/webhooks  endpoints (add/enable/disable/rotate-secret/remove) +
                       per-endpoint deliveries view with replay
@@ -67,6 +67,18 @@ Navigation: navbar gains `[ settings ]` when logged in and `[ admin ]` when
   read-only; set/clear/reconcile live under `/admin/quotas`.
 - **Repo delete in the UI is global-admin only and never purges storage**
   (`--purge-storage` remains CLI-only). Rename is repo-admin+ (rename shipped in M21).
+
+> **Amendment (post-review).** Web rename is gated to **global admin only** (not
+> repo-admin+) and now runs a **destination-prefix storage collision probe**
+> before the auth-side rename. Rationale: M21 `repo rename` is auth-only — the
+> auth.db row + dependent tables move atomically, but storage keys are NOT
+> migrated; the operator moves `tenants/<t>/repos/<old>/` → `.../<new>/` out of
+> band, and the CLI refuses to rename when the destination prefix is non-empty
+> (confused-read guard). A repo-admin can neither migrate storage nor is trusted
+> to point a name at leftover/foreign objects (delete-no-purge then
+> rename-into-that-name), so the web surface mirrors the CLI: global-admin gate
+> + the same `store.List(destPrefix, MaxKeys:1)` probe (wired as the
+> `RepoRenameCheck` composition-root closure). Discovered in roborev round 7.
 - `Session.IsAdmin` is joined fresh from `users` at session lookup, so admin
   revocation takes effect on the next request. Disabled users' sessions must fail
   lookup (believed already true from Phase 1; the plan verifies and adds a

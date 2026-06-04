@@ -360,7 +360,8 @@ func (w *fakeWebhooks) Enqueue(ctx context.Context, event webhooks.Event, tenant
 }
 
 func TestRepoSettingsRename(t *testing.T) {
-	// Security matrix: reader (PermRead) WITH valid CSRF → 404.
+	// Security matrix: reader (PermRead) WITH valid CSRF → 404. Rename is
+	// global-admin-only, so a non-admin session is uniformly rejected.
 	t.Run("form security", func(t *testing.T) {
 		store := newFakeStore()
 		store.perm = auth.PermRead
@@ -373,17 +374,104 @@ func TestRepoSettingsRename(t *testing.T) {
 		})
 	})
 
-	t.Run("invalid name → flash, RenameRepo not called", func(t *testing.T) {
+	// THE key regression: a repo-admin (not global admin) must get a uniform
+	// 404 BEFORE any store mutation. M21 rename is an operator procedure
+	// (auth rename + out-of-band storage migration); repo-admins can't migrate
+	// storage, so the web surface is gated to global admin like delete.
+	t.Run("repo-admin (non-global) → 404, RenameRepo not called", func(t *testing.T) {
 		store := newFakeStore()
-		store.perm = auth.PermAdmin
+		store.perm = auth.PermAdmin // repo-admin but session is not global admin
 		var called bool
 		store.renameRepo = func(ctx context.Context, tenant, oldName, newName string) error {
 			called = true
 			return nil
 		}
-		h := newTestHandlerWith(store, nil)
-		req := csrfPost(t, "/acme/demo/settings/rename", url.Values{"newname": {"bad name!"}})
+		h := newTestHandlerWith(store, func(d *Deps) {
+			d.RenameCheck = func(ctx context.Context, tenant, newName string) error { return nil }
+		})
+		req := csrfPost(t, "/acme/demo/settings/rename", url.Values{"newname": {"demo2"}})
 		addSessionCookie(t, req, store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status %d, want 404; body=%s", rec.Code, rec.Body.String())
+		}
+		if called {
+			t.Fatal("RenameRepo must not be called for a non-global admin")
+		}
+	})
+
+	t.Run("nil renameCheck → flash unavailable, RenameRepo not called", func(t *testing.T) {
+		store := newFakeStore()
+		var called bool
+		store.renameRepo = func(ctx context.Context, tenant, oldName, newName string) error {
+			called = true
+			return nil
+		}
+		h := newTestHandlerWith(store, nil) // d.RenameCheck stays nil
+		req := csrfPost(t, "/acme/demo/settings/rename", url.Values{"newname": {"demo2"}})
+		addSessionCookie(t, req, store, adminSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status %d, want 303; body=%s", rec.Code, rec.Body.String())
+		}
+		if called {
+			t.Fatal("RenameRepo must not be called when renameCheck is nil")
+		}
+		if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
+			t.Fatal("expected flash cookie for unavailable-rename")
+		}
+	})
+
+	t.Run("storage collision → flash, RenameRepo + enqueue not called", func(t *testing.T) {
+		store := newFakeStore()
+		var called bool
+		store.renameRepo = func(ctx context.Context, tenant, oldName, newName string) error {
+			called = true
+			return nil
+		}
+		var enqueued bool
+		wh := &fakeWebhooks{enqueue: func(ctx context.Context, event webhooks.Event, tenant, repo, actor string, payload any) error {
+			enqueued = true
+			return nil
+		}}
+		h := newTestHandlerWith(store, func(d *Deps) {
+			d.Webhooks = wh
+			d.RenameCheck = func(ctx context.Context, tenant, newName string) error {
+				return errors.New("destination storage prefix not empty (first key: tenants/acme/repos/demo2/manifest/root.json)")
+			}
+		})
+		req := csrfPost(t, "/acme/demo/settings/rename", url.Values{"newname": {"demo2"}})
+		addSessionCookie(t, req, store, adminSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status %d, want 303; body=%s", rec.Code, rec.Body.String())
+		}
+		if called {
+			t.Fatal("RenameRepo must not be called on a storage collision")
+		}
+		if enqueued {
+			t.Fatal("webhook must not be enqueued on a storage collision (refused before enqueue)")
+		}
+		if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
+			t.Fatal("expected flash cookie for storage collision")
+		}
+	})
+
+	t.Run("invalid name → flash, RenameRepo not called", func(t *testing.T) {
+		store := newFakeStore()
+		var called bool
+		store.renameRepo = func(ctx context.Context, tenant, oldName, newName string) error {
+			called = true
+			return nil
+		}
+		h := newTestHandlerWith(store, func(d *Deps) {
+			d.RenameCheck = func(ctx context.Context, tenant, newName string) error { return nil }
+		})
+		req := csrfPost(t, "/acme/demo/settings/rename", url.Values{"newname": {"bad name!"}})
+		addSessionCookie(t, req, store, adminSession())
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		if rec.Code != http.StatusSeeOther {
@@ -399,13 +487,14 @@ func TestRepoSettingsRename(t *testing.T) {
 
 	t.Run("conflict → flash name already taken", func(t *testing.T) {
 		store := newFakeStore()
-		store.perm = auth.PermAdmin
 		store.renameRepo = func(ctx context.Context, tenant, oldName, newName string) error {
 			return sqlitestore.ErrRepoExists
 		}
-		h := newTestHandlerWith(store, nil)
+		h := newTestHandlerWith(store, func(d *Deps) {
+			d.RenameCheck = func(ctx context.Context, tenant, newName string) error { return nil }
+		})
 		req := csrfPost(t, "/acme/demo/settings/rename", url.Values{"newname": {"taken"}})
-		addSessionCookie(t, req, store, userSession())
+		addSessionCookie(t, req, store, adminSession())
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		if rec.Code != http.StatusSeeOther {
@@ -418,13 +507,14 @@ func TestRepoSettingsRename(t *testing.T) {
 
 	t.Run("no such repo → 404", func(t *testing.T) {
 		store := newFakeStore()
-		store.perm = auth.PermAdmin
 		store.renameRepo = func(ctx context.Context, tenant, oldName, newName string) error {
 			return auth.ErrNoSuchRepo
 		}
-		h := newTestHandlerWith(store, nil)
+		h := newTestHandlerWith(store, func(d *Deps) {
+			d.RenameCheck = func(ctx context.Context, tenant, newName string) error { return nil }
+		})
 		req := csrfPost(t, "/acme/demo/settings/rename", url.Values{"newname": {"demo2"}})
-		addSessionCookie(t, req, store, userSession())
+		addSessionCookie(t, req, store, adminSession())
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		if rec.Code != http.StatusNotFound {
@@ -434,7 +524,6 @@ func TestRepoSettingsRename(t *testing.T) {
 
 	t.Run("happy path: rename + webhook + audit + metric + redirect", func(t *testing.T) {
 		store := newFakeStore()
-		store.perm = auth.PermAdmin
 		var order []string
 		var mu sync.Mutex
 		var gotTenant, gotOld, gotNew string
@@ -459,9 +548,10 @@ func TestRepoSettingsRename(t *testing.T) {
 		h := newTestHandlerWith(store, func(d *Deps) {
 			d.Logger = logger
 			d.Webhooks = wh
+			d.RenameCheck = func(ctx context.Context, tenant, newName string) error { return nil }
 		})
 		req := csrfPost(t, "/acme/demo/settings/rename", url.Values{"newname": {"demo2"}})
-		addSessionCookie(t, req, store, userSession())
+		addSessionCookie(t, req, store, adminSession())
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 
@@ -494,7 +584,6 @@ func TestRepoSettingsRename(t *testing.T) {
 
 	t.Run("rename to same name → flash name unchanged, RenameRepo not called", func(t *testing.T) {
 		store := newFakeStore()
-		store.perm = auth.PermAdmin
 		var called bool
 		store.renameRepo = func(ctx context.Context, tenant, oldName, newName string) error {
 			called = true
@@ -505,9 +594,12 @@ func TestRepoSettingsRename(t *testing.T) {
 			enqueued = true
 			return nil
 		}}
-		h := newTestHandlerWith(store, func(d *Deps) { d.Webhooks = wh })
+		h := newTestHandlerWith(store, func(d *Deps) {
+			d.Webhooks = wh
+			d.RenameCheck = func(ctx context.Context, tenant, newName string) error { return nil }
+		})
 		req := csrfPost(t, "/acme/demo/settings/rename", url.Values{"newname": {"demo"}})
-		addSessionCookie(t, req, store, userSession())
+		addSessionCookie(t, req, store, adminSession())
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		if rec.Code != http.StatusSeeOther {
@@ -529,15 +621,16 @@ func TestRepoSettingsRename(t *testing.T) {
 
 	t.Run("nil webhooks → still succeeds", func(t *testing.T) {
 		store := newFakeStore()
-		store.perm = auth.PermAdmin
 		var called bool
 		store.renameRepo = func(ctx context.Context, tenant, oldName, newName string) error {
 			called = true
 			return nil
 		}
-		h := newTestHandlerWith(store, nil) // d.Webhooks stays nil
+		h := newTestHandlerWith(store, func(d *Deps) { // d.Webhooks stays nil
+			d.RenameCheck = func(ctx context.Context, tenant, newName string) error { return nil }
+		})
 		req := csrfPost(t, "/acme/demo/settings/rename", url.Values{"newname": {"demo2"}})
-		addSessionCookie(t, req, store, userSession())
+		addSessionCookie(t, req, store, adminSession())
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		if rec.Code != http.StatusSeeOther {
@@ -750,7 +843,7 @@ func TestRepoSettingsDangerZoneRender(t *testing.T) {
 		}
 	})
 
-	t.Run("repo-admin sees rename but NOT delete", func(t *testing.T) {
+	t.Run("repo-admin sees neither rename nor delete (both admin-only)", func(t *testing.T) {
 		store := mkStore()
 		store.perm = auth.PermAdmin
 		h := newTestHandlerWith(store, nil)
@@ -759,8 +852,11 @@ func TestRepoSettingsDangerZoneRender(t *testing.T) {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		body := rec.Body.String()
-		if !strings.Contains(body, "/acme/demo/settings/rename") {
-			t.Fatalf("repo-admin must see rename form; body=%s", body)
+		// Rename is now an operator procedure (auth rename + out-of-band storage
+		// migration) gated to global admin like delete, so a repo-admin sees the
+		// danger-zone forms for neither.
+		if strings.Contains(body, "/acme/demo/settings/rename") {
+			t.Fatalf("repo-admin must NOT see rename form; body=%s", body)
 		}
 		if strings.Contains(body, "/acme/demo/settings/delete") {
 			t.Fatalf("repo-admin must NOT see delete form; body=%s", body)

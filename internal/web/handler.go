@@ -46,6 +46,7 @@ type Deps struct {
 	Quotas         QuotaAdmin
 	QuotaReconcile QuotaReconciler
 	RepoInit       RepoInitializer
+	RenameCheck    RepoRenameCheck
 }
 
 type server struct {
@@ -68,6 +69,7 @@ type server struct {
 	quotas         QuotaAdmin
 	quotaReconcile QuotaReconciler
 	repoInit       RepoInitializer
+	renameCheck    RepoRenameCheck
 }
 
 // NewHandler builds the web UI http.Handler. Panics only on an unrecoverable
@@ -98,6 +100,7 @@ func NewHandler(d Deps) http.Handler {
 		quotas:         d.Quotas,
 		quotaReconcile: d.QuotaReconcile,
 		repoInit:       d.RepoInit,
+		renameCheck:    d.RenameCheck,
 	}
 	if d.OIDC != nil {
 		if len(d.OIDC.HMACKey) < 16 {

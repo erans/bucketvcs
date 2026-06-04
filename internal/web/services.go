@@ -58,3 +58,14 @@ type QuotaReconciler func(ctx context.Context, tenant string, dryRun bool) (quot
 // RepoInitializer creates a repo's storage layout (in-process equivalent of
 // `bucketvcs init`). Wired in serve.go as a closure over the ObjectStore.
 type RepoInitializer func(ctx context.Context, tenant, repoName, actor string) error
+
+// RepoRenameCheck probes the destination storage prefix for a web rename. It
+// mirrors the M21 `bucketvcs repo rename` pre-check 3: M21 rename is auth-only
+// (the auth.db row + dependent tables move atomically, but storage keys are NOT
+// migrated — operators move tenants/<t>/repos/<old>/ → .../<new>/ out of band).
+// The CLI refuses to rename when the destination prefix is non-empty to avoid a
+// confused read against leftover/foreign objects; the web handler needs the same
+// guard. Returns nil when the destination prefix is empty, and a descriptive
+// error when it is non-empty OR the probe itself fails (fail-closed). Wired in
+// serve.go as a closure over the ObjectStore.
+type RepoRenameCheck func(ctx context.Context, tenant, newName string) error

@@ -33,7 +33,9 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/oidc"
 	"github.com/bucketvcs/bucketvcs/internal/policy"
 	"github.com/bucketvcs/bucketvcs/internal/repo"
+	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/sshd"
+	"github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/web"
 	"github.com/bucketvcs/bucketvcs/internal/webhooks"
 )
@@ -608,6 +610,28 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 						Actor:         actor,
 					})
 					return err
+				},
+				RenameCheck: func(ctx context.Context, tenant, newName string) error {
+					// Mirrors `bucketvcs repo rename` pre-check 3
+					// (cmd/bucketvcs/repo_rename.go): M21 rename does NOT migrate
+					// storage keys, so refuse if any object already lives under the
+					// destination prefix to avoid a confused read after rename.
+					// keys.NewRepo(...).Prefix() == "tenants/<t>/repos/<new>/", the
+					// SAME literal the CLI builds.
+					rk, kerr := keys.NewRepo(tenant, newName)
+					if kerr != nil {
+						return fmt.Errorf("rename: storage key: %w", kerr)
+					}
+					destPrefix := rk.Prefix()
+					page, lerr := store.List(ctx, destPrefix, &storage.ListOptions{MaxKeys: 1})
+					if lerr != nil {
+						return fmt.Errorf("rename: storage collision check: %w", lerr)
+					}
+					if page != nil && len(page.Objects) > 0 {
+						return fmt.Errorf("rename: storage prefix %s is non-empty (first key: %s); refusing to rename",
+							destPrefix, page.Objects[0].Key)
+					}
+					return nil
 				},
 			})
 		}

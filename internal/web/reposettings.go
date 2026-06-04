@@ -146,8 +146,20 @@ func (s *server) repoSettingsSetPublic(w http.ResponseWriter, r *http.Request, s
 }
 
 // repoSettingsRename renames (tenant, repo) to (tenant, newName)
-// (POST /settings/rename). Repo-admin or global-admin (chassis-gated).
+// (POST /settings/rename). This is global-admin-only — repo-admins get a
+// uniform 404 BEFORE the CSRF check. Rename is an operator procedure: M21
+// rename is auth-only (the auth.db row + dependent tables move atomically, but
+// storage keys are NOT migrated). The operator moves
+// tenants/<t>/repos/<old>/ → .../<new>/ out of band; a repo-admin cannot
+// complete that, so the web surface is restricted to global admin like delete.
+// Before the rename we run the SAME destination-prefix collision probe the CLI
+// uses (renameCheck) so a web rename can never point a name at leftover/foreign
+// objects (e.g. delete-no-purge then rename-into-that-name).
 func (s *server) repoSettingsRename(w http.ResponseWriter, r *http.Request, sr settingsRoute) {
+	if !isGlobalAdmin(r) {
+		s.renderError(w, r, http.StatusNotFound, "not found")
+		return
+	}
 	if !s.postGuard(w, r) {
 		return
 	}
@@ -163,6 +175,24 @@ func (s *server) repoSettingsRename(w http.ResponseWriter, r *http.Request, sr s
 		// fall through to a 500 on otherwise-valid input).
 		EmitAdminActionMetric(r.Context(), s.logger, "repo", "rename", "invalid")
 		s.redirectFlash(w, r, "/"+sr.tenant+"/"+sr.repo+"/settings", "name unchanged")
+		return
+	}
+	// No storage handle → the collision probe is impossible; refuse rather than
+	// silently skipping the CLI safeguard (mirrors RepoInit's nil handling).
+	if s.renameCheck == nil {
+		EmitAdminActionMetric(r.Context(), s.logger, "repo", "rename", "invalid")
+		s.redirectFlash(w, r, "/"+sr.tenant+"/"+sr.repo+"/settings",
+			"rename unavailable (no storage handle)")
+		return
+	}
+	// Destination-prefix collision probe (CLI pre-check 3). renameCheck returns
+	// an error when the destination prefix is non-empty OR the probe failed.
+	// Per the round-4 masking convention the detail is logged, not flashed.
+	if err := s.renameCheck(r.Context(), sr.tenant, newName); err != nil {
+		s.logger.Warn("repo rename: storage collision probe", "tenant", sr.tenant, "newname", newName, "err", err)
+		EmitAdminActionMetric(r.Context(), s.logger, "repo", "rename", "invalid")
+		s.redirectFlash(w, r, "/"+sr.tenant+"/"+sr.repo+"/settings",
+			"destination storage prefix not empty (or probe failed); refusing rename")
 		return
 	}
 	sess := SessionFromContext(r.Context())
@@ -201,7 +231,8 @@ func (s *server) repoSettingsRename(w http.ResponseWriter, r *http.Request, sr s
 	s.emitAdmin(r.Context(), "repo.renamed",
 		slog.String("tenant", sr.tenant), slog.String("from", sr.repo), slog.String("to", newName))
 	EmitAdminActionMetric(r.Context(), s.logger, "repo", "rename", "ok")
-	s.redirectFlash(w, r, "/"+sr.tenant+"/"+newName+"/settings", "repo renamed")
+	s.redirectFlash(w, r, "/"+sr.tenant+"/"+newName+"/settings",
+		"repo renamed; storage keys NOT migrated — move tenants/"+sr.tenant+"/repos/"+sr.repo+"/ to .../"+newName+"/ out of band (see operator guide)")
 }
 
 // repoSettingsDelete deletes (tenant, repo) (POST /settings/delete). This is
