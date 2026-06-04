@@ -50,6 +50,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return runSSH(ctx, rest, stdout, stderr)
 	case "gc":
 		return runGC(ctx, rest, stdout, stderr)
+	case "doctor":
+		return runDoctor(ctx, rest, stdout, stderr)
 	case "maintenance":
 		return runMaintenance(ctx, rest, stdout, stderr)
 	case "negotiate":
@@ -89,6 +91,7 @@ Subcommands:
   token              Manage tokens (create/list/revoke/rotate)
   repo               Manage repository registry and permissions (register/grant/public/rename/delete)
   gc                 Garbage-collect orphan and unreachable storage
+  doctor             Read-only health checks: storage, auth-db, config coherence, host deps
   maintenance        Run repack maintenance against repos
   negotiate          Debug: compute shipping plan via pure-Go reachability index
   reshard-refs       Convert a repo from inline refs to sharded refs
