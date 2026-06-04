@@ -641,7 +641,7 @@ affected.
 
 | Metric | Labels | Description |
 |---|---|---|
-| `web_admin_actions_total` | `domain`, `action`, `result` | Count of settings-form actions; `result` ∈ `ok`, `invalid`, `denied`, `error`; `domain` matches the settings area (e.g. `token`, `webhook`, `admin_users`, `admin_repos`, `admin_quotas`, `user`) |
+| `web_admin_actions_total` | `domain`, `action`, `result` | Count of settings-form actions; `result` ∈ `ok`, `invalid`, `error`; `domain` matches the settings area (e.g. `token`, `webhook`, `admin_users`, `admin_repos`, `admin_quotas`, `user`) |
 
 **Audit events** — all Phase 3 events carry `source=web`; actor is the session user.
 
