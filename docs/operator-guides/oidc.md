@@ -1,6 +1,6 @@
-# M22 — OIDC Token Exchange (operator guide)
+# OIDC Token Exchange (operator guide)
 
-This guide covers the M22 OIDC token-exchange feature. It explains what shipped, how to register trusted issuers and trust rules with the `bucketvcs oidc` CLI, how CI workloads obtain short-lived access tokens, security guidance and limitations, and how to read the metrics and audit events.
+This guide covers the OIDC token-exchange feature. It explains how to register trusted issuers and trust rules with the `bucketvcs oidc` CLI, how CI workloads obtain short-lived access tokens, security guidance and limitations, and how to read the metrics and audit events.
 
 Production readiness summary:
 
@@ -9,7 +9,7 @@ Production readiness summary:
 - Trust rules: `(issuer, audience, claim constraints) → (tenant, repo, scopes, ttl)` — **shipped**.
 - Scope down-scoping via request `scope=` parameter — **shipped**.
 - Short-lived repo-bound tokens swept by background goroutine — **shipped**.
-- Rate-limiting on credential failures (shared M18 limiter) — **shipped**.
+- Rate-limiting on credential failures (shared with the credential-failure limiter) — **shipped**.
 - Human/browser SSO, array-valued `aud`, tokens without `kid`, `jti` replay cache — **not shipped (v1 limitations, see §6)**.
 - Migration `0010_oidc.sql` is forward-only and applied by the existing `RunMigrations`.
 
@@ -17,7 +17,7 @@ Production readiness summary:
 
 ## 1. Overview
 
-M22 lets CI/CD workloads exchange a short-lived IdP-issued identity token (an OIDC `id_token`) for a BucketVCS access token scoped to a single repository. The exchange is governed by operator-defined trust rules stored in the gateway's authdb.
+OIDC token exchange lets CI/CD workloads exchange a short-lived IdP-issued identity token (an OIDC `id_token`) for a BucketVCS access token scoped to a single repository. The exchange is governed by operator-defined trust rules stored in the gateway's authdb.
 
 **Why bother?** Long-lived static tokens checked into CI secrets rotate infrequently and are valid indefinitely. An OIDC-minted token lives for at most 1 hour (default 15 minutes), is bound to one repo, and carries only the scopes the rule grants. A leaked token expires on its own; there is no standing credential to rotate.
 
@@ -312,7 +312,7 @@ HTTP issuer URLs are permitted solely for loopback addresses (`localhost`, `127.
 
 ### 5.7 Rate limiting
 
-Credential failures at `/_oidc/token` count against the M18 per-IP rate limiter (shared with Basic auth failures). Repeated invalid tokens will trigger 429 responses. The `--auth-rate-limit-*` serve flags control burst and refill. Issuer-unavailable (503) responses do NOT count as credential failures and do not increment the failure bucket.
+Credential failures at `/_oidc/token` count against the per-IP rate limiter (shared with Basic auth failures). Repeated invalid tokens will trigger 429 responses. The `--auth-rate-limit-*` serve flags control burst and refill. Issuer-unavailable (503) responses do NOT count as credential failures and do not increment the failure bucket.
 
 ---
 
@@ -370,7 +370,7 @@ Two metrics, emitted as structured slog records with `msg="metric"` and `metric_
 | `invalid_token` | 401 | Signature or claims verification failure. |
 | `no_rule` | 403 | No matching trust rule. |
 | `invalid_scope` | 400 | Requested scope exceeds or is invalid relative to the rule's grant. |
-| `rate_limited` | 429 | Per-IP failure budget exhausted (M18 limiter). |
+| `rate_limited` | 429 | Per-IP failure budget exhausted. |
 | `issuer_unavailable` | 503 | Discovery or JWKS endpoint unreachable. |
 
 ### 7.3 Quick log filter
@@ -402,5 +402,5 @@ journalctl -u bucketvcs \
 | **400 `invalid_request` — bad form** | `grant_type` is missing or wrong, `subject_token` is empty, or the POST body is not `application/x-www-form-urlencoded`. | Verify the `curl` invocation uses `--data-urlencode` (not `-d`) for each parameter, and that `grant_type` is exactly `urn:ietf:params:oauth:grant-type:token-exchange`. |
 | **400 `invalid_scope`** | The `scope=` request parameter contains a scope not in the rule's grant, or an unrecognised scope name. | Omit `scope=` to use the full rule grant, or request only scopes that are a subset of the rule's scopes. |
 | **503 `temporarily_unavailable`** | The gateway could not reach the issuer's discovery endpoint (`<issuer-url>/.well-known/openid-configuration`) or its JWKS URI. | Check network connectivity from the gateway to the IdP. Check DNS resolution for the issuer URL. The error is retryable — the next exchange attempt will re-fetch discovery. |
-| **429** | Per-IP rate limit on credential failures (M18). | Reduce retry rate. Wait for the bucket to refill (default: 1 failure cleared per minute when idle, burst=10). Operator can adjust with `--auth-rate-limit-burst` and `--auth-rate-limit-refill-per-minute`. |
+| **429** | Per-IP rate limit on credential failures. | Reduce retry rate. Wait for the bucket to refill (default: 1 failure cleared per minute when idle, burst=10). Operator can adjust with `--auth-rate-limit-burst` and `--auth-rate-limit-refill-per-minute`. |
 | **Token works but git clone prompts for password** | OIDC token bound to a different repo than the one being cloned. | OIDC-minted tokens are bound to exactly one `(tenant, repo)` pair. The attempt to use the token against a different repo returns 403 at the scope-check layer, which git surfaces as an auth prompt. Mint a separate token for each repo. |

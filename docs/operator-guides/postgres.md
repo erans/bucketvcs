@@ -1,8 +1,8 @@
-# M23 B1 — PostgreSQL metadata backend (operator guide)
+# PostgreSQL metadata backend (operator guide)
 
-This guide covers M23 Phase B1: backing the BucketVCS **metadata/auth database**
+This guide covers backing the BucketVCS **metadata/auth database**
 with [PostgreSQL](https://www.postgresql.org) instead of a local SQLite file. It
-explains what shipped, how to enable it, how backend selection works, the B1
+explains how to enable it, how backend selection works, the
 caveats you must understand before deploying, and how to migrate existing data.
 
 Production readiness summary:
@@ -12,7 +12,7 @@ Production readiness summary:
 - Password via `BUCKETVCS_DB_AUTH_TOKEN` env or standard libpq (`PGPASSWORD`/`~/.pgpass`); a URL-embedded password is accepted with a WARN — **shipped**.
 - All 10 migrations apply over Postgres; behavioral parity proven by a gated conformance suite — **shipped**.
 - SQLite (modernc, pure-Go) remains the zero-dependency default — **unchanged**.
-- Multi-node concurrency hardening (race-safe webhook claiming, DB-level quota idempotency, `--auth-db-max-conns` pool sizing) — **shipped in Phase B2** (see `docs/multinode.md`).
+- Multi-node concurrency hardening (race-safe webhook claiming, DB-level quota idempotency, `--auth-db-max-conns` pool sizing) — **shipped** (see `docs/multinode.md`).
 
 ---
 
@@ -21,24 +21,23 @@ Production readiness summary:
 BucketVCS keeps two very different kinds of state:
 
 - **Git object data** — packs, indexes, bundles, LFS objects — lives in object
-  storage (S3 / R2 / GCS / Azure / localfs). M23 does **not** touch this.
+  storage (S3 / R2 / GCS / Azure / localfs). The auth-DB backend choice does **not** touch this.
 - **Metadata / auth** — users, tokens, repos, permissions, protected
   refs/paths, hooks, webhooks, OIDC issuers/rules, LFS locks, quotas — lives in
-  the auth DB. This is what M23 B1 lets you move to PostgreSQL.
+  the auth DB. This is what the PostgreSQL backend lets you move off SQLite.
 
-Because B1 introduces a SQL-dialect layer (`?`→`$N` rebinding, SQLSTATE error
+Because the backend introduces a SQL-dialect layer (`?`→`$N` rebinding, SQLSTATE error
 classification, and a handful of divergent-construct helpers), the existing store
 methods run on Postgres without per-call edits. Selecting Postgres is purely an
 operator configuration change; no data model or consumer behavior changes.
 
 **Why bother?** A local SQLite file ties the gateway's auth state to one host's
 disk. Pointing the auth DB at a Postgres instance decouples that state from the
-gateway host, which simplifies backups, host replacement, and (in Phase B2)
-multi-node deployments.
+gateway host, which simplifies backups, host replacement, and multi-node
+deployments.
 
-**Multi-node restriction lifted in B2.** B1 kept `MaxOpenConns(1)` for
-single-writer correctness. Phase B2 lifts this for the PostgreSQL backend:
-multi-node deployments are now supported via `--auth-db-max-conns` (default 10),
+**Multi-node support.** Multi-node deployments are supported on the PostgreSQL
+backend via `--auth-db-max-conns` (default 10),
 `FOR UPDATE SKIP LOCKED` webhook claiming, and `quota_credits` idempotency. See
 `docs/multinode.md`. SQLite and libSQL remain single-node.
 
@@ -112,37 +111,36 @@ development or Docker-internal setups, `?sslmode=disable` is accepted.
 | `libsql://<db>.turso.io` | libSQL (Turso) | |
 | `https://<db>.turso.io` | libSQL (Turso) | |
 | `http://sqld.internal:8080` | libSQL (self-hosted) | |
-| `postgres://user@host:5432/db` | PostgreSQL | B1 |
-| `postgresql://user@host:5432/db` | PostgreSQL | B1 |
+| `postgres://user@host:5432/db` | PostgreSQL | |
+| `postgresql://user@host:5432/db` | PostgreSQL | |
 
 Password resolution for the PostgreSQL backend is described in §2.2. The
 password is **never** accepted as a CLI argument.
 
 ---
 
-## 4. B1 caveats (read before deploying)
+## 4. Caveats (read before deploying)
 
-1. **Multi-node restriction lifted in B2 (PostgreSQL only).** Phase B2 adds
+1. **Multi-node support is PostgreSQL only.** The PostgreSQL backend uses
    `FOR UPDATE SKIP LOCKED` webhook claiming, `quota_credits` DB-level idempotency,
    and `--auth-db-max-conns` pool sizing. Multiple gateway nodes against one
-   Postgres DB are now race-safe. See `docs/multinode.md`.
+   Postgres DB are race-safe. See `docs/multinode.md`.
    SQLite and libSQL remain single-node regardless of this flag.
-2. **`MaxOpenConns(1)` was a B1 constraint, now lifted for PostgreSQL.** B1 kept
-   one connection to preserve single-writer serialization. B2 makes the pool size
-   configurable via `--auth-db-max-conns` (default 10) for the Postgres backend.
+2. **Connection pool size is configurable for PostgreSQL only.** The pool size
+   is set via `--auth-db-max-conns` (default 10) for the Postgres backend.
    SQLite and libSQL are always capped at 1.
-3. **Rate limiter stays per-node.** The M18 credential-failure limiter is
+3. **Rate limiter stays per-node.** The credential-failure limiter is
    in-memory per gateway node regardless of DB backend.
 4. **Package name is a historical misnomer.** The implementation lives in
    `internal/auth/sqlitestore`, which now hosts three backends (sqlite, libsql,
-   postgres). The package is not renamed in B1 (renaming would touch all 46
+   postgres). The package is not renamed (renaming would touch all 46
    consumers); this is documented and will be addressed separately.
 
 ---
 
 ## 5. Migrating existing SQLite data into Postgres
 
-Migration is done out of band; M23 B1 does not automate it. Two approaches:
+Migration is done out of band; BucketVCS does not automate it. Two approaches:
 
 ### 5.1 Fresh Postgres DB, re-create via CLI (recommended for small deployments)
 
@@ -221,17 +219,17 @@ contents after loading to confirm all migrations are recorded (the latest
 
 ---
 
-## 7. Phase B2 (shipped)
+## 7. Multi-node support (shipped)
 
-B2 built directly on the B1 schema (all foreign keys are `DEFERRABLE INITIALLY
-DEFERRED` in the Postgres migration set, so B2 required no migration edits).
-The following items planned at the end of B1 are now complete:
+Multi-node deployment builds directly on the same schema (all foreign keys are
+`DEFERRABLE INITIALLY DEFERRED` in the Postgres migration set). The following
+items are complete:
 
 - **Multi-node webhook claiming** via `SELECT … FOR UPDATE SKIP LOCKED`.
 - **DB-level quota idempotency** via the `quota_credits` table (unique PK on
   `(tenant, oid)`; replaces the in-process ring).
 - **Connection pooling** via `--auth-db-max-conns` (default 10; Postgres only).
-- **Documentation** of the per-node M18 rate limiter in a multi-gateway context.
+- **Documentation** of the per-node rate limiter in a multi-gateway context.
 
 See `docs/multinode.md` for full details, upgrade notes,
 and the supported PostgreSQL version matrix.

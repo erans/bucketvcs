@@ -1,9 +1,9 @@
-# M23 — Turso / libSQL metadata backend (operator guide)
+# Turso / libSQL metadata backend (operator guide)
 
-This guide covers M23 Phase A: backing the BucketVCS **metadata/auth database**
+This guide covers backing the BucketVCS **metadata/auth database**
 with [Turso](https://turso.tech) / [libSQL](https://github.com/tursodatabase/libsql)
-instead of a local SQLite file. It explains what shipped, how to enable it, how
-backend selection works, the Phase-A caveats you must understand before
+instead of a local SQLite file. It explains how to enable it, how
+backend selection works, the caveats you must understand before
 deploying, and how to migrate existing data.
 
 Production readiness summary:
@@ -13,8 +13,7 @@ Production readiness summary:
 - Auth token via `BUCKETVCS_DB_AUTH_TOKEN` env (never a CLI argument) — **shipped**.
 - All 10 migrations apply over libSQL; behavioral parity proven by a gated conformance suite — **shipped**.
 - SQLite (modernc, pure-Go) remains the zero-dependency default — **unchanged**.
-- PostgreSQL backend + SQL-dialect layer — **Phase B (not shipped)**.
-- Multi-node-safe webhook claiming / quota updates, connection pooling > 1, embedded replicas / offline mode — **Phase B / out of scope (see §4)**.
+- Multi-node-safe webhook claiming / quota updates, connection pooling > 1, embedded replicas / offline mode — **out of scope for libSQL (see §4)**. For multi-node deployments, use the PostgreSQL backend (`docs/postgres.md`, `docs/multinode.md`).
 
 ---
 
@@ -23,10 +22,10 @@ Production readiness summary:
 BucketVCS keeps two very different kinds of state:
 
 - **Git object data** — packs, indexes, bundles, LFS objects — lives in object
-  storage (S3 / R2 / GCS / Azure / localfs). M23 does **not** touch this.
+  storage (S3 / R2 / GCS / Azure / localfs). The auth-DB backend choice does **not** touch this.
 - **Metadata / auth** — users, tokens, repos, permissions, protected
   refs/paths, hooks, webhooks, OIDC issuers/rules, LFS locks, quotas — lives in
-  the auth DB. This is what M23 lets you move to Turso/libSQL.
+  the auth DB. This is what the libSQL backend lets you move off SQLite.
 
 Because libSQL speaks SQLite's SQL dialect, the existing schema, migrations, and
 ~45 store methods run essentially unchanged. Selecting Turso is purely an
@@ -34,8 +33,7 @@ operator configuration change; no data model or consumer behavior changes.
 
 **Why bother?** A local SQLite file ties the gateway's auth state to one host's
 disk. Pointing the auth DB at a managed Turso database decouples that state from
-the gateway host, which simplifies backups, host replacement, and (in Phase B)
-multi-node deployments.
+the gateway host, which simplifies backups and host replacement.
 
 ---
 
@@ -108,26 +106,27 @@ The token is **never** accepted as a CLI argument.
 
 ---
 
-## 4. Phase-A caveats (read before deploying)
+## 4. Caveats (read before deploying)
 
 1. **Remote libSQL only.** No embedded replica / offline mode. Those require the
    cgo `go-libsql` driver, which would break the `CGO_ENABLED=0`
-   cross-compilation the release pipeline depends on. Phase A uses the pure-Go
-   remote client exclusively.
-2. **Single-node only for now.** Multi-node-safe webhook claiming and DB-atomic
-   quota updates are **Phase B**. Running multiple gateway nodes against one
-   Turso DB is **not yet race-safe** — deploy a single gateway node in Phase A.
-3. **`MaxOpenConns(1)`.** Phase A keeps one connection to preserve the
-   single-writer serialization the current store code assumes (quota ring-lock,
-   webhook claim). This bounds throughput; Phase B revisits pooling.
-4. **Rate limiter stays per-node.** The M18 credential-failure limiter is
+   cross-compilation the release pipeline depends on. The libSQL backend uses the
+   pure-Go remote client exclusively.
+2. **Single-node only.** Multi-node-safe webhook claiming and DB-atomic
+   quota updates are not available on libSQL. Running multiple gateway nodes
+   against one Turso DB is **not race-safe** — deploy a single gateway node, or
+   use the PostgreSQL backend for multi-node (`docs/multinode.md`).
+3. **`MaxOpenConns(1)`.** The libSQL backend keeps one connection to preserve the
+   single-writer serialization the store code assumes (quota ring-lock,
+   webhook claim). This bounds throughput.
+4. **Rate limiter stays per-node.** The credential-failure limiter is
    in-memory per node regardless of DB backend.
 
 ---
 
 ## 5. Migrating existing SQLite data into Turso
 
-This is done out of band; M23 does not automate it.
+This is done out of band; BucketVCS does not automate it.
 
 ```bash
 # 1. Dump the existing SQLite auth DB.
@@ -157,7 +156,10 @@ gateway start applies any not-yet-present migrations idempotently.
 
 ---
 
-## 7. Phase B (planned, not in this release)
+## 7. Multi-node and PostgreSQL
+
+Multi-node deployments and a SQL-dialect layer for other databases live in the
+PostgreSQL backend rather than libSQL:
 
 - PostgreSQL backend with a SQL-dialect layer (timestamps, upserts,
   autoincrement, `$N` placeholders, FK deferral, SQLSTATE error codes).
@@ -165,4 +167,5 @@ gateway start applies any not-yet-present migrations idempotently.
   claiming, DB-atomic quota updates) for shared-DB multi-gateway deployments.
 - Connection pooling beyond a single connection.
 
-The `Backend` seam introduced in M23 is the extension point these build on.
+The `Backend` seam is the extension point these build on. See `docs/postgres.md`
+and `docs/multinode.md`.
