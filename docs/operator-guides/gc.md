@@ -1,4 +1,4 @@
-# M8 Operator Guide: `bucketvcs gc`
+# Operator Guide: `bucketvcs gc`
 
 This guide is for operators who deploy, schedule, and monitor `bucketvcs gc`
 in production. It covers what the command does, when to run it, how to tune
@@ -40,20 +40,19 @@ any pack.
   JSON) that are no longer pointed to by the current manifest. These accumulate
   whenever a new index is generated and the old one is superseded.
 
-### 1.2 Explicitly out of scope (not swept by M8)
+### 1.2 Explicitly out of scope (not swept)
 
 - **Object-level GC and repack inside packs** — Reclaiming individual Git objects
-  and repacking loose or redundant data belongs to M9. `bucketvcs gc` does not
-  open pack files and does not rewrite them.
+  and repacking loose or redundant data belongs to `bucketvcs maintenance`.
+  `bucketvcs gc` does not open pack files and does not rewrite them.
 
 - **Generated packs** (`packs/generated/`)  — Dynamic pack writers are not yet
-  implemented. GC for generated packs is deferred to the milestone that
-  introduces those writers.
+  implemented. GC for generated packs is deferred until those writers exist.
 
 - **In-binary multipart cleanup** — Aborting incomplete multipart uploads from
   inside the binary requires extending the `ObjectStore` surface with
-  `ListIncompleteMultipartUploads` and `AbortMultipart`. That extension is a
-  focused future milestone. In the interim, use per-cloud bucket lifecycle
+  `ListIncompleteMultipartUploads` and `AbortMultipart`. That extension is
+  future work. In the interim, use per-cloud bucket lifecycle
   policies (see §5 below).
 
 ---
@@ -294,17 +293,17 @@ Retention values below 1 hour should only appear in automated testing scenarios
 where you have full control over the store and there are no concurrent sessions.
 Never run sub-1h retention against a production store.
 
-### 3.4 M11 TTL ≤ retention/24 rule
+### 3.4 Bundle/pack URL TTL ≤ retention/24 rule
 
-If you operate M11 bundle-uri or packfile-uri acceleration, the URL TTLs
+If you operate bundle-uri or packfile-uri acceleration, the URL TTLs
 configured on `bucketvcs serve` (`--proxied-url-bundle-ttl`,
 `--proxied-url-pack-ttl`) must satisfy `TTL ≤ retention / 24`.
 This is an operational rule, not a CLI-enforced check — `bucketvcs serve`
 will accept violating configurations, but the operator may receive bundle
 or pack URLs that reference GC-swept blobs (404 in direct mode, 500 in
 proxied mode). If you tighten `--retention` below the default 168h, lower
-the M11 TTL flags proportionally. See
-[M11 §5 TTL vs M8 Retention](bundles.md#5-ttl-vs-m8-retention).
+the bundle/pack TTL flags proportionally. See
+[Bundles: TTL vs Retention](bundles.md#5-ttl-vs-retention).
 
 ---
 
@@ -1033,12 +1032,12 @@ In the interim, if you operate a repository at this scale:
 
 ---
 
-## 10. Acceptance Verification (M8 CI / Conformance Workflow)
+## 10. Acceptance Verification (CI / Conformance Workflow)
 
-This section documents how to confirm that the M8 GC safety tests are
+This section documents how to confirm that the GC safety tests are
 exercised by the conformance workflow on every PR.
 
-### 10.1 What landed in M8
+### 10.1 GC safety test coverage
 
 - `internal/gc/conformance/safety_localfs_test.go` — property-based GCSafety
   test against the localfs backend (`TestGC_PropertyGCSafety_Localfs`).
@@ -1051,9 +1050,9 @@ exercised by the conformance workflow on every PR.
 - `scripts/conformance-emulators.sh` — extended with
   `go test ... ./internal/gc/conformance/...` so the CI emulator job picks up
   the localfs GCSafety test in the same run as the cloud-adapter tests.
-- `.github/workflows/conformance.yml` — unchanged from M7; the `emulators` job
+- `.github/workflows/conformance.yml` — the `emulators` job
   delegates entirely to `scripts/conformance-emulators.sh`, so no workflow-file
-  edit was required.
+  edit is required.
 
 ### 10.2 Running locally before pushing
 
@@ -1077,12 +1076,12 @@ leave the stack running for interactive debugging after the test run.
 ### 10.3 Triggering the CI conformance workflow (manual step)
 
 The `conformance / emulators` GitHub Actions job runs on every pull request.
-To confirm the M8 GCSafety tests are picked up:
+To confirm the GCSafety tests are picked up:
 
 1. Push the branch:
 
    ```bash
-   git push -u origin feature/m8-gc
+   git push -u origin feature/gc-work
    ```
 
 2. Open a draft PR against `main`.

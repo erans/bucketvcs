@@ -1,29 +1,29 @@
-# M14 — Protected refs (operator guide)
+# Push policy: protected refs, paths, and hooks (operator guide)
 
-This guide covers the M14 Tier 1 protected-refs feature. It explains what M14 ships, how to configure rules via the `bucketvcs policy` CLI, how enforcement integrates with receive-pack, how to read the metrics + audit events, and the common operator recipes.
+This guide covers the push-policy engine: protected refs, protected paths, and custom hooks. It explains what each tier enforces, how to configure rules via the `bucketvcs policy` CLI, how enforcement integrates with receive-pack, how to read the metrics + audit events, and the common operator recipes.
 
 The companion design document is `docs/superpowers/specs/2026-05-21-m14-hooks-policy-design.md`; the implementation plan is `docs/superpowers/plans/2026-05-21-m14-hooks-policy.md`.
 
 Production readiness summary:
 
-- Tier 1 protected refs (deletion + force-push blocking on glob-matched refnames) — **shipped** (M14).
-- Tier 2 path restrictions (`**`-aware glob matching against the diff-tree) — **shipped** (M16).
-- Tier 3 external hooks (shell-script `pre-receive` + `post-receive` under a `bwrap` namespace sandbox) — **shipped** (M20, see §11).
+- Tier 1 protected refs (deletion + force-push blocking on glob-matched refnames) — **shipped**.
+- Tier 2 path restrictions (`**`-aware glob matching against the diff-tree) — **shipped**.
+- Tier 3 external hooks (shell-script `pre-receive` + `post-receive` under a `bwrap` namespace sandbox) — **shipped** (see §11).
 - Tier 2 file-size / commit-metadata / signing rules — **deferred**.
-- Schema 4 → 9 (`0005_protected_refs.sql` ... `0009_hooks.sql`) are forward-only and applied by the existing `RunMigrations`.
+- Schema migrations `0005_protected_refs.sql` … `0009_hooks.sql` are forward-only and applied by the existing `RunMigrations`.
 
 ---
 
 ## 1. Overview
 
-M14 introduces a single protected-refs rule family. An operator registers a rule by `(tenant, repo, refname_pattern)`, and the gateway's receive-pack engine consults the rule for every ref update on that repo. Rules block two operations:
+The push-policy engine introduces a protected-refs rule family. An operator registers a rule by `(tenant, repo, refname_pattern)`, and the gateway's receive-pack engine consults the rule for every ref update on that repo. Rules block two operations:
 
 - **Deletion** of a matching ref (`old_oid != 0…0`, `new_oid == 0…0`).
 - **Non-fast-forward update** of a matching ref (`merge-base --is-ancestor old new` exits non-zero).
 
 A rule that doesn't match the inbound refname is a no-op; a rule whose ref class doesn't apply (creation, FF update) is a no-op. New-ref creation is **always allowed** in Tier 1 — `block_create` is a Tier 2 extension.
 
-The MVP intentionally omits webhooks, signed-commit verification, file-size limits, commit-author email enforcement, and per-actor allowlists. Operators who need any of those today must run an external pre-receive proxy or wait for Tier 2 / 3.
+The protected-refs MVP intentionally omits webhooks, signed-commit verification, file-size limits, commit-author email enforcement, and per-actor allowlists. Operators who need any of those today must run an external pre-receive proxy or use Tier 2 / 3.
 
 What ships:
 
@@ -167,7 +167,7 @@ Note: this is the **only** point where `policy.ref.rejected` fires. Accepted pus
 
 ### 4.2 Opt-out
 
-`EngineRequest.Policy` is `*policy.Service`. When `nil`, step 8b is skipped entirely — no enforcement, no metric emission for the policy family. This matches pre-M14 behavior bit-for-bit.
+`EngineRequest.Policy` is `*policy.Service`. When `nil`, step 8b is skipped entirely — no enforcement, no metric emission for the policy family. This matches the behavior of a gateway with no policy engine wired, bit-for-bit.
 
 The bundled CLI wires `policy.Service` unconditionally whenever `--auth-db` is configured for `bucketvcs serve`. Operators who want to disable enforcement at the gateway must build their own server entry point that leaves `gateway.Options.Policy` unset.
 
@@ -179,7 +179,7 @@ If every ref was rejected, the engine short-circuits with the same report — no
 
 ### 4.4 Fail-closed posture
 
-A `CheckUpdate` failure due to authdb unreachability, lock contention, or `git merge-base` failure is treated as `internal_error` and **rejects the push**. This is deliberate. A policy lookup that fails CANNOT silently allow a write to a protected branch — the contrast is M13.5 quota, where verify-path lookup failures degrade-open because the client has already uploaded. Step 8b is pre-commit; failing closed is the correct posture.
+A `CheckUpdate` failure due to authdb unreachability, lock contention, or `git merge-base` failure is treated as `internal_error` and **rejects the push**. This is deliberate. A policy lookup that fails CANNOT silently allow a write to a protected branch — the contrast is LFS quota enforcement, where verify-path lookup failures degrade-open because the client has already uploaded. Step 8b is pre-commit; failing closed is the correct posture.
 
 Operators alert on `policy_refs_check_total{outcome=internal_error}` and investigate authdb health.
 
@@ -257,7 +257,7 @@ Triggers: step 8b `CheckUpdate` non-`PolicyError` (sqlite read, `merge-base` sub
 | `protected-branch: deletion blocked by pattern <PAT>` | Rule with `block_deletion=true` matched the deletion. | Expected. Remove (`policy refs remove`) or relax (`policy refs add … --allow-deletion`). |
 | `protected-branch: non-fast-forward push blocked by pattern <PAT>` | Rule with `block_force_push=true` matched a non-FF update. | Expected. Developer must rebase, merge, or open a PR. |
 | `protected-branch: … by pattern <PAT>` but PAT seems wrong | `*` does not cross `/`; `**` is not supported; literal vs full-ref form mismatch. | `policy refs list` to inspect actual stored patterns. Re-add with a more specific pattern (e.g. `refs/heads/release/*` not `refs/heads/release/**`). |
-| `internal-error: merge-base failed: …` | Local bare corrupted, or OID not reachable. | Investigate bare integrity; consider `bucketvcs maintenance --force-rebuild` (M9). |
+| `internal-error: merge-base failed: …` | Local bare corrupted, or OID not reachable. | Investigate bare integrity; consider `bucketvcs maintenance --force-rebuild`. |
 | `internal-error: …sqlite…` | authdb read failed (disk full, lock contention, file moved). | Failing closed is intentional. Investigate authdb. Alert on `outcome=internal_error` for early warning. |
 | All pushes succeed despite a rule | Operator stored `main` instead of `refs/heads/main`. | `policy refs list` shows the stored pattern. Re-add with the full ref form. |
 | Rule appears in `list` but isn't enforced | Gateway built with `EngineRequest.Policy = nil`, or running against a different authdb than the CLI wrote to. | Confirm `bucketvcs serve --auth-db=…` points at the same path as the `policy` CLI. |
@@ -352,9 +352,9 @@ Pattern is matched as a literal string; mismatches are no-ops with exit code 0.
 
 ### 8.2 Compatibility
 
-- A pre-M14 gateway running against an M14-migrated authdb works unchanged — it doesn't query `protected_refs`.
-- An M14 gateway running against a pre-M14 authdb migrates 4 → 5 in-place on startup.
-- An M14 gateway with `EngineRequest.Policy = nil` (operator-built; `bucketvcs serve` always wires `policy.Service`) behaves exactly like pre-M14: no enforcement, no metrics, no audit events for the policy family.
+- A gateway without the policy engine running against a policy-migrated authdb works unchanged — it doesn't query `protected_refs`.
+- A policy-aware gateway running against an authdb that predates the `protected_refs` table migrates it in-place on startup.
+- A policy-aware gateway with `EngineRequest.Policy = nil` (operator-built; `bucketvcs serve` always wires `policy.Service`) behaves exactly like a gateway with no policy engine: no enforcement, no metrics, no audit events for the policy family.
 
 ### 8.3 Disabling per deployment
 
@@ -363,20 +363,20 @@ The bundled `bucketvcs serve` constructs `policy.New(authS.DB())` whenever `--au
 1. Build a custom server entrypoint that leaves `gateway.Options.Policy` unset, or
 2. Remove every row from the `protected_refs` table — `CheckUpdate` short-circuits when `List` returns zero rows, so the enforcement path becomes a single sqlite SELECT per push (no `merge-base` shell-out, no audit event).
 
-Option 2 is the recommended approach for ops who want the M14 binary but no enforcement.
+Option 2 is the recommended approach for ops who want the policy-aware binary but no enforcement.
 
 ---
 
 ## 9. Deferred work
 
-The MVP shipped Tier 1 only. The following items are explicitly scoped out:
+The protected-refs MVP shipped Tier 1 only. The following items are explicitly scoped out:
 
 - **Tier 2 rule families** — file-size limits, path restrictions, commit-author email regex, commit-message regex, signed-commit verification. Each is a new policy type under the same `internal/policy` package + a new CLI subcommand.
-- **HTTP webhook hooks** — shipped in M15; see the M15 operator guide.
+- **HTTP webhook hooks** — see the webhooks operator guide.
 - **Post-receive infrastructure** — natural extension point for webhooks; nothing in Tier 1 needs it.
 - **Tenant-level default rules** — auto-apply a default ruleset to all repos under a tenant.
 - **`block_create` toggle** — gates new ref creation; depends on identity to be useful.
-- **Recursive glob patterns** (`**`) — `path.Match` doesn't support; not worth a dependency for Tier 1.
+- **Recursive glob patterns** (`**`) — `path.Match` doesn't support; not worth a dependency for protected-refs matching.
 - **Bulk rule operations** — `policy refs apply --file=rules.json` for ops-as-code workflows.
 - **Audit on accept** (`policy.ref.allowed`) — would double the audit volume; the existing receive-pack audit already covers accepted pushes.
 - **Per-rule actor allowlist** — "block force-push to main UNLESS actor in [...]"; requires identity gating (RBAC, deploy-key role tags, etc.).
@@ -384,9 +384,9 @@ The MVP shipped Tier 1 only. The following items are explicitly scoped out:
 
 ---
 
-## 11. Tier 3 — custom hooks (M20)
+## 11. Tier 3 — custom hooks
 
-Tier 3 ships in M20: per-`(tenant, repo, trigger)` shell-script hooks for `pre-receive` (gate the push) and `post-receive` (run after a successful push). Scripts execute in a `bwrap` namespace sandbox with read-only `/repo`, no network by default, no `$HOOME`, no `/etc`, and a fresh `/tmp`. The design spec is `docs/superpowers/specs/2026-05-23-m20-hooks-tier3-design.md`; the schema is migration `0009_hooks.sql`.
+Tier 3 adds per-`(tenant, repo, trigger)` shell-script hooks for `pre-receive` (gate the push) and `post-receive` (run after a successful push). Scripts execute in a `bwrap` namespace sandbox with read-only `/repo`, no network by default, no `$HOOME`, no `/etc`, and a fresh `/tmp`. The design spec is `docs/superpowers/specs/2026-05-24-m20-hooks-tier3-design.md`; the schema is migration `0009_hooks.sql`.
 
 ### 11.1 Install `bwrap`
 
@@ -470,7 +470,7 @@ bucketvcs policy hooks add \
 {"tenant":"acme","repo":"site","push_id":"…","actor":"alice","tx_id":"…","manifest_version":42,"storage_backend":"localfs","updates":[…]}
 ```
 
-Native git scripts that read until EOF and ignore the JSON envelope still work; M20-aware scripts can `awk` past the blank line for the richer payload.
+Native git scripts that read until EOF and ignore the JSON envelope still work; envelope-aware scripts can `awk` past the blank line for the richer payload.
 
 ### 11.5 Environment variables
 
@@ -631,4 +631,4 @@ Yes. Both the HTTP gateway (`internal/gateway/receive_pack.go`) and the SSH list
 
 ### Q: Are protected-refs rules backed up with the repo?
 
-No — they live in `auth.db`, not in the bucket. Operator-side backups should include the authdb (it already holds users, tokens, grants, SSH keys, LFS locks, and quotas; M14 adds the protected_refs table to that list).
+No — they live in `auth.db`, not in the bucket. Operator-side backups should include the authdb (it already holds users, tokens, grants, SSH keys, LFS locks, and quotas; the protected_refs table is part of that list).

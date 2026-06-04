@@ -1,10 +1,10 @@
-# M13 — Git LFS Operator Guide
+# Git LFS Operator Guide
 
-This guide is for operators who deploy, tune, monitor, and roll back M13 Git
+This guide is for operators who deploy, tune, monitor, and roll back Git
 LFS support in production. It covers the LFS production-readiness surface,
-the per-repo storage layout, the M13-relevant `bucketvcs serve` flags, the
+the per-repo storage layout, the LFS-relevant `bucketvcs serve` flags, the
 per-backend transfer-mode matrix, three minimum operator setup recipes, the
-signed-URL TTL rule against M8 retention, the verify-failure forensic
+signed-URL TTL rule against GC retention, the verify-failure forensic
 procedure, the complete observability surface (10 metrics + 7 audit events),
 operations runbooks (signing-key rotation, emergency disable, manual
 cleanup), the deferred-work tracker, and an FAQ for the common stock
@@ -17,19 +17,18 @@ unchanged against a bucketvcs gateway over both HTTPS and SSH.
 
 | Concern | Status | Notes |
 |---|---|---|
-| HTTPS LFS push / pull | ✅ shipped | P0–P3; direct signed URL on S3/R2/GCS/Azure, gateway-proxied URL on localfs |
-| SSH `git-lfs-authenticate` | ✅ shipped | P4; Basic-auth bearer in the response header |
-| Locks API | ✅ implemented (M13.3) | Stock git-lfs lock/unlock/locks/locks --verify work against this server |
+| HTTPS LFS push / pull | ✅ shipped | direct signed URL on S3/R2/GCS/Azure, gateway-proxied URL on localfs |
+| SSH `git-lfs-authenticate` | ✅ shipped | Basic-auth bearer in the response header |
+| Locks API | ✅ implemented | Stock git-lfs lock/unlock/locks/locks --verify work against this server |
 | Multipart upload | ❌ deferred | Single PUT only; proxied-path cap 5 GiB (5×2³⁰ bytes), direct-path cap is the backend's single-PUT limit (5 GB / 5×10⁹ bytes on S3/R2 — slightly under the proxied cap) |
-| LFS GC | ✅ implemented (M13.4) | `bucketvcs gc --lfs` walks reachable Git blobs and sweeps unreferenced LFS objects past retention |
-| Per-tenant byte quotas | ✅ implemented (M13.5) | `bucketvcs quota` CLI; LFS-only; per-tenant hard cap enforced at the Batch handler |
+| LFS GC | ✅ implemented | `bucketvcs gc --lfs` walks reachable Git blobs and sweeps unreferenced LFS objects past retention |
+| Per-tenant byte quotas | ✅ implemented | `bucketvcs quota` CLI; LFS-only; per-tenant hard cap enforced at the Batch handler |
 | LFS-aware bandwidth metering | ❌ deferred | Get byte usage from S3 access logs / GCS audit logs / Azure storage analytics |
-| LFS-specific token scopes | ❌ deferred | Today every M4 write token can push LFS; every M4 read token can pull LFS |
+| LFS-specific token scopes | ❌ deferred | Today every write token can push LFS; every read token can pull LFS |
 
 The remaining deferred items are tracked in §8 with the trigger condition each
-operator should watch for. The verify-token mechanism listed as deferred
-in earlier M13 docs shipped in M13.1 — see §5.4. The Locks API listed as
-deferred in M13/M13.1/M13.2 shipped in M13.3 — see §8.1.
+operator should watch for. The verify-token mechanism is described in §5.4; the
+Locks API in §8.1.
 
 ---
 
@@ -38,7 +37,7 @@ deferred in M13/M13.1/M13.2 shipped in M13.3 — see §8.1.
 Git LFS (Large File Storage) stores large blobs out-of-band from the Git
 object graph. The client replaces a tracked file with a small pointer blob in
 Git; the actual bytes live in an LFS object store keyed by the SHA-256 of the
-content. M13 implements the LFS server protocol so that stock `git-lfs`
+content. The LFS server protocol is implemented so that stock `git-lfs`
 clients push and pull large objects against a bucketvcs gateway with no
 client-side configuration beyond the usual `git lfs track "*.bin"`.
 
@@ -81,13 +80,13 @@ returns one entry per LFS object in the repo.
 
 The flat layout is intentional. LFS clients address objects by full OID; they
 never list. Deep prefixing buys nothing for content-addressed key access and
-complicates the listing path used by operator-side audits and the M13.4
+complicates the listing path used by operator-side audits and the
 LFS GC walk. The trade-off versus a `<aa>/<bb>/<rest>` 2/2 sharded layout —
 the convention some filesystems use to bound directory entry counts — is that
 on filesystems with hard caps on entries per directory (ext2/ext3 with the
 default 32 000-entry limit, network filesystems with their own limits), a
 flat layout can exhaust the directory at high object counts. In production,
-M13 runs against cloud object stores (S3, R2, GCS, Azure Blob) where listing
+LFS runs against cloud object stores (S3, R2, GCS, Azure Blob) where listing
 is paginated and there is no directory-entry cap. Localfs is intended for
 development; ext4 (the modern Linux default) has no per-directory limit, so
 the flat layout is safe in practice.
@@ -101,18 +100,18 @@ limits that the flat layout interacts with.
 
 ### 3.1 CLI flags
 
-The five M13-relevant `bucketvcs serve` flags:
+The five LFS-relevant `bucketvcs serve` flags:
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--lfs` | `true` | Enable the LFS Batch API. LFS routes (`/info/lfs/objects/batch` for Batch; `/_lfs/<tenant>/<repo>/<oid>` for proxied PUT/GET/POST, where POST is the M13.1 verify endpoint) are mounted only when this is true. Hard-requires `--proxied-url-signing-key` + `--proxied-url-base`; set to `false` to make the gateway return 404 on every LFS route — see §7.2. |
+| `--lfs` | `true` | Enable the LFS Batch API. LFS routes (`/info/lfs/objects/batch` for Batch; `/_lfs/<tenant>/<repo>/<oid>` for proxied PUT/GET/POST, where POST is the verify endpoint) are mounted only when this is true. Hard-requires `--proxied-url-signing-key` + `--proxied-url-base`; set to `false` to make the gateway return 404 on every LFS route — see §7.2. |
 | `--lfs-presign-ttl` | `15m` | TTL for LFS upload/download presigned URLs (direct mode) and HMAC-signed proxied URLs (localfs). The Batch response's `expires_at` field is set from `now + this`. Clients refresh by re-running Batch. |
 | `--lfs-ssh-token-ttl` | `15m` | TTL for the bearer token issued via SSH `git-lfs-authenticate`. The client uses that bearer to drive the HTTPS Batch API and signed-URL transfers — once it expires, the client re-runs the SSH authenticate command. |
-| `--proxied-url-signing-key` | (empty) | Path to a file holding an HMAC key (≥ 16 bytes) used to sign proxied `/_lfs/` URLs. Required when the store is localfs and `--lfs=true`. Shared with M11 bundle/pack proxied URLs. |
+| `--proxied-url-signing-key` | (empty) | Path to a file holding an HMAC key (≥ 16 bytes) used to sign proxied `/_lfs/` URLs. Required when the store is localfs and `--lfs=true`. Shared with bundle/pack proxied URLs. |
 | `--proxied-url-base` | (empty) | External base URL of this gateway, e.g. `https://gw.example`. Required for SSH `git-lfs-authenticate` (no inbound HTTP request to derive the host from) and for proxied LFS URLs on localfs. HTTPS Batch on cloud backends works without it. |
 | `--max-body-bytes` | `1073741824` (1 GiB) | Global HTTP body cap. Applies to every gateway HTTP path including the LFS proxied `/_lfs/` PUT — to allow LFS objects above 1 GiB on the proxied path, raise this to at least the largest expected single-object size (proxied path has a separate 5 GiB hard cap; see §8.2). Direct-path LFS PUTs do NOT pass through the gateway and ignore this flag. |
 
-All defaults match `cmd/bucketvcs/serve.go`. The M8 retention flag
+All defaults match `cmd/bucketvcs/serve.go`. The retention flag
 referenced by §4 is `bucketvcs gc --retention` (default `168h` / 7 days);
 the same flag governs `bucketvcs maintenance` indirectly through the GC it
 schedules.
@@ -151,7 +150,7 @@ bucketvcs serve \
   --proxied-url-base "https://gw.example.com"
 ```
 
-As of M13.1, `--proxied-url-signing-key` and `--proxied-url-base` are
+Both `--proxied-url-signing-key` and `--proxied-url-base` are
 **required** whenever `--lfs=true`, even on cloud backends, because the
 verify action mints an HMAC-signed kind=5 token regardless of which
 backend serves the upload (see §5.4). Upload/download URLs remain
@@ -175,7 +174,7 @@ bucketvcs serve \
 ```
 
 Both `--proxied-url-signing-key` and `--proxied-url-base` are required:
-the signing key signs M13.1 verify tokens (kind=5) and M11
+the signing key signs verify tokens (kind=5) and
 bundle/pack-URI tokens (kind=1/2); the base URL is the external gateway
 host used as the verify URL prefix and as the SSH `git-lfs-authenticate`
 Href. LFS upload/download URLs remain S3-presigned (direct mode).
@@ -195,7 +194,7 @@ Localfs means proxied URLs. `--proxied-url-signing-key` is required (the
 gateway must HMAC-sign each `/_lfs/` URL); `--proxied-url-base` is required
 so the URL has the right host. Generate the signing key with
 `openssl rand -hex 16 > /etc/bucketvcs/proxied.key`. The key file is shared
-with M11 bundle / pack proxied URLs — if you already run M11 proxied mode,
+with bundle / pack proxied URLs — if you already run proxied mode,
 the existing file is reused.
 
 ---
@@ -204,7 +203,7 @@ the existing file is reused.
 
 ### 4.1 The hard rule
 
-The M11 retention rule applies to LFS in the same form:
+The bundle/pack URL retention rule applies to LFS in the same form:
 
 ```
 TTL ≤ retention / 24
@@ -218,18 +217,18 @@ reference an LFS object that gets swept by GC before the client downloads
 it. The client then sees a 404 (direct mode) or 500 (proxied mode) when
 finally pulling. Treat the rule as a hard pre-deploy lint.
 
-The 24× safety factor (the same as M11 §5.4) accommodates GC scheduling
-jitter and the §43.6-style race window described in the M8 operator guide.
+The 24× safety factor (the same as the bundle/pack TTL rule) accommodates GC scheduling
+jitter and the §43.6-style race window described in the GC operator guide.
 A URL minted right before a GC mark — but downloaded right after the
 following sweep — must remain valid; the 24× headroom is what makes that
 hold against the worst-case GC timing.
 
-LFS GC ships as of M13.4 (§8.3). Reachability-based mark-and-sweep of
-unreferenced LFS objects after retention elapses is now active, so the
+LFS GC is active (§8.3). Reachability-based mark-and-sweep of
+unreferenced LFS objects after retention elapses runs, so the
 24× headroom rule is load-bearing for LFS too: a signed-URL TTL ≥
 24× the GC cadence ensures URLs minted just before a mark remain
 valid through the following sweep. Operators who configure TTLs in
-respect of this rule do not need to revisit it after M13.4.
+respect of this rule do not need to revisit it.
 
 ### 4.2 Relevant flags
 
@@ -242,7 +241,7 @@ LFS TTL flags:
   for the HTTPS Batch API; once it expires, `git-lfs` re-invokes the SSH
   authenticate command to mint a new one.
 
-M8 retention flag:
+Retention flag:
 
 - `bucketvcs gc --retention` — default `168h` (7 days).
 
@@ -278,9 +277,9 @@ retention change. Tune retention upward, not TTL downward — TTL governs
 client-side request windows and the worst-case bytes-in-flight; bumping it
 up trades clock-skew tolerance for a smaller retention safety margin.
 
-The M11 proxied-URL TTL flags (`--proxied-url-bundle-ttl`,
+The bundle/pack proxied-URL TTL flags (`--proxied-url-bundle-ttl`,
 `--proxied-url-pack-ttl`) are independent of the LFS TTLs and obey the
-24× rule in their own right. M13 reuses the M11 signing-key file for
+24× rule in their own right. LFS reuses the bundle/pack signing-key file for
 `/_lfs/` URLs but uses a separate TTL knob — there is no shared TTL
 constraint between LFS and bundle/pack.
 
@@ -404,9 +403,9 @@ URL that expired before the PUT completed.
   outage, CORS, expired bucket creds). Drop `--lfs=false` per §7.2 until
   the upstream is restored.
 
-### 5.4 The verify-token mechanism (M13.1)
+### 5.4 The verify-token mechanism
 
-As of M13.1, the verify action carries an HMAC-signed short-TTL token
+The verify action carries an HMAC-signed short-TTL token
 of kind=5 (`lfs-verify`) — not an echo of the inbound Batch request's
 `Authorization` header. The token is bound to (tenant, repo, oid) and
 expires after `--lfs-presign-ttl` (default 15m). The token is not
@@ -418,13 +417,13 @@ action carries the token in both the URL `?token=` query parameter and
 an `Authorization: Bearer bvtv_<token>` header; the `git-lfs` client
 replays both on the verify POST, and the gateway validates the URL
 token (the header is decorative — the `bvtv_` prefix distinguishes
-verify tokens from M4 session tokens `bvts_` in forensics).
+verify tokens from session tokens `bvts_` in forensics).
 
-This closes the response-body credential leak the pre-M13.1 echo
-mechanism exposed:
+This closes the response-body credential leak that an
+`Authorization`-echo mechanism would expose:
 
 - **Client-side persistence.** `git-lfs` caches the verify action's
-  `Authorization` value on disk. Under M13.1 the cached value is a
+  `Authorization` value on disk. The cached value is a
   15-minute kind=5 token scoped to one OID, not a long-lived user
   credential.
 - **Response-body log exposure.** Any access log / reverse proxy / WAF
@@ -453,12 +452,12 @@ exits with code 2.
 
 ## 6. Observability reference
 
-### 6.1 Metrics (every M13 emission)
+### 6.1 Metrics
 
-All M13 metrics are emitted as slog text-format `metric` records with
+All LFS metrics are emitted as slog text-format `metric` records with
 `metric_name=<name> value=<int>` plus label key/value pairs. Below are
-the ten M13 metrics with valid label values and emission sites (six
-from M13/M13.1/M13.2 plus four added in M13.3 for the Locks API):
+the ten LFS metrics with valid label values and emission sites (six
+core LFS metrics plus four for the Locks API):
 
 #### `lfs_batch_requests_total{op,result}`
 
@@ -553,8 +552,8 @@ One record per SSH `git-lfs-authenticate` exec command.
     requires read, `upload` requires write).
   - `disabled` — server started with `--lfs=false`.
   - `anon` — anonymous SSH session reached the dispatcher (deploy keys
-    too, since deploy actors cannot mint LFS bearers — see M13 P4 scope
-    decision).
+    too, since deploy actors cannot mint LFS bearers — see the SSH
+    `git-lfs-authenticate` scope decision).
   - `error` — token mint failed, IO failed, or other internal error.
   - `client_disconnected` — token was minted and written to the wire
     but the client dropped before the gateway saw the close — useful for
@@ -562,7 +561,7 @@ One record per SSH `git-lfs-authenticate` exec command.
 
 Site: `internal/sshd/session.go` `handleLFSAuthenticate`.
 
-#### `lfs_locks_created_total{outcome}` (M13.3)
+#### `lfs_locks_created_total{outcome}`
 
 One record per `POST /info/lfs/locks` request.
 - `outcome`:
@@ -572,7 +571,7 @@ One record per `POST /info/lfs/locks` request.
 
 Site: `internal/lfs/locks_handler.go` `handleLocksCreate`.
 
-#### `lfs_locks_listed_total{outcome}` (M13.3)
+#### `lfs_locks_listed_total{outcome}`
 
 One record per `GET /info/lfs/locks` request.
 - `outcome`:
@@ -581,7 +580,7 @@ One record per `GET /info/lfs/locks` request.
 
 Site: `internal/lfs/locks_handler.go` `handleLocksList`.
 
-#### `lfs_locks_verified_total{outcome}` (M13.3)
+#### `lfs_locks_verified_total{outcome}`
 
 One record per `POST /info/lfs/locks/verify` request.
 - `outcome`:
@@ -590,7 +589,7 @@ One record per `POST /info/lfs/locks/verify` request.
 
 Site: `internal/lfs/locks_handler.go` `handleLocksVerify`.
 
-#### `lfs_locks_deleted_total{force,outcome}` (M13.3)
+#### `lfs_locks_deleted_total{force,outcome}`
 
 One record per `POST /info/lfs/locks/<id>/unlock` request.
 - `force`: `true` or `false` — whether the caller set `force=true`.
@@ -606,7 +605,7 @@ indicates non-owner force-unlocks are happening in volume and may
 warrant social escalation. Site: `internal/lfs/locks_handler.go`
 `handleLocksUnlock`.
 
-#### `lfs_gc_objects_marked_total{outcome}` (M13.4)
+#### `lfs_gc_objects_marked_total{outcome}`
 
 One record per `RunMark` call, emitted after the mark record is built.
 - `outcome`:
@@ -614,7 +613,7 @@ One record per `RunMark` call, emitted after the mark record is built.
 
 Site: `internal/lfs/gc/gc.go` `RunMark`.
 
-#### `lfs_gc_objects_swept_total{outcome}` (M13.4)
+#### `lfs_gc_objects_swept_total{outcome}`
 
 Four records per `RunSweep` call (one per outcome bucket, including
 zero counts so dashboards can graph deltas reliably).
@@ -643,7 +642,7 @@ are possible.
 
 Site: `internal/lfs/gc/gc.go` `RunSweep`.
 
-#### `lfs_gc_bytes_swept_total` (M13.4)
+#### `lfs_gc_bytes_swept_total`
 
 One record per `RunSweep` call. Value is the total bytes the sweep
 reclaimed (or would have reclaimed, in dry-run). Operators tracking
@@ -652,7 +651,7 @@ storage-cost recovery should chart this against
 
 Site: `internal/lfs/gc/gc.go` `RunSweep`.
 
-#### `lfs_quota_check_total{outcome}` (M13.5)
+#### `lfs_quota_check_total{outcome}`
 
 One record per Batch upload pre-check.
 - `outcome`:
@@ -661,7 +660,7 @@ One record per Batch upload pre-check.
 
 Site: `internal/lfs/handler.go::handleBatch`.
 
-#### `lfs_quota_bytes_used{tenant}` (M13.5)
+#### `lfs_quota_bytes_used{tenant}`
 
 Gauge of the current `used_bytes` for the named tenant. Refreshed
 on every Add (verify success), Subtract (GC sweep success), Set,
@@ -673,10 +672,10 @@ Sites: `internal/lfs/proxied.go::serveVerify`, `internal/lfs/gc/gc.go::RunSweep`
 
 ### 6.2 Audit events
 
-Eleven M13 audit events (four from M13/M13.1/M13.2, three added in M13.3
-for the Locks API, two added in M13.4 for LFS GC, two added in M13.5
+Eleven LFS audit events (four core LFS events, three
+for the Locks API, two for LFS GC, two
 for quotas). All use the
-flat-attribute slog shape established by M11 — each event has a
+flat-attribute slog shape — each event has a
 top-level `event=<name>` attr plus event-specific attrs. The audit
 stream is the same stdout/stderr stream that carries metrics.
 
@@ -714,7 +713,7 @@ Site: `internal/lfs/audit.go` `emitLFSObjectServed`, called from
 
 Emitted at the end of every verify request, regardless of outcome.
 
-Attrs: `repo=<tenant>/<repo>`, `user=""` (always empty under M13.1 —
+Attrs: `repo=<tenant>/<repo>`, `user=""` (always empty —
 verify is authenticated by the kind=5 HMAC token bound to (tenant,
 repo, oid), not a session, so there is no actor to record), `oid=<sha256>`,
 `size=<claimed size>`, `result=ok|missing|size_mismatch|error`.
@@ -734,13 +733,13 @@ anon|error|client_disconnected`.
 Site: `internal/lfs/audit.go` `EmitLFSSSHAuthenticate`, called from
 `internal/sshd/session.go`.
 
-#### `event=lfs.lock.create` (M13.3)
+#### `event=lfs.lock.create`
 
 Emitted after a `POST /info/lfs/locks` request creates a lock (201).
 Not emitted on conflict / unauthorized / error.
 
 Attrs: `repo=<tenant>/<repo>`, `user=<actor name>`,
-`owner_user_id=<M4 user ID of the creator>`, `lock_id=<lock_…>`,
+`owner_user_id=<user ID of the creator>`, `lock_id=<lock_…>`,
 `path=<locked path>`, `ref_name=<ref name or empty>` — `ref_name` is the
 optional repo-ref the lock was scoped to (empty for repo-wide locks).
 The explicit `owner_user_id` field lets audit consumers pivot on user
@@ -749,7 +748,7 @@ IDs without a name-join.
 Site: `internal/lfs/audit.go` `emitLFSLockCreate`, called from
 `internal/lfs/locks_handler.go` `handleLocksCreate`.
 
-#### `event=lfs.lock.delete` (M13.3)
+#### `event=lfs.lock.delete`
 
 Emitted after a `POST /info/lfs/locks/<id>/unlock` request deletes a
 lock (200). Not emitted on 403 / 404 / other-error paths.
@@ -764,7 +763,7 @@ audit traces of force-unlocks should grep for non-empty
 Site: `internal/lfs/audit.go` `emitLFSLockDelete`, called from
 `internal/lfs/locks_handler.go` `handleLocksUnlock`.
 
-#### `event=lfs.lock.verify` (M13.3)
+#### `event=lfs.lock.verify`
 
 Emitted after a `POST /info/lfs/locks/verify` request completes (200).
 Not emitted on unauthorized / error.
@@ -776,7 +775,7 @@ Attrs: `repo=<tenant>/<repo>`, `user=<actor name>`,
 Site: `internal/lfs/audit.go` `emitLFSLockVerify`, called from
 `internal/lfs/locks_handler.go` `handleLocksVerify`.
 
-#### `event=lfs.gc.mark` (M13.4)
+#### `event=lfs.gc.mark`
 
 Emitted after `RunMark` finishes one mark pass. One event per repo
 per CLI invocation.
@@ -794,7 +793,7 @@ running `--sweep-only` afterwards will fail with `ErrNoMarks`.
 Site: `internal/lfs/audit.go` `EmitLFSGCMark`, called from
 `internal/lfs/gc/gc.go` `RunMark`.
 
-#### `event=lfs.gc.sweep` (M13.4)
+#### `event=lfs.gc.sweep`
 
 Emitted after `RunSweep` finishes one sweep pass. One event per repo
 per CLI invocation.
@@ -810,7 +809,7 @@ real sweep would have done from what it actually did.
 Site: `internal/lfs/audit.go` `EmitLFSGCSweep`, called from
 `internal/lfs/gc/gc.go` `RunSweep`.
 
-#### `event=lfs.quota.exceeded` (M13.5)
+#### `event=lfs.quota.exceeded`
 
 Emitted on every rejected Batch upload.
 
@@ -821,7 +820,7 @@ Attrs: `tenant=<t>`, `current_bytes=<int64>`, `limit_bytes=<int64>`,
 Site: `internal/lfs/audit.go::EmitLFSQuotaExceeded`, called from
 `internal/lfs/handler.go::handleBatch`.
 
-#### `event=lfs.quota.reconcile` (M13.5)
+#### `event=lfs.quota.reconcile`
 
 Emitted once per `bucketvcs quota reconcile` invocation per tenant.
 
@@ -874,7 +873,7 @@ turnover, on a suspected key compromise, or as scheduled hygiene.
 **Important: the current implementation supports ONE active key at a
 time** — see `cmd/bucketvcs/serve.go` reading a single file into
 `signingKey`, which is plumbed into `LFSProxiedURLSigningKey`,
-`ProxiedURLSigningKey`, and the M11 `URLBuilder.ProxiedKey` simultaneously.
+`ProxiedURLSigningKey`, and the bundle/pack `URLBuilder.ProxiedKey` simultaneously.
 There is no overlap window: a hard cutover means in-flight tokens minted
 with the old key fail verification immediately after restart.
 
@@ -950,7 +949,7 @@ or repo touch is needed.
 
 ### 7.3 Removing stale LFS objects
 
-LFS-aware reachability GC ships as of M13.4 (§8.3) — use
+LFS-aware reachability GC is available (§8.3) — use
 `bucketvcs gc --lfs` for routine orphan cleanup. The out-of-band
 recipe below remains documented for one-off forensic cleanups (e.g.
 auditing what GC would remove before flipping it on, or scrubbing
@@ -985,39 +984,38 @@ out-of-band procedure:
    source of OIDs that look orphaned but should not be deleted.
 
 This procedure is out-of-band and unsupported by the gateway directly.
-As of M13.4 it is superseded by `bucketvcs gc --lfs` (§8.3), which
+It is superseded by `bucketvcs gc --lfs` (§8.3), which
 mark-and-sweeps unreferenced LFS objects with carry-forward retention
 semantics. The manual procedure is retained here only for operators
-running a pre-M13.4 binary or for one-off audits of LFS state against
+running a binary without LFS GC or for one-off audits of LFS state against
 external systems.
 
 ---
 
 ## 8. Deferred work
 
-Items are tracked deliberately outside M13. Each subsection below
+Items in this section are deliberately deferred. Each subsection below
 records why the item is deferred, the operational trigger condition that
 should prompt operators to escalate, and the workaround available today.
 The production-readiness table in the preamble cross-references each
 item by section number.
 
-> **The verify-token mechanism originally tracked here as deferred
-> shipped in M13.1 — see §5.4. The Locks API originally tracked here
-> as deferred shipped in M13.3 — see §8.1.**
+> **The verify-token mechanism is implemented — see §5.4. The Locks API
+> is implemented — see §8.1.**
 
 ### 8.1 LFS Locking API
 
-**Status.** Implemented (M13.3, tag m13.3-lfs-locks). The four endpoints
+**Status.** Implemented. The four endpoints
 (`POST /locks`, `GET /locks`, `POST /locks/verify`,
 `POST /locks/:id/unlock`) are served by the gateway under
 `{tenant}/{repo}.git/info/lfs/locks`. Stock `git-lfs` clients
 (`git lfs lock`, `git lfs unlock`, `git lfs locks`, `git lfs locks --verify`)
 work without configuration.
 
-**Storage.** Lock records live in the `lfs_locks` table on the M4 authdb
+**Storage.** Lock records live in the `lfs_locks` table on the authdb
 sqlite file (the one `--auth-db` points at). Whatever backs up authdb
 backs up locks too. The schema migration is additive and applied on
-first M13.3+ boot; pre-M13.3 binaries on the same authdb file are
+first boot of a locks-aware binary; older binaries on the same authdb file are
 unaffected (they don't see the new table).
 
 **Auth.** Create + Unlock require `ActionWrite` on the repo. List +
@@ -1057,12 +1055,12 @@ tables for fields). Verify failures and 503 outcomes show up under
 `outcome="error"` for the relevant `lfs_locks_*_total` counter; the
 detailed error is in the structured log via `slog` at level Error.
 
-**Deferred from M13.3** (tracked in §11):
+**Deferred** (tracked in §11):
 - TTL / auto-expiry on stale locks.
 - SSH-native lock transport (today SSH redirects to HTTPS via the existing
   `lfs.IssueSSHToken` flow).
 - Lock notifications / webhooks.
-- Integration with M11 protected branches (orthogonal: protected
+- Integration with protected branches (orthogonal: protected
   branches refuse pushes; locks block specific paths within an
   otherwise-pushable branch).
 
@@ -1103,7 +1101,7 @@ boundary.
   limit is 5000 MiB.
 
 Treat **5 GB (decimal, 5×10⁹ bytes)** — the S3 single-PUT limit — as
-the effective ceiling on every backend for M13 if you want a single
+the effective ceiling on every backend if you want a single
 number that holds everywhere; the proxied-path 5 GiB cap is slightly
 larger but cannot rescue a single PUT that exceeds S3's limit on the
 direct path.
@@ -1121,7 +1119,7 @@ upload behind a shared URL).
 
 ### 8.3 LFS-aware GC
 
-**Status.** Implemented (M13.4, tag `m13.4-lfs-gc`). Use:
+**Status.** Implemented. Use:
 
 ```
 bucketvcs gc --store=URL --repo=tenant/repo --lfs [--retention=168h] [--dry-run]
@@ -1134,7 +1132,7 @@ bucketvcs gc --store=URL --repo=tenant/repo --lfs --include-git-objects
 ```
 
 **Discovery.** `RunMark` materializes the repo's mirror (reusing the
-M9 maintenance materialize path), walks every reachable Git blob via
+maintenance materialize path), walks every reachable Git blob via
 `git rev-list --objects --all` + `git cat-file --batch`, filters to
 blobs ≤1024 bytes, and extracts the referenced LFS OID from the
 pointer signature. Live set = the union of referenced OIDs across all
@@ -1146,16 +1144,16 @@ candidate.
 in the mirror, not the LFS object size. Materialize itself is bounded
 by the pack count.
 
-**Retention.** Default 7 days (mirrors M8's Git-objects GC). An LFS
+**Retention.** Default 7 days (mirrors the Git-objects GC). An LFS
 object becomes deletable only after it has been marked unreferenced
 for at least the retention window. `first_seen_unreferenced_at`
 carries forward across mark runs, so the retention clock survives
-re-runs and is consistent with the M8 semantics.
+re-runs and is consistent with the Git-objects GC semantics.
 
 **Storage.** Mark records live at
 `tenants/<tenant>/repos/<repo>/gc/lfs-marks/<id>.json`; sweep records
 at `tenants/<tenant>/repos/<repo>/gc/lfs-sweeps/<id>.json`. These are
-parallel to the existing M8 `gc/marks/` and `gc/sweeps/` paths — the
+parallel to the existing `gc/marks/` and `gc/sweeps/` paths — the
 two kinds of GC keep their records cleanly separated.
 
 **Push-race fail-soft.** Because LFS objects are content-addressed
@@ -1168,7 +1166,7 @@ cost is acceptable.
 **Failure modes.**
 | Symptom | Cause | Action |
 |---|---|---|
-| `materialize: ...` error | M9 Materialize failed (storage IO, git fsck) | Investigate logs; retry GC later |
+| `materialize: ...` error | Materialize failed (storage IO, git fsck) | Investigate logs; retry GC later |
 | `rev-list failed` / `batch-check failed` | `git` binary error or corrupt mirror | Investigate; possibly re-mirror via `bucketvcs maintenance` |
 | Per-object delete error (network, permissions, IAM) | Backend rejected the delete | Counted as `error` in the sweep report; sweep continues; investigate the underlying backend issue |
 | Head/Delete race on a candidate | Object modified between the sweep's Head and Delete | Counted as `skipped_concurrent`; retried automatically on next sweep |
@@ -1187,7 +1185,7 @@ your push volume. A typical OSS deployment:
 
 ### 8.4 Per-tenant byte quotas
 
-**Status.** Implemented (M13.5, tag `m13.5-quotas`). Use:
+**Status.** Implemented. Use:
 
 ```
 bucketvcs quota set       --auth-db=PATH --tenant=T --limit=100GiB
@@ -1196,7 +1194,7 @@ bucketvcs quota reconcile --auth-db=PATH --store=URL {--tenant=T | --all-tenants
 bucketvcs quota clear     --auth-db=PATH --tenant=T
 ```
 
-**Schema.** New `quotas` table on the M4 authdb (migration 0004):
+**Schema.** New `quotas` table on the authdb (migration 0004):
 columns `tenant PRIMARY KEY`, `limit_bytes`, `used_bytes`, `updated_at`.
 
 **Enforcement.** The Batch upload handler runs one atomic SQL read
@@ -1247,7 +1245,7 @@ exceeded` message; the client surfaces it through stock `git lfs push`.
 | `quota show` reports `over_by=<bytes>` | Limit was lowered below current usage, or drift caught up | New uploads correctly rejected until GC + reconcile drain usage |
 | Verify response latency increases when quotas are enabled | Quota Add is a synchronous sqlite write after `WriteHeader(200)` | Acceptable: response body has already been committed; the latency floor is sqlite write latency. No mitigation needed under normal load. |
 
-**Bootstrap (one-time after upgrade).** Fresh M13.5 deployments
+**Bootstrap (one-time after upgrade).** Fresh deployments
 running against pre-existing LFS objects must seed counters once:
 
 ```
@@ -1333,9 +1331,9 @@ gateway.
 
 A deliberate compatibility choice documented in the godoc on
 `IssueSSHToken` in `internal/lfs/auth.go`. The
-M4 gateway's `RunAuth` path in `internal/gateway/auth.go` only parses
+gateway's `RunAuth` path in `internal/gateway/auth.go` only parses
 HTTP Basic credentials — it calls `r.BasicAuth()` and
-dispatches to `auth.BasicPassword` against the M4 token store. There is
+dispatches to `auth.BasicPassword` against the token store. There is
 no Bearer-token parser on the inbound side today.
 
 `IssueSSHToken` therefore mints a short-TTL token, packs it into a
