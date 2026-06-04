@@ -137,6 +137,10 @@ func NewHandler(d Deps) http.Handler {
 	s.mux.HandleFunc("/admin/users/email", s.handleAdminUserEmail)
 	s.mux.HandleFunc("/admin/repos", s.handleAdminRepos)
 	s.mux.HandleFunc("/admin/repos/register", s.handleAdminRepoRegister)
+	s.mux.HandleFunc("/admin/quotas", s.handleAdminQuotas)
+	s.mux.HandleFunc("/admin/quotas/set", s.handleAdminQuotaSet)
+	s.mux.HandleFunc("/admin/quotas/clear", s.handleAdminQuotaClear)
+	s.mux.HandleFunc("/admin/quotas/reconcile", s.handleAdminQuotaReconcile)
 	s.mux.HandleFunc("/", s.handleLanding)
 
 	return sessionMiddleware(s.store, s.ttl)(cspMiddleware(s.mux))

@@ -1,0 +1,61 @@
+{{define "title"}}quotas · admin · bucketvcs{{end}}
+{{define "content"}}
+<div class="settings">
+  {{template "adminnav" .}}
+  {{if .Flash}}<p class="flash">{{.Flash}}</p>{{end}}
+  <h2>lfs quotas</h2>
+  {{if .Enabled}}
+  {{if .Quotas}}
+  <table>
+    <thead>
+      <tr><th>tenant</th><th>used</th><th>limit</th><th>updated</th><th>actions</th></tr>
+    </thead>
+    <tbody>
+    {{range .Quotas}}
+    <tr>
+      <td class="mono">{{.Tenant}}</td>
+      <td>{{humansize .UsedBytes}}</td>
+      <td>{{if gt .LimitBytes 0}}{{humansize .LimitBytes}}{{else}}0 B{{end}}</td>
+      <td title="{{abstime .UpdatedAt.Unix}}">{{reltime .UpdatedAt.Unix}}</td>
+      <td>
+        <form method="post" action="/admin/quotas/clear" style="display:inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="hidden" name="tenant" value="{{.Tenant}}">
+          <button type="submit">clear</button>
+        </form>
+        <form method="post" action="/admin/quotas/reconcile" style="display:inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="hidden" name="tenant" value="{{.Tenant}}">
+          <button type="submit">reconcile</button>
+        </form>
+      </td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="empty">no quota rows — all tenants are currently unlimited.</p>
+  {{end}}
+
+  <h2>set quota</h2>
+  <form method="post" action="/admin/quotas/set">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label>tenant <input type="text" name="tenant" required autocomplete="off"></label>
+    <label>limit <input type="text" name="limit" required placeholder="e.g. 100GiB" autocomplete="off"></label>
+    <button type="submit">set</button>
+  </form>
+
+  {{if .CanReconcile}}
+  <h2>reconcile by tenant</h2>
+  <form method="post" action="/admin/quotas/reconcile">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label>tenant <input type="text" name="tenant" required autocomplete="off"></label>
+    <button type="submit">reconcile</button>
+  </form>
+  {{end}}
+  {{else}}
+  <p class="note">quota management unavailable (no quota service configured).</p>
+  {{end}}
+</div>
+{{end}}
+{{template "base" .}}
