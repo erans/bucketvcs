@@ -26,6 +26,7 @@ Protocol-v2 **bundle-URI** and **packfile-URI** acceleration offload heavy initi
 Not a toy. bucketvcs ships the things a real Git host needs:
 
 - **Git LFS** — batch transfer, file locks, per-tenant quotas, and LFS garbage collection
+- **Web UI** — browser login (password or **OIDC SSO**), syntax-highlighted code browsing with diffs and READMEs, and full settings/admin: tokens, SSH keys, grants, webhooks, policies, users, repos, and quotas — all from the browser
 - **Keyless CI** — OIDC token exchange (RFC 8693): your pipeline trades its IdP identity for a short-lived, repo-scoped token, so there are no long-lived secrets to leak
 - **Fine-grained auth** — scoped access tokens with rotation, SSH user & deploy keys, and per-IP rate-limiting on credential failures
 - **Policy & governance** — protected refs, protected paths, custom pre/post-receive hooks, and signed, retryable **webhooks**
@@ -125,7 +126,7 @@ git push https://my-host/my-org/my-repo main
 
 ## Status
 
-bucketvcs is open-source and built for production use as a **Git-protocol server and CLI**. It is a backend — there is **no web UI yet**; you administer it through the `bucketvcs` command and drive Git over HTTPS/SSH.
+bucketvcs is open-source and built for production use. A single binary serves the **Git protocol** (HTTPS/SSH) and an embedded **web UI** — browse code in the browser, log in with a password or OIDC SSO, and manage users, repos, tokens, webhooks, and policies from the settings pages. Everything is equally administrable through the `bucketvcs` CLI.
 
 Run `bucketvcs <command> --help` for the full command surface, and browse **[`docs/`](docs/)** for design specs, operator guides, and quickstarts.
 
