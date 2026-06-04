@@ -41,8 +41,8 @@
   <form method="post" action="/settings/tokens/create">
     <input type="hidden" name="csrf_token" value="{{.CSRF}}">
     <label>label <input type="text" name="label" required></label>
-    <label>scopes <input type="text" name="scopes" placeholder="repo:read,repo:write,lfs:read,... (empty = legacy, full access)"></label>
-    <p class="hint">scope names: repo:read, repo:write, repo:admin, lfs:read, lfs:write, webhook:admin, storage:admin. empty = legacy (full access)</p>
+    <label>scopes <input type="text" name="scopes" placeholder="repo:read,repo:write,lfs:read,... or 'all' for full access" required></label>
+    <p class="hint">scope names: repo:read, repo:write, repo:admin, lfs:read, lfs:write, webhook:admin, storage:admin. use 'all' for full access. required.</p>
     <label>expires <input type="text" name="expires" placeholder="720h, empty = never"></label>
     <button type="submit">create token</button>
   </form>

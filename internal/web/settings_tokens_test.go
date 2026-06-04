@@ -302,7 +302,39 @@ func TestTokenCreateHappy(t *testing.T) {
 	}
 }
 
-func TestTokenCreateLegacyScopes(t *testing.T) {
+func TestTokenCreateEmptyScopes(t *testing.T) {
+	store := newFakeStore()
+	var createCalled bool
+	store.createToken = func(ctx context.Context, id, userID, secretHash, label string, expiresAt *int64, scopes auth.TokenScope) error {
+		createCalled = true
+		return nil
+	}
+	h := newTestHandler(store)
+
+	// empty scopes field => flash error, no token minted
+	req := csrfPost(t, "/settings/tokens/create", url.Values{
+		"label":  {"no-scope"},
+		"scopes": {""},
+	})
+	addSessionCookie(t, req, store, userSession())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("empty scopes: status %d, want 303; body:\n%s", rec.Code, rec.Body.String())
+	}
+	if loc := rec.Header().Get("Location"); loc != "/settings/tokens" {
+		t.Fatalf("empty scopes: Location %q, want /settings/tokens", loc)
+	}
+	if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
+		t.Fatal("empty scopes: no flash cookie set")
+	}
+	if createCalled {
+		t.Fatal("empty scopes: CreateToken should not have been called")
+	}
+}
+
+func TestTokenCreateAllScopes(t *testing.T) {
 	logger, sink := newTestLogger()
 	store := newFakeStore()
 	var capturedID string
@@ -314,28 +346,31 @@ func TestTokenCreateLegacyScopes(t *testing.T) {
 	}
 	h := NewHandler(Deps{Store: store, Logger: logger})
 
-	// empty scopes field => legacy (ScopeLegacy == 0)
+	// "all" => ScopeMaskAll (all 7 bits) — NOT ScopeLegacy
 	req := csrfPost(t, "/settings/tokens/create", url.Values{
-		"label":  {"no-scope"},
-		"scopes": {""},
+		"label":  {"all-access"},
+		"scopes": {"all"},
 	})
 	addSessionCookie(t, req, store, userSession())
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("legacy scopes: status %d, want 200; body:\n%s", rec.Code, rec.Body.String())
+		t.Fatalf("all scopes: status %d, want 200; body:\n%s", rec.Code, rec.Body.String())
 	}
-	if capturedScopes != auth.ScopeLegacy {
-		t.Fatalf("legacy scopes: scopes %v, want ScopeLegacy", capturedScopes)
+	if capturedScopes != auth.ScopeMaskAll {
+		t.Fatalf("all scopes: scopes %v (%d), want ScopeMaskAll (%d)", capturedScopes, capturedScopes, auth.ScopeMaskAll)
 	}
-
-	// audit parity: the elevated legacy grant must be flagged.
-	if !sink.Has("auth.token.created", map[string]string{
+	// ScopeMaskAll != ScopeLegacy — explicit full access is NOT the legacy bypass
+	if capturedScopes == auth.ScopeLegacy {
+		t.Fatal("all scopes: ScopeMaskAll must not equal ScopeLegacy")
+	}
+	// audit event must NOT carry legacy=true (legacy attr code removed)
+	if sink.Has("auth.token.created", map[string]string{
 		"token_id": capturedID,
 		"legacy":   "true",
 	}) {
-		t.Fatal("legacy scopes: audit event auth.token.created missing legacy=true attr")
+		t.Fatal("all scopes: audit event should not carry legacy=true for ScopeMaskAll")
 	}
 }
 

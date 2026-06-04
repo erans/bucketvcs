@@ -74,15 +74,17 @@ func (s *server) handleTokenCreate(w http.ResponseWriter, r *http.Request) {
 	sess := SessionFromContext(r.Context())
 	label := r.PostFormValue("label")
 	scopesStr := r.PostFormValue("scopes")
-	var scopes auth.TokenScope
-	if scopesStr != "" {
-		var err error
-		scopes, err = auth.ParseScopes(scopesStr)
-		if err != nil {
-			EmitAdminActionMetric(r.Context(), s.logger, "token", "create", "invalid")
-			s.redirectFlash(w, r, "/settings/tokens", "invalid scopes: "+scopesStr)
-			return
-		}
+	if scopesStr == "" {
+		EmitAdminActionMetric(r.Context(), s.logger, "token", "create", "invalid")
+		s.redirectFlash(w, r, "/settings/tokens",
+			"scopes required (e.g. repo:read,repo:write — or 'all' for full access)")
+		return
+	}
+	scopes, err := auth.ParseScopes(scopesStr)
+	if err != nil {
+		EmitAdminActionMetric(r.Context(), s.logger, "token", "create", "invalid")
+		s.redirectFlash(w, r, "/settings/tokens", "invalid scopes: "+scopesStr)
+		return
 	}
 	var expiresAt *int64
 	if d := r.PostFormValue("expires"); d != "" {
@@ -119,13 +121,6 @@ func (s *server) handleTokenCreate(w http.ResponseWriter, r *http.Request) {
 		slog.String("token_id", id),
 		slog.String("label", label),
 		slog.String("scopes", scopesStr),
-	}
-	// Audit parity with the M17 CLI: an empty scopes field mints a
-	// ScopeLegacy (full-access) token. This UX is spec-sanctioned (the form
-	// warns "empty = legacy, full access"), but the elevated grant must be
-	// flagged in the audit trail so operators can spot it.
-	if scopes == auth.ScopeLegacy {
-		createAttrs = append(createAttrs, slog.Bool("legacy", true))
 	}
 	s.emitAdmin(r.Context(), "auth.token.created", createAttrs...)
 	EmitAdminActionMetric(r.Context(), s.logger, "token", "create", "ok")

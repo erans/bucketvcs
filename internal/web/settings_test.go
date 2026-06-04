@@ -302,4 +302,56 @@ func TestPasswordChange(t *testing.T) {
 			t.Fatal("revokeCleanupError: no flash cookie set")
 		}
 	})
+
+	t.Run("noCookieFlashNoRevocation", func(t *testing.T) {
+		// Drive the handler with a context-injected session but NO session cookie
+		// (the unreachable-in-prod shape: session was injected by middleware but
+		// the cookie value was not readable via r.Cookie). In this path
+		// DeleteSessionsForUser must NOT be called and the flash must be just
+		// "password changed" (not "...other sessions signed out").
+		store := newFakeStore()
+		store.verify = func(ctx context.Context, u, p string) (*auth.Actor, error) {
+			return &auth.Actor{UserID: "user1", Name: u}, nil
+		}
+		store.setPassword = func(ctx context.Context, u, p string) error { return nil }
+		var revokeCalled bool
+		store.deleteSessionsFor = func(ctx context.Context, userID, exceptRawID string) (int64, error) {
+			revokeCalled = true
+			return 0, nil
+		}
+		s := newTestServerStruct(store)
+
+		// Build POST request with CSRF but WITHOUT the session cookie; inject
+		// the session directly into the request context via withTestSession.
+		form := cloneValues(baseForm)
+		form.Set(csrfFormField, "test-csrf-token")
+		req := httptest.NewRequest(http.MethodPost, "/settings/password",
+			strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(&http.Cookie{Name: csrfCookieName, Value: "test-csrf-token"})
+		req = withTestSession(req, userSession())
+
+		rec := httptest.NewRecorder()
+		s.handlePasswordChange(rec, req)
+
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("noCookie: status %d, want 303; body:\n%s", rec.Code, rec.Body.String())
+		}
+		if loc := rec.Header().Get("Location"); loc != "/settings" {
+			t.Fatalf("noCookie: Location %q, want /settings", loc)
+		}
+		if revokeCalled {
+			t.Fatal("noCookie: DeleteSessionsForUser must not be called without a cookie")
+		}
+		flashCookie := findCookie(rec.Result().Cookies(), flashCookieName)
+		if flashCookie == nil {
+			t.Fatal("noCookie: no flash cookie set")
+		}
+		// The flash value is URL-encoded; just check for the "signed out" absence.
+		if strings.Contains(flashCookie.Value, "signed+out") ||
+			strings.Contains(flashCookie.Value, "signed%20out") ||
+			strings.Contains(flashCookie.Value, "signed out") {
+			t.Fatalf("noCookie: flash must not mention session revocation, got %q", flashCookie.Value)
+		}
+	})
 }
