@@ -12,13 +12,15 @@ import (
 
 // reservedTenantNames are top-level web UI path segments. A tenant with one
 // of these names would be shadowed by the explicit mux routes (the literal
-// /admin/* and /settings/* handlers win over the "/" browse catch-all), so
-// web registration refuses them. Git-protocol access is unaffected (.git
-// paths route to the gateway), and the CLI is intentionally not gated — an
-// operator who really wants such a tenant accepts the web shadowing, which
-// the operator guide documents.
+// /admin/* and /settings/* handlers win over the "/" browse catch-all; _ui
+// is the static-asset subtree; healthz is claimed by the gateway dispatcher
+// before the web mux), so web registration refuses them. Git-protocol access
+// is unaffected (.git paths route to the gateway), and the CLI is
+// intentionally not gated — an operator who really wants such a tenant
+// accepts the web shadowing, which the operator guide documents.
 var reservedTenantNames = map[string]bool{
-	"admin": true, "settings": true, "login": true, "logout": true, "healthz": true,
+	"admin": true, "settings": true, "login": true, "logout": true,
+	"healthz": true, "_ui": true,
 }
 
 type adminReposData struct {

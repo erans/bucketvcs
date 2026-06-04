@@ -195,6 +195,16 @@ func (s *server) repoSettingsRename(w http.ResponseWriter, r *http.Request, sr s
 			"destination storage prefix not empty (or probe failed); refusing rename")
 		return
 	}
+	// Auth-row pre-check: the repo.renamed webhook must be enqueued BEFORE
+	// RenameRepo (Enqueue resolves endpoints by the old name), so a rename
+	// that would fail on a name conflict would otherwise emit a spurious
+	// event. Probing the destination row first closes the user-triggerable
+	// conflict path; the residual TOCTOU window matches the CLI's tradeoff.
+	if _, err := s.store.GetRepoFlags(r.Context(), sr.tenant, newName); err == nil {
+		EmitAdminActionMetric(r.Context(), s.logger, "repo", "rename", "invalid")
+		s.redirectFlash(w, r, "/"+sr.tenant+"/"+sr.repo+"/settings", "name already taken")
+		return
+	}
 	sess := SessionFromContext(r.Context())
 	actor := ""
 	if sess != nil {

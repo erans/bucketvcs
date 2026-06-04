@@ -359,6 +359,16 @@ func (w *fakeWebhooks) Enqueue(ctx context.Context, event webhooks.Event, tenant
 	return nil
 }
 
+// destAbsent is a getRepoFlags fake for rename tests: the CURRENT repo
+// ("demo") resolves, any other name (the rename destination) is absent so
+// the auth-row pre-check passes.
+func destAbsent(ctx context.Context, tenant, repo string) (auth.RepoFlags, error) {
+	if repo == "demo" {
+		return auth.RepoFlags{}, nil
+	}
+	return auth.RepoFlags{}, auth.ErrNoSuchRepo
+}
+
 func TestRepoSettingsRename(t *testing.T) {
 	// Security matrix: reader (PermRead) WITH valid CSRF → 404. Rename is
 	// global-admin-only, so a non-admin session is uniformly rejected.
@@ -487,10 +497,21 @@ func TestRepoSettingsRename(t *testing.T) {
 
 	t.Run("conflict → flash name already taken", func(t *testing.T) {
 		store := newFakeStore()
+		// Default fake getRepoFlags resolves ANY name, so the auth-row
+		// pre-check catches the conflict BEFORE the webhook enqueue — the
+		// round-12 fix: no spurious repo.renamed event on a name conflict.
+		renameCalled := false
 		store.renameRepo = func(ctx context.Context, tenant, oldName, newName string) error {
+			renameCalled = true
 			return sqlitestore.ErrRepoExists
 		}
+		enqueueCalled := false
+		wh := &fakeWebhooks{enqueue: func(ctx context.Context, event webhooks.Event, tenant, repo, actor string, payload any) error {
+			enqueueCalled = true
+			return nil
+		}}
 		h := newTestHandlerWith(store, func(d *Deps) {
+			d.Webhooks = wh
 			d.RenameCheck = func(ctx context.Context, tenant, newName string) error { return nil }
 		})
 		req := csrfPost(t, "/acme/demo/settings/rename", url.Values{"newname": {"taken"}})
@@ -503,10 +524,17 @@ func TestRepoSettingsRename(t *testing.T) {
 		if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
 			t.Fatal("expected flash cookie for conflict error")
 		}
+		if enqueueCalled {
+			t.Fatal("repo.renamed must NOT be enqueued when the destination name is taken")
+		}
+		if renameCalled {
+			t.Fatal("RenameRepo must NOT be called when the pre-check catches the conflict")
+		}
 	})
 
 	t.Run("no such repo → 404", func(t *testing.T) {
 		store := newFakeStore()
+		store.getRepoFlags = destAbsent // dest row absent: pre-check passes
 		store.renameRepo = func(ctx context.Context, tenant, oldName, newName string) error {
 			return auth.ErrNoSuchRepo
 		}
@@ -524,6 +552,7 @@ func TestRepoSettingsRename(t *testing.T) {
 
 	t.Run("happy path: rename + webhook + audit + metric + redirect", func(t *testing.T) {
 		store := newFakeStore()
+		store.getRepoFlags = destAbsent // dest row absent: pre-check passes
 		var order []string
 		var mu sync.Mutex
 		var gotTenant, gotOld, gotNew string
@@ -621,6 +650,7 @@ func TestRepoSettingsRename(t *testing.T) {
 
 	t.Run("nil webhooks → still succeeds", func(t *testing.T) {
 		store := newFakeStore()
+		store.getRepoFlags = destAbsent // dest row absent: pre-check passes
 		var called bool
 		store.renameRepo = func(ctx context.Context, tenant, oldName, newName string) error {
 			called = true
