@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
-	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/webhooks"
 )
@@ -497,7 +496,7 @@ func repoDelete(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	// Use a tx with foreign_keys=OFF; clean up the non-webhook dependents
 	// explicitly, then drop the repos row. PRAGMA foreign_keys is per-
 	// connection in sqlite, so we set/restore around the transaction.
-	if err := deleteRepoKeepingWebhooks(ctx, s, tenant, repo); err != nil {
+	if err := s.DeleteRepoCascade(ctx, tenant, repo); err != nil {
 		fmt.Fprintf(stderr, "delete: %v\n", err)
 		return 1
 	}
@@ -512,46 +511,6 @@ func repoDelete(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return 1
 	}
 	return 0
-}
-
-// deleteRepoKeepingWebhooks performs the (tenant, repo) deletion without
-// cascading webhook_endpoints + webhook_deliveries. See repoDelete godoc
-// for rationale. The orphan webhook_endpoints row produced here is a
-// known limitation; a webhook-prune sweeper can clean it up after the
-// worker has drained any associated deliveries.
-func deleteRepoKeepingWebhooks(ctx context.Context, s *sqlitestore.Store, tenant, repo string) error {
-	db := s.DB()
-	// Drop FK enforcement for the destructive sequence so cascades on
-	// webhook_endpoints (ON DELETE CASCADE) and webhook_deliveries (via
-	// endpoint_id) do not fire.
-	if _, err := db.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
-		return fmt.Errorf("disable foreign_keys: %w", err)
-	}
-	// Re-enable on every exit. We do NOT wrap in a tx because PRAGMA
-	// foreign_keys is a no-op inside an open tx in sqlite; the safe path
-	// is auto-commit statements bracketed by the pragma toggle.
-	defer func() {
-		_, _ = db.ExecContext(ctx, `PRAGMA foreign_keys=ON`)
-	}()
-
-	// Cascade the non-webhook dependents manually so they're cleaned up
-	// even though FK is off.
-	stmts := []struct {
-		name string
-		sql  string
-	}{
-		{"protected_refs", `DELETE FROM protected_refs WHERE tenant=? AND repo=?`},
-		{"repo_permissions", `DELETE FROM repo_permissions WHERE tenant=? AND repo=?`},
-		{"ssh_keys (deploy-scope)", `DELETE FROM ssh_keys WHERE scope_tenant=? AND scope_repo=?`},
-		{"lfs_locks", `DELETE FROM lfs_locks WHERE tenant=? AND repo=?`},
-		{"repos", `DELETE FROM repos WHERE tenant=? AND name=?`},
-	}
-	for _, st := range stmts {
-		if _, err := db.ExecContext(ctx, st.sql, tenant, repo); err != nil {
-			return fmt.Errorf("delete from %s: %w", st.name, err)
-		}
-	}
-	return nil
 }
 
 // purgePrefix iterates the storage prefix and deletes every key. Returns
