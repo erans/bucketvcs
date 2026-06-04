@@ -200,3 +200,32 @@ func TestNavbarLinks(t *testing.T) {
 		}
 	})
 }
+
+// TestLandingConsumesFlash locks the round-9 fix: redirect targets like repo
+// delete land on "/", which must render and clear the pending flash instead
+// of leaving it to surface stale on a later settings page.
+func TestLandingConsumesFlash(t *testing.T) {
+	store := newFakeStore()
+	h := newTestHandler(store)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	setRec := httptest.NewRecorder()
+	setFlash(setRec, "repo acme/demo deleted", false)
+	req.AddCookie(setRec.Result().Cookies()[0])
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "repo acme/demo deleted") {
+		t.Fatal("landing page did not render the pending flash")
+	}
+	cleared := false
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == flashCookieName && c.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Fatal("landing page did not clear the flash cookie")
+	}
+}

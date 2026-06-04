@@ -128,7 +128,13 @@ func (s *server) handleAdminUserCreate(w http.ResponseWriter, r *http.Request) {
 		slog.Bool("password_set", passwordSet),
 	)
 	EmitAdminActionMetric(r.Context(), s.logger, "admin_users", "create", "ok")
-	s.redirectFlash(w, r, base, "user created: "+name)
+	if passwordSet {
+		s.redirectFlash(w, r, base, "user created: "+name)
+		return
+	}
+	// Deliberate no-password create is legitimate (OIDC-only accounts), but
+	// say so — password login is unusable until one is set.
+	s.redirectFlash(w, r, base, "user created: "+name+" (no password set — password login unavailable until one is set via CLI or the user signs in via OIDC)")
 }
 
 // handleAdminUserDisable processes POST /admin/users/disable.

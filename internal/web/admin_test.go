@@ -207,6 +207,17 @@ func TestAdminUserCreate_Happy(t *testing.T) {
 		if !sink.Has("auth.user.created", map[string]string{"user": "dave", "password_set": "false"}) {
 			t.Fatal("missing auth.user.created audit event with password_set=false")
 		}
+		// Deliberate no-password create must say so (roborev round 9):
+		// password login is unusable until set via CLI or OIDC.
+		flash := ""
+		for _, c := range rec.Result().Cookies() {
+			if c.Name == flashCookieName && c.Value != "" {
+				flash = decodeFlash(c)
+			}
+		}
+		if !strings.Contains(flash, "no password set") {
+			t.Fatalf("flash %q should mention the missing password", flash)
+		}
 	})
 	t.Run("with password ≥8 → CreateUser + SetPassword, audit password_set=true", func(t *testing.T) {
 		store := adminStore()
