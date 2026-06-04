@@ -440,9 +440,15 @@ func (s *server) webhooksReplay(w http.ResponseWriter, r *http.Request, sr setti
 			s.renderError(w, r, http.StatusNotFound, "not found")
 			return
 		}
-		// in_flight or other transient error → flash, preserve deliveries view
 		EmitAdminActionMetric(r.Context(), s.logger, "webhook", "delivery_replay", "error")
-		s.redirectFlash(w, r, backURL, "replay failed: "+err.Error())
+		if errors.Is(err, webhooks.ErrReplayInFlight) {
+			// Benign: worker is mid-delivery; tell the operator to wait.
+			s.redirectFlash(w, r, backURL, err.Error())
+			return
+		}
+		// Unknown/DB error: log internally, show generic message.
+		s.logger.Error("webhooks: replay delivery", "delivery_id", deliveryID, "err", err)
+		s.redirectFlash(w, r, backURL, "replay failed (internal error); see server log")
 		return
 	}
 	s.emitAdmin(r.Context(), "webhooks.delivery_replayed",

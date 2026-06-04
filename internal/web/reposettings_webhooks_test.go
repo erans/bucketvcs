@@ -679,7 +679,7 @@ func TestRepoSettingsWebhooksReplay(t *testing.T) {
 		}
 	})
 
-	t.Run("service error → flash, preserve endpoint param", func(t *testing.T) {
+	t.Run("ErrReplayInFlight → flash with sentinel message, no DB text leak", func(t *testing.T) {
 		store := webhookStore()
 		wh := &extendedFakeWebhooks{
 			listFn: func(ctx context.Context, tenant, repo string) ([]webhooks.Endpoint, error) {
@@ -689,7 +689,7 @@ func TestRepoSettingsWebhooksReplay(t *testing.T) {
 				return webhooks.Delivery{ID: id, EndpointID: 42}, nil
 			},
 			replayDeliveryFn: func(ctx context.Context, id string) error {
-				return fmt.Errorf("webhooks: cannot replay %s: row is in_flight", id)
+				return fmt.Errorf("%w (id=%s)", webhooks.ErrReplayInFlight, id)
 			},
 		}
 		h := newTestHandlerWith(store, func(d *Deps) { d.Webhooks = wh })
@@ -699,14 +699,64 @@ func TestRepoSettingsWebhooksReplay(t *testing.T) {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		if rec.Code != http.StatusSeeOther {
-			t.Fatalf("service error: status %d, want 303; body=%s", rec.Code, rec.Body.String())
+			t.Fatalf("ErrReplayInFlight: status %d, want 303; body=%s", rec.Code, rec.Body.String())
 		}
 		loc := rec.Header().Get("Location")
 		if !strings.Contains(loc, "endpoint=42") {
 			t.Fatalf("Location %q must contain endpoint=42 to preserve deliveries view", loc)
 		}
-		if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
-			t.Fatal("expected flash cookie for service error")
+		flash := findCookie(rec.Result().Cookies(), flashCookieName)
+		if flash == nil {
+			t.Fatal("expected flash cookie for ErrReplayInFlight")
+		}
+		flashVal := decodeFlash(flash)
+		if !strings.Contains(flashVal, "in_flight") {
+			t.Errorf("flash %q must mention in_flight", flashVal)
+		}
+	})
+
+	t.Run("wrapped DB error → generic flash, no DB text in flash or body", func(t *testing.T) {
+		store := webhookStore()
+		wh := &extendedFakeWebhooks{
+			listFn: func(ctx context.Context, tenant, repo string) ([]webhooks.Endpoint, error) {
+				return []webhooks.Endpoint{stdEndpoint}, nil
+			},
+			showDeliveryFn: func(ctx context.Context, id string) (webhooks.Delivery, error) {
+				return webhooks.Delivery{ID: id, EndpointID: 42}, nil
+			},
+			replayDeliveryFn: func(ctx context.Context, id string) error {
+				return fmt.Errorf("webhooks: replay %s: %w", id, fmt.Errorf("database/sql: connection pool exhausted"))
+			},
+		}
+		h := newTestHandlerWith(store, func(d *Deps) { d.Webhooks = wh })
+		req := csrfPost(t, "/acme/demo/settings/webhooks/replay",
+			url.Values{"delivery_id": {"del-1"}, "endpoint_id": {"42"}})
+		addSessionCookie(t, req, store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("DB error: status %d, want 303; body=%s", rec.Code, rec.Body.String())
+		}
+		loc := rec.Header().Get("Location")
+		if !strings.Contains(loc, "endpoint=42") {
+			t.Fatalf("Location %q must contain endpoint=42", loc)
+		}
+		flash := findCookie(rec.Result().Cookies(), flashCookieName)
+		if flash == nil {
+			t.Fatal("expected flash cookie for DB error")
+		}
+		flashVal := decodeFlash(flash)
+		// Must contain generic "internal error" message.
+		if !strings.Contains(flashVal, "internal error") {
+			t.Errorf("flash %q must contain 'internal error'", flashVal)
+		}
+		// Must NOT contain the raw DB error text.
+		const dbText = "connection pool exhausted"
+		if strings.Contains(flashVal, dbText) {
+			t.Errorf("flash %q must not contain internal DB text %q", flashVal, dbText)
+		}
+		if strings.Contains(rec.Body.String(), dbText) {
+			t.Errorf("response body must not contain internal DB text %q", dbText)
 		}
 	})
 

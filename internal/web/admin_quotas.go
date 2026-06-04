@@ -153,9 +153,9 @@ func (s *server) handleAdminQuotaReconcile(w http.ResponseWriter, r *http.Reques
 	}
 	rep, err := s.quotaReconcile(r.Context(), tenant, false)
 	if err != nil {
-		s.logger.Warn("admin quotas: reconcile failed", "tenant", tenant, "err", err)
+		s.logger.Error("admin quotas: reconcile failed", "tenant", tenant, "err", err)
 		EmitAdminActionMetric(r.Context(), s.logger, "admin_quotas", "reconcile", "error")
-		s.redirectFlash(w, r, dest, "reconcile failed: "+err.Error())
+		s.redirectFlash(w, r, dest, "reconcile failed (internal error); see server log")
 		return
 	}
 	s.emitAdmin(r.Context(), "quota.reconciled",

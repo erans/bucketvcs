@@ -411,6 +411,10 @@ func TestAdminQuotaReconcile_Error(t *testing.T) {
 	if !strings.Contains(flashVal, "reconcile failed") {
 		t.Errorf("flash %q should mention 'reconcile failed'", flashVal)
 	}
+	// Internal error text must NOT be echoed into the flash (flashableErr hardening).
+	if strings.Contains(flashVal, "storage unreachable") {
+		t.Errorf("flash %q must not contain internal error text %q", flashVal, "storage unreachable")
+	}
 }
 
 func TestAdminQuotaSet_MetricEmitted(t *testing.T) {
