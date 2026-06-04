@@ -59,6 +59,19 @@ func (s *server) handleRepoSettings(w http.ResponseWriter, r *http.Request, sr s
 		s.renderError(w, r, http.StatusNotFound, "not found")
 		return
 	}
+	// Repo-existence probe (roborev round 16): canAdminRepo short-circuits for
+	// global admins without touching the repos table, so a missing repo would
+	// otherwise render empty webhooks/policy/hooks tabs while general/access
+	// 404'd — one probe here makes every tab uniform.
+	if _, err := s.store.GetRepoFlags(r.Context(), sr.tenant, sr.repo); err != nil {
+		if !errors.Is(err, auth.ErrNoSuchRepo) {
+			s.logger.Error("repo settings: existence probe", "tenant", sr.tenant, "repo", sr.repo, "err", err)
+			s.renderError(w, r, http.StatusInternalServerError, "internal error")
+			return
+		}
+		s.renderError(w, r, http.StatusNotFound, "not found")
+		return
+	}
 	switch sr.tab {
 	case "":
 		s.repoSettingsGeneral(w, r, sr)
@@ -229,7 +242,9 @@ func (s *server) repoSettingsRename(w http.ResponseWriter, r *http.Request, sr s
 		case errors.Is(err, auth.ErrNoSuchRepo):
 			s.renderError(w, r, http.StatusNotFound, "not found")
 		case errors.Is(err, sqlitestore.ErrRepoExists):
-			EmitAdminActionMetric(r.Context(), s.logger, "repo", "rename", "conflict")
+			// "invalid" keeps the result enum closed (ok|invalid|error) —
+			// a name collision is user input, like the pre-check flash.
+			EmitAdminActionMetric(r.Context(), s.logger, "repo", "rename", "invalid")
 			s.redirectFlash(w, r, "/"+sr.tenant+"/"+sr.repo+"/settings", "name already taken")
 		default:
 			s.logger.Error("repo rename", "tenant", sr.tenant, "repo", sr.repo, "err", err)

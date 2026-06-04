@@ -110,6 +110,19 @@ func TestRepoSettingsAuthzMatrix(t *testing.T) {
 			want: http.StatusNotFound,
 		},
 		{
+			// Locks the CHASSIS-level existence probe (roborev round 16): tabs
+			// without their own repo probe (webhooks/policy/hooks) must also
+			// 404 for global admins on a missing repo, not render empty pages.
+			name: "global admin missing repo 404 on webhooks tab", sess: adminSession(), perm: auth.PermNone,
+			path: "/acme/demo/settings/webhooks",
+			mut: func(s *fakeStore) {
+				s.getRepoFlags = func(ctx context.Context, tenant, repo string) (auth.RepoFlags, error) {
+					return auth.RepoFlags{}, auth.ErrNoSuchRepo
+				}
+			},
+			want: http.StatusNotFound,
+		},
+		{
 			// Same lock on the POST /settings/public path: SetRepoPublic
 			// reporting a missing repo must surface as 404, not 500/303.
 			name: "global admin public toggle missing repo 404", sess: adminSession(), perm: auth.PermNone,
