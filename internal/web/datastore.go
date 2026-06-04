@@ -78,6 +78,11 @@ type DataStore interface {
 	// delivery can drain. Storage objects are NOT purged.
 	DeleteRepoCascade(ctx context.Context, tenant, repo string) error
 
+	// RegisterRepoIfNew inserts the (tenant, name) repos row if absent and
+	// reports whether a new row was actually inserted (false => already
+	// registered). Used by the admin repo-registration page.
+	RegisterRepoIfNew(ctx context.Context, tenant, name string) (bool, error)
+
 	// OIDC (Phase 1.5)
 	FindUserByEmail(ctx context.Context, email string) (*auth.Actor, error)
 	FindIdentity(ctx context.Context, issuer, subject string) (*auth.Actor, error)

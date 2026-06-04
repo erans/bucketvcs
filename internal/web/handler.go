@@ -135,6 +135,8 @@ func NewHandler(d Deps) http.Handler {
 	s.mux.HandleFunc("/admin/users/enable", s.handleAdminUserEnable)
 	s.mux.HandleFunc("/admin/users/delete", s.handleAdminUserDelete)
 	s.mux.HandleFunc("/admin/users/email", s.handleAdminUserEmail)
+	s.mux.HandleFunc("/admin/repos", s.handleAdminRepos)
+	s.mux.HandleFunc("/admin/repos/register", s.handleAdminRepoRegister)
 	s.mux.HandleFunc("/", s.handleLanding)
 
 	return sessionMiddleware(s.store, s.ttl)(cspMiddleware(s.mux))

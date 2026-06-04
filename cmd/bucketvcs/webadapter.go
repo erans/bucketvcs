@@ -71,6 +71,10 @@ func (a *webAdapter) DeleteRepoCascade(ctx context.Context, tenant, repo string)
 	return a.s.DeleteRepoCascade(ctx, tenant, repo)
 }
 
+func (a *webAdapter) RegisterRepoIfNew(ctx context.Context, tenant, name string) (bool, error) {
+	return a.s.RegisterRepoIfNew(ctx, tenant, name)
+}
+
 func (a *webAdapter) FindUserByEmail(ctx context.Context, email string) (*auth.Actor, error) {
 	return a.s.FindUserByEmail(ctx, email)
 }

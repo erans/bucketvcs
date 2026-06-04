@@ -12,21 +12,22 @@ import (
 
 // fakeStore implements DataStore for handler/middleware tests.
 type fakeStore struct {
-	verify        func(ctx context.Context, u, p string) (*auth.Actor, error)
-	sessions      map[string]*auth.Session // keyed by raw id
-	repos         func(actor *auth.Actor) []Repo
-	findByEmail   func(email string) (*auth.Actor, error)
-	findIdentity  func(issuer, subject string) (*auth.Actor, error)
-	linkIdentity  func(userID, issuer, subject, email string) error
-	perm          auth.Perm // returned by LookupRepoPerm
-	permErr       error     // when non-nil, LookupRepoPerm returns it
-	getRepoFlags  func(ctx context.Context, tenant, repo string) (auth.RepoFlags, error)
-	setRepoPublic func(ctx context.Context, tenant, repo string, public bool) error
-	renameRepo    func(ctx context.Context, tenant, oldName, newName string) error
-	deleteRepo    func(ctx context.Context, tenant, repo string) error
-	getUserByName func(ctx context.Context, name string) (*auth.User, error)
-	setPassword   func(ctx context.Context, userName, plaintext string) error
-	hasPassword   func(ctx context.Context, userName string) (bool, error)
+	verify            func(ctx context.Context, u, p string) (*auth.Actor, error)
+	sessions          map[string]*auth.Session // keyed by raw id
+	repos             func(actor *auth.Actor) []Repo
+	findByEmail       func(email string) (*auth.Actor, error)
+	findIdentity      func(issuer, subject string) (*auth.Actor, error)
+	linkIdentity      func(userID, issuer, subject, email string) error
+	perm              auth.Perm // returned by LookupRepoPerm
+	permErr           error     // when non-nil, LookupRepoPerm returns it
+	getRepoFlags      func(ctx context.Context, tenant, repo string) (auth.RepoFlags, error)
+	setRepoPublic     func(ctx context.Context, tenant, repo string, public bool) error
+	renameRepo        func(ctx context.Context, tenant, oldName, newName string) error
+	deleteRepo        func(ctx context.Context, tenant, repo string) error
+	registerRepoIfNew func(ctx context.Context, tenant, name string) (bool, error)
+	getUserByName     func(ctx context.Context, name string) (*auth.User, error)
+	setPassword       func(ctx context.Context, userName, plaintext string) error
+	hasPassword       func(ctx context.Context, userName string) (bool, error)
 
 	// token methods
 	listTokensForUser func(ctx context.Context, name string) ([]TokenInfo, error)
@@ -116,6 +117,12 @@ func (f *fakeStore) DeleteRepoCascade(ctx context.Context, tenant, repo string) 
 		return f.deleteRepo(ctx, tenant, repo)
 	}
 	return nil
+}
+func (f *fakeStore) RegisterRepoIfNew(ctx context.Context, tenant, name string) (bool, error) {
+	if f.registerRepoIfNew != nil {
+		return f.registerRepoIfNew(ctx, tenant, name)
+	}
+	return true, nil
 }
 func (f *fakeStore) FindUserByEmail(ctx context.Context, email string) (*auth.Actor, error) {
 	if f.findByEmail != nil {

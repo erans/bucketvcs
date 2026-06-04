@@ -62,6 +62,9 @@ func (b *browseDataStore) RenameRepo(ctx context.Context, tenant, oldName, newNa
 func (b *browseDataStore) DeleteRepoCascade(ctx context.Context, tenant, repo string) error {
 	panic("browseDataStore.DeleteRepoCascade not implemented")
 }
+func (b *browseDataStore) RegisterRepoIfNew(ctx context.Context, tenant, name string) (bool, error) {
+	panic("browseDataStore.RegisterRepoIfNew not implemented")
+}
 func (b *browseDataStore) FindUserByEmail(ctx context.Context, email string) (*auth.Actor, error) {
 	return nil, errors.New("none")
 }

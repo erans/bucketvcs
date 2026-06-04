@@ -1,0 +1,41 @@
+{{define "title"}}repos · admin · bucketvcs{{end}}
+{{define "content"}}
+<div class="settings">
+  {{template "adminnav" .}}
+  {{if .Flash}}<p class="flash">{{.Flash}}</p>{{end}}
+  <h2>repositories</h2>
+  {{if .Repos}}
+  <table>
+    <thead>
+      <tr><th>repo</th><th>visibility</th><th>created</th><th>actions</th></tr>
+    </thead>
+    <tbody>
+    {{range .Repos}}
+    <tr>
+      <td class="mono"><a href="/{{urlpath .Tenant}}/{{urlpath .Name}}">{{.Tenant}}/{{.Name}}</a></td>
+      <td>{{if .PublicRead}}public{{else}}private{{end}}</td>
+      <td title="{{abstime .CreatedAt}}">{{reltime .CreatedAt}}</td>
+      <td><a href="/{{urlpath .Tenant}}/{{urlpath .Name}}/settings">settings</a></td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="empty">no repositories registered yet.</p>
+  {{end}}
+  <p class="note">Deleting a repository happens from its settings page.</p>
+
+  <h2>register repository</h2>
+  {{if .CanRegister}}
+  <form method="post" action="/admin/repos/register">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label>tenant <input type="text" name="tenant" required autocomplete="off"></label>
+    <label>name <input type="text" name="name" required autocomplete="off"></label>
+    <button type="submit">register</button>
+  </form>
+  {{else}}
+  <p class="note">repo registration unavailable (no storage handle).</p>
+  {{end}}
+</div>
+{{end}}
+{{template "base" .}}
