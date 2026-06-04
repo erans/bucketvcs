@@ -14,6 +14,7 @@ import (
 type fakeStore struct {
 	verify            func(ctx context.Context, u, p string) (*auth.Actor, error)
 	sessions          map[string]*auth.Session // keyed by raw id
+	deleteSessionsFor func(ctx context.Context, userID, exceptRawID string) (int64, error)
 	repos             func(actor *auth.Actor) []Repo
 	findByEmail       func(email string) (*auth.Actor, error)
 	findIdentity      func(issuer, subject string) (*auth.Actor, error)
@@ -78,6 +79,19 @@ func (f *fakeStore) TouchSession(ctx context.Context, raw string, ttl time.Durat
 func (f *fakeStore) DeleteSession(ctx context.Context, raw string) error {
 	delete(f.sessions, raw)
 	return nil
+}
+func (f *fakeStore) DeleteSessionsForUser(ctx context.Context, userID, exceptRawID string) (int64, error) {
+	if f.deleteSessionsFor != nil {
+		return f.deleteSessionsFor(ctx, userID, exceptRawID)
+	}
+	var n int64
+	for raw, s := range f.sessions {
+		if s.UserID == userID && raw != exceptRawID {
+			delete(f.sessions, raw)
+			n++
+		}
+	}
+	return n, nil
 }
 func (f *fakeStore) ListAccessibleRepos(ctx context.Context, actor *auth.Actor) ([]Repo, error) {
 	if f.repos == nil {

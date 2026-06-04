@@ -224,21 +224,26 @@ func TestRepoSettingsAccessRevoke(t *testing.T) {
 		}
 	})
 
-	t.Run("no such user → flash, no 500", func(t *testing.T) {
+	t.Run("empty username → flash, RevokeRepoPermission not called", func(t *testing.T) {
 		store := accessStore()
+		var called bool
 		store.revokeRepoPermission = func(ctx context.Context, userName, tenant, repo string) error {
-			return auth.ErrNoSuchUser
+			called = true
+			return nil
 		}
 		h := newTestHandlerWith(store, nil)
-		req := csrfPost(t, "/acme/demo/settings/access/revoke", url.Values{"username": {"ghost"}})
+		req := csrfPost(t, "/acme/demo/settings/access/revoke", url.Values{"username": {""}})
 		addSessionCookie(t, req, store, userSession())
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		if rec.Code != http.StatusSeeOther {
-			t.Fatalf("status %d, want 303 (flash, not 500); body=%s", rec.Code, rec.Body.String())
+			t.Fatalf("status %d, want 303; body=%s", rec.Code, rec.Body.String())
+		}
+		if called {
+			t.Fatal("RevokeRepoPermission must not be called for empty username")
 		}
 		if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
-			t.Fatal("expected flash cookie for no-such-user revoke")
+			t.Fatal("expected flash cookie for empty-username revoke")
 		}
 	})
 }

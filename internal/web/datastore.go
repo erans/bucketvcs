@@ -51,6 +51,10 @@ type DataStore interface {
 	LookupSession(ctx context.Context, rawID string) (*auth.Session, error)
 	TouchSession(ctx context.Context, rawID string, ttl time.Duration) error
 	DeleteSession(ctx context.Context, rawID string) error
+	// DeleteSessionsForUser deletes all of a user's sessions except the one
+	// identified by exceptRawID ("" = delete all). Returns the number deleted.
+	// Used on password change to revoke attacker-held cookies.
+	DeleteSessionsForUser(ctx context.Context, userID, exceptRawID string) (int64, error)
 	ListAccessibleRepos(ctx context.Context, actor *auth.Actor) ([]Repo, error)
 	// GetVisibleRepo returns the repo if the actor may view it, or an error.
 	// The web layer treats any error as 404 (anti-enumeration).

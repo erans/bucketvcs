@@ -234,7 +234,7 @@ func TestAdminUserCreate_Happy(t *testing.T) {
 			t.Fatal("missing auth.user.created audit event with password_set=true")
 		}
 	})
-	t.Run("CreateUser ok + SetPassword fails → 500", func(t *testing.T) {
+	t.Run("CreateUser ok + SetPassword fails → flash (user exists), audit password_set=false", func(t *testing.T) {
 		store := adminStore()
 		store.createUser = func(ctx context.Context, name string, isAdmin bool) (string, error) {
 			return "uid-" + name, nil
@@ -242,13 +242,25 @@ func TestAdminUserCreate_Happy(t *testing.T) {
 		store.setPassword = func(ctx context.Context, userName, plaintext string) error {
 			return errors.New("db boom")
 		}
-		h := newTestHandlerWith(store, nil)
+		logger, sink := newTestLogger()
+		h := newTestHandlerWith(store, func(d *Deps) { d.Logger = logger })
 		req := csrfPost(t, "/admin/users/create", url.Values{"name": {"frank"}, "password": {"longenough"}})
 		addSessionCookie(t, req, store, adminSession())
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
-		if rec.Code != http.StatusInternalServerError {
-			t.Fatalf("status %d, want 500", rec.Code)
+		// The user DOES exist now, so a bare 500 is wrong: flash + 303 instead.
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status %d, want 303; body=%s", rec.Code, rec.Body.String())
+		}
+		if loc := rec.Header().Get("Location"); loc != "/admin/users" {
+			t.Fatalf("Location %q, want /admin/users", loc)
+		}
+		if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
+			t.Fatal("expected flash cookie when set-password fails")
+		}
+		// The auth.user.created event must still fire (the user exists).
+		if !sink.Has("auth.user.created", map[string]string{"user": "frank", "password_set": "false"}) {
+			t.Fatal("missing auth.user.created audit event with password_set=false")
 		}
 	})
 }

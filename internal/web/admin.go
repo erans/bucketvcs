@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
@@ -105,9 +106,17 @@ func (s *server) handleAdminUserCreate(w http.ResponseWriter, r *http.Request) {
 	passwordSet := false
 	if password != "" {
 		if err := s.store.SetPassword(r.Context(), name, password); err != nil {
+			// The user was already created, so a bare 500 would be misleading
+			// (a retry hits "user already exists"). Surface the partial state:
+			// the account exists but has no password.
 			s.logger.Error("admin: set password after create", "user", name, "err", err)
 			EmitAdminActionMetric(r.Context(), s.logger, "admin_users", "create", "error")
-			s.renderError(w, r, http.StatusInternalServerError, "internal error")
+			s.emitAdmin(r.Context(), "auth.user.created",
+				slog.String("user", name),
+				slog.Bool("is_admin", isAdmin),
+				slog.Bool("password_set", false),
+			)
+			s.redirectFlash(w, r, base, "user "+strconv.Quote(name)+" created WITHOUT a password (set-password failed); set one via CLI 'bucketvcs user set-password' or delete and retry")
 			return
 		}
 		passwordSet = true

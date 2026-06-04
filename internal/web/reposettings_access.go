@@ -138,6 +138,11 @@ func (s *server) accessRevoke(w http.ResponseWriter, r *http.Request, sr setting
 		return
 	}
 	userName := r.PostFormValue("username")
+	if userName == "" {
+		EmitAdminActionMetric(r.Context(), s.logger, "repo_access", "revoke", "invalid")
+		s.redirectFlash(w, r, sr.accessBase(), "username required")
+		return
+	}
 	if err := s.store.RevokeRepoPermission(r.Context(), userName, sr.tenant, sr.repo); err != nil {
 		if errors.Is(err, auth.ErrNoSuchUser) {
 			EmitAdminActionMetric(r.Context(), s.logger, "repo_access", "revoke", "invalid")

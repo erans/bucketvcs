@@ -31,6 +31,9 @@ func (a *webAdapter) TouchSession(ctx context.Context, raw string, ttl time.Dura
 func (a *webAdapter) DeleteSession(ctx context.Context, raw string) error {
 	return a.s.DeleteSession(ctx, raw)
 }
+func (a *webAdapter) DeleteSessionsForUser(ctx context.Context, userID, exceptRawID string) (int64, error) {
+	return a.s.DeleteSessionsForUser(ctx, userID, exceptRawID)
+}
 func (a *webAdapter) ListAccessibleRepos(ctx context.Context, actor *auth.Actor) ([]web.Repo, error) {
 	rs, err := a.s.ListAccessibleRepos(ctx, actor)
 	if err != nil {

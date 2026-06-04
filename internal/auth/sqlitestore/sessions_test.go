@@ -84,6 +84,78 @@ func TestLookupSession_RejectsDisabledUser(t *testing.T) {
 	}
 }
 
+func TestDeleteSessionsForUser(t *testing.T) {
+	s := mustOpen(t)
+	defer s.Close()
+	ctx := context.Background()
+
+	uid, err := s.CreateUser(ctx, "alice", true)
+	if err != nil {
+		t.Fatalf("CreateUser alice: %v", err)
+	}
+	otherUID, err := s.CreateUser(ctx, "mallory", false)
+	if err != nil {
+		t.Fatalf("CreateUser mallory: %v", err)
+	}
+
+	raw1, err := s.CreateSession(ctx, uid, "password", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateSession 1: %v", err)
+	}
+	raw2, err := s.CreateSession(ctx, uid, "password", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateSession 2: %v", err)
+	}
+	raw3, err := s.CreateSession(ctx, uid, "password", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateSession 3: %v", err)
+	}
+	otherRaw, err := s.CreateSession(ctx, otherUID, "password", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateSession other: %v", err)
+	}
+
+	// Delete alice's other sessions, keeping raw2 (the "current" one).
+	n, err := s.DeleteSessionsForUser(ctx, uid, raw2)
+	if err != nil {
+		t.Fatalf("DeleteSessionsForUser: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("deleted %d sessions, want 2", n)
+	}
+
+	// raw2 survives.
+	if _, err := s.LookupSession(ctx, raw2); err != nil {
+		t.Fatalf("LookupSession raw2 (kept): %v", err)
+	}
+	// raw1 + raw3 are gone.
+	if _, err := s.LookupSession(ctx, raw1); !errors.Is(err, auth.ErrNoSession) {
+		t.Fatalf("LookupSession raw1: want ErrNoSession, got %v", err)
+	}
+	if _, err := s.LookupSession(ctx, raw3); !errors.Is(err, auth.ErrNoSession) {
+		t.Fatalf("LookupSession raw3: want ErrNoSession, got %v", err)
+	}
+	// The other user's session is untouched.
+	if _, err := s.LookupSession(ctx, otherRaw); err != nil {
+		t.Fatalf("LookupSession other user: %v", err)
+	}
+
+	// exceptRawID == "" deletes all remaining sessions for the user.
+	n, err = s.DeleteSessionsForUser(ctx, uid, "")
+	if err != nil {
+		t.Fatalf("DeleteSessionsForUser (all): %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("deleted %d sessions, want 1", n)
+	}
+	if _, err := s.LookupSession(ctx, raw2); !errors.Is(err, auth.ErrNoSession) {
+		t.Fatalf("LookupSession raw2 after delete-all: want ErrNoSession, got %v", err)
+	}
+	if _, err := s.LookupSession(ctx, otherRaw); err != nil {
+		t.Fatalf("LookupSession other user after delete-all: %v", err)
+	}
+}
+
 func TestSessionExpiryAndSweep(t *testing.T) {
 	s := mustOpen(t)
 	defer s.Close()

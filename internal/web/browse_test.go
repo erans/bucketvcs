@@ -38,6 +38,9 @@ func (b *browseDataStore) TouchSession(ctx context.Context, raw string, ttl time
 	return nil
 }
 func (b *browseDataStore) DeleteSession(ctx context.Context, raw string) error { return nil }
+func (b *browseDataStore) DeleteSessionsForUser(ctx context.Context, userID, exceptRawID string) (int64, error) {
+	return 0, nil
+}
 func (b *browseDataStore) ListAccessibleRepos(ctx context.Context, a *auth.Actor) ([]Repo, error) {
 	return nil, nil
 }

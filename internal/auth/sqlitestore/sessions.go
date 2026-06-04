@@ -95,6 +95,28 @@ func (s *Store) DeleteSession(ctx context.Context, rawID string) error {
 	return err
 }
 
+// DeleteSessionsForUser deletes all of a user's sessions except the one
+// identified by exceptRawID ("" = delete all). Returns the number deleted.
+// Used on password change so credential rotation revokes attacker-held cookies.
+func (s *Store) DeleteSessionsForUser(ctx context.Context, userID, exceptRawID string) (int64, error) {
+	var (
+		res sql.Result
+		err error
+	)
+	if exceptRawID == "" {
+		res, err = s.db.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ?`, userID)
+	} else {
+		res, err = s.db.ExecContext(ctx,
+			`DELETE FROM sessions WHERE user_id = ? AND id_hash != ?`,
+			userID, hashSessionID(exceptRawID))
+	}
+	if err != nil {
+		return 0, fmt.Errorf("delete sessions for user: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // SweepExpiredSessions deletes sessions whose expiry is at or before `now`.
 func (s *Store) SweepExpiredSessions(ctx context.Context, now time.Time) (int, error) {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at <= ?`, now.Unix())

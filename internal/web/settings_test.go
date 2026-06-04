@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -219,6 +220,14 @@ func TestPasswordChange(t *testing.T) {
 			setPWPlain = p
 			return nil
 		}
+		var revokedUser, revokedExcept string
+		var revokeCalled bool
+		store.deleteSessionsFor = func(ctx context.Context, userID, exceptRawID string) (int64, error) {
+			revokeCalled = true
+			revokedUser = userID
+			revokedExcept = exceptRawID
+			return 2, nil
+		}
 		h := NewHandler(Deps{Store: store, Logger: logger})
 
 		req := csrfPost(t, "/settings/password", cloneValues(baseForm))
@@ -237,12 +246,60 @@ func TestPasswordChange(t *testing.T) {
 		if setPWPlain != "newpass123" {
 			t.Fatalf("happy: SetPassword called with wrong plaintext %q", setPWPlain)
 		}
+		if !revokeCalled {
+			t.Fatal("happy: DeleteSessionsForUser was not called")
+		}
+		if revokedUser != "user1" {
+			t.Fatalf("happy: DeleteSessionsForUser userID %q, want %q", revokedUser, "user1")
+		}
+		// The current session's raw cookie value must be the exclusion so the
+		// user is not logged out of the session that just changed the password.
+		if revokedExcept != "test-sess-user1" {
+			t.Fatalf("happy: DeleteSessionsForUser exceptRawID %q, want current cookie", revokedExcept)
+		}
+		if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
+			t.Fatal("happy: no flash cookie set")
+		}
 		if !sink.Has("auth.user.password_changed", map[string]string{
 			"actor":  "user",
 			"source": "web",
 			"user":   "user",
 		}) {
 			t.Fatal("happy: audit event auth.user.password_changed not logged with expected attrs")
+		}
+	})
+
+	t.Run("revokeCleanupErrorStill303", func(t *testing.T) {
+		store := newFakeStore()
+		store.verify = func(ctx context.Context, u, p string) (*auth.Actor, error) {
+			return &auth.Actor{UserID: "user1", Name: u}, nil
+		}
+		var setPWCalled bool
+		store.setPassword = func(ctx context.Context, u, p string) error {
+			setPWCalled = true
+			return nil
+		}
+		store.deleteSessionsFor = func(ctx context.Context, userID, exceptRawID string) (int64, error) {
+			return 0, errors.New("boom")
+		}
+		h := newTestHandler(store)
+
+		req := csrfPost(t, "/settings/password", cloneValues(baseForm))
+		addSessionCookie(t, req, store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		// Cleanup failure is best-effort: the password change still succeeds.
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("revokeCleanupError: status %d, want 303; body:\n%s", rec.Code, rec.Body.String())
+		}
+		if loc := rec.Header().Get("Location"); loc != "/settings" {
+			t.Fatalf("revokeCleanupError: Location %q, want /settings", loc)
+		}
+		if !setPWCalled {
+			t.Fatal("revokeCleanupError: SetPassword should have been called")
+		}
+		if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
+			t.Fatal("revokeCleanupError: no flash cookie set")
 		}
 	})
 }

@@ -573,6 +573,12 @@ unexploitable.
 **Destructive actions** (repo delete, user delete, endpoint remove, hook remove)
 require a type-the-name confirm field validated server-side; no JS-only confirms.
 
+**Password change revokes other sessions**: a successful change at
+`/settings/password` deletes the user's *other* web sessions (attacker-held
+cookies die; the current session survives so the operator is not logged out).
+API tokens are NOT auto-revoked — rotate or revoke those separately via
+`/settings/tokens`.
+
 ### 7.4 SSRF note — webhook endpoint URLs
 
 Repo admins can register webhook endpoint URLs. A malicious URL could cause the
