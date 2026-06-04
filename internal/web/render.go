@@ -75,9 +75,11 @@ type treeData struct {
 
 type blobData struct {
 	browseHeader
-	Path string
-	Blob browsemodel.Blob
-	Code template.HTML // highlighted HTML; empty for binary/too-large
+	Path     string
+	Blob     browsemodel.Blob
+	Code     template.HTML // highlighted HTML; empty for binary/too-large
+	Markdown bool          // path renders as Markdown (offer the toggle)
+	Rendered template.HTML // sanitized rendered Markdown when ?view=rendered
 }
 
 type commitsData struct {

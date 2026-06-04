@@ -599,3 +599,53 @@ func TestUIWideCSP(t *testing.T) {
 		t.Errorf("raw CSP = %q", got)
 	}
 }
+
+func TestBlob_MarkdownRenderedToggle(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+		blob: browsemodel.Blob{Path: "docs/guide.md", Size: 20, Bytes: []byte("# Title\n\n**bold** <script>x()</script>\n")},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+
+	// Source view: offers [rendered].
+	req := httptest.NewRequest("GET", "/acme/demo/blob/main/docs/guide.md", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, "?view=rendered") || !strings.Contains(body, "[rendered]") {
+		t.Fatalf("source view missing [rendered] toggle: %s", body)
+	}
+
+	// Rendered view: sanitized HTML + [source] link back.
+	req = httptest.NewRequest("GET", "/acme/demo/blob/main/docs/guide.md?view=rendered", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body = rec.Body.String()
+	if !strings.Contains(body, "<strong>") && !strings.Contains(body, "<h1") {
+		t.Fatalf("rendered view missing rendered markdown: %s", body)
+	}
+	if strings.Contains(body, "<script>") {
+		t.Fatalf("rendered view not sanitized: %s", body)
+	}
+	if !strings.Contains(body, "[source]") {
+		t.Fatalf("rendered view missing [source] toggle: %s", body)
+	}
+}
+
+func TestBlob_NonMarkdownNoRenderToggle(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+		blob: browsemodel.Blob{Path: "main.go", Size: 10, Bytes: []byte("package x\n")},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/blob/main/main.go?view=rendered", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if strings.Contains(body, "[rendered]") || strings.Contains(body, "[source]") {
+		t.Fatalf("non-markdown blob should have no render toggle: %s", body)
+	}
+	if !strings.Contains(body, "main.go") {
+		t.Fatalf("source view broken: %s", body)
+	}
+}

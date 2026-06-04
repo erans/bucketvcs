@@ -227,8 +227,12 @@ func (s *server) handleBlob(w http.ResponseWriter, r *http.Request, br browseRou
 		s.browseError(w, r, err)
 		return
 	}
+	md := isMarkdownPath(res.Path) && !b.Binary && !b.TooLarge && len(b.Bytes) <= maxHighlightBytes
+	var rendered template.HTML
 	var code template.HTML
-	if !b.Binary && !b.TooLarge {
+	if md && r.URL.Query().Get("view") == "rendered" {
+		rendered = renderMarkdown(b.Bytes)
+	} else if !b.Binary && !b.TooLarge {
 		code = highlight(res.Path, b.Bytes)
 	}
 	s.renderBrowse(w, r, "blob.html", blobData{
@@ -236,6 +240,8 @@ func (s *server) handleBlob(w http.ResponseWriter, r *http.Request, br browseRou
 		Path:         res.Path,
 		Blob:         b,
 		Code:         code,
+		Markdown:     md,
+		Rendered:     rendered,
 	})
 }
 

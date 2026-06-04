@@ -12,6 +12,12 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/browsemodel"
 )
 
+// isMarkdownPath reports whether a blob path renders as Markdown.
+func isMarkdownPath(p string) bool {
+	l := strings.ToLower(p)
+	return strings.HasSuffix(l, ".md") || strings.HasSuffix(l, ".markdown")
+}
+
 // ugcPolicy is the HTML sanitization policy for rendered Markdown. Built once;
 // bluemonday policies are safe for concurrent use after construction.
 var ugcPolicy = bluemonday.UGCPolicy()

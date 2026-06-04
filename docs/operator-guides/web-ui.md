@@ -350,6 +350,8 @@ skipped.
 | Binary blob (NUL byte in first 8 KiB) | Message + download link; no source rendered |
 | Any blob > 10 MiB | "Too large" message; bytes are not fetched and the file is not downloadable (the raw endpoint returns HTTP 413) |
 
+Markdown blobs (`.md` / `.markdown`, text, ≤ 1 MiB) offer a `[rendered]` toggle next to `[raw]`; appending `?view=rendered` shows the goldmark-rendered, bluemonday-sanitized HTML in the same `<div class="readme">` frame used by the repo-home README — the rendered view links back via `[source]`.
+
 Chroma selects a lexer by filename; if that fails it falls back to content
 analysis, then to a plain-text lexer. Output uses CSS classes (`WithClasses(true)`)
 rather than inline styles — a requirement of the strict UI CSP. The stylesheet is
