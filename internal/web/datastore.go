@@ -29,6 +29,10 @@ type DataStore interface {
 	// The web layer treats any error as 404 (anti-enumeration).
 	GetVisibleRepo(ctx context.Context, actor *auth.Actor, tenant, name string) (*Repo, error)
 
+	// LookupRepoPerm returns the actor's effective permission on (tenant, repo).
+	// Used by the repo-settings authz gate (PermAdmin or global admin).
+	LookupRepoPerm(ctx context.Context, actor *auth.Actor, tenant, repo string) (auth.Perm, error)
+
 	// OIDC (Phase 1.5)
 	FindUserByEmail(ctx context.Context, email string) (*auth.Actor, error)
 	FindIdentity(ctx context.Context, issuer, subject string) (*auth.Actor, error)

@@ -18,6 +18,8 @@ type fakeStore struct {
 	findByEmail  func(email string) (*auth.Actor, error)
 	findIdentity func(issuer, subject string) (*auth.Actor, error)
 	linkIdentity func(userID, issuer, subject, email string) error
+	perm         auth.Perm // returned by LookupRepoPerm
+	permErr      error     // when non-nil, LookupRepoPerm returns it
 }
 
 func newFakeStore() *fakeStore { return &fakeStore{sessions: map[string]*auth.Session{}} }
@@ -52,6 +54,12 @@ func (f *fakeStore) ListAccessibleRepos(ctx context.Context, actor *auth.Actor) 
 }
 func (f *fakeStore) GetVisibleRepo(ctx context.Context, actor *auth.Actor, tenant, name string) (*Repo, error) {
 	return nil, nil
+}
+func (f *fakeStore) LookupRepoPerm(ctx context.Context, actor *auth.Actor, tenant, repo string) (auth.Perm, error) {
+	if f.permErr != nil {
+		return auth.PermNone, f.permErr
+	}
+	return f.perm, nil
 }
 func (f *fakeStore) FindUserByEmail(ctx context.Context, email string) (*auth.Actor, error) {
 	if f.findByEmail != nil {

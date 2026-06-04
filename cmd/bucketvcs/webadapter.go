@@ -51,6 +51,10 @@ func (a *webAdapter) GetVisibleRepo(ctx context.Context, actor *auth.Actor, tena
 	return &web.Repo{Tenant: r.Tenant, Name: r.Name, PublicRead: r.PublicRead, CreatedAt: r.CreatedAt}, nil
 }
 
+func (a *webAdapter) LookupRepoPerm(ctx context.Context, actor *auth.Actor, tenant, repo string) (auth.Perm, error) {
+	return a.s.LookupRepoPerm(ctx, actor, tenant, repo)
+}
+
 func (a *webAdapter) FindUserByEmail(ctx context.Context, email string) (*auth.Actor, error) {
 	return a.s.FindUserByEmail(ctx, email)
 }

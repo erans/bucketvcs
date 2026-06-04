@@ -46,6 +46,9 @@ func (b *browseDataStore) GetVisibleRepo(ctx context.Context, a *auth.Actor, ten
 	}
 	return nil, errNotVisible
 }
+func (b *browseDataStore) LookupRepoPerm(ctx context.Context, a *auth.Actor, tenant, repo string) (auth.Perm, error) {
+	return auth.PermNone, nil
+}
 func (b *browseDataStore) FindUserByEmail(ctx context.Context, email string) (*auth.Actor, error) {
 	return nil, errors.New("none")
 }
