@@ -255,7 +255,7 @@ func deliver(ctx context.Context, svc *Service, client *http.Client, cfg WorkerC
 	httpReq.Header.Set("BucketVCS-Signature", sig)
 	httpReq.Header.Set("X-BucketVCS-Delivery-ID", row.ID)
 	httpReq.Header.Set("X-BucketVCS-Event", row.EventType)
-	httpReq.Header.Set("User-Agent", "bucketvcs-webhook/M15")
+	httpReq.Header.Set("User-Agent", "bucketvcs-webhook/1")
 	resp, err := client.Do(httpReq)
 	durationMs := time.Since(start).Milliseconds()
 	if err != nil {

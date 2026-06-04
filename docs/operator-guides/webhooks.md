@@ -212,7 +212,7 @@ Every POST carries:
 
 ```
 Content-Type: application/json
-User-Agent: bucketvcs-webhook/M15
+User-Agent: bucketvcs-webhook/1
 X-BucketVCS-Event: push
 X-BucketVCS-Delivery-ID: <uuid>
 BucketVCS-Signature: t=1747934201,v1=4b3f…
