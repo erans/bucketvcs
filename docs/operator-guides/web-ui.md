@@ -363,7 +363,12 @@ links the stylesheet automatically.
 The old "white-box" symptom (highlighted text invisible on a dark background) is
 gone — the monokai dark theme is embedded in the generated stylesheet.
 
-Line numbers in highlighted blobs are anchors (`#L42`); visiting a URL with that fragment (or clicking a line number) highlights the target line and scrolls it into view.
+Line numbers in highlighted blobs are anchors (`#L42`), and ranges are
+supported as `#L42:50` (lenient parsing also accepts `#L42:L50`, `#L42-50`,
+and `#L42-L50`). Visiting a URL with such a fragment highlights the line or
+range and scrolls the first line into view. Clicking a line number selects
+that line and updates the fragment; click-and-drag on the number column
+selects a range.
 
 Blob and tree views also show relative times ("2h ago") with absolute UTC
 tooltips, and file sizes are displayed in binary units (e.g. "1.2 KiB").
