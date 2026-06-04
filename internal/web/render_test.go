@@ -53,7 +53,7 @@ func TestRenderLanding_DiskOverride(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "templates"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"base.html", "landing.html", "login.html", "error.html"} {
+	for _, name := range []string{"base.html", "_partials.html", "landing.html", "login.html", "error.html"} {
 		b, err := assetsFS.ReadFile("templates/" + name)
 		if err != nil {
 			t.Fatalf("read embedded %s: %v", name, err)

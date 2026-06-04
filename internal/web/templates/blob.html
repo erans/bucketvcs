@@ -2,13 +2,17 @@
 {{define "content"}}
 <div class="browse">
   <div class="repohdr"><span class="path">{{.Tenant}}/{{.Repo}}</span></div>
-  <div class="path">{{.Path}}{{if not .Blob.TooLarge}} &nbsp;<a href="/{{.Tenant}}/{{.Repo}}/raw/{{urlpath .RefOrOID}}/{{urlpath .Path}}">[raw]</a>{{end}}</div>
+  <div class="path">{{.Path}}{{if .Markdown}}{{if .Rendered}} &nbsp;<a href="/{{.Tenant}}/{{.Repo}}/blob/{{urlpath .RefOrOID}}/{{urlpath .Path}}">[source]</a>{{else}} &nbsp;<a href="/{{.Tenant}}/{{.Repo}}/blob/{{urlpath .RefOrOID}}/{{urlpath .Path}}?view=rendered">[rendered]</a>{{end}}{{end}}{{if not .Blob.TooLarge}} &nbsp;<a href="/{{.Tenant}}/{{.Repo}}/raw/{{urlpath .RefOrOID}}/{{urlpath .Path}}">[raw]</a>{{end}}</div>
   {{if .Blob.TooLarge}}
-    <p class="empty">file too large to display ({{.Blob.Size}} bytes)</p>
+    <p class="empty">file too large to display ({{humansize .Blob.Size}})</p>
   {{else if .Blob.Binary}}
-    <p class="empty">binary file ({{.Blob.Size}} bytes) — <a href="/{{.Tenant}}/{{.Repo}}/raw/{{urlpath .RefOrOID}}/{{urlpath .Path}}">download</a></p>
+    <p class="empty">binary file ({{humansize .Blob.Size}}) — <a href="/{{.Tenant}}/{{.Repo}}/raw/{{urlpath .RefOrOID}}/{{urlpath .Path}}">download</a></p>
   {{else}}
-    <div class="code">{{.Code}}</div>
+    {{if .Rendered}}
+      <div class="readme">{{.Rendered}}</div>
+    {{else}}
+      <div class="code">{{.Code}}</div>
+    {{end}}
   {{end}}
 </div>
 {{end}}

@@ -14,6 +14,19 @@ import (
 // DefaultSessionTTL is used when Deps.SessionTTL is zero.
 const DefaultSessionTTL = 168 * time.Hour
 
+// uiCSP is the strict policy for all UI responses. Possible because the UI has
+// zero inline styles/scripts (class-based chroma + diff classes). Blocks remote
+// README images by design (img-src 'self') — see the operator guide. The raw
+// endpoint overrides this with its own stricter policy.
+const uiCSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+
+func cspMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy", uiCSP)
+		next.ServeHTTP(w, r)
+	})
+}
+
 // Deps are the web handler's dependencies (composition-root wired).
 type Deps struct {
 	Store      DataStore
@@ -76,6 +89,7 @@ func NewHandler(d Deps) http.Handler {
 		}
 	}
 	s.mux.Handle("/_ui/static/", staticHandler(d.UIDir))
+	s.mux.HandleFunc("/_ui/static/chroma.css", chromaCSSHandler(d.UIDir))
 	s.mux.HandleFunc("/login", s.handleLogin)
 	s.mux.HandleFunc("/logout", s.handleLogout)
 	if s.oidc != nil {
@@ -84,7 +98,7 @@ func NewHandler(d Deps) http.Handler {
 	}
 	s.mux.HandleFunc("/", s.handleLanding)
 
-	return sessionMiddleware(s.store, s.ttl)(s.mux)
+	return sessionMiddleware(s.store, s.ttl)(cspMiddleware(s.mux))
 }
 
 // renderError writes a styled error page with the given status code.

@@ -1259,3 +1259,39 @@ func DiffTreePatch(ctx context.Context, dir, oid, parent string) ([]byte, error)
 	return runCapped(ctx, dir, maxDiffPatchBytes, "-c", "core.quotePath=false", "--no-replace-objects", "diff-tree", "-p", "-M",
 		"--root", "--no-color", oid)
 }
+
+// maxLogNameStatusBytes caps the bounded attribution walk used by the web
+// tree view's last-commit column.
+const maxLogNameStatusBytes = 8 << 20 // 8 MiB
+
+// LogNameStatus returns up to max commits reachable from oid with the paths
+// each touched, as 0x1e-separated records:
+//
+//	0x1e <oid> 0x1f <author-name> 0x1f <author-email> 0x1f <unixtime> 0x1f <subject> \n
+//	<STATUS>\t<path>\n ...
+//
+// Renames are disabled (--no-renames: a rename reports as A+D, so the rename
+// commit is the path's last touch) and paths are emitted verbatim
+// (core.quotePath=false). scopePath, when non-empty, restricts the walk to
+// commits touching that directory. Output is byte-capped; on overflow the
+// captured prefix is returned with an error wrapping ErrOutputCapped.
+func LogNameStatus(ctx context.Context, dir, oid string, max int, scopePath string) ([]byte, error) {
+	if !validRefOrOID(oid) {
+		return nil, fmt.Errorf("gitcli: LogNameStatus: invalid oid %q", oid)
+	}
+	if max <= 0 {
+		return nil, fmt.Errorf("gitcli: LogNameStatus: bad max %d", max)
+	}
+	args := []string{
+		"-c", "core.quotePath=false", "--no-replace-objects", "log", oid,
+		fmt.Sprintf("--max-count=%d", max), "--name-status", "--no-color",
+		"--no-renames", "--pretty=format:%x1e%H%x1f%an%x1f%ae%x1f%at%x1f%s",
+	}
+	if scopePath != "" {
+		if !validRevPath(scopePath) {
+			return nil, fmt.Errorf("gitcli: LogNameStatus: invalid scope path %q", scopePath)
+		}
+		args = append(args, "--", scopePath+"/")
+	}
+	return runCapped(ctx, dir, maxLogNameStatusBytes, args...)
+}

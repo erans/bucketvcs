@@ -16,4 +16,5 @@ type ContentStore interface {
 	ReadBlob(ctx context.Context, tenant, repo, oid, path string) (browsemodel.Blob, error)
 	Log(ctx context.Context, tenant, repo, oid string, offset, limit int) ([]browsemodel.CommitMeta, bool, error)
 	Commit(ctx context.Context, tenant, repo, oid string) (browsemodel.CommitDetail, error)
+	TreeActivity(ctx context.Context, tenant, repo, oid, path string) (map[string]browsemodel.CommitMeta, error)
 }

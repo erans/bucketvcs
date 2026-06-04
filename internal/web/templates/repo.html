@@ -1,23 +1,12 @@
 {{define "title"}}{{.Tenant}}/{{.Repo}} · bucketvcs{{end}}
 {{define "content"}}
 <div class="browse">
-  <div class="repohdr"><span class="path">{{.Tenant}}/{{.Repo}}</span></div>
+  <div class="repohdr"><span class="path">{{.Tenant}}/{{.Repo}}</span>{{template "refswitcher" .}}</div>
   <div class="refs">
     {{if .Refs.Branches}}branches: {{range .Refs.Branches}}<a href="/{{$.Tenant}}/{{$.Repo}}/tree/{{urlpath .Name}}">{{.Name}}</a> {{end}}{{end}}
     {{if .Refs.Tags}}&nbsp;&middot;&nbsp;tags: {{range .Refs.Tags}}<a href="/{{$.Tenant}}/{{$.Repo}}/tree/{{urlpath .Name}}">{{.Name}}</a> {{end}}{{end}}
   </div>
-  {{if .Entries}}
-  <table class="tree">
-    {{range .Entries}}
-    <tr>
-      {{if eq .Type "tree"}}<td class="kind">dir</td><td><a href="/{{$.Tenant}}/{{$.Repo}}/tree/{{urlpath $.RefOrOID}}/{{urlpath .Path}}">{{.Name}}/</a></td><td class="size"></td>
-      {{else if eq .Type "blob"}}<td class="kind">file</td><td><a href="/{{$.Tenant}}/{{$.Repo}}/blob/{{urlpath $.RefOrOID}}/{{urlpath .Path}}">{{.Name}}</a></td><td class="size">{{.Size}}</td>
-      {{else}}<td class="kind">mod</td><td>{{.Name}}</td><td class="size"></td>{{end}}
-    </tr>
-    {{end}}
-  </table>
-  {{else}}<p class="empty">empty repository</p>{{end}}
-  {{if .ReadmeHTML}}<div class="readme">── README ──{{.ReadmeHTML}}</div>{{end}}
+  {{template "treeRows" .}}
 </div>
 {{end}}
 {{template "base" .}}

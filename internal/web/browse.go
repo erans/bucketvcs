@@ -150,8 +150,16 @@ func (s *server) handleRepoHome(w http.ResponseWriter, r *http.Request, br brows
 		return
 	}
 	readme := s.renderReadme(r.Context(), br, res.OID, entries)
+	h := s.header(w, r, br, refs, refs.Default, res.OID)
+	activity, aerr := s.content.TreeActivity(r.Context(), br.tenant, br.repo, res.OID, "")
+	if aerr != nil {
+		// Best-effort column: log and render "—" rather than failing the page.
+		s.logger.WarnContext(r.Context(), "tree activity failed", "tenant", br.tenant, "repo", br.repo, "err", aerr)
+		activity = nil
+	}
+	h.Activity = activity
 	s.renderBrowse(w, r, "repo.html", repoHomeData{
-		browseHeader: s.header(w, r, br, refs, refs.Default, res.OID),
+		browseHeader: h,
 		Entries:      entries,
 		ReadmeHTML:   readme,
 	})
@@ -163,7 +171,13 @@ func (s *server) handleTree(w http.ResponseWriter, r *http.Request, br browseRou
 		s.browseError(w, r, err)
 		return
 	}
-	res, err := browsemodel.ResolveRest(refs, br.rest)
+	rest := br.rest
+	if qr := r.URL.Query().Get("ref"); qr != "" {
+		// The ref-switcher form serializes its select as ?ref=<name> (both the
+		// htmx request and the no-JS GET submit); it navigates to that ref's root.
+		rest = qr
+	}
+	res, err := browsemodel.ResolveRest(refs, rest)
 	if err != nil {
 		s.browseError(w, r, err)
 		return
@@ -173,11 +187,32 @@ func (s *server) handleTree(w http.ResponseWriter, r *http.Request, br browseRou
 		s.browseError(w, r, err)
 		return
 	}
-	s.renderBrowse(w, r, "tree.html", treeData{
-		browseHeader: s.header(w, r, br, refs, res.Ref, res.OID),
-		Path:         res.Path,
-		Entries:      entries,
-	})
+	h := s.header(w, r, br, refs, res.Ref, res.OID)
+	h.Path = res.Path
+	activity, aerr := s.content.TreeActivity(r.Context(), br.tenant, br.repo, res.OID, res.Path)
+	if aerr != nil {
+		// Best-effort column: log and render "—" rather than failing the page.
+		s.logger.WarnContext(r.Context(), "tree activity failed", "tenant", br.tenant, "repo", br.repo, "err", aerr)
+		activity = nil
+	}
+	h.Activity = activity
+	var readme template.HTML
+	if res.Path == "" {
+		readme = s.renderReadme(r.Context(), br, res.OID, entries)
+	}
+	data := treeData{browseHeader: h, Entries: entries, ReadmeHTML: readme}
+	if r.Header.Get("HX-Request") == "true" {
+		var buf bytes.Buffer
+		if err := s.render.renderPartial(&buf, "treeRows", data); err != nil {
+			s.renderError(w, r, http.StatusInternalServerError, "render error")
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = buf.WriteTo(w)
+		EmitRequestMetric(r.Context(), s.logger, "tree", http.StatusOK)
+		return
+	}
+	s.renderBrowse(w, r, "tree.html", data)
 }
 
 func (s *server) handleBlob(w http.ResponseWriter, r *http.Request, br browseRoute) {
@@ -196,8 +231,12 @@ func (s *server) handleBlob(w http.ResponseWriter, r *http.Request, br browseRou
 		s.browseError(w, r, err)
 		return
 	}
+	md := isMarkdownPath(res.Path) && !b.Binary && !b.TooLarge && len(b.Bytes) <= maxHighlightBytes
+	var rendered template.HTML
 	var code template.HTML
-	if !b.Binary && !b.TooLarge {
+	if md && r.URL.Query().Get("view") == "rendered" {
+		rendered = renderMarkdown(b.Bytes)
+	} else if !b.Binary && !b.TooLarge {
 		code = highlight(res.Path, b.Bytes)
 	}
 	s.renderBrowse(w, r, "blob.html", blobData{
@@ -205,6 +244,8 @@ func (s *server) handleBlob(w http.ResponseWriter, r *http.Request, br browseRou
 		Path:         res.Path,
 		Blob:         b,
 		Code:         code,
+		Markdown:     md,
+		Rendered:     rendered,
 	})
 }
 

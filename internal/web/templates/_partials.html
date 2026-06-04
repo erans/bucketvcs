@@ -1,0 +1,24 @@
+{{define "treeRows"}}<div id="tree">
+  {{if .Entries}}
+  <table class="tree">
+    {{range .Entries}}
+    <tr>
+      {{if eq .Type "tree"}}<td class="kind">dir</td><td class="name"><a href="/{{$.Tenant}}/{{$.Repo}}/tree/{{urlpath $.RefOrOID}}/{{urlpath .Path}}">{{.Name}}/</a></td><td class="size"></td>{{template "treeAge" (index $.Activity .Path)}}
+      {{else if eq .Type "blob"}}<td class="kind">file</td><td class="name"><a href="/{{$.Tenant}}/{{$.Repo}}/blob/{{urlpath $.RefOrOID}}/{{urlpath .Path}}">{{.Name}}</a></td><td class="size">{{humansize .Size}}</td>{{template "treeAge" (index $.Activity .Path)}}
+      {{else}}<td class="kind">mod</td><td class="name">{{.Name}}</td><td class="size"></td>{{template "treeAge" (index $.Activity .Path)}}{{end}}
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<p class="empty">{{if .Path}}empty directory{{else}}empty repository{{end}}</p>{{end}}
+  {{if .ReadmeHTML}}<div class="readme">{{.ReadmeHTML}}</div>{{end}}
+</div>{{end}}
+
+{{define "treeAge"}}{{if .OID}}<td class="age" title="{{abstime .AuthorTime}}"><span class="lastmsg">{{.Summary}}</span> · {{reltime .AuthorTime}}</td>{{else}}<td class="age">—</td>{{end}}{{end}}
+
+{{define "refswitcher"}}<form class="refswitch" method="get" action="/{{.Tenant}}/{{.Repo}}/tree/" hx-get="/{{.Tenant}}/{{.Repo}}/tree/" hx-target="#tree" hx-swap="outerHTML" hx-push-url="true" hx-trigger="change">
+  <select name="ref">
+    {{range .Refs.Branches}}<option value="{{.Name}}" {{if eq .Name $.Ref}}selected{{end}}>{{.Name}}</option>{{end}}
+    {{range .Refs.Tags}}<option value="{{.Name}}" {{if eq .Name $.Ref}}selected{{end}}>tag: {{.Name}}</option>{{end}}
+  </select>
+  <noscript><button type="submit">go</button></noscript>
+</form>{{end}}

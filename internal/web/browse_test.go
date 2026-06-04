@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -57,13 +58,14 @@ func (b *browseDataStore) LinkIdentity(ctx context.Context, userID, issuer, subj
 
 // fakeContent is a configurable ContentStore for browse tests.
 type fakeContent struct {
-	refs   browsemodel.Refs
-	warm   bool
-	tree   []browsemodel.TreeEntry
-	blob   browsemodel.Blob
-	log    []browsemodel.CommitMeta
-	more   bool
-	commit browsemodel.CommitDetail
+	refs     browsemodel.Refs
+	warm     bool
+	tree     []browsemodel.TreeEntry
+	blob     browsemodel.Blob
+	log      []browsemodel.CommitMeta
+	more     bool
+	commit   browsemodel.CommitDetail
+	activity map[string]browsemodel.CommitMeta
 }
 
 func (f *fakeContent) ListRefs(ctx context.Context, t, r string) (browsemodel.Refs, error) {
@@ -95,6 +97,9 @@ func (f *fakeContent) Commit(ctx context.Context, t, r, oid string) (browsemodel
 		return browsemodel.CommitDetail{}, browsemodel.ErrWarming
 	}
 	return f.commit, nil
+}
+func (f *fakeContent) TreeActivity(ctx context.Context, t, r, oid, p string) (map[string]browsemodel.CommitMeta, error) {
+	return f.activity, nil
 }
 
 func newBrowseServer(content ContentStore, visible map[string]bool) http.Handler {
@@ -391,6 +396,19 @@ func TestRfc5987Encode(t *testing.T) {
 	}
 }
 
+func TestChromaCSSRoute(t *testing.T) {
+	h := newBrowseServer(&fakeContent{}, map[string]bool{})
+	req := httptest.NewRequest("GET", "/_ui/static/chroma.css", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), ".chroma") {
+		t.Fatalf("chroma.css route: code=%d body=%.120s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/css") {
+		t.Fatalf("content-type = %q", ct)
+	}
+}
+
 func TestCommits_PathFilteredIs404(t *testing.T) {
 	content := &fakeContent{
 		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
@@ -412,5 +430,273 @@ func TestQueryPage_Clamped(t *testing.T) {
 	req = httptest.NewRequest("GET", "/x?page=3", nil)
 	if got := queryPage(req); got != 3 {
 		t.Fatalf("queryPage 3 = %d", got)
+	}
+}
+
+func TestCommit_DiffLineClasses(t *testing.T) {
+	content := &fakeContent{
+		commit: browsemodel.CommitDetail{
+			Meta:    browsemodel.CommitMeta{OID: "c2", ShortOID: "c2", Summary: "update a", AuthorName: "Ann", AuthorTime: 1700000000},
+			Message: "update a\n",
+			Files: []browsemodel.FileDiff{{
+				NewPath: "a.txt", Status: "M", Additions: 1, Deletions: 1,
+				Hunks: []browsemodel.Hunk{{Header: "@@ -1 +1 @@", Lines: []browsemodel.DiffLine{
+					{Kind: ' ', Text: "ctx line"},
+					{Kind: '-', Text: "old"},
+					{Kind: '+', Text: "new"},
+				}}},
+			}},
+		},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/commit/c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	for _, want := range []string{`class="dl ctx"`, `class="dl del"`, `class="dl add"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing %s in commit view: %s", want, body)
+		}
+	}
+	if strings.Contains(body, `class="dl k`) {
+		t.Errorf("old k-class scheme still present")
+	}
+}
+
+func TestTree_QueryRefSelectsRef(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{
+			{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"},
+			{Name: "dev", OID: "1234567890123456789012345678901234567890"},
+		}},
+		tree: []browsemodel.TreeEntry{{Name: "a.txt", Path: "a.txt", Type: "blob", OID: "x"}},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/tree/?ref=dev", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("?ref= tree: code %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "tree/dev/") {
+		t.Fatalf("expected links on ref dev: %s", rec.Body.String())
+	}
+}
+
+func TestTree_HXRequestReturnsFragment(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+		tree: []browsemodel.TreeEntry{{Name: "a.txt", Path: "a.txt", Type: "blob", OID: "x"}},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/tree/main", nil)
+	req.Header.Set("HX-Request", "true")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if strings.Contains(body, "<html") {
+		t.Fatalf("HX-Request should get a bare fragment: %s", body)
+	}
+	if !strings.Contains(body, `id="tree"`) || !strings.Contains(body, "a.txt") {
+		t.Fatalf("fragment missing tree content: %s", body)
+	}
+}
+
+func TestRenderPartial_TreeRows(t *testing.T) {
+	r, err := newRenderer("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := treeData{
+		browseHeader: browseHeader{Tenant: "acme", Repo: "demo", Ref: "main"},
+		Entries:      []browsemodel.TreeEntry{{Name: "a.txt", Path: "a.txt", Type: "blob", Size: 6, OID: "x"}},
+	}
+	var buf bytes.Buffer
+	if err := r.renderPartial(&buf, "treeRows", data); err != nil {
+		t.Fatalf("renderPartial: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, `id="tree"`) || !strings.Contains(out, "a.txt") {
+		t.Fatalf("partial missing container/entry: %s", out)
+	}
+	if strings.Contains(out, "<html") {
+		t.Fatalf("partial must not include the base layout: %s", out)
+	}
+}
+
+func TestCommits_AgeColumn(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+		log:  []browsemodel.CommitMeta{{OID: "c2", ShortOID: "c2", Summary: "update a", AuthorName: "Ann", AuthorTime: time.Now().Add(-2 * time.Hour).Unix()}},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/commits/main", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), "2h ago") {
+		t.Fatalf("commit log missing relative age: %s", rec.Body.String())
+	}
+}
+
+func TestBlob_HumanizedSize(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+		blob: browsemodel.Blob{Path: "bin.dat", Size: 4 << 20, Binary: true, Bytes: []byte{0}},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/blob/main/bin.dat", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), "4.0 MiB") {
+		t.Fatalf("binary notice missing humanized size: %s", rec.Body.String())
+	}
+}
+
+func TestTree_ActivityColumnRendered(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+		tree: []browsemodel.TreeEntry{
+			{Name: "a.txt", Path: "a.txt", Type: "blob", Size: 6, OID: "x"},
+			{Name: "old.txt", Path: "old.txt", Type: "blob", Size: 1, OID: "y"},
+		},
+		activity: map[string]browsemodel.CommitMeta{
+			"a.txt": {OID: "abc", Summary: "update a", AuthorTime: 1700000000},
+		},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/tree/main", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, "update a") {
+		t.Fatalf("attributed entry missing summary: %s", body)
+	}
+	if !strings.Contains(body, "—") {
+		t.Fatalf("unattributed entry should render —: %s", body)
+	}
+}
+
+func TestUIWideCSP(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+		tree: []browsemodel.TreeEntry{{Name: "a.txt", Path: "a.txt", Type: "blob", OID: "x"}},
+		blob: browsemodel.Blob{Path: "a.txt", Size: 2, Bytes: []byte("x\n")},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	const want = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+	for _, path := range []string{"/", "/login", "/acme/demo", "/acme/demo/tree/main", "/acme/demo/blob/main/a.txt", "/nope"} {
+		req := httptest.NewRequest("GET", path, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if got := rec.Header().Get("Content-Security-Policy"); got != want {
+			t.Errorf("%s: CSP = %q", path, got)
+		}
+	}
+	req := httptest.NewRequest("GET", "/acme/demo/raw/main/a.txt", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if got := rec.Header().Get("Content-Security-Policy"); got != "default-src 'none'; sandbox" {
+		t.Errorf("raw CSP = %q", got)
+	}
+}
+
+func TestBlob_MarkdownRenderedToggle(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+		blob: browsemodel.Blob{Path: "docs/guide.md", Size: 20, Bytes: []byte("# Title\n\n**bold** <script>x()</script>\n")},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+
+	// Source view: offers [rendered].
+	req := httptest.NewRequest("GET", "/acme/demo/blob/main/docs/guide.md", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, "?view=rendered") || !strings.Contains(body, "[rendered]") {
+		t.Fatalf("source view missing [rendered] toggle: %s", body)
+	}
+
+	// Rendered view: sanitized HTML + [source] link back.
+	req = httptest.NewRequest("GET", "/acme/demo/blob/main/docs/guide.md?view=rendered", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body = rec.Body.String()
+	if !strings.Contains(body, "<strong>") && !strings.Contains(body, "<h1") {
+		t.Fatalf("rendered view missing rendered markdown: %s", body)
+	}
+	if strings.Contains(body, "<script>") {
+		t.Fatalf("rendered view not sanitized: %s", body)
+	}
+	if !strings.Contains(body, "[source]") {
+		t.Fatalf("rendered view missing [source] toggle: %s", body)
+	}
+}
+
+func TestBlob_NonMarkdownNoRenderToggle(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+		blob: browsemodel.Blob{Path: "main.go", Size: 10, Bytes: []byte("package x\n")},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/blob/main/main.go?view=rendered", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if strings.Contains(body, "[rendered]") || strings.Contains(body, "[source]") {
+		t.Fatalf("non-markdown blob should have no render toggle: %s", body)
+	}
+	if !strings.Contains(body, "main.go") {
+		t.Fatalf("source view broken: %s", body)
+	}
+}
+
+func TestLineNumsJSServed(t *testing.T) {
+	h := newBrowseServer(&fakeContent{}, map[string]bool{})
+	req := httptest.NewRequest("GET", "/_ui/static/linenums.js", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "hashchange") {
+		t.Fatalf("linenums.js not served: code=%d", rec.Code)
+	}
+}
+
+func TestTreeRoot_RendersReadme(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+		tree: []browsemodel.TreeEntry{{Name: "README.md", Path: "README.md", Type: "blob", Size: 10, OID: "x"}},
+		blob: browsemodel.Blob{Path: "README.md", Size: 10, Bytes: []byte("# Hello Readme\n")},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+
+	// Full tree page at ref root renders the README.
+	req := httptest.NewRequest("GET", "/acme/demo/tree/?ref=main", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), "Hello Readme") {
+		t.Fatalf("tree root missing rendered README: %s", rec.Body.String())
+	}
+
+	// htmx fragment at ref root includes the README (inside #tree).
+	req = httptest.NewRequest("GET", "/acme/demo/tree/main", nil)
+	req.Header.Set("HX-Request", "true")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), "Hello Readme") {
+		t.Fatalf("htmx fragment missing README: %s", rec.Body.String())
+	}
+}
+
+func TestTreeSubdir_NoReadme(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+		tree: []browsemodel.TreeEntry{{Name: "README.md", Path: "sub/README.md", Type: "blob", Size: 10, OID: "x"}},
+		blob: browsemodel.Blob{Path: "sub/README.md", Size: 10, Bytes: []byte("# Sub Readme\n")},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/tree/main/sub", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if strings.Contains(rec.Body.String(), "Sub Readme") {
+		t.Fatalf("subdirectory tree should not render README: %s", rec.Body.String())
 	}
 }

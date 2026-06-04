@@ -115,6 +115,13 @@ raw_body=$(curl -sS "$BASE_URL/acme/demo/raw/main/a.txt")
 test "$raw_body" = "hello again" || { echo "FAIL: raw body = '$raw_body'"; exit 1; }
 echo "  raw OK"
 
+# 8b. chroma stylesheet + UI CSP.
+echo "== chroma.css + CSP =="
+curl -sf "$BASE_URL/_ui/static/chroma.css" | grep -q ".chroma" || { echo "FAIL: chroma.css missing"; exit 1; }
+home_csp=$(curl -sSI "$BASE_URL/acme/demo" | grep -i "^Content-Security-Policy:" || true)
+printf '%s' "$home_csp" | grep -q "script-src 'self'" || { echo "FAIL: UI CSP missing on browse page: $home_csp"; exit 1; }
+echo "  chroma.css + CSP OK"
+
 # 9. Commit log.
 echo "== GET /acme/demo/commits/main =="
 curl -sS "$BASE_URL/acme/demo/commits/main" | grep -q "update a" || { echo "FAIL: log missing 'update a'"; exit 1; }

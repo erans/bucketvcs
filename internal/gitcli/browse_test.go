@@ -223,3 +223,37 @@ func TestRunCapped_UnderCap(t *testing.T) {
 		t.Fatalf("runCapped: expected 40-char OID, got %q", oid)
 	}
 }
+
+func TestLogNameStatus(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	bare, oid := makeBrowseBare(t)
+	out, err := LogNameStatus(context.Background(), bare, oid, 10, "")
+	if err != nil {
+		t.Fatalf("LogNameStatus: %v", err)
+	}
+	s := string(out)
+	if !strings.Contains(s, "\x1e") || !strings.Contains(s, "\x1f") {
+		t.Fatalf("missing record/field separators: %q", s)
+	}
+	if !strings.Contains(s, "A\ta.txt") {
+		t.Fatalf("missing name-status entry for a.txt: %q", s)
+	}
+	scoped, err := LogNameStatus(context.Background(), bare, oid, 10, "sub")
+	if err != nil {
+		t.Fatalf("scoped: %v", err)
+	}
+	if !strings.Contains(string(scoped), "sub/b.txt") || strings.Contains(string(scoped), "A\ta.txt") {
+		t.Fatalf("scoping wrong: %q", scoped)
+	}
+}
+
+func TestLogNameStatus_RejectsBadArgs(t *testing.T) {
+	if _, err := LogNameStatus(context.Background(), "/tmp", "--evil", 10, ""); err == nil {
+		t.Fatal("flag-like oid accepted")
+	}
+	if _, err := LogNameStatus(context.Background(), "/tmp", "abc", 10, "-evil"); err == nil {
+		t.Fatal("flag-like scope path accepted")
+	}
+}
