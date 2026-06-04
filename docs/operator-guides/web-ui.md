@@ -552,6 +552,12 @@ not, so an operator who registers one accepts the web shadowing.
 | **Repo delete** | Global admin only (not repo-admin) | Irreversible; never purges storage from the UI — `--purge-storage` remains a CLI-only path |
 | **Quota set/clear/reconcile** | Global admin only | M13.5 quotas are per-tenant LFS byte caps that constrain operator spend; a repo-admin raising their own cap defeats them |
 
+Note on quota visibility: the repo-settings general tab shows the TENANT's
+aggregate LFS usage/cap read-only to any repo-admin in that tenant (spec §3,
+deliberate). Quotas are tenant-scoped, so a repo-admin of one repo sees the
+tenant-wide figure; operators who consider that sensitive should reserve the
+repo `admin` perm accordingly.
+
 All authorization failures return a uniform HTTP 404 (same anti-enumeration
 stance as the browse and git gateway handlers). Unauthorized access to any
 settings page or action is indistinguishable from "not found".
