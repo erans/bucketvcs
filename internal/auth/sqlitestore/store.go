@@ -39,6 +39,28 @@ func Open(value string, opts ...Option) (*Store, error) {
 	return &Store{db: &dbWrap{db: db, backend: b}, backend: b}, nil
 }
 
+// OpenForInspection opens the metadata database WITHOUT applying pending
+// migrations. Used by `bucketvcs doctor`, which must observe — not mutate —
+// the schema state. Callers that intend to write should use Open.
+//
+// NOTE: the sqlite driver creates a missing database file on first use;
+// doctor stats filesystem paths before calling this so a missing db is
+// reported, not silently created.
+//
+// Intentionally omits the "authdb opened" slog line from Open — doctor output
+// should stay clean and not emit noise for read-only inspection.
+func OpenForInspection(value string, opts ...Option) (*Store, error) {
+	b, err := resolveBackend(value, opts...)
+	if err != nil {
+		return nil, err
+	}
+	db, err := b.Open()
+	if err != nil {
+		return nil, fmt.Errorf("open authdb (%s): %w", b.Name(), err)
+	}
+	return &Store{db: &dbWrap{db: db, backend: b}, backend: b}, nil
+}
+
 // Close closes the underlying database handle.
 func (s *Store) Close() error { return s.db.Close() }
 
