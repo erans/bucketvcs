@@ -37,14 +37,14 @@ func TestAbsTime(t *testing.T) {
 
 func TestHumanSize(t *testing.T) {
 	cases := map[int64]string{
-		0:          "0 B",
-		312:        "312 B",
-		1024:       "1.0 KiB",
-		1228:       "1.2 KiB",
-		10 * 1024:  "10 KiB",
-		4 << 20:                      "4.0 MiB",
-		1181116006:                   "1.1 GiB",
-		int64(1) << 50:               "1.0 PiB",
+		0:                                   "0 B",
+		312:                                 "312 B",
+		1024:                                "1.0 KiB",
+		1228:                                "1.2 KiB",
+		10 * 1024:                           "10 KiB",
+		4 << 20:                             "4.0 MiB",
+		1181116006:                          "1.1 GiB",
+		int64(1) << 50:                      "1.0 PiB",
 		(int64(1) << 62) + (int64(1) << 61): "6.0 EiB",
 	}
 	for in, want := range cases {
