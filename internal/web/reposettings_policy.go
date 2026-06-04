@@ -109,10 +109,14 @@ func (s *server) policyRefsAdd(w http.ResponseWriter, r *http.Request, sr settin
 		BlockForcePush: blockForcePush,
 		CreatedAt:      time.Now(),
 	}); err != nil {
-		// Surface all Add errors as operator-grade flashes. The service returns
-		// user-actionable messages (empty pattern, bad glob) and also DB errors
-		// whose wrapped text is operator-readable. ErrInvalidInput and ErrConflict
-		// are also matched for interface conformance.
+		// Surface known validation errors (empty pattern, bad glob) as flashes;
+		// mask unknown (wrapped DB) errors as a 500 so their text never leaks.
+		if !flashableErr(err) {
+			s.logger.Error("policy: add ref rule", "tenant", sr.tenant, "repo", sr.repo, "err", err)
+			EmitAdminActionMetric(r.Context(), s.logger, "policy", "ref_add", "error")
+			s.renderError(w, r, http.StatusInternalServerError, "internal error")
+			return
+		}
 		EmitAdminActionMetric(r.Context(), s.logger, "policy", "ref_add", "invalid")
 		s.redirectFlash(w, r, sr.policyBase(), err.Error())
 		return
@@ -182,10 +186,15 @@ func (s *server) policyPathsAdd(w http.ResponseWriter, r *http.Request, sr setti
 		PathPattern:    pathPattern,
 		CreatedAt:      time.Now(),
 	}); err != nil {
-		// Surface all AddPathRule errors as operator-grade flashes. The service
-		// validates patterns (invalid refname_pattern, invalid path_pattern) and
-		// returns operator-readable messages. ErrInvalidInput is also matched for
-		// interface conformance.
+		// Surface known validation errors (invalid refname_pattern / path_pattern,
+		// wrapping policy.ErrInvalidInput) as flashes; mask unknown (wrapped DB)
+		// errors as a 500 so their text never leaks.
+		if !flashableErr(err) {
+			s.logger.Error("policy: add path rule", "tenant", sr.tenant, "repo", sr.repo, "err", err)
+			EmitAdminActionMetric(r.Context(), s.logger, "policy", "path_add", "error")
+			s.renderError(w, r, http.StatusInternalServerError, "internal error")
+			return
+		}
 		EmitAdminActionMetric(r.Context(), s.logger, "policy", "path_add", "invalid")
 		s.redirectFlash(w, r, sr.policyBase(), err.Error())
 		return

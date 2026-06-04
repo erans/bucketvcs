@@ -33,6 +33,15 @@ var ErrCascadeUnsupportedBackend = errors.New("sqlitestore: repo delete cascade 
 // dependents. The orphan webhook_endpoints row produced here is the intended
 // known limitation; a webhook-prune sweeper can clean it up after the worker
 // has drained any associated deliveries.
+//
+// ATOMICITY: the seven DELETEs run inside a single transaction on the pinned
+// connection, so a mid-sweep failure rolls the whole sweep back — there is no
+// partial-failure window in which (e.g.) protected_refs is gone but repos
+// survives. PRAGMA foreign_keys=OFF is issued on the connection OUTSIDE the
+// transaction; sqlite keeps the per-connection FK setting effective for
+// statements inside the tx, and the setting cannot be changed within a tx
+// anyway. On any DELETE error the tx is rolled back before the existing
+// FK-restore / connection-poison logic runs.
 func (s *Store) DeleteRepoCascade(ctx context.Context, tenant, repo string) error {
 	// Backend gate: this function's correctness depends on suppressing the
 	// webhook_endpoints ON DELETE CASCADE via the sqlite per-connection
@@ -90,6 +99,8 @@ func (s *Store) DeleteRepoCascade(ctx context.Context, tenant, repo string) erro
 	// Cascade the non-webhook dependents manually so they're cleaned up
 	// even though FK is off. protected_paths + hooks are swept explicitly
 	// because their FK-cascade can't fire with foreign_keys=OFF (see godoc).
+	// All seven DELETEs run in a single transaction so a mid-sweep failure
+	// rolls the whole sweep back (no partial-failure window).
 	stmts := []struct {
 		name string
 		sql  string
@@ -102,19 +113,36 @@ func (s *Store) DeleteRepoCascade(ctx context.Context, tenant, repo string) erro
 		{"lfs_locks", `DELETE FROM lfs_locks WHERE tenant=? AND repo=?`},
 		{"repos", `DELETE FROM repos WHERE tenant=? AND name=?`},
 	}
+
+	// restoreFK re-enables FK enforcement on the pinned connection, marking
+	// `restored` so the deferred poison is skipped, or logging+leaving it false
+	// so the deferred discard drops the connection.
+	restoreFK := func(cause string, causeErr error) {
+		if _, rerr := conn.ExecContext(ctx, `PRAGMA foreign_keys=ON`); rerr == nil {
+			restored = true
+		} else {
+			slog.Default().Error("DeleteRepoCascade: restore foreign_keys; discarding connection",
+				"cause", cause, "cause_err", causeErr, "restore_err", rerr)
+		}
+	}
+
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		restoreFK("begin tx", err)
+		return fmt.Errorf("begin delete tx: %w", err)
+	}
 	for _, st := range stmts {
-		if _, err := conn.ExecContext(ctx, st.sql, tenant, repo); err != nil {
-			// Restore FK enforcement before returning so the connection is
-			// safe to pool. If the restore itself fails the deferred discard
-			// poisons the connection.
-			if _, rerr := conn.ExecContext(ctx, `PRAGMA foreign_keys=ON`); rerr == nil {
-				restored = true
-			} else {
-				slog.Default().Error("DeleteRepoCascade: restore foreign_keys after delete error; discarding connection",
-					"table", st.name, "delete_err", err, "restore_err", rerr)
-			}
+		if _, err := tx.ExecContext(ctx, st.sql, tenant, repo); err != nil {
+			// Roll back so no partial sweep is committed, then restore FK
+			// enforcement before returning so the connection is safe to pool.
+			_ = tx.Rollback()
+			restoreFK("delete from "+st.name, err)
 			return fmt.Errorf("delete from %s: %w", st.name, err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		restoreFK("commit", err)
+		return fmt.Errorf("commit delete tx: %w", err)
 	}
 
 	// Re-enable FK enforcement on the pinned connection before it returns to the

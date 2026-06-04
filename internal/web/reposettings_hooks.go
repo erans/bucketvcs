@@ -121,8 +121,15 @@ func (s *server) hooksAdd(w http.ResponseWriter, r *http.Request, sr settingsRou
 		Enabled:    true,
 		Now:        time.Now(),
 	}); err != nil {
-		s.logger.Error("hooks: add", "tenant", sr.tenant, "repo", sr.repo, "err", err)
-		EmitAdminActionMetric(r.Context(), s.logger, "hooks", "add", "error")
+		// Surface known validation errors (prefixed "hooks: ") as flashes; mask
+		// unknown (wrapped DB) errors as a 500 so their text never leaks.
+		if !flashableErr(err) {
+			s.logger.Error("hooks: add", "tenant", sr.tenant, "repo", sr.repo, "err", err)
+			EmitAdminActionMetric(r.Context(), s.logger, "hooks", "add", "error")
+			s.renderError(w, r, http.StatusInternalServerError, "internal error")
+			return
+		}
+		EmitAdminActionMetric(r.Context(), s.logger, "hooks", "add", "invalid")
 		s.redirectFlash(w, r, sr.hooksBase(), err.Error())
 		return
 	}

@@ -290,6 +290,16 @@ func TestTokenCreateHappy(t *testing.T) {
 	if cc := rec.Header().Get("Cache-Control"); cc != "no-store, private" {
 		t.Fatalf("happy create: Cache-Control %q, want \"no-store, private\"", cc)
 	}
+
+	// The secret page renders base.html, which includes the logout form's
+	// {{.CSRF}} hidden field. renderSecretOnce must issue a CSRF token so that
+	// field is non-empty — otherwise logging out from the secret page 403s.
+	if strings.Contains(body, `name="csrf_token" value=""`) {
+		t.Fatalf("happy create: empty csrf_token in logout form (logout would 403):\n%s", body)
+	}
+	if !strings.Contains(body, `name="csrf_token"`) {
+		t.Fatalf("happy create: csrf_token field missing from secret page:\n%s", body)
+	}
 }
 
 func TestTokenCreateLegacyScopes(t *testing.T) {

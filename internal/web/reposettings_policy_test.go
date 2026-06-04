@@ -267,6 +267,31 @@ func TestRepoSettingsPolicyRefsAdd(t *testing.T) {
 		}
 	})
 
+	t.Run("unknown DB error → 500, no flash", func(t *testing.T) {
+		store := policyStore()
+		pol := &fakePolicy{
+			addFn: func(ctx context.Context, r policy.ProtectedRef) error {
+				// Mirrors policy.Add's DB wrap: fmt.Errorf("policy add ...: %w", err).
+				return errors.New(`policy add "acme"/"demo" "refs/heads/main": disk I/O error`)
+			},
+		}
+		h := newTestHandlerWith(store, func(d *Deps) { d.Policy = pol })
+		req := csrfPost(t, "/acme/demo/settings/policy/refs/add",
+			url.Values{"pattern": {"refs/heads/main"}, "block_deletion": {"on"}})
+		addSessionCookie(t, req, store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status %d, want 500; body=%s", rec.Code, rec.Body.String())
+		}
+		if findCookie(rec.Result().Cookies(), flashCookieName) != nil {
+			t.Fatal("must NOT set flash cookie for masked DB error")
+		}
+		if strings.Contains(rec.Body.String(), "disk I/O error") {
+			t.Fatal("DB error text must not leak into response body")
+		}
+	})
+
 	t.Run("happy path: Add called + correct ProtectedRef fields + audit", func(t *testing.T) {
 		store := policyStore()
 		var gotRef policy.ProtectedRef
@@ -529,6 +554,34 @@ func TestRepoSettingsPolicyPathsAdd(t *testing.T) {
 		}
 		if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
 			t.Fatal("expected flash cookie for invalid pattern")
+		}
+	})
+
+	t.Run("unknown DB error → 500, no flash", func(t *testing.T) {
+		store := policyStore()
+		pol := &fakePolicy{
+			addPathRuleFn: func(ctx context.Context, in policy.ProtectedPath) error {
+				// Mirrors AddPathRule's DB wrap: fmt.Errorf("policy: add path rule: %w", err).
+				// Note the "policy: " prefix MUST still mask (it is a DB wrap, not validation).
+				return errors.New("policy: add path rule: disk I/O error")
+			},
+		}
+		h := newTestHandlerWith(store, func(d *Deps) { d.Policy = pol })
+		req := csrfPost(t, "/acme/demo/settings/policy/paths/add", url.Values{
+			"refname_pattern": {"refs/heads/main"},
+			"path_pattern":    {"secrets/**"},
+		})
+		addSessionCookie(t, req, store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status %d, want 500; body=%s", rec.Code, rec.Body.String())
+		}
+		if findCookie(rec.Result().Cookies(), flashCookieName) != nil {
+			t.Fatal("must NOT set flash cookie for masked DB error")
+		}
+		if strings.Contains(rec.Body.String(), "disk I/O error") {
+			t.Fatal("DB error text must not leak into response body")
 		}
 	})
 

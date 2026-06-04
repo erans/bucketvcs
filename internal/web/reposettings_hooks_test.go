@@ -252,6 +252,33 @@ func TestRepoSettingsHooksAdd(t *testing.T) {
 		}
 	})
 
+	t.Run("unknown DB error → 500, no flash", func(t *testing.T) {
+		store := hooksStore()
+		hk := &fakeHooks{
+			addFn: func(ctx context.Context, r hooks.Row) error {
+				// Mirrors hooks.Store.Add's DB wrap: fmt.Errorf("hooks.Add: %w", err).
+				return errors.New("hooks.Add: disk I/O error")
+			},
+		}
+		h := newTestHandlerWith(store, func(d *Deps) { d.Hooks = hk })
+		req := csrfPost(t, "/acme/demo/settings/hooks/add", url.Values{
+			"trigger":     {hooks.TriggerPreReceive},
+			"script_name": {"check-policy.sh"},
+		})
+		addSessionCookie(t, req, store, adminSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status %d, want 500; body=%s", rec.Code, rec.Body.String())
+		}
+		if findCookie(rec.Result().Cookies(), flashCookieName) != nil {
+			t.Fatal("must NOT set flash cookie for masked DB error")
+		}
+		if strings.Contains(rec.Body.String(), "disk I/O error") {
+			t.Fatal("DB error text must not leak into response body")
+		}
+	})
+
 	t.Run("happy path: Add called + correct Row fields + audit + 303", func(t *testing.T) {
 		store := hooksStore()
 		var gotRow hooks.Row

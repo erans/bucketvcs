@@ -165,9 +165,13 @@ func TestDeleteRepoCascade_RestoresFKEnforcement(t *testing.T) {
 }
 
 // TestDeleteRepoCascade_RestoresFKOnMidSequenceError verifies the restore path
-// runs even when a DELETE errors mid-sweep. We DROP the hooks table (third in
-// the sweep) so the hooks DELETE fails; the cascade must still return the error
-// AND re-enable foreign_keys before the connection is pooled.
+// runs even when a DELETE errors mid-sweep, AND that the sweep is atomic: the
+// seven DELETEs run in one transaction, so a mid-sweep failure rolls the whole
+// sweep back. We DROP the hooks table (third in the sweep) so the hooks DELETE
+// fails; the cascade must (1) return the error, (2) re-enable foreign_keys
+// before the connection is pooled, and (3) leave the rows from the
+// already-executed DELETEs (protected_refs, protected_paths) intact because the
+// transaction rolled back.
 func TestDeleteRepoCascade_RestoresFKOnMidSequenceError(t *testing.T) {
 	s := mustOpen(t)
 	defer s.Close()
@@ -179,6 +183,20 @@ func TestDeleteRepoCascade_RestoresFKOnMidSequenceError(t *testing.T) {
 	}
 	if err := s.RegisterRepo(ctx, "acme", "foo"); err != nil {
 		t.Fatalf("RegisterRepo: %v", err)
+	}
+
+	// Seed rows in the two tables swept BEFORE hooks (protected_refs is #1,
+	// protected_paths is #2; hooks is #3). After the forced hooks failure these
+	// must still be present — proving the transaction rolled back.
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO protected_refs (tenant, repo, refname_pattern, block_deletion, block_force_push, created_at)
+		 VALUES ('acme', 'foo', 'refs/heads/main', 1, 1, 1)`); err != nil {
+		t.Fatalf("seed protected_refs: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO protected_paths (tenant, repo, refname_pattern, path_pattern, created_at)
+		 VALUES ('acme', 'foo', 'refs/heads/main', 'secrets/**', 1)`); err != nil {
+		t.Fatalf("seed protected_paths: %v", err)
 	}
 
 	// Force the mid-sweep DELETE to fail: drop the hooks table so
@@ -194,5 +212,23 @@ func TestDeleteRepoCascade_RestoresFKOnMidSequenceError(t *testing.T) {
 	// Despite the mid-sweep failure, FK enforcement must be restored.
 	if !fkEnforced(t, s, userID) {
 		t.Fatal("foreign_keys NOT enforced after mid-sequence error: restore path skipped")
+	}
+
+	// Atomicity: the rows swept before the failure must STILL be present
+	// because the transaction rolled back (no partial sweep committed).
+	for _, c := range []struct{ table, tCol, rCol string }{
+		{"protected_refs", "tenant", "repo"},
+		{"protected_paths", "tenant", "repo"},
+		{"repos", "tenant", "name"},
+	} {
+		var n int
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM `+c.table+` WHERE `+c.tCol+`=? AND `+c.rCol+`=?`,
+			"acme", "foo").Scan(&n); err != nil {
+			t.Fatalf("%s: count: %v", c.table, err)
+		}
+		if n != 1 {
+			t.Errorf("%s: count=%d after rolled-back sweep, want 1 (rollback must preserve)", c.table, n)
+		}
 	}
 }

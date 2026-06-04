@@ -2,6 +2,8 @@ package web
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
+	"github.com/bucketvcs/bucketvcs/internal/policy"
 )
 
 // newTestServerWithRender builds a *server with a real embedded renderer for
@@ -136,5 +139,43 @@ func TestRenderBufferedNilLogger(t *testing.T) {
 	gotErr := s.renderBuffered(rec, "nonexistent.html", nil)
 	if gotErr == nil {
 		t.Fatal("renderBuffered: expected error for unknown page, got nil")
+	}
+}
+
+// TestFlashableErr pins the conservative validation-vs-internal predicates so
+// wrapped DB errors never leak into a flash.
+func TestFlashableErr(t *testing.T) {
+	dbWrap := errors.New("disk I/O error")
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		// policy.Add validation messages.
+		{"policy empty pattern", fmt.Errorf("policy: refname_pattern must not be empty"), true},
+		{"policy invalid refname", fmt.Errorf("policy: invalid refname_pattern %q: %w", "[", errors.New("syntax error in pattern")), true},
+		// policy.Add DB wrap ("policy add ...", no colon) → masked.
+		{"policy.Add db wrap", fmt.Errorf("policy add %q/%q %q: %w", "acme", "demo", "refs/heads/main", dbWrap), false},
+		// policy.AddPathRule validation wraps ErrInvalidInput.
+		{"path ErrInvalidInput", fmt.Errorf("%w: invalid path_pattern: bad", policy.ErrInvalidInput), true},
+		// policy.AddPathRule DB wrap ("policy: add path rule: ...") → masked
+		// despite the "policy: " prefix.
+		{"path db wrap", fmt.Errorf("policy: add path rule: %w", dbWrap), false},
+		// hooks validateRow messages.
+		{"hooks validate", fmt.Errorf("hooks: invalid script_name %q (must be ...)", "bad/name"), true},
+		// hooks DB wrap ("hooks.Add: ...") → masked.
+		{"hooks.Add db wrap", fmt.Errorf("hooks.Add: %w", dbWrap), false},
+		// ErrConflict reserved-sentinel conformance.
+		{"policy ErrConflict", fmt.Errorf("wrapped: %w", policy.ErrConflict), true},
+		// Arbitrary unknown error → masked.
+		{"unknown", dbWrap, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := flashableErr(c.err); got != c.want {
+				t.Fatalf("flashableErr(%v) = %v, want %v", c.err, got, c.want)
+			}
+		})
 	}
 }
