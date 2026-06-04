@@ -459,6 +459,45 @@ func TestCommit_DiffLineClasses(t *testing.T) {
 	}
 }
 
+func TestTree_QueryRefSelectsRef(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{
+			{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"},
+			{Name: "dev", OID: "1234567890123456789012345678901234567890"},
+		}},
+		tree: []browsemodel.TreeEntry{{Name: "a.txt", Path: "a.txt", Type: "blob", OID: "x"}},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/tree/?ref=dev", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("?ref= tree: code %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "tree/dev/") {
+		t.Fatalf("expected links on ref dev: %s", rec.Body.String())
+	}
+}
+
+func TestTree_HXRequestReturnsFragment(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+		tree: []browsemodel.TreeEntry{{Name: "a.txt", Path: "a.txt", Type: "blob", OID: "x"}},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/tree/main", nil)
+	req.Header.Set("HX-Request", "true")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if strings.Contains(body, "<html") {
+		t.Fatalf("HX-Request should get a bare fragment: %s", body)
+	}
+	if !strings.Contains(body, `id="tree"`) || !strings.Contains(body, "a.txt") {
+		t.Fatalf("fragment missing tree content: %s", body)
+	}
+}
+
 func TestRenderPartial_TreeRows(t *testing.T) {
 	r, err := newRenderer("")
 	if err != nil {

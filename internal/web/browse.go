@@ -163,7 +163,13 @@ func (s *server) handleTree(w http.ResponseWriter, r *http.Request, br browseRou
 		s.browseError(w, r, err)
 		return
 	}
-	res, err := browsemodel.ResolveRest(refs, br.rest)
+	rest := br.rest
+	if qr := r.URL.Query().Get("ref"); qr != "" {
+		// The ref-switcher form serializes its select as ?ref=<name> (both the
+		// htmx request and the no-JS GET submit); it navigates to that ref's root.
+		rest = qr
+	}
+	res, err := browsemodel.ResolveRest(refs, rest)
 	if err != nil {
 		s.browseError(w, r, err)
 		return
@@ -175,10 +181,19 @@ func (s *server) handleTree(w http.ResponseWriter, r *http.Request, br browseRou
 	}
 	h := s.header(w, r, br, refs, res.Ref, res.OID)
 	h.Path = res.Path
-	s.renderBrowse(w, r, "tree.html", treeData{
-		browseHeader: h,
-		Entries:      entries,
-	})
+	data := treeData{browseHeader: h, Entries: entries}
+	if r.Header.Get("HX-Request") == "true" {
+		var buf bytes.Buffer
+		if err := s.render.renderPartial(&buf, "treeRows", data); err != nil {
+			s.renderError(w, r, http.StatusInternalServerError, "render error")
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = buf.WriteTo(w)
+		EmitRequestMetric(r.Context(), s.logger, "tree", http.StatusOK)
+		return
+	}
+	s.renderBrowse(w, r, "tree.html", data)
 }
 
 func (s *server) handleBlob(w http.ResponseWriter, r *http.Request, br browseRoute) {
