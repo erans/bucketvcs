@@ -76,3 +76,5 @@ table.commits td.age { text-align: right; }
 .code { margin-top: .6rem; }
 /* pre.blob is emitted by highlight.go's plainPre fallback (oversize/unhighlightable blobs) */
 pre.blob { background: #111; border: 1px solid #333; padding: .5rem; overflow-x: auto; }
+
+.flash { border: 1px solid #8fd98f; padding: .35rem .6rem; color: #8fd98f; }

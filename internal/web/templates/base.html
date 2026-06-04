@@ -22,6 +22,7 @@
   </nav>
 </header>
 <main>
+{{if .Flash}}<p class="flash">{{.Flash}}</p>{{end}}
 {{block "content" .}}{{end}}
 </main>
 </body>

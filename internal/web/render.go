@@ -21,6 +21,7 @@ import (
 type base struct {
 	Session *auth.Session
 	CSRF    string
+	Flash   string
 }
 
 type landingData struct {
