@@ -11,10 +11,7 @@ import (
 	"os"
 	"time"
 
-	"golang.org/x/crypto/ssh"
-
 	"github.com/bucketvcs/bucketvcs/internal/auth"
-	"github.com/bucketvcs/bucketvcs/internal/sshd"
 )
 
 // runUserKey dispatches `bucketvcs user key <subcommand>`.
@@ -72,15 +69,6 @@ func userKeyAdd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return 1
 	}
 
-	parsedKey, _, _, _, err := ssh.ParseAuthorizedKey(pubBytes)
-	if err != nil {
-		fmt.Fprintf(stderr, "user key add: not an OpenSSH public key: %v\n", err)
-		return 1
-	}
-	fp := sshd.SHA256Fingerprint(parsedKey)
-	keyType := parsedKey.Type()
-	wireBytes := parsedKey.Marshal()
-
 	db, _, err := openAuthDB("")
 	if err != nil {
 		fmt.Fprintf(stderr, "user key add: open db: %v\n", err)
@@ -98,20 +86,13 @@ func userKeyAdd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return 1
 	}
 
-	keyID, err := auth.GenerateSSHKeyID()
+	k, err := auth.BuildUserSSHKey(pubBytes, user.ID, *label)
 	if err != nil {
-		fmt.Fprintf(stderr, "user key add: generate id: %v\n", err)
+		fmt.Fprintf(stderr, "user key add: not an OpenSSH public key: %v\n", err)
 		return 1
 	}
 
-	err = db.AddSSHKey(ctx, auth.SSHKey{
-		ID:          keyID,
-		Fingerprint: fp,
-		PublicKey:   wireBytes,
-		KeyType:     keyType,
-		Label:       *label,
-		UserID:      user.ID,
-	})
+	err = db.AddSSHKey(ctx, k)
 	if err != nil {
 		if errors.Is(err, auth.ErrDuplicateFingerprint) {
 			fmt.Fprintf(stderr, "user key add: fingerprint already registered\n")
@@ -121,7 +102,7 @@ func userKeyAdd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "added key %s (%s %s) for %s\n", keyID, fp, keyType, userName)
+	fmt.Fprintf(stdout, "added key %s (%s %s) for %s\n", k.ID, k.Fingerprint, k.KeyType, userName)
 	return 0
 }
 
