@@ -74,7 +74,7 @@ bucketvcs serve \
 |---|---|---|
 | `--ui` | `true` | Enable the web UI. Set `--ui=false` to disable (git gateway only). |
 | `--ui-addr` | `""` (shares `--addr`) | Bind the web UI on a separate listen address. Requires `--addr` to also be set — a startup `WARN` is emitted if `--ui-addr` is set but `--addr` is not; the UI will not be served in that configuration. |
-| `--ui-dir` | `""` (embedded assets) | Serve HTML templates and static files from this directory instead of the compiled-in assets. Use only during development. |
+| `--ui-dir` | `""` (embedded assets) | Serve HTML templates and static files from this directory instead of the compiled-in assets. Use only during development. Custom template directories must supply all page templates **and** `_partials.html` (the shared ref-switcher and tree-row fragment templates); without it, any tree or repo-home render will fail. |
 | `--ui-session-ttl` | `168h` (7 days) | Session cookie lifetime. The TTL is sliding: each authenticated request refreshes the expiry. Sessions are swept from the database every 10 minutes. |
 
 ### 2.2 Separate listener
@@ -318,9 +318,13 @@ same name, the branch wins; use the tag's commit OID to browse the tag.
 
 ### 6.2 Branch and tag switcher
 
-Each browse page shows a branch/tag dropdown populated from all known refs. The
-switcher uses plain links (full-page navigation); htmx partial swaps are a
-deferred item. The single-commit view is the exception: commits are addressed
+Each tree page shows a branch/tag `<select>` dropdown. When JavaScript is
+available, htmx intercepts the `change` event and swaps only the tree table
+in place (`hx-target="#tree"`, `hx-push-url="true"`), so the rest of the page
+stays stable. Without JavaScript, the form falls back to a plain GET
+(`?ref=<name>`) that navigates to the selected ref's root tree. Switching the
+ref from a blob or commits page always performs a full navigation to the new
+ref's tree root. The single-commit view is the exception: commits are addressed
 by OID, so it omits the switcher (and skips the ref load entirely).
 
 ### 6.3 README rendering
@@ -341,14 +345,46 @@ skipped.
 
 | Condition | Behaviour |
 |---|---|
-| Text blob ≤ 1 MiB | Syntax-highlighted via **chroma** (inline styles, "bw" theme) |
+| Text blob ≤ 1 MiB | Syntax-highlighted via **chroma** (class-based monokai with line numbers) |
 | Text blob > 1 MiB | Plain escaped `<pre>` (no highlighting) |
 | Binary blob (NUL byte in first 8 KiB) | Message + download link; no source rendered |
 | Any blob > 10 MiB | "Too large" message; bytes are not fetched and the file is not downloadable (the raw endpoint returns HTTP 413) |
 
 Chroma selects a lexer by filename; if that fails it falls back to content
-analysis, then to a plain-text lexer. Inline styles (`WithClasses(false)`) keep
-the output self-contained — no separate CSS file is required.
+analysis, then to a plain-text lexer. Output uses CSS classes (`WithClasses(true)`)
+rather than inline styles — a requirement of the strict UI CSP. The stylesheet is
+generated at startup and served at `/_ui/static/chroma.css`. If `--ui-dir` is
+set and a `static/chroma.css` file exists under that directory, it is served
+instead (theming hook). No separate download is required; the page `<base.html>`
+links the stylesheet automatically.
+
+The old "white-box" symptom (highlighted text invisible on a dark background) is
+gone — the monokai dark theme is embedded in the generated stylesheet.
+
+Blob and tree views also show relative times ("2h ago") with absolute UTC
+tooltips, and file sizes are displayed in binary units (e.g. "1.2 KiB").
+
+### 6.4a Tree activity column
+
+Each directory listing includes a "last commit" column: the most recent commit
+that touched each entry, with a relative timestamp and commit summary. The
+attribution is computed from a single bounded history walk per tree page:
+
+- **Walk depth**: the 200 most recent commits reachable from the current tree OID
+  (constant `treeActivityWindow = 200`).
+- **Output cap**: 8 MiB of `git log` output; if the walk hits the cap, the
+  captured prefix is still parsed and used.
+- **Renames**: `--no-renames` is passed, so a rename is attributed to the rename
+  commit (shown as both an `A` and a `D` by git). The renamed-from path is not
+  followed back into history.
+- **Entries not touched in the window**: shown as "—" in the last-commit column.
+  This is expected on repositories with long-lived paths or large histories.
+- **Degradation**: if the walk fails for any reason (subprocess error, mirror
+  unavailability), the column renders entirely as "—" and a `WARN` log is emitted.
+  The rest of the tree page is unaffected.
+- **Mirror cost**: the walk opens a mirror handle — the same handle used for the
+  tree listing — so a tree page incurs one extra mirror-open wait recorded in the
+  `web_browse_mirror_wait_seconds` metric.
 
 ### 6.5 Raw endpoint safety headers
 
@@ -366,9 +402,19 @@ Because repo content is attacker-controlled, every response is hardened:
 Blobs over the 10 MiB cap are not served at all: the raw endpoint returns
 HTTP 413 rather than an empty attachment.
 
-These headers together ensure that HTML, SVG, and other active content cannot
-execute inline under the UI's origin, even when a browser ignores
-`Content-Security-Policy`.
+All other HTML browse pages (tree, blob, commits, commit, landing, login, error)
+carry a strict UI-wide `Content-Security-Policy` applied by a middleware wrapper:
+
+```
+default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+```
+
+This policy is enforced because the UI has no inline scripts or styles
+(class-based chroma + class-based diff rows). Remote images embedded in a
+rendered README are **blocked** by `img-src 'self'` — the image alt text is
+shown instead. This prevents a viewer's IP from being disclosed to a remote
+image host. The raw endpoint overrides the UI-wide policy with its own stricter
+`default-src 'none'; sandbox` directive.
 
 ### 6.6 Diff caps
 
@@ -434,13 +480,9 @@ No new audit events are emitted for Phase 2. Read operations are not audited.
 - Cursor-based pagination (current log pagination is offset-based).
 - Per-read audit events.
 - Web clone / zip download.
-- htmx partial swaps for the ref switcher (currently full-page navigation).
 - Branch and tag management through the UI.
-- A `Content-Security-Policy` on the rendered HTML browse pages. The raw
-  endpoint carries a strict CSP, but HTML pages rely on bluemonday's
-  sanitization (scripts and event handlers are stripped). A rendered README
-  may still reference remote images, which can disclose a viewer's IP to the
-  image host; a UI-wide CSP / image proxy is deferred.
+- README remote-image proxy (remote images are blocked by the page CSP; a
+  proxy would be needed to display them — alt text renders in their place).
 - Git errors during a read surface as HTTP 404 when the object, ref, or path does
   not exist (missing-ref/missing-path/missing-object checks return ErrNotFound →
   404); an unexpected git failure that occurs after the object's existence is
@@ -477,8 +519,8 @@ No new audit events are emitted for Phase 2. Read operations are not audited.
   RP-initiated logout) are listed in that section's "Deferred" note.
 - **Phase 2 — code browse**: shipped — see §6 above. Remaining Phase 2 deferrals
   (path-filtered log, blame, search, compare views, cursor pagination, per-read
-  audit, web clone/zip, htmx partial swaps, branch/tag management) are listed in
-  §6.9.
+  audit, web clone/zip, branch/tag management, README remote-image proxy) are
+  listed in §6.9.
 - **Phase 3 — settings / admin screens**: manage users, repos, protected-ref
   policies, webhooks, and token scopes through the UI rather than the CLI.
 - **Per-session audit trail**: expose session list and per-user login history to
