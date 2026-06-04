@@ -80,21 +80,59 @@ func TestRepoSettingsAuthzMatrix(t *testing.T) {
 		name string
 		sess *auth.Session
 		perm auth.Perm
+		// post sends a CSRF-protected POST with `form`; otherwise a plain GET.
+		post bool
+		form url.Values
 		path string
+		// mut customizes the fake store (e.g. to inject ErrNoSuchRepo).
+		mut  func(*fakeStore)
 		want int
 	}{
-		{"anon redirects to login", nil, auth.PermNone, "/acme/demo/settings", http.StatusSeeOther},
-		{"non-admin reader 404", userSession(), auth.PermRead, "/acme/demo/settings", http.StatusNotFound},
-		{"repo admin 200", userSession(), auth.PermAdmin, "/acme/demo/settings", http.StatusOK},
-		{"global admin 200", adminSession(), auth.PermNone, "/acme/demo/settings", http.StatusOK},
-		{"repo admin unknown tab 404", userSession(), auth.PermAdmin, "/acme/demo/settings/bogus", http.StatusNotFound},
+		{name: "anon redirects to login", sess: nil, perm: auth.PermNone, path: "/acme/demo/settings", want: http.StatusSeeOther},
+		{name: "non-admin reader 404", sess: userSession(), perm: auth.PermRead, path: "/acme/demo/settings", want: http.StatusNotFound},
+		{name: "repo admin 200", sess: userSession(), perm: auth.PermAdmin, path: "/acme/demo/settings", want: http.StatusOK},
+		{name: "global admin 200", sess: adminSession(), perm: auth.PermNone, path: "/acme/demo/settings", want: http.StatusOK},
+		{name: "repo admin unknown tab 404", sess: userSession(), perm: auth.PermAdmin, path: "/acme/demo/settings/bogus", want: http.StatusNotFound},
+		{
+			// Locks ErrNoSuchRepo→404 in repoSettingsGeneral: a future refactor
+			// must not silently turn a missing repo into a 500 or a 200.
+			name: "global admin missing repo 404", sess: adminSession(), perm: auth.PermNone,
+			path: "/acme/demo/settings",
+			mut: func(s *fakeStore) {
+				s.getRepoFlags = func(ctx context.Context, tenant, repo string) (auth.RepoFlags, error) {
+					return auth.RepoFlags{}, auth.ErrNoSuchRepo
+				}
+			},
+			want: http.StatusNotFound,
+		},
+		{
+			// Same lock on the POST /settings/public path: SetRepoPublic
+			// reporting a missing repo must surface as 404, not 500/303.
+			name: "global admin public toggle missing repo 404", sess: adminSession(), perm: auth.PermNone,
+			post: true, form: url.Values{"public": {"on"}},
+			path: "/acme/demo/settings/public",
+			mut: func(s *fakeStore) {
+				s.setRepoPublic = func(ctx context.Context, tenant, repo string, public bool) error {
+					return auth.ErrNoSuchRepo
+				}
+			},
+			want: http.StatusNotFound,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			store := newFakeStore()
 			store.perm = tc.perm
+			if tc.mut != nil {
+				tc.mut(store)
+			}
 			h := newTestHandlerWith(store, nil)
-			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			var req *http.Request
+			if tc.post {
+				req = csrfPost(t, tc.path, cloneValues(tc.form))
+			} else {
+				req = httptest.NewRequest(http.MethodGet, tc.path, nil)
+			}
 			if tc.sess != nil {
 				addSessionCookie(t, req, store, tc.sess)
 			}
