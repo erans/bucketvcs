@@ -388,3 +388,41 @@ func TestPasswordChange(t *testing.T) {
 		}
 	})
 }
+
+// TestPasswordChangeOIDCOnly locks the round-14 guard: a direct POST from an
+// account with no password hash (OIDC-only) gets a clear flash instead of the
+// confusing "current password incorrect"; bootstrap stays CLI-only.
+func TestPasswordChangeOIDCOnly(t *testing.T) {
+	store := newFakeStore()
+	store.hasPassword = func(ctx context.Context, userName string) (bool, error) {
+		return false, nil
+	}
+	verifyCalled, setCalled := false, false
+	store.verify = func(ctx context.Context, u, p string) (*auth.Actor, error) {
+		verifyCalled = true
+		return nil, auth.ErrInvalidCredential
+	}
+	store.setPassword = func(ctx context.Context, u, p string) error {
+		setCalled = true
+		return nil
+	}
+	h := NewHandler(Deps{Store: store, Logger: slog.Default()})
+	form := url.Values{"current": {""}, "new1": {"newpass123"}, "new2": {"newpass123"}}
+	req := csrfPost(t, "/settings/password", form)
+	addSessionCookie(t, req, store, userSession())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status %d, want 303", rec.Code)
+	}
+	fc := findCookie(rec.Result().Cookies(), flashCookieName)
+	if fc == nil {
+		t.Fatal("no flash cookie")
+	}
+	if got := decodeFlash(fc); !strings.Contains(got, "not configured") {
+		t.Fatalf("flash %q should explain password login is not configured", got)
+	}
+	if verifyCalled || setCalled {
+		t.Fatalf("verify=%v set=%v; neither store call should run for OIDC-only accounts", verifyCalled, setCalled)
+	}
+}

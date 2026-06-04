@@ -285,8 +285,15 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	// construct unconditionally; the web layer only invokes them on demand
 	// from the settings/admin pages. hooksStore is the CRUD Store (distinct
 	// from the optional hooksSvc Runner constructed below for receive-pack).
+	// quotaSvc is gated on --lfs: M13.5 quota enforcement lives in the LFS
+	// Batch handler, so with LFS off a configured quota would be inert —
+	// leaving the web Deps nil makes the quota pages degrade to their
+	// "unavailable" notices instead of offering unenforceable knobs.
 	hooksStore := hooks.NewStore(authS.DB())
-	quotaSvc := quota.New(authS.DB(), logger)
+	var quotaSvc *quota.Service
+	if *lfsEnabled {
+		quotaSvc = quota.New(authS.DB(), logger)
+	}
 
 	// M20 Tier 3 hooks service (optional). Constructed only when
 	// --hooks-enabled=true. bwrap detection: on Linux, the binary must
@@ -587,7 +594,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 				logger.Info("oidc browser login enabled", "issuer", *oidcIssuer)
 			}
 			browseSvc := gitbrowse.NewService(store, srv.MirrorManager(), *uiBrowseTimeout, logger)
-			uiHandler = web.NewHandler(web.Deps{
+			webDeps := web.Deps{
 				Store:      newWebAdapter(authS),
 				Logger:     logger,
 				Limiter:    rateLimiter,
@@ -599,10 +606,6 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 				Webhooks:   webhookSvc,
 				Policy:     policySvc,
 				Hooks:      hooksStore,
-				Quotas:     quotaSvc,
-				QuotaReconcile: func(ctx context.Context, tenant string, dryRun bool) (quota.Report, error) {
-					return quotaSvc.Reconcile(ctx, store, tenant, dryRun)
-				},
 				RepoInit: func(ctx context.Context, tenant, repoName, actor string) error {
 					// Mirrors `bucketvcs init` defaults (cmd/bucketvcs/init.go).
 					_, err := repo.Create(ctx, store, tenant, repoName, repo.CreateOptions{
@@ -633,7 +636,17 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 					}
 					return nil
 				},
-			})
+			}
+			// Quota pages only when LFS is on (see quotaSvc construction).
+			// Assigned conditionally: a typed-nil *quota.Service stored in the
+			// QuotaAdmin interface would defeat the web layer's nil checks.
+			if quotaSvc != nil {
+				webDeps.Quotas = quotaSvc
+				webDeps.QuotaReconcile = func(ctx context.Context, tenant string, dryRun bool) (quota.Report, error) {
+					return quotaSvc.Reconcile(ctx, store, tenant, dryRun)
+				}
+			}
+			uiHandler = web.NewHandler(webDeps)
 		}
 
 		var mainHandler http.Handler = srv // gateway

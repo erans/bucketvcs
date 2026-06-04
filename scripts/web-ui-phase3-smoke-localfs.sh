@@ -308,24 +308,27 @@ GIT_TERMINAL_PROMPT=0 git -c credential.helper= \
     || { echo "FAIL: git ls-remote with API token failed"; exit 1; }
 echo "  git ls-remote with token OK"
 
-# ---- step 12 — admin sets quota for acme ------------------------------------
+# ---- step 12 — quotas degrade when LFS is off --------------------------------
+# This smoke runs with --lfs=false, so the quota service is deliberately not
+# wired (M13.5 enforcement lives in the LFS Batch handler — a quota set with
+# LFS off would be inert). Assert the degraded surface: notice page + 404 POST.
 echo ""
-echo "== Step 12: admin sets quota for tenant acme =="
+echo "== Step 12: /admin/quotas degrades cleanly with --lfs=false =="
 
 csrf_admin_q=$(get_csrf "$JAR_A" "$BASE_URL/admin/quotas")
 test -n "$csrf_admin_q" || { echo "FAIL: no csrf on /admin/quotas"; exit 1; }
+
+quotas_page=$(curl -sS -b "$JAR_A" "$BASE_URL/admin/quotas")
+assert_contains "$quotas_page" "unavailable" "quotas page shows unavailable notice when LFS is off"
+echo "  /admin/quotas shows unavailable notice OK"
 
 q_code=$(curl -sS -b "$JAR_A" -c "$JAR_A" -o /dev/null -w '%{http_code}' \
     --data-urlencode "csrf_token=$csrf_admin_q" \
     --data-urlencode "tenant=acme" \
     --data-urlencode "limit=10GiB" \
     "$BASE_URL/admin/quotas/set")
-assert_eq "$q_code" "303" "admin quota set"
-echo "  quota set -> 303 OK"
-
-quotas_page=$(curl -sS -b "$JAR_A" "$BASE_URL/admin/quotas")
-assert_contains "$quotas_page" "acme" "quotas page contains tenant acme after set"
-echo "  /admin/quotas contains 'acme' OK"
+assert_eq "$q_code" "404" "quota set POST 404s when LFS is off"
+echo "  quota set with LFS off -> 404 OK"
 
 # ---- step 13 — CSRF negative: POST without csrf_token returns 403 -----------
 echo ""

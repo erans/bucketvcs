@@ -431,6 +431,11 @@ func (s *server) webhooksReplay(w http.ResponseWriter, r *http.Request, sr setti
 	// no-such-delivery and foreign-delivery (cross-repo/tenant) alike.
 	d, err := s.webhooks.ShowDelivery(r.Context(), deliveryID)
 	if err != nil || d.EndpointID != ep.ID {
+		// A genuine backend failure keeps the anti-enumeration 404 but must
+		// not vanish from the logs (round-14 observability fix).
+		if err != nil && !errors.Is(err, webhooks.ErrNotFound) {
+			s.logger.Error("webhooks replay: show delivery", "delivery_id", deliveryID, "err", err)
+		}
 		s.renderError(w, r, http.StatusNotFound, "not found")
 		return
 	}

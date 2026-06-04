@@ -625,6 +625,11 @@ optional. When a service is not wired at startup, the corresponding tab or page
 renders a "not enabled on this server" notice instead of forms; no panic or 500
 occurs. This mirrors the `Content == nil` behavior that disables code browse.
 
+Quotas are wired only when `--lfs=true`: M13.5 quota enforcement lives in the
+LFS Batch handler, so with LFS off the `/admin/quotas` pages degrade to the
+unavailable notice rather than offering knobs that nothing enforces (the
+repo-settings quota display is likewise hidden).
+
 The hooks tab returns HTTP 404 unconditionally for non-admin users regardless of
 service availability (authz check precedes nil check).
 

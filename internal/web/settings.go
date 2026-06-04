@@ -70,6 +70,13 @@ func (s *server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 		fail("password too short (min 8)")
 		return
 	}
+	// OIDC-only accounts have no password hash: the GET page hides the form,
+	// but a direct POST would otherwise surface a confusing "current password
+	// incorrect". Password bootstrap stays CLI-only by design (spec §3).
+	if hasPW, err := s.store.HasPassword(r.Context(), sess.Name); err == nil && !hasPW {
+		fail("password login is not configured for this account; use the CLI to set one")
+		return
+	}
 	if _, err := s.store.VerifyPassword(r.Context(), sess.Name, cur); err != nil {
 		if auth.IsCredentialError(err) {
 			fail("current password incorrect")
