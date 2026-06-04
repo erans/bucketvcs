@@ -626,6 +626,42 @@ func (s *Store) RevokeRepoPermission(ctx context.Context, userName, tenant, repo
 	return err
 }
 
+// RepoGrant is one explicit (user, perm) permission row on a repo.
+type RepoGrant struct {
+	UserName string
+	Perm     string // "read" | "write" | "admin"
+}
+
+// ListRepoGrants returns the explicit permission rows on (tenant, repo),
+// ordered by user name. ErrNoSuchRepo if the repo is unregistered.
+func (s *Store) ListRepoGrants(ctx context.Context, tenant, repo string) ([]RepoGrant, error) {
+	// Existence probe — distinguishes an unregistered repo (ErrNoSuchRepo)
+	// from a registered repo with no grants (empty slice, nil error).
+	if _, err := s.GetRepoFlags(ctx, tenant, repo); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT u.name, rp.perm
+		FROM repo_permissions rp
+		JOIN users u ON u.id = rp.user_id
+		WHERE rp.tenant = ? AND rp.repo = ?
+		ORDER BY u.name
+	`, tenant, repo)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []RepoGrant
+	for rows.Next() {
+		var g RepoGrant
+		if err := rows.Scan(&g.UserName, &g.Perm); err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
 // DeleteRepo removes a (tenant, name) from repos. SSH deploy keys bound to
 // the repo are removed by CASCADE (schema enforces ON DELETE CASCADE on the
 // FOREIGN KEY). No error if the repo did not exist.
