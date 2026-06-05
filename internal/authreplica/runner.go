@@ -46,6 +46,9 @@ type Runner struct {
 	lsstore *litestream.Store
 	stopped bool
 
+	// hbCancel/hbDone are written only during single-threaded boot
+	// (StartReplication) and read in Close; the lifecycle contract is
+	// single-caller — Close must not race StartReplication or itself.
 	hbCancel context.CancelFunc
 	hbDone   chan struct{}
 }

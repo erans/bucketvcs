@@ -59,7 +59,12 @@ type Lease struct {
 // NewLease returns an unacquired lease at <prefix>/lease.json.
 func NewLease(store storage.ObjectStore, prefix string, ttl time.Duration) *Lease {
 	idb := make([]byte, 16)
-	_, _ = rand.Read(idb)
+	// crypto/rand.Read never fails on Go 1.20+; panic rather than silently
+	// degrading to an all-zeros InstanceID (which would make every node's
+	// lease look identical in holder-named errors).
+	if _, err := rand.Read(idb); err != nil {
+		panic(err)
+	}
 	return &Lease{
 		store: store,
 		key:   path.Join(prefix, "lease.json"),

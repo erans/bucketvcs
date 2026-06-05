@@ -87,6 +87,10 @@ func runAuthDBRestore(ctx context.Context, args []string, stdout, stderr io.Writ
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	if *timestamp != "" && *txid != "" {
+		fmt.Fprintln(stderr, "authdb restore: --timestamp and --txid are mutually exclusive")
+		return 2
+	}
 
 	target := *output
 	if target == "" {
