@@ -51,10 +51,16 @@ type Client struct {
 }
 
 // NewClient returns a Client writing under prefix (no trailing slash needed).
+// An empty (or all-slash) prefix falls back to DefaultPrefix so the write
+// keys and DeleteAll's list prefix can never diverge.
 func NewClient(store storage.ObjectStore, prefix string) *Client {
+	p := strings.Trim(prefix, "/")
+	if p == "" {
+		p = DefaultPrefix
+	}
 	return &Client{
 		store:  store,
-		prefix: strings.Trim(prefix, "/"),
+		prefix: p,
 		logger: slog.Default(),
 	}
 }
