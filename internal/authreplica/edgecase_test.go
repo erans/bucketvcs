@@ -1,3 +1,9 @@
+// Litestream edge-case suite. These tests encode EMPIRICALLY DISCOVERED
+// litestream v0.5.11 behavior (see per-test comments, esp. E2/E5). The hard
+// assertions pin the UNSAFE direction (forked lineage presented as healthy,
+// PITR resolving forward); a future litestream that becomes strictly safer
+// passes with a logged DISCOVERY-CHANGE note rather than a failure. Re-run
+// against any litestream version bump alongside conformance_test.go.
 package authreplica
 
 import (
@@ -535,6 +541,11 @@ func TestEdge_PITRBeyondRetainedWindow(t *testing.T) {
 			// LTX timestamp so CalcRestoreTarget resolves to exactly earlyRows.
 			time.Sleep(50 * time.Millisecond)
 			earlyTS = time.Now().UTC()
+			// Widened separation between earlyTS and the next sync's stored
+			// timestamp (≥ the L1 interval) so a loaded CI runner cannot land
+			// the next LTX inside the window (review hardening).
+			time.Sleep(450 * time.Millisecond)
+			continue
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
@@ -574,6 +585,11 @@ func TestEdge_PITRBeyondRetainedWindow(t *testing.T) {
 		t.Fatalf("E5 PITR FORWARD-LEAK GUARD TRIPPED: restore to a timestamp when %d "+
 			"rows existed returned %d rows — litestream resolved FORWARD of the request. "+
 			"Re-investigate immediately.", earlyRows, n)
+	}
+	// Lower bound (review hardening): the snapshot lineage demonstrably covers
+	// the earlyRows state, so resolving too far BACK is also a regression.
+	if n < earlyRows {
+		t.Fatalf("E5 PITR resolved too far back: want %d rows at earlyTS, got %d", earlyRows, n)
 	}
 	t.Logf("E5 encoded truth: PITR to an early timestamp reconstructed exactly %d rows "+
 		"(state at-or-before the request) from the snapshot lineage; requested-window "+

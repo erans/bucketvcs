@@ -395,6 +395,16 @@ Even so, as **belt-and-suspenders on R2**:
   never compacts down is the signal to investigate (and the reason the lifecycle
   rule above is recommended).
 
+> **Level-0 accumulation is expected on every backend, not just R2** (verified
+> empirically against litestream v0.5.11): compaction deletes superseded files
+> at the *compacted* levels through the replica client, but **does not prune
+> level-0 LTX files from the replica** — its L0 retention applies to local
+> copies only. The level-0 `files` count therefore grows steadily on all
+> backends. The objects are tiny, but on long-lived deployments configure the
+> lifecycle rule above (any backend that supports one) with a retention longer
+> than your PITR window, and treat `replica-status`'s level-0 count as a
+> gauge, not an anomaly.
+
 ### 6.2 localfs
 
 - Objects appear under `<root>/objects/sys/authdb/...` with `.meta` sidecars
@@ -417,6 +427,19 @@ Even so, as **belt-and-suspenders on R2**:
 | **Lease survives a kill -9** | `lease.json` persists until the TTL expires; the next start takes over via CAS once expired. | Wait out `--auth-db-replica-lease-ttl`, or shorten the TTL. On localfs also clear `<root>/.lock` (§4.3). |
 | **Lease lost while serving** (`authdb.replica.lease_lost`) | Replication **stops**, the node **keeps serving**, and its subsequent authdb writes are **not replicated**. | **Runbook §4.2: alert, then drain/restart the node.** Do not ignore. |
 | **LTX position mismatch after unclean shutdown** | Restore/replay may report an LTX position or txid mismatch (a partial WAL segment from the moment of the crash). | Use `replica-status` to read the consistent `max_txid` at level 0, then `authdb restore --output <copy> --txid <that-max>` to a copy, verify it, and promote it with `--force` (which clears stale `-wal/-shm/-txid` sidecars — §5.4). Do not hand-edit sidecars. |
+
+> **⚠️ Never resume replication against a stale local authdb.** Verified
+> empirically against litestream v0.5.11: if the local file is an *older copy*
+> (e.g. restored from a filesystem snapshot or hand-copied backup) while the
+> replica holds newer transactions, starting replication does **not** error —
+> litestream silently snapshots the stale state on top of the newer lineage,
+> and the corruption only surfaces later as `database disk image is malformed`
+> on the live DB and on restores. **There is no write-time error.** This is
+> exactly why restore-on-boot only runs when the local file is *missing*, and
+> why the single-writer lease exists. If you ever need to roll the authdb back
+> to an older state, do it through `authdb restore` against the replica
+> (§5.2/§5.3) — never by copying an old file into place — or point the rolled-
+> back node at a **fresh replica prefix** so it starts a new lineage.
 
 ---
 
