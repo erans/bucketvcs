@@ -32,10 +32,12 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/oidc"
 	"github.com/bucketvcs/bucketvcs/internal/policy"
+	"github.com/bucketvcs/bucketvcs/internal/replica"
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 	"github.com/bucketvcs/bucketvcs/internal/sshd"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
+	"github.com/bucketvcs/bucketvcs/internal/storage/fallback"
 	"github.com/bucketvcs/bucketvcs/internal/web"
 	"github.com/bucketvcs/bucketvcs/internal/webhooks"
 )
@@ -84,6 +86,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	uiEnabled, uiAddr, uiDir, uiSessionTTL, uiBrowseTimeout := sf.uiEnabled, sf.uiAddr, sf.uiDir, sf.uiSessionTTL, sf.uiBrowseTimeout
 	oidcLogin, oidcIssuer, oidcClientID := sf.oidcLogin, sf.oidcIssuer, sf.oidcClientID
 	oidcSecretFile, oidcRedirect, oidcScopes, oidcLabel := sf.oidcSecretFile, sf.oidcRedirect, sf.oidcScopes, sf.oidcLabel
+	replicaOf, replicaCheckInterval, writeRegionURL := sf.replicaOf, sf.replicaCheckInterval, sf.writeRegionURL
 
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -163,6 +166,45 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 		*mirrorDir = defaultMirrorDir()
 	}
 
+	// M26 replica mode: validate the flag surface before opening anything.
+	isReplica := *replicaOf != ""
+	var replicaMode replica.Mode
+	if isReplica {
+		var ok bool
+		replicaMode, ok = replica.ParseMode(*sf.replicaMode)
+		if !ok {
+			fmt.Fprintf(stderr, "serve: --replica-mode=%q must be strong-current|bounded-stale\n", *sf.replicaMode)
+			return 2
+		}
+		if *sf.replicaLagBudget < 30*time.Second {
+			fmt.Fprintln(stderr, "serve: --replica-lag-budget must be >= 30s")
+			return 2
+		}
+		if *replicaCheckInterval == 0 {
+			iv := *sf.replicaLagBudget / 4
+			if iv < 15*time.Second {
+				iv = 15 * time.Second
+			}
+			*replicaCheckInterval = iv
+		}
+		if *oidcEnabled {
+			fmt.Fprintln(stderr, "serve: --oidc is not available on replicas (token exchange mints tokens — a write-region concern); exchange against the write-region URL instead")
+			return 2
+		}
+		// Explicit --ui=true is an error; the untouched default becomes off.
+		uiExplicit := false
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "ui" {
+				uiExplicit = true
+			}
+		})
+		if uiExplicit && *uiEnabled {
+			fmt.Fprintln(stderr, "serve: the web UI is not served on replicas; browse via the write-region gateway")
+			return 2
+		}
+		*uiEnabled = false
+	}
+
 	store, err := openStore(*storeURL)
 	if err != nil {
 		fmt.Fprintf(stderr, "serve: open store: %v\n", err)
@@ -170,12 +212,52 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	}
 	defer closeStore(store)
 
+	// M26 replica composition. The defer above was registered against the
+	// regional store value, so reassigning `store` below still closes the
+	// regional store on shutdown (closeStore's argument is evaluated at defer
+	// time, before this reassignment); the canonical store gets its own
+	// defer. fallback.Store itself owns nothing and needs no Close — passing
+	// it to closeStore would be a harmless no-op, but we never do.
+	var replicaCfg *replica.GatewayConfig
+	if isReplica {
+		canonical, err := openStore(*replicaOf)
+		if err != nil {
+			fmt.Fprintf(stderr, "serve: open --replica-of store: %v\n", err)
+			return 1
+		}
+		defer closeStore(canonical)
+		routing := fallback.RootFromRegional
+		if replicaMode == replica.ModeStrongCurrent {
+			routing = fallback.RootFromCanonical
+		}
+		regional := store
+		store = fallback.New(regional, canonical, routing, slog.Default())
+		ctl := replica.NewController(replica.ControllerConfig{
+			Mode:          replicaMode,
+			LagBudget:     *sf.replicaLagBudget,
+			CheckInterval: *replicaCheckInterval,
+			Regional:      regional,
+			Canonical:     canonical,
+			Logger:        slog.Default(),
+		})
+		replicaCfg = &replica.GatewayConfig{
+			WriteRegionURL: *writeRegionURL,
+			Gate:           ctl,
+			Health:         ctl.Snapshot,
+		}
+	}
+
 	authS, _, err := openAuthDB(*authDB, sqlitestore.WithMaxConns(*authDBMaxConns))
 	if err != nil {
 		fmt.Fprintf(stderr, "serve: auth-db: %v\n", err)
 		return 1
 	}
 	defer authS.Close()
+
+	if isReplica && authS.BackendName() != "postgres" {
+		fmt.Fprintln(stderr, "serve: --replica-of requires a postgres --auth-db (replica regions share the central postgres; a cross-region sqlite/libsql file is a misconfiguration)")
+		return 2
+	}
 
 	logger := slog.Default()
 
@@ -376,10 +458,16 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 
 	// M15 webhook delivery worker. Runs for the lifetime of serveCtx;
 	// returns when ctx is cancelled at shutdown. Backed by the same
-	// authdb as enqueue, so no extra DB handle is needed.
-	wcfg := webhooks.DefaultWorkerConfig()
-	wcfg.Egress = webhookEgress
-	go webhooks.StartWorker(serveCtx, webhookSvc, wcfg)
+	// authdb as enqueue, so no extra DB handle is needed. On replicas the
+	// worker is NOT started: webhook deliveries fire from the write region.
+	if isReplica {
+		slog.Default().Info("replica mode: webhook delivery worker not started (deliveries fire from the write region)",
+			"mode", replicaMode.String())
+	} else {
+		wcfg := webhooks.DefaultWorkerConfig()
+		wcfg.Egress = webhookEgress
+		go webhooks.StartWorker(serveCtx, webhookSvc, wcfg)
+	}
 
 	// M22 OIDC expired-token sweep goroutine.
 	if *oidcEnabled {
@@ -479,6 +567,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			OIDCEnabled:             *oidcEnabled,
 			OIDCStore:               oidcStore,
 			OIDCVerifier:            oidcVerifier,
+			Replica:                 replicaCfg,
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "serve: NewServer: %v\n", err)
@@ -665,6 +754,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			Webhooks:          webhookSvc,
 			Hooks:             hooksSvc,
 			Limiter:           rateLimiter,
+			Replica:           replicaCfg,
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "serve: ssh new server: %v\n", err)
