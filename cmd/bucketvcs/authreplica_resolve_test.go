@@ -3,6 +3,9 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
+	"github.com/bucketvcs/bucketvcs/internal/authreplica"
 )
 
 func TestResolveAuthDBReplica(t *testing.T) {
@@ -14,12 +17,13 @@ func TestResolveAuthDBReplica(t *testing.T) {
 		isReplica bool   // M26 replica-serve mode
 		wantErr   string // substring; "" = ok
 		wantAuto  bool   // resolved to system store + DefaultPrefix
+		wantURL   string // explicit StoreURL expected on the spec; "" = unchecked
 	}{
 		{name: "off is nil", replica: "off", storeURL: "localfs:/tmp/x"},
 		{name: "empty is nil", replica: "", storeURL: "localfs:/tmp/x"},
 		{name: "auto ok", replica: "auto", storeURL: "localfs:/tmp/x", wantAuto: true},
 		{name: "auto needs store", replica: "auto", storeURL: "", wantErr: "--store"},
-		{name: "explicit url ok", replica: "localfs:/tmp/replica", storeURL: "localfs:/tmp/x"},
+		{name: "explicit url ok", replica: "localfs:/tmp/replica", storeURL: "localfs:/tmp/x", wantURL: "localfs:/tmp/replica"},
 		{name: "postgres dsn rejected", replica: "auto", storeURL: "localfs:/tmp/x",
 			authDB: "postgres://u@h/db", wantErr: "embedded sqlite"},
 		{name: "libsql dsn rejected", replica: "auto", storeURL: "localfs:/tmp/x",
@@ -51,6 +55,23 @@ func TestResolveAuthDBReplica(t *testing.T) {
 			if tc.wantAuto && (spec.UseSystemStore != true || spec.Prefix == "") {
 				t.Fatalf("auto not resolved: %+v", spec)
 			}
+			if tc.wantURL != "" && (spec.StoreURL != tc.wantURL || spec.UseSystemStore || spec.Prefix != authreplica.DefaultPrefix) {
+				t.Fatalf("explicit url not resolved: %+v", spec)
+			}
 		})
+	}
+}
+
+func TestSQLitePathStripsScheme(t *testing.T) {
+	cases := map[string]string{
+		"/var/lib/bucketvcs.db":                   "/var/lib/bucketvcs.db",
+		"sqlite:/var/lib/bucketvcs.db":            "/var/lib/bucketvcs.db",
+		"file:/var/lib/bucketvcs.db":              "/var/lib/bucketvcs.db",
+		"file:auth.db?_pragma=busy_timeout(5000)": "auth.db",
+	}
+	for in, want := range cases {
+		if got := sqlitestore.SQLitePath(in); got != want {
+			t.Fatalf("SQLitePath(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

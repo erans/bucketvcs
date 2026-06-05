@@ -292,6 +292,10 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			fmt.Fprintf(stderr, "serve: --auth-db-replica: %v\n", perr)
 			return 1
 		}
+		// sqlitestore.Open strips sqlite:/file: DSN schemes before opening the
+		// file; litestream must replicate that same stripped path, not the raw
+		// --auth-db value, or it tracks a different file than sqlite writes.
+		authDBPath = sqlitestore.SQLitePath(authDBPath)
 		// Restore writes the authdb file at authDBPath; its parent dir must
 		// exist (mirrors openAuthDB, which MkdirAll's the same directory).
 		if perr := os.MkdirAll(filepath.Dir(authDBPath), 0o700); perr != nil {

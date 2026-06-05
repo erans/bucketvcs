@@ -126,6 +126,14 @@ func sqlitePath(value string) string {
 	return value
 }
 
+// SQLitePath returns the on-disk file path the sqlite backend will open for
+// the given --auth-db value, stripping any sqlite:/file: DSN scheme. It is
+// the single source of truth callers must use when they need the real file
+// location (e.g. authdb replication tracks the same file sqlite writes).
+func SQLitePath(value string) string {
+	return sqlitePath(value)
+}
+
 // sqliteBackend is the default modernc.org/sqlite backend — exactly the
 // behavior shipped before M23.
 type sqliteBackend struct{ path string }
