@@ -286,6 +286,9 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 				fmt.Fprintf(stderr, "serve: --auth-db-replica: %v\n", err)
 				return 1
 			}
+			// Registered before the runner-shutdown defer ⇒ LIFO runs it after
+			// Runner.Close — the store stays usable for final sync + lease release.
+			defer closeStore(replStore)
 		}
 		authDBPath, perr := resolveAuthDB(*authDB, realEnv())
 		if perr != nil {

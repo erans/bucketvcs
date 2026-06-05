@@ -157,16 +157,6 @@ func runAuthDBRestore(ctx context.Context, args []string, stdout, stderr io.Writ
 	return 0
 }
 
-// leaseHolderDoc mirrors authreplica's private leaseDoc (lease.go) — keep in sync; it cannot be imported.
-// It carries the lease.json body for read-only status.
-type leaseHolderDoc struct {
-	InstanceID string    `json:"instance_id"`
-	Hostname   string    `json:"hostname"`
-	PID        int       `json:"pid"`
-	RenewedAt  time.Time `json:"renewed_at"`
-	TTLSeconds int64     `json:"ttl_s"`
-}
-
 func runAuthDBReplicaStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("authdb replica-status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -237,23 +227,23 @@ func runAuthDBReplicaStatus(ctx context.Context, args []string, stdout, stderr i
 // returns (_, false) with no error — it just means no node currently (or
 // recently) held the replication lease. Any other Get error is surfaced as a
 // one-line warning to stderr and the lease line is omitted.
-func readLeaseHolder(ctx context.Context, st storage.ObjectStore, prefix string, stderr io.Writer) (leaseHolderDoc, bool) {
+func readLeaseHolder(ctx context.Context, st storage.ObjectStore, prefix string, stderr io.Writer) (authreplica.LeaseDoc, bool) {
 	key := path.Join(prefix, "lease.json")
 	obj, err := st.Get(ctx, key, nil)
 	if err != nil {
 		if !errors.Is(err, storage.ErrNotFound) {
 			fmt.Fprintf(stderr, "authdb replica-status: lease: %v\n", err)
 		}
-		return leaseHolderDoc{}, false
+		return authreplica.LeaseDoc{}, false
 	}
 	defer obj.Body.Close()
 	b, err := io.ReadAll(obj.Body)
 	if err != nil {
-		return leaseHolderDoc{}, false
+		return authreplica.LeaseDoc{}, false
 	}
-	var doc leaseHolderDoc
+	var doc authreplica.LeaseDoc
 	if err := json.Unmarshal(b, &doc); err != nil {
-		return leaseHolderDoc{}, false
+		return authreplica.LeaseDoc{}, false
 	}
 	return doc, true
 }

@@ -29,8 +29,9 @@ var ErrLeaseLost = errors.New("authreplica: lease lost to another instance")
 // always terminates rather than recursing/looping forever under contention.
 const acquireAttempts = 4
 
-// leaseDoc is the JSON body of <prefix>/lease.json.
-type leaseDoc struct {
+// LeaseDoc is the JSON body of <prefix>/lease.json. Exported so CLI
+// consumers (authdb replica-status) decode the same shape the lease writes.
+type LeaseDoc struct {
 	InstanceID string    `json:"instance_id"`
 	Hostname   string    `json:"hostname"`
 	PID        int       `json:"pid"`
@@ -77,7 +78,7 @@ func (l *Lease) TookOver() (bool, string) { return l.tookOver, l.prevHolder }
 
 func (l *Lease) body() ([]byte, error) {
 	host, _ := os.Hostname()
-	return json.Marshal(leaseDoc{
+	return json.Marshal(LeaseDoc{
 		InstanceID: l.id,
 		Hostname:   host,
 		PID:        os.Getpid(),
@@ -116,7 +117,7 @@ func (l *Lease) Acquire(ctx context.Context) error {
 		if readErr != nil {
 			return fmt.Errorf("authreplica: read lease: %w", readErr)
 		}
-		var doc leaseDoc
+		var doc LeaseDoc
 		if err := json.Unmarshal(raw, &doc); err != nil {
 			return fmt.Errorf("authreplica: parse lease %s: %w", l.key, err)
 		}
