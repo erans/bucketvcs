@@ -1,6 +1,7 @@
 package shiplog
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"errors"
@@ -88,7 +89,11 @@ func (e *Engine) Start() {
 	e.shipDone = make(chan struct{})
 	go func() {
 		defer close(e.shipDone)
-		t := time.NewTicker(shipTick)
+		tick := e.cfg.shipTick
+		if tick <= 0 {
+			tick = shipTick
+		}
+		t := time.NewTicker(tick)
 		defer t.Stop()
 		for {
 			select {
@@ -132,28 +137,49 @@ func (e *Engine) shipOne(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
-	// gzip to a sibling temp file, then stream it (re-readable on retry is
-	// unnecessary: we re-gzip per attempt; files are ≤ MaxEvents lines).
+	// Fully buffer the gzipped file in memory (files are ≤ MaxEvents lines, so
+	// bounded) and hand a re-readable bytes.Reader to PutIfAbsent. Buffering —
+	// rather than an io.Pipe — guarantees no dangling goroutine when the store
+	// returns without draining the body (e.g. a transient PUT error).
 	raw, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("shiplog: open pending: %w", err)
 	}
 	defer raw.Close()
-	pr, pw := io.Pipe()
-	go func() {
-		zw := gzip.NewWriter(pw)
-		_, cerr := io.Copy(zw, raw)
-		if cerr == nil {
-			cerr = zw.Close()
-		}
-		pw.CloseWithError(cerr)
-	}()
-	if _, err := e.cfg.Store.PutIfAbsent(ctx, key, pr, nil); err != nil &&
+
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	cr := &countingReader{r: raw}
+	if _, err := io.Copy(zw, cr); err != nil {
+		return fmt.Errorf("shiplog: gzip %s: %w", filepath.Base(path), err)
+	}
+	if err := zw.Close(); err != nil {
+		return fmt.Errorf("shiplog: gzip close %s: %w", filepath.Base(path), err)
+	}
+
+	if _, err := e.cfg.Store.PutIfAbsent(ctx, key, bytes.NewReader(buf.Bytes()), nil); err != nil &&
 		!errors.Is(err, storage.ErrAlreadyExists) {
 		return fmt.Errorf("shiplog: put %s: %w", key, err)
 	}
 	e.shippedFiles.Add(1)
+	e.shippedEvents.Add(cr.newlines)
 	return nil
+}
+
+// countingReader counts newline bytes as data flows through it.
+type countingReader struct {
+	r        io.Reader
+	newlines int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	for _, b := range p[:n] {
+		if b == '\n' {
+			c.newlines++
+		}
+	}
+	return n, err
 }
 
 func (e *Engine) removePending(path string) {
@@ -205,9 +231,13 @@ func (e *Engine) DroppedFiles() int64 { return e.droppedFiles.Load() }
 // ShipErrors reports the cumulative count of per-file ship failures.
 func (e *Engine) ShipErrors() int64 { return e.shipErrors.Load() }
 
+// ShippedEvents reports the cumulative count of NDJSON lines shipped.
+func (e *Engine) ShippedEvents() int64 { return e.shippedEvents.Load() }
+
 // metricSnapshot holds the cumulative counters last emitted as metric lines.
 type metricSnapshot struct {
 	shippedFiles  int64
+	shippedEvents int64
 	shipErrors    int64
 	droppedEvents int64
 	droppedFiles  int64
@@ -219,6 +249,7 @@ type metricSnapshot struct {
 func (e *Engine) emitMetricsIfChanged(ctx context.Context) {
 	cur := metricSnapshot{
 		shippedFiles:  e.shippedFiles.Load(),
+		shippedEvents: e.shippedEvents.Load(),
 		shipErrors:    e.shipErrors.Load(),
 		droppedEvents: e.dropped.Load(),
 		droppedFiles:  e.droppedFiles.Load(),
@@ -232,6 +263,9 @@ func (e *Engine) emitMetricsIfChanged(ctx context.Context) {
 	}
 	if cur.shippedFiles != e.lastMetrics.shippedFiles {
 		emit("shiplog_shipped_files_total", cur.shippedFiles)
+	}
+	if cur.shippedEvents != e.lastMetrics.shippedEvents {
+		emit("shiplog_shipped_events_total", cur.shippedEvents)
 	}
 	if cur.shipErrors != e.lastMetrics.shipErrors {
 		emit("shiplog_ship_errors_total", cur.shipErrors)
@@ -250,7 +284,8 @@ func (e *Engine) emitMetricsIfChanged(ctx context.Context) {
 func (e *Engine) Close(ctx context.Context) error {
 	var shipErr error
 	e.closeOnce.Do(func() {
-		close(e.ch) // intakeLoop drains, rotates non-empty actives, exits
+		e.closed.Store(true)
+		close(e.done) // intakeLoop drains, rotates non-empty actives, exits
 		<-e.intakeDone
 		if e.shipCancel != nil {
 			e.shipCancel()

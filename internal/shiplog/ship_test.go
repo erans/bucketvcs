@@ -7,7 +7,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -251,6 +253,127 @@ func TestShip_ErrorCounterIncrementsOnFailedPut(t *testing.T) {
 	if got := e.ShipErrors(); got != 2 {
 		t.Fatalf("want 2 ship errors, got %d", got)
 	}
+}
+
+// nonDrainingFailStore fails every PutIfAbsent WITHOUT reading the body — the
+// exact condition that leaked an io.Pipe goroutine before the I1 buffering fix.
+type nonDrainingFailStore struct {
+	storage.ObjectStore
+}
+
+func (s *nonDrainingFailStore) PutIfAbsent(ctx context.Context, key string, body io.Reader, opts *storage.PutOptions) (storage.ObjectVersion, error) {
+	return storage.ObjectVersion{}, storage.ErrTransient
+}
+
+// TestShip_NoGoroutineLeakOnUndrainedBody is the I1 regression: when the store
+// returns without consuming the body, repeated ShipPending calls must not
+// accumulate goroutines (the old io.Pipe writer blocked forever on pw.Write).
+func TestShip_NoGoroutineLeakOnUndrainedBody(t *testing.T) {
+	base, err := localfs.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := &nonDrainingFailStore{ObjectStore: base}
+	e, _, _ := newTestEngine(t, func(c *Config) { c.Store = fs })
+	for i := 0; i < 5; i++ {
+		e.Enqueue(StreamUsage, []byte(`{"x":1}`))
+	}
+	drainAppends(t, e)
+
+	// Prime once so any lazily-spawned runtime goroutines settle.
+	_ = e.ShipPending(context.Background())
+	runtime.GC()
+	before := runtime.NumGoroutine()
+	for i := 0; i < 25; i++ {
+		_ = e.ShipPending(context.Background()) // each fails without draining
+	}
+	runtime.GC()
+	time.Sleep(20 * time.Millisecond) // let any leaked goroutines register
+	after := runtime.NumGoroutine()
+	if after > before+2 { // small slack for the runtime
+		t.Fatalf("goroutine leak: before=%d after=%d", before, after)
+	}
+}
+
+// TestShip_ShippedEventsAdvances is the I2 regression: a successful ship counts
+// the file's NDJSON lines into shippedEvents.
+func TestShip_ShippedEventsAdvances(t *testing.T) {
+	e, _, _ := newTestEngine(t, nil) // MaxEvents=5
+	for i := 0; i < 5; i++ {
+		e.Enqueue(StreamActivity, []byte(fmt.Sprintf(`{"i":%d}`, i)))
+	}
+	drainAppends(t, e)
+	if got := e.ShippedEvents(); got != 0 {
+		t.Fatalf("shippedEvents should start at 0, got %d", got)
+	}
+	if err := e.ShipPending(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.ShippedEvents(); got != 5 {
+		t.Fatalf("want 5 shipped events, got %d", got)
+	}
+}
+
+// TestShipLoop_StartTickShipsAndCloseRaces is the M1 regression: drive the ship
+// loop with a fast tick, prove an object lands, then Close concurrently with
+// ongoing Enqueues. Run the whole package under -race.
+func TestShipLoop_StartTickShipsAndCloseRaces(t *testing.T) {
+	st, err := localfs.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := New(Config{
+		Store:     st,
+		SpoolDir:  t.TempDir(),
+		MaxEvents: 5,
+		MaxAge:    time.Hour,
+		shipTick:  10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.Start()
+
+	// Background Enqueues keep pushing past MaxEvents so files rotate + ship.
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				e.Enqueue(StreamUsage, []byte(`{"loop":1}`))
+				time.Sleep(time.Millisecond)
+			}
+		}
+	}()
+
+	// Bounded poll until the ship loop lands at least one object.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if len(listKeys(t, st, "sys/logs/usage/")) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			close(stop)
+			wg.Wait()
+			t.Fatal("ship loop never produced an object")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Close concurrently with ongoing Enqueues (the C1 lifecycle path).
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := e.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Millisecond) // a few post-close Enqueues
+	close(stop)
+	wg.Wait()
 }
 
 func TestClose_IdleShipsNothing(t *testing.T) {

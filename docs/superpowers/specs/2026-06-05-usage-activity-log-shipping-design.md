@@ -87,7 +87,8 @@ sys/logs/usage/<YYYY>/<MM>/<DD>/<HHMMSS>-<instance8>-<seq6>.ndjson.gz
 
 - `instance8` = 8-hex chars of a per-boot crypto/rand instance ID → multinode
   gateways never collide; readers merge by timestamp.
-- Written with `PutIfAbsent`; on (theoretical) collision, bump seq and retry.
+- Written with `PutIfAbsent`; a PutIfAbsent collision means an identical
+  re-ship of the same file (at-least-once) and is treated as success.
 - BYOB: logs always target the **system** store, never tenant buckets.
 
 ## Lifecycle

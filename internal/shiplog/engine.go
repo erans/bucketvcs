@@ -49,7 +49,8 @@ type Config struct {
 	Logger        *slog.Logger  // MUST be built on the base (non-tap) handler
 	Now           func() time.Time
 
-	pauseIntake bool // test seam: do not start the intake goroutine
+	pauseIntake bool          // test seam: do not start the intake goroutine
+	shipTick    time.Duration // test seam: ship-loop tick interval; default shipTick const
 }
 
 type event struct {
@@ -75,6 +76,8 @@ type Engine struct {
 	ch     chan event
 	flush  chan chan struct{}
 	rotate chan struct{}
+	done   chan struct{} // closed by Close to signal lifecycle teardown
+	closed atomic.Bool   // set by Close before close(done); guards Enqueue
 
 	mu      sync.Mutex // guards pending list (intake adds, ship loop removes)
 	pending []string   // absolute paths of rotated, unshipped files
@@ -142,6 +145,7 @@ func New(cfg Config) (*Engine, error) {
 		ch:         make(chan event, cfg.QueueSize),
 		flush:      make(chan chan struct{}),
 		rotate:     make(chan struct{}, 1),
+		done:       make(chan struct{}),
 		intakeDone: make(chan struct{}),
 		streams: map[Stream]*streamState{
 			StreamActivity: {},
@@ -159,9 +163,17 @@ func New(cfg Config) (*Engine, error) {
 
 // Enqueue submits one NDJSON line (no trailing newline) to a stream.
 // Never blocks: a full queue drops the event and increments the counter.
+// Safe after Close: a closed engine drops the event instead of panicking on
+// a send to a torn-down lifecycle.
 func (e *Engine) Enqueue(s Stream, line []byte) {
+	if e.closed.Load() {
+		e.dropped.Add(1)
+		return
+	}
 	select {
 	case e.ch <- event{stream: s, line: line}:
+	case <-e.done:
+		e.dropped.Add(1)
 	default:
 		e.dropped.Add(1)
 	}
@@ -206,11 +218,7 @@ func (e *Engine) intakeLoop() {
 	defer age.Stop()
 	for {
 		select {
-		case ev, ok := <-e.ch:
-			if !ok {
-				e.rotateAll() // final rotation on close (empty = no-op)
-				return
-			}
+		case ev := <-e.ch:
 			e.append(ev)
 		case done := <-e.flush:
 			e.drainQueued()
@@ -219,6 +227,13 @@ func (e *Engine) intakeLoop() {
 			e.checkAge()
 		case <-age.C:
 			e.checkAge()
+		case <-e.done:
+			// Lifecycle teardown: drain everything still buffered, do a
+			// final rotation of non-empty actives, then exit. The channel is
+			// never closed, so this is the only exit path.
+			e.drainQueued()
+			e.rotateAll()
+			return
 		}
 	}
 }
@@ -227,10 +242,7 @@ func (e *Engine) intakeLoop() {
 func (e *Engine) drainQueued() {
 	for {
 		select {
-		case ev, ok := <-e.ch:
-			if !ok {
-				return
-			}
+		case ev := <-e.ch:
 			e.append(ev)
 		default:
 			return

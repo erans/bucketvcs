@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -147,4 +148,55 @@ func TestEngine_DropsWhenChannelFull(t *testing.T) {
 		t.Fatalf("want 1 dropped, got %d", got)
 	}
 	e.resumeIntake()
+}
+
+// TestEngine_EnqueueAfterCloseDoesNotPanic is the C1 regression: Enqueue must
+// never panic after Close (the lifecycle used to close(e.ch), so a post-Close
+// send panicked with "send on closed channel"). Now it drops + counts.
+func TestEngine_EnqueueAfterCloseDoesNotPanic(t *testing.T) {
+	e, _, _ := newTestEngine(t, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := e.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	before := e.DroppedEvents()
+	// These would panic on a closed channel under the old design.
+	e.Enqueue(StreamActivity, []byte(`{"after":"close"}`))
+	e.Enqueue(StreamUsage, []byte(`{"after":"close"}`))
+	if got := e.DroppedEvents(); got != before+2 {
+		t.Fatalf("post-close Enqueue must drop+count: want %d, got %d", before+2, got)
+	}
+}
+
+// TestEngine_EnqueueConcurrentWithClose stresses the Enqueue/Close race that
+// the C1 fix must survive. Run under -race; the assertion is simply "no panic".
+func TestEngine_EnqueueConcurrentWithClose(t *testing.T) {
+	e, _, _ := newTestEngine(t, nil)
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					e.Enqueue(StreamActivity, []byte(`{"race":1}`))
+				}
+			}
+		}()
+	}
+	time.Sleep(5 * time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := e.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Keep enqueuing for a moment AFTER Close to exercise the closed path too.
+	time.Sleep(5 * time.Millisecond)
+	close(stop)
+	wg.Wait()
 }
