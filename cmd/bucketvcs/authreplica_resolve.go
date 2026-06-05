@@ -2,9 +2,9 @@ package main
 
 import (
 	"errors"
-	"net/url"
 	"strings"
 
+	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
 	"github.com/bucketvcs/bucketvcs/internal/authreplica"
 )
 
@@ -17,24 +17,6 @@ type authDBReplicaSpec struct {
 	Prefix         string
 }
 
-// isNonSQLiteAuthDB mirrors sqlitestore's backend inference: it returns true
-// for the same schemes that resolveBackend (internal/auth/sqlitestore/
-// backend.go) routes to the postgres or libsql backends. Source of truth is
-// resolveBackend's isPostgresValue/isLibsqlValue (both unexported); keep this
-// in sync with them. Anything else (bare path, file:, sqlite:) is the embedded
-// SQLite backend, which is the only backend authdb replication applies to.
-func isNonSQLiteAuthDB(value string) bool {
-	u, err := url.Parse(value)
-	if err != nil {
-		return false
-	}
-	switch strings.ToLower(u.Scheme) {
-	case "postgres", "postgresql", "libsql", "http", "https":
-		return true
-	}
-	return false
-}
-
 // resolveAuthDBReplica validates and resolves the --auth-db-replica flag.
 // Returns (nil, nil) when replication is off.
 func resolveAuthDBReplica(replica, storeURL, authDB string, isReplicaServe bool) (*authDBReplicaSpec, error) {
@@ -42,7 +24,7 @@ func resolveAuthDBReplica(replica, storeURL, authDB string, isReplicaServe bool)
 	if replica == "" || replica == "off" {
 		return nil, nil
 	}
-	if isNonSQLiteAuthDB(authDB) {
+	if sqlitestore.IsNonSQLiteValue(authDB) {
 		return nil, errors.New("--auth-db-replica: replication is for the embedded sqlite backend; libsql/postgres bring their own durability")
 	}
 	if isReplicaServe {

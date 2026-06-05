@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
@@ -91,6 +92,12 @@ func Prepare(ctx context.Context, cfg Config) (*Runner, error) {
 	r.lsdb = lsdb
 
 	if !cfg.SkipRestore {
+		// EnsureExists is a no-op when the local DB already exists, so emitting
+		// the restored audit event unconditionally would fire a phantom event
+		// on every clean restart. Only emit when the file was actually missing
+		// AND EnsureExists materialized it (an empty bucket leaves it missing).
+		_, statErr := os.Stat(cfg.DBPath)
+		wasMissing := os.IsNotExist(statErr)
 		start := time.Now()
 		if err := lsdb.EnsureExists(ctx); err != nil {
 			_ = r.lease.Release(ctx)
@@ -98,12 +105,16 @@ func Prepare(ctx context.Context, cfg Config) (*Runner, error) {
 				"(refusing to start with an empty authdb while a replica may exist; "+
 				"use --auth-db-replica-skip-restore to override)", err)
 		}
-		logger.LogAttrs(ctx, slog.LevelInfo, "authdb.replica.restored",
-			slog.Bool("audit", true),
-			slog.String("event", "authdb.replica.restored"),
-			slog.String("db_path", cfg.DBPath),
-			slog.Int64("duration_ms", time.Since(start).Milliseconds()),
-		)
+		_, postStatErr := os.Stat(cfg.DBPath)
+		fileNowExists := postStatErr == nil
+		if wasMissing && fileNowExists {
+			logger.LogAttrs(ctx, slog.LevelInfo, "authdb.replica.restored",
+				slog.Bool("audit", true),
+				slog.String("event", "authdb.replica.restored"),
+				slog.String("db_path", cfg.DBPath),
+				slog.Int64("duration_ms", time.Since(start).Milliseconds()),
+			)
+		}
 	}
 	return r, nil
 }

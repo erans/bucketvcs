@@ -239,10 +239,12 @@ func readLeaseHolder(ctx context.Context, st storage.ObjectStore, prefix string,
 	defer obj.Body.Close()
 	b, err := io.ReadAll(obj.Body)
 	if err != nil {
+		fmt.Fprintf(stderr, "authdb replica-status: lease: %v\n", err)
 		return authreplica.LeaseDoc{}, false
 	}
 	var doc authreplica.LeaseDoc
 	if err := json.Unmarshal(b, &doc); err != nil {
+		fmt.Fprintf(stderr, "authdb replica-status: lease: %v\n", err)
 		return authreplica.LeaseDoc{}, false
 	}
 	return doc, true

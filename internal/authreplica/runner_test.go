@@ -3,8 +3,10 @@ package authreplica
 import (
 	"context"
 	"database/sql"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -114,5 +116,93 @@ func TestRunner_SkipRestore(t *testing.T) {
 	defer r.Close(ctx)
 	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
 		t.Fatal("SkipRestore must not create/restore the db")
+	}
+}
+
+// recordingHandler captures emitted log messages for assertion.
+type recordingHandler struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (h *recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.events = append(h.events, r.Message)
+	return nil
+}
+func (h *recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *recordingHandler) WithGroup(string) slog.Handler      { return h }
+
+// TestRunner_RestoredEventOnlyOnActualRestore asserts the authdb.replica.restored
+// audit event fires only when a missing local DB is actually materialized from
+// the replica — never on an empty-bucket first boot and never when the file
+// already exists (clean restart).
+func TestRunner_RestoredEventOnlyOnActualRestore(t *testing.T) {
+	ctx := context.Background()
+	store := newLocalFS(t)
+	dbPath := filepath.Join(t.TempDir(), "a.db")
+	h := &recordingHandler{}
+	cfg := Config{DBPath: dbPath, Store: store, Prefix: DefaultPrefix, LeaseTTL: time.Minute, Logger: slog.New(h)}
+
+	// First boot: file missing, bucket empty → EnsureExists no-ops → NO event.
+	r, err := Prepare(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range h.events {
+		if e == "authdb.replica.restored" {
+			t.Fatal("restored event emitted on empty-bucket first boot")
+		}
+	}
+
+	// Seed: create db, replicate, close, delete local file.
+	db := openSQL(t, dbPath)
+	if _, err := db.ExecContext(ctx, `CREATE TABLE t (id INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	r2, err := Prepare(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r2.StartReplication(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := r2.SyncNow(ctx); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if err := r2.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Existing-file boot must NOT have emitted restored either.
+	for _, e := range h.events {
+		if e == "authdb.replica.restored" {
+			t.Fatal("restored event emitted when file already existed")
+		}
+	}
+	matches, _ := filepath.Glob(dbPath + "*")
+	for _, m := range matches {
+		os.RemoveAll(m)
+	}
+
+	// Real restore boot → event MUST fire exactly once.
+	r3, err := Prepare(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r3.Close(ctx)
+	var n int
+	for _, e := range h.events {
+		if e == "authdb.replica.restored" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("want exactly 1 restored event, got %d", n)
 	}
 }

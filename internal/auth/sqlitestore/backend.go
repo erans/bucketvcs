@@ -83,6 +83,13 @@ func resolveBackend(value string, opts ...Option) (Backend, error) {
 	return sqliteBackend{path: sqlitePath(value)}, nil
 }
 
+// IsNonSQLiteValue reports whether the --auth-db value selects a non-embedded
+// backend (postgres/libsql). Callers gating sqlite-only features (e.g. authdb
+// replication) must use this rather than duplicating scheme lists.
+func IsNonSQLiteValue(value string) bool {
+	return isPostgresValue(value) || isLibsqlValue(value)
+}
+
 // isPostgresValue reports whether value is a PostgreSQL URL.
 func isPostgresValue(value string) bool {
 	u, err := url.Parse(value)
