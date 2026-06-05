@@ -136,6 +136,12 @@ bucketvcs serve --store="$STORE" --auth-db="$AUTHDB" --addr=127.0.0.1:8080
 > SQLite (the default) needs no setup, and all three backends are drop-in — every
 > step in this guide is identical regardless of `--auth-db`.
 
+> **Durability (optional, SQLite only):** add `--auth-db-replica=auto` to continuously
+> replicate the authdb into the `--store` bucket (~1s RPO) and restore it automatically
+> on boot — see [authdb replication](operator-guides/authdb-replication.md), and
+> [authdb hosting](operator-guides/authdb-hosting.md) for choosing between SQLite,
+> Turso, and PostgreSQL.
+
 User/token/grant setup and the push/clone flow are identical to the localfs
 walkthrough — see [Quickstart §4–6](quickstart.md#4-set-up-access). Only the
 `--store` value changed.

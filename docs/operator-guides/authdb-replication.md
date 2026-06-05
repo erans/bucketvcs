@@ -14,6 +14,10 @@ already lives in the object store and is written with compare-and-swap
 manifests, so it is durable and consistent independently. This guide covers the
 authdb only.
 
+This guide assumes you have already chosen the embedded SQLite backend. For how
+this fits alongside the Turso/libSQL and PostgreSQL options — and when to pick
+each — see the [authdb hosting guide](authdb-hosting.md).
+
 ---
 
 ## 1. What it does

@@ -4,6 +4,8 @@ This guide covers backing the BucketVCS **metadata/auth database**
 with [PostgreSQL](https://www.postgresql.org) instead of a local SQLite file. It
 explains how to enable it, how backend selection works, the
 caveats you must understand before deploying, and how to migrate existing data.
+For choosing between backends (SQLite, SQLite + replication, Turso/libSQL, and
+PostgreSQL), see the [authdb hosting guide](authdb-hosting.md).
 
 Production readiness summary:
 

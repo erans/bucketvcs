@@ -77,6 +77,12 @@ export AUTHDB="./auth.db"
 > The rest of this guide uses the SQLite default; the backends are
 > drop-in — every step below is identical regardless of `--auth-db`.
 
+> **Durability (optional, SQLite only):** add `--auth-db-replica=auto` to continuously
+> replicate the authdb into the `--store` bucket (~1s RPO) and restore it automatically
+> on boot — see [authdb replication](operator-guides/authdb-replication.md), and
+> [authdb hosting](operator-guides/authdb-hosting.md) for choosing between SQLite,
+> Turso, and PostgreSQL.
+
 ---
 
 ## 3. Create a repository
@@ -209,6 +215,7 @@ automatically. Recipes for S3 and R2 are in the
 | Protect branches / paths, run hooks | [policy & hooks](operator-guides/hooks-policy.md) |
 | Keep storage tight | [`bucketvcs maintenance`](operator-guides/maintenance.md) + `bucketvcs gc` ([guide](operator-guides/gc.md)) |
 | A managed/multi-node metadata DB | [Turso/libSQL](operator-guides/turso.md) · [PostgreSQL](operator-guides/postgres.md) ([multi-node](operator-guides/multinode.md)) |
+| Choosing & making the authdb durable | [authdb hosting](operator-guides/authdb-hosting.md) · [authdb replication](operator-guides/authdb-replication.md) |
 
 Run `bucketvcs <command> --help` for the full flag surface of any command, and
 browse [`docs/`](.) for design specs and operator guides.
