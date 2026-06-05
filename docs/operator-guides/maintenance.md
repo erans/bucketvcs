@@ -672,3 +672,20 @@ Exit codes:
   1  At least one repo failed (including CAS exhaustion)
   2  Invalid flags
 ```
+
+---
+
+## 10. BYOB (bring-your-own-bucket) tenants
+
+When a tenant has a per-tenant storage binding (see [bring-your-own-bucket](byob.md)), pass
+`--auth-db` and `--byob-encryption-key` with `--repo` so maintenance uses the tenant's bucket:
+
+```bash
+bucketvcs maintenance \
+  --auth-db 'postgres://...' \
+  --byob-encryption-key /etc/bucketvcs/byob.key \
+  --repo acme/website
+```
+
+When both BYOB flags are present and a binding exists for the tenant, `--store` is not
+required. If no binding is found, maintenance falls back to `--store`.

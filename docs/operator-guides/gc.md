@@ -1121,3 +1121,21 @@ To confirm the GCSafety tests are picked up:
 | GCSafety test: Azure | `grep -r TestAzureBlob_GCSafety --include='*.go'` | Found in `internal/storage/azureblob/` |
 | GCSafety test: localfs | `grep -r TestGC_PropertyGCSafety_Localfs --include='*.go'` | Found in `internal/gc/conformance/` |
 | Local emulator run | `./scripts/conformance-emulators.sh` | All tests pass |
+
+---
+
+## 11. BYOB (bring-your-own-bucket) tenants
+
+When a tenant has a per-tenant storage binding (see [bring-your-own-bucket](byob.md)), pass
+`--auth-db` and `--byob-encryption-key` with `--repo` so GC uses the tenant's bucket:
+
+```bash
+bucketvcs gc \
+  --auth-db 'postgres://...' \
+  --byob-encryption-key /etc/bucketvcs/byob.key \
+  --repo acme/website
+```
+
+When both BYOB flags are present and a binding exists for the tenant, `--store` is not
+required; GC opens the tenant's store from the encrypted binding. If no binding is found,
+GC falls back to `--store`.

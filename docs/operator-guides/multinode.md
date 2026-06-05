@@ -121,6 +121,8 @@ invisible to the current claimer. Exactly one node claims and delivers each
 webhook event. There is no distributed lock, no coordination table, and no
 leader; every node is an equal participant.
 
+Webhook workers do not start on replica gateways (see [multi-region](multi-region.md) §5); webhook delivery originates only from write-region gateway nodes.
+
 Under SQLite and libSQL the claim path continues to use the existing
 serialized-write approach, which is correct for single-node deployments.
 

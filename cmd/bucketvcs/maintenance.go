@@ -79,6 +79,8 @@ Flags:
   --bundle-default-branch=REF           Override default-branch detection (e.g. refs/heads/main)
   --bitmap-coverage-pct=N               Default 100; force-repack when fewer than N% of canonical packs carry a .bitmap (0 disables, M9.5)
   --help                                Show this help
+  --auth-db=<path|URL>                  Auth DB path or URL; with --byob-encryption-key, enables BYOB store lookup for --repo
+  --byob-encryption-key=<path>          Path to 32-byte BYOB encryption key file; enables per-tenant store routing when --repo is set
 
 Exit codes:
   0 success or dry-run completed

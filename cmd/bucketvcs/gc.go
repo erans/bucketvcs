@@ -528,6 +528,8 @@ Flags:
   --include-git-objects     When --lfs is set, also run Git-objects GC (Git first, then LFS)
   --format=text|json        Output format (default text)
   --help                    Show this help
+  --auth-db=<path|URL>                    Auth DB path or URL; with --byob-encryption-key, enables BYOB store lookup for --repo
+  --byob-encryption-key=<path>            Path to 32-byte BYOB encryption key file; enables per-tenant store routing when --repo is set
 
 Examples:
   Run Git-objects GC (default):

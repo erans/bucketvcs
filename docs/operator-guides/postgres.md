@@ -27,6 +27,8 @@ BucketVCS keeps two very different kinds of state:
   refs/paths, hooks, webhooks, OIDC issuers/rules, LFS locks, quotas — lives in
   the auth DB. This is what the PostgreSQL backend lets you move off SQLite.
 
+PostgreSQL is required for multi-node deployments; SQLite and libSQL are single-node only.
+
 Because the backend introduces a SQL-dialect layer (`?`→`$N` rebinding, SQLSTATE error
 classification, and a handful of divergent-construct helpers), the existing store
 methods run on Postgres without per-call edits. Selecting Postgres is purely an
