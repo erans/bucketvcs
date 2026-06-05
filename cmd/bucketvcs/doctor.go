@@ -19,6 +19,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
 	"github.com/bucketvcs/bucketvcs/internal/doctor"
 	"github.com/bucketvcs/bucketvcs/internal/gateway"
+	"github.com/bucketvcs/bucketvcs/internal/replica"
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/repo/manifest"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
@@ -88,6 +89,9 @@ func runDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		}},
 
 		{Name: "storage.writable", Run: func(ctx context.Context) doctor.Result {
+			if *sf.replicaOf != "" {
+				return doctor.Result{Status: doctor.StatusSkip, Detail: "read-only replica (--replica-of set)"}
+			}
 			if store == nil {
 				return doctor.Result{Status: doctor.StatusSkip, Detail: "store unavailable"}
 			}
@@ -271,6 +275,35 @@ func runDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 			}
 			return doctor.Result{Status: doctor.StatusOK, Detail: fmt.Sprintf("schema v%d, %d sampled keys present", view.Header.SchemaVersion, len(keys))}
 		}})
+	}
+
+	if *sf.replicaOf != "" {
+		checks = append(checks,
+			doctor.Check{Name: "replica.canonical", Run: func(ctx context.Context) doctor.Result {
+				c, err := openStore(*sf.replicaOf)
+				if err != nil {
+					return doctor.Result{Status: doctor.StatusFail, Detail: err.Error()}
+				}
+				defer closeStore(c)
+				if _, err := c.List(ctx, "", &storage.ListOptions{MaxKeys: 1}); err != nil {
+					return doctor.Result{Status: doctor.StatusFail, Detail: "list: " + err.Error()}
+				}
+				return doctor.Result{Status: doctor.StatusOK, Detail: c.Name() + " backend, list ok"}
+			}},
+			doctor.Check{Name: "config.replica", Run: func(ctx context.Context) doctor.Result {
+				if _, ok := replica.ParseMode(*sf.replicaMode); !ok {
+					return doctor.Result{Status: doctor.StatusFail, Detail: "--replica-mode=" + *sf.replicaMode + " must be strong-current|bounded-stale"}
+				}
+				if *sf.replicaLagBudget < 30*time.Second {
+					return doctor.Result{Status: doctor.StatusFail, Detail: "--replica-lag-budget must be >= 30s"}
+				}
+				path, err := resolveAuthDB(*sf.authDB, realEnv())
+				if err == nil && !strings.HasPrefix(path, "postgres://") && !strings.HasPrefix(path, "postgresql://") {
+					return doctor.Result{Status: doctor.StatusFail, Detail: "replicas require a postgres --auth-db (shared central pg); got a file/libsql backend"}
+				}
+				return doctor.Result{Status: doctor.StatusOK, Detail: "mode " + *sf.replicaMode + ", budget " + sf.replicaLagBudget.String()}
+			}},
+		)
 	}
 
 	if failed := doctor.Run(ctx, stdout, *asJSON, checks); failed > 0 {
