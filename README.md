@@ -139,7 +139,29 @@ Then open `http://my-host:8080/` in a browser — the web UI serves on the same
 listener (log in with a user created via `bucketvcs user add` + `user set-password`,
 or wire up OIDC; see the [web UI guide](docs/operator-guides/web-ui.md)).
 
+The web UI is **optional** — omit `--ui` or pass `--ui=false` if you only need the Git protocol gateway and CLI.
+
 `bucketvcs doctor` — read-only health checks for storage, auth-db, and config. Accepts the same flags as `serve`; swap `serve` for `doctor` to validate a deployment without binding any ports.
+
+---
+
+## Web UI
+
+The web UI is built in to the same binary — no separate service, no JavaScript build step, no external dependencies. Templates and static assets are compiled into the binary at build time; every page works without JS.
+
+| Login | Repositories |
+|-------|--------------|
+| ![Login page](docs/screenshots/01-login.png) | ![Repository list](docs/screenshots/02-home.png) |
+
+| File tree with rendered README | Syntax-highlighted file view |
+|-------------------------------|------------------------------|
+| ![File tree](docs/screenshots/03-repo-tree.png) | ![File view](docs/screenshots/04-file.png) |
+
+| Commit history |
+|----------------|
+| ![Commit log](docs/screenshots/05-commits.png) |
+
+The UI is **optional**. Run without it by omitting `--ui` or passing `--ui=false` — the Git gateway and all CLI commands work the same either way.
 
 ---
 
