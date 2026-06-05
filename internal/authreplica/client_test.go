@@ -20,6 +20,7 @@ func newLocalFS(t *testing.T) storage.ObjectStore {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { closeIfCloser(s) })
 	return s
 }
 

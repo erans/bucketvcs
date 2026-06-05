@@ -138,6 +138,7 @@ func (r *Runner) StartReplication(ctx context.Context) error {
 	st := litestream.NewStore([]*litestream.DB{r.lsdb}, levels)
 	st.Logger = slog.New(newLevelFilterHandler(r.logger.Handler(), slog.LevelWarn))
 	if err := st.Open(ctx); err != nil {
+		_ = st.Close(ctx) // best-effort: reap any goroutines a partial Open started
 		return fmt.Errorf("authreplica: open litestream store: %w", err)
 	}
 	r.mu.Lock()
