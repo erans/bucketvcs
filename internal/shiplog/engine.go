@@ -83,11 +83,16 @@ type Engine struct {
 	droppedFiles  atomic.Int64
 	shippedFiles  atomic.Int64
 	shippedEvents atomic.Int64
+	shipErrors    atomic.Int64
 
 	intakeDone chan struct{}
 	shipDone   chan struct{}
 	shipCancel context.CancelFunc
 	closeOnce  sync.Once
+
+	// lastMetrics snapshots the cumulative counters at the previous metric
+	// emission; owned exclusively by the ship loop (emitMetricsIfChanged).
+	lastMetrics metricSnapshot
 
 	streams map[Stream]*streamState
 }
@@ -305,11 +310,4 @@ func (e *Engine) rotateStream(s Stream, st *streamState) {
 	e.pending = append(e.pending, pendingPath)
 	e.mu.Unlock()
 	st.f, st.count = nil, 0
-}
-
-// Stubs replaced in ship.go (Task 2).
-func (e *Engine) adoptLeftovers() error { return nil }
-func (e *Engine) Close(ctx context.Context) error {
-	e.closeOnce.Do(func() { close(e.ch); <-e.intakeDone })
-	return nil
 }
