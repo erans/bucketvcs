@@ -162,7 +162,7 @@ func claim(ctx context.Context, db sqlitestore.Querier, batch int) ([]claimedRow
 // URL + secret in one query.
 //
 // SQLite already serializes writers, and bucketvcs's documented design is
-// single-writer per gateway (see operator guide §11). The transaction
+// single-writer per gateway (see operator guide §12, Limits). The transaction
 // boundary ensures the SELECT + UPDATE batch is atomic; concurrent worker
 // processes — if any — serialize through SQLite's write lock.
 //

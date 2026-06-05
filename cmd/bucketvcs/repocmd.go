@@ -492,10 +492,10 @@ func repoDelete(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		fmt.Fprintf(stderr, "warning: webhooks.enqueue_failed for repo.deleted: %v\n", werr)
 	}
 
-	// Step 4: manually orchestrate the delete so webhook tables survive.
-	// Use a tx with foreign_keys=OFF; clean up the non-webhook dependents
-	// explicitly, then drop the repos row. PRAGMA foreign_keys is per-
-	// connection in sqlite, so we set/restore around the transaction.
+	// Step 4: delete the repo row and its dependents while leaving the
+	// webhook tables intact so the repo.deleted delivery can drain. The
+	// backend-specific mechanics (sqlite pragma pinning, postgres plain tx)
+	// live in DeleteRepoCascade.
 	if err := s.DeleteRepoCascade(ctx, tenant, repo); err != nil {
 		fmt.Fprintf(stderr, "delete: %v\n", err)
 		return 1

@@ -11,7 +11,8 @@ Production readiness summary:
 - At-least-once delivery with bounded retries + dead-letter — **shipped**.
 - Single-writer worker per gateway process (in-process sqlite queue) — **shipped**.
 - Manual operator replay via CLI — **shipped**.
-- Cross-tenant fan-out, configurable per-endpoint retry policy, alternate signing schemes — **deferred**.
+- Built-in egress deny-list (SSRF protection, DNS-rebinding-safe, configurable CIDR allow-holes) — **shipped** (see §6).
+- Cross-tenant fan-out, configurable per-endpoint retry policy, per-endpoint / per-tenant egress policy, alternate signing schemes — **deferred**.
 - Schema 5 → 6 (`0006_webhooks.sql`) is forward-only and applied by the existing `RunMigrations`.
 
 ---
@@ -30,15 +31,15 @@ What ships:
 - `bucketvcs webhook endpoint add | list | remove | enable | disable` CLI.
 - `bucketvcs webhook delivery list | show | replay` CLI for diagnostics + manual recovery.
 - 6 enqueue call sites already wired in receivepack, LFS handlers, LFS locks, and `bucketvcs repo register`.
-- 4 metrics + 6 audit events documented in §6.
+- 4 metrics + 6 audit events documented in §7.
 - Migration `0006_webhooks.sql`.
 
-What does not ship (full list in §11):
+What does not ship (full list in §12):
 
 - `repo.deleted` and `repo.renamed` events are reserved in the taxonomy but have no CLI emission today (`bucketvcs repo` has no `delete` or `rename` subcommand).
 - The `storage_backend` field on `PushPayload` is wired through the API but currently always empty — set to the live backend in a future release.
 - Per-endpoint retry policy / per-endpoint backoff override (every endpoint uses the global schedule).
-- Multi-process worker / horizontal scale-out (single writer per gateway process; see §11 for the upgrade path).
+- Multi-process worker / horizontal scale-out (single writer per gateway process; see §12 for the upgrade path).
 - HMAC-SHA256 is the only signing scheme; v2/ed25519 is reserved in the header format but not emitted.
 - TLS-CA pinning per endpoint, mTLS to receivers.
 
@@ -345,9 +346,69 @@ This resets `attempts=0`, `next_attempt_at=NOW`, `status=pending`. The worker pi
 
 ---
 
-## 6. Observability
+## 6. Egress policy (SSRF protection)
 
-### 6.1 Metrics
+The delivery worker refuses to connect to private and internal addresses by
+default. The check runs at **dial time on the resolved IP**, so DNS-rebinding
+(a hostname that resolves clean at registration and to 169.254.169.254 at
+delivery) is covered. Denied by default:
+
+- loopback (`127.0.0.0/8`, `::1`)
+- link-local (`169.254.0.0/16` — includes cloud metadata endpoints — and `fe80::/10`)
+- private ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, ULA `fc00::/7`)
+- unspecified, multicast, and broadcast addresses
+
+**To deliver to a receiver in a private range** (a LAN Jenkins, an internal
+service), punch a hole with the repeatable flag:
+
+```bash
+bucketvcs serve ... --webhook-allow-cidr=192.168.1.0/24
+```
+
+`--webhook-allow-cidr=0.0.0.0/0` restores the fully-open pre-M25 behavior.
+
+**To deny by hostname** — useful for internal names that resolve to *public*
+IPs (split-horizon DNS, internal apps behind public load balancers):
+
+```bash
+bucketvcs serve ... --webhook-deny-host='*.corp.example.com' --webhook-deny-host=metadata.google.internal
+```
+
+Hostname rules are policy, not a security boundary: a raw IP or an alternate
+DNS name pointing at the same box bypasses them. The IP-range check is the
+real gate. There is deliberately no allow-by-hostname flag — allowing a name
+to resolve into denied IP space would re-open DNS rebinding.
+
+A denied delivery is recorded as a normal failure: it follows the standard
+backoff schedule and dead-letters after 5 attempts, with
+`last_error = "egress denied: ..."` naming the flag to fix. If you add the
+missing `--webhook-allow-cidr` and restart, parked deliveries succeed on
+their next scheduled attempt — no manual replay needed.
+
+Additional hardening in the delivery client: HTTP redirects are not followed
+(a 3xx response is a failed attempt), proxy environment variables are
+ignored (a proxy would dial on the worker's behalf and bypass the policy),
+and endpoint URLs must be http/https.
+
+Registration of an endpoint whose URL contains a **literal** denied IP is
+rejected up front in the web UI (which knows the live policy) and warned
+about by `bucketvcs webhook endpoint add` (a separate process that cannot
+know serve's flags).
+
+Observability: `webhook_egress_denied_total` metric (deliberately unlabeled —
+endpoint URLs are attacker-influenced) and the `webhooks.egress_denied` audit
+event (`delivery_id`, `endpoint_id`, `host`, `ip`, `denied_by`, `pattern`).
+
+> **Upgrade note (breaking):** deployments delivering webhooks to private or
+> loopback receivers MUST add `--webhook-allow-cidr` covering those receivers
+> when upgrading to this version; their deliveries will otherwise park in
+> retry and dead-letter after ~14.5h.
+
+---
+
+## 7. Observability
+
+### 7.1 Metrics
 
 Four metrics, all emitted as structured slog records with `msg="metric"` and a `name=<metric>` attr to distinguish them from audit events:
 
@@ -355,12 +416,12 @@ Four metrics, all emitted as structured slog records with `msg="metric"` and a `
 |---|---|---|---|
 | `webhooks_delivery_total` | counter | `outcome={delivered,failed_retry,dead_letter,enqueue_failed}` | once per attempt outcome |
 | `webhooks_attempt_duration_ms` | histogram (point sample) | `outcome=...` | once per attempt, measures wall time including DNS/connect/TLS/wait |
-| `webhooks_queue_depth` | gauge | `status={pending,in_flight,dead_letter}` | reserved for periodic gauge emission (see §6.4) |
+| `webhooks_queue_depth` | gauge | `status={pending,in_flight,dead_letter}` | reserved for periodic gauge emission (see §7.4) |
 | `webhooks_endpoints_active` | gauge | none | reserved for periodic gauge emission |
 
 The point-sample shape matches the policy + LFS metrics; a scraping sidecar can aggregate by `(name, outcome)` from the raw slog stream.
 
-### 6.2 Audit events
+### 7.2 Audit events
 
 Six structured events:
 
@@ -375,7 +436,7 @@ Six structured events:
 
 The two `endpoint_*` emitters are exported and tested; wiring them into the `webhook endpoint add` / `remove` CLI is a small follow-up and intentionally deferred to keep the emitter API stable.
 
-### 6.3 Quick log filter
+### 7.3 Quick log filter
 
 ```
 # Successful deliveries in the last hour:
@@ -390,7 +451,7 @@ journalctl -u bucketvcs --since "1 hour ago" \
   | sed -E 's/.*outcome=([^ ]+).*/\1/' | sort | uniq -c
 ```
 
-### 6.4 Queue-depth gauge
+### 7.4 Queue-depth gauge
 
 `EmitQueueDepthGauge` is exported but not currently invoked by the worker on a timer. Operators who want a `webhooks_queue_depth` time series should either:
 
@@ -401,17 +462,17 @@ The queue-depth + endpoints-active samplers are deferred to a follow-up because 
 
 ---
 
-## 7. Failure modes
+## 8. Failure modes
 
-### 7.1 Receiver returns 4xx / 5xx / timeout
+### 8.1 Receiver returns 4xx / 5xx / timeout
 
 The worker treats all non-2xx outcomes identically: failed attempt, back to `pending` with backoff. A receiver that returns 410 (Gone) cannot signal "give up" today — operators who decommission a receiver should `webhook endpoint disable` or `remove` the row; otherwise the delivery wastes retry budget for the full 14.5 hours.
 
-### 7.2 Receiver TLS error
+### 8.2 Receiver TLS error
 
 A failed TLS handshake (cert expired, hostname mismatch, untrusted CA) counts as a failed attempt with `status_code=0`. The error message goes into `last_error` (truncated at 512 chars). Per-endpoint TLS pinning is not available; deploy your receivers behind a public CA or wire an internal CA bundle into the gateway's system trust store.
 
-### 7.3 Gateway crashes mid-delivery
+### 8.3 Gateway crashes mid-delivery
 
 A row stuck in `in_flight` for ≥ 60 s is reclaimed back to `pending` (without incrementing `attempts`) by the `Reclaim` sweep. The sweep runs both at worker boot AND periodically from the worker loop (every ~60 ticks ≈ 1 minute at the default 1 s tick interval). This catches both gateway crashes (caught at next-boot reclaim) and in-process failures where `recordResult`'s UPDATE failed after a context cancel or sqlite-busy (caught by the periodic sweep, no restart required).
 
@@ -419,17 +480,17 @@ A delivery that timed out at 9.9 s and crashed before the result row was written
 
 The 60 s threshold is tuned against the 10 s HTTP timeout; lowering it risks declaring a slow attempt dead while it's still inflight.
 
-### 7.4 Enqueue failure (fail-open)
+### 8.4 Enqueue failure (fail-open)
 
 If `webhooks.Enqueue` returns an error (sqlite write failure, FK violation), the originating operation does NOT abort. The error is logged via `webhooks.enqueue_failed` and the operation reports success to the client. Operators MUST treat repeated `enqueue_failed` events as a P1 — drift between gateway state and webhook state means consumers will silently miss events.
 
-### 7.5 Endpoint URL points at a public sink with no auth
+### 8.5 Endpoint URL points at a public sink with no auth
 
 The signature is the only authentication. There is no IP allowlist or mTLS. Receivers SHOULD verify the signature on every request and reject unsigned / mis-signed payloads with 400.
 
 ---
 
-## 8. Recommended alerts
+## 9. Recommended alerts
 
 Prometheus-style (translate the slog stream to a metrics backend first):
 
@@ -459,7 +520,7 @@ The `webhooks_attempt_duration_ms{outcome="delivered"}` p99 is a useful SLO targ
 
 ---
 
-## 9. Wiring reference
+## 10. Wiring reference
 
 `bucketvcs serve` constructs the webhook service exactly once at boot:
 
@@ -484,13 +545,13 @@ The 6 call sites — receivepack push, receivepack policy-reject, LFS verify, LF
 
 ---
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
-### 10.1 Receiver reports "stale signature" but I just pushed
+### 11.1 Receiver reports "stale signature" but I just pushed
 
 Check the receiver's clock. The 5-minute window is bilateral — receiver clock drifted >5 min into the future or the past will reject otherwise valid signatures. Synchronise with NTP or widen the tolerance temporarily for debugging.
 
-### 10.2 Receiver gets duplicate deliveries for the same event
+### 11.2 Receiver gets duplicate deliveries for the same event
 
 By design — `at-least-once` semantics. Two common causes:
 
@@ -499,7 +560,7 @@ By design — `at-least-once` semantics. Two common causes:
 
 Deduplicate by `X-BucketVCS-Delivery-ID`.
 
-### 10.3 Signature verification fails but the rest of the request looks fine
+### 11.3 Signature verification fails but the rest of the request looks fine
 
 Three usual culprits:
 
@@ -507,17 +568,17 @@ Three usual culprits:
 2. JSON-aware middleware reformats the body (re-indenting, sorting keys). HMAC is over the **exact bytes**. Read the raw stream before any parser sees it.
 3. The secret was copied with leading/trailing whitespace.
 
-### 10.4 `webhooks.enqueue_failed` keeps firing
+### 11.4 `webhooks.enqueue_failed` keeps firing
 
 Indicates the gateway's sqlite (authdb) is unhealthy — usually disk full, schema-gate failure, or a stale FK. Run `bucketvcs inspect-manifest` and check `sqlite_master` schema_version. If the migration didn't apply on first boot, the table won't exist and every enqueue fails. Re-run with `--auth-db=<same path>` and confirm the boot log shows `migration 0006_webhooks applied`.
 
-### 10.5 An endpoint is firing into the wrong tenant
+### 11.5 An endpoint is firing into the wrong tenant
 
 Endpoints are keyed by `(tenant, repo)`, not by URL. An operator who created two endpoints with the same URL across tenants will see both fire — that's intentional fan-out. To stop one without affecting the other, use `webhook endpoint disable --id=<N>` against the specific row.
 
 ---
 
-## 11. Limits
+## 12. Limits
 
 - **Single-writer worker.** One `StartWorker` per gateway process. Horizontal scale-out (multiple gateway processes against the same authdb) is not safe; the claim transaction relies on sqlite's serialised writer.
 - **No CLI for `repo.deleted` / `repo.renamed`.** The events are reserved in the taxonomy and `--events=all` will subscribe to them, but no code path emits them today.
@@ -525,23 +586,23 @@ Endpoints are keyed by `(tenant, repo)`, not by URL. An operator who created two
 - **Per-endpoint retry policy is not configurable.** Every endpoint shares the global schedule.
 - **No webhook secret rotation.** To rotate, remove + re-add the endpoint; receivers must be updated in lockstep.
 - **No per-endpoint event-mask edit.** To change the subscription list, remove + re-add (the secret will rotate too).
-- **`endpoint_created` / `endpoint_removed` audit events are emitter-only.** The CLI does not call them today — listed in §6 for forward-compat.
+- **`endpoint_created` / `endpoint_removed` audit events are emitter-only.** The CLI does not call them today — listed in §7 for forward-compat.
 - **Queue-depth and endpoints-active gauges are emitter-only** until an operator wires a sampler.
-- **No backpressure.** If the worker can't drain the queue, deliveries accumulate in `pending` indefinitely. Operators should alert on backlog (§8) and either scale the receiver or temporarily `endpoint disable` the slow one.
+- **No backpressure.** If the worker can't drain the queue, deliveries accumulate in `pending` indefinitely. Operators should alert on backlog (§9) and either scale the receiver or temporarily `endpoint disable` the slow one.
 - **HMAC-SHA256 only.** The header reserves `v1=` for SHA256; `v2=` is parked for future schemes.
-- **No egress allowlist on endpoint URLs (SSRF surface).** Endpoint registration was operator-CLI-only when this was designed, but the web UI now lets any repo-admin register endpoint URLs — including ones that resolve to internal addresses (link-local metadata services, RFC 1918 hosts, `localhost`). The worker will dutifully POST to whatever it is given. Operators who delegate repo-admin to semi-trusted users SHOULD front the worker's egress with network policy (firewall rules, an egress proxy, or a locked-down network namespace) so it cannot reach internal targets. A built-in egress deny-list is a known deferral; until then, network-level isolation is the only control.
+- **Egress policy is per-serve-process and not configurable per-endpoint or per-tenant.** See §6 for the shipped controls. Per-endpoint / per-tenant egress override is deferred.
 
-The companion design document (§9 "Out of scope") enumerates the future path: multi-process worker via a leader-elected sqlite row, per-endpoint backoff schedules, signed-URL artefacts in the payload, and cross-tenant fan-out.
+The companion design document (its "Out of scope" list, §1.2) enumerates the future path: multi-process worker via a leader-elected sqlite row, per-endpoint backoff schedules, signed-URL artefacts in the payload, and cross-tenant fan-out.
 
 ---
 
-## 12. Webhook delivery retention
+## 13. Webhook delivery retention
 
 The `webhook_deliveries` table grows monotonically: every push, lock, lfs.upload, repo.created/deleted/renamed, and policy.ref.rejected adds one row per subscribed endpoint, and rows in terminal states (`delivered`, `dead_letter`) are never removed by the worker itself. On a high-traffic monorepo this table can reach millions of rows in weeks and degrade the worker's claim query (which scans `(status, next_attempt_at)`).
 
 `bucketvcs webhook prune` sweeps terminal-state rows past a retention window.
 
-### 12.1 What it does
+### 13.1 What it does
 
 ```
 bucketvcs webhook prune \
@@ -559,7 +620,7 @@ bucketvcs webhook prune \
 - `--dry-run` reports the counts that WOULD be deleted without mutating the table. Use it before tightening retention windows in production.
 - `--actor` overrides the default attribution (`$USER` if set, else `"unknown"`). Cron jobs should pass an explicit actor (e.g. `--actor=ops-cron`) so the audit trail names the responsible automation.
 
-### 12.2 Recommended cron schedule
+### 13.2 Recommended cron schedule
 
 Run nightly at off-peak. The DELETE is a single statement per status (two statements total) and holds the sqlite writer for the duration, so wall-clock cost scales with the number of rows being deleted, not the table size.
 
@@ -572,7 +633,7 @@ Run nightly at off-peak. The DELETE is a single statement per status (two statem
 
 A first-time prune against a never-pruned table can delete millions of rows in one shot. If you anticipate this, run a `--dry-run` first to gauge wall-clock cost, and consider a one-time low-retention sweep (`--delivered-older-than=24h`) on a maintenance window before switching to nightly defaults.
 
-### 12.3 Observability
+### 13.3 Observability
 
 Each invocation emits:
 
@@ -581,7 +642,7 @@ Each invocation emits:
 
 Both signals land in the CLI process's slog stderr — the prune CLI runs out-of-process from the gateway, so its observability flows through whatever sink the operator wires for command output (systemd journal, file redirection, etc.). Production deployments should redirect prune CLI stdout/stderr to the same log aggregator as `bucketvcs serve`.
 
-### 12.4 What it does NOT do
+### 13.4 What it does NOT do
 
 - It does not VACUUM the database. Sqlite reclaims space lazily via the freelist; the disk file size stays roughly flat after a large delete. Run `VACUUM` manually if you need the bytes back (note: VACUUM rewrites the entire file and requires roughly 2x free space).
 - It does not respect FK cascades from `webhook_endpoints`. If you `webhook endpoint remove`, the FK cascade already drops the dependent delivery rows synchronously. Prune is for rows whose endpoint is still active but whose delivery is past retention.
@@ -589,7 +650,7 @@ Both signals land in the CLI process's slog stderr — the prune CLI runs out-of
 
 ---
 
-## 13. Repo rename: auth-only semantics
+## 14. Repo rename: auth-only semantics
 
 ```
 bucketvcs repo rename <tenant>/<old-name> <new-name> \
@@ -600,7 +661,7 @@ bucketvcs repo rename <tenant>/<old-name> <new-name> \
 
 The rename CLI updates **auth.db only**. Storage keys at `tenants/<tenant>/repos/<old-name>/...` are NOT migrated by this command — the operator is responsible for moving them out of band (`aws s3 mv`, `gsutil mv`, etc.) AND for rewriting the absolute key references in the manifest body (`pack_key`, `idx_key`, index keys all contain the old prefix).
 
-### 13.1 What the CLI does atomically
+### 14.1 What the CLI does atomically
 
 A single sqlite transaction over the `RenameRepo` helper updates every FK-bearing dependent table plus a small set of repo-scoped tables without FKs:
 
@@ -620,7 +681,7 @@ NOT touched by `RenameRepo`:
 
 The transaction runs with `PRAGMA defer_foreign_keys = TRUE` so intermediate states (rows pointing at a row that hasn't been renamed yet) are tolerated until the COMMIT.
 
-### 13.2 Refusal conditions
+### 14.2 Refusal conditions
 
 The CLI refuses (exit 1, no auth mutation, no webhook delivery) if any of these is true:
 
@@ -631,7 +692,7 @@ The CLI refuses (exit 1, no auth mutation, no webhook delivery) if any of these 
 
 Successful rename emits the `ok` outcome metric.
 
-### 13.3 Webhook ordering — at-least-once before commit
+### 14.3 Webhook ordering — at-least-once before commit
 
 The `repo.renamed` webhook is enqueued **BEFORE** the auth transaction runs. This matches the `repo.deleted` precedent: endpoints scoped to `(tenant, old-name)` are still present in `webhook_endpoints` when `Enqueue` resolves subscribers — the rename would move those rows to the new name in the same transaction, and a worker reading `webhook_endpoints` AFTER the rename would not match the old `(tenant, repo)` payload key.
 
@@ -639,7 +700,7 @@ Consequence: if the auth transaction subsequently fails (sqlite I/O error, const
 
 If enqueue itself fails, a `webhooks.enqueue_failed` audit fires and the rename proceeds fail-open — the auth transaction still runs. The rename is not blocked by webhook-subsystem health.
 
-### 13.4 Storage migration runbook
+### 14.4 Storage migration runbook
 
 After `bucketvcs repo rename <tenant>/<old> <new>` succeeds:
 
@@ -650,7 +711,7 @@ After `bucketvcs repo rename <tenant>/<old> <new>` succeeds:
 
 A future release may automate this storage step via a `bucketvcs storage rename` helper that respects the manifest indirection. For now it is an operator runbook.
 
-### 13.5 Limits
+### 14.5 Limits
 
 - Same-tenant only. Cross-tenant motion requires a separate verb.
 - No undo. The rename is committed when the sqlite transaction commits; reverse direction must be done with a second `repo rename` call.
