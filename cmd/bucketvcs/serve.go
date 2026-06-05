@@ -265,17 +265,29 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	// the primary with an embedded sqlite --auth-db (enforced by
 	// resolveAuthDBReplica). StartReplication is called AFTER openAuthDB below.
 	var replRunner *authreplica.Runner
-	// cleanupReplOnEarlyExit covers the window between a successful Prepare and
-	// the real shutdown defer registered just after `defer authS.Close()`. Any
-	// `return` in that window (e.g. openAuthDB failure) must release the lease.
-	cleanupReplOnEarlyExit := false
+	// replStoreDedicated is non-nil only for --auth-db-replica=<url> (a store
+	// we opened ourselves and must close). The system store is closed by its
+	// own defer.
+	var replStoreDedicated storage.ObjectStore
+	// replShutdownArmed flips to true once the real shutdown defer (registered
+	// after `defer authS.Close()`) takes ownership of cleanup.
+	replShutdownArmed := false
+	// Early-exit guard: covers every return between here and the real shutdown
+	// defer. Ordering inside matters — the runner must close (final sync +
+	// lease release) while its store is still open, so the store closes last.
 	defer func() {
-		if replRunner != nil && cleanupReplOnEarlyExit {
+		if replShutdownArmed {
+			return // the real shutdown defer owns cleanup
+		}
+		if replRunner != nil {
 			shCtx, shCancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer shCancel()
 			if cerr := replRunner.Close(shCtx); cerr != nil {
 				slog.Default().Error("auth-db replication shutdown", slog.Any("error", cerr))
 			}
+		}
+		if replStoreDedicated != nil {
+			closeStore(replStoreDedicated)
 		}
 	}()
 	if replicaSpec != nil {
@@ -286,9 +298,10 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 				fmt.Fprintf(stderr, "serve: --auth-db-replica: %v\n", err)
 				return 1
 			}
-			// Registered before the runner-shutdown defer ⇒ LIFO runs it after
-			// Runner.Close — the store stays usable for final sync + lease release.
-			defer closeStore(replStore)
+			// Owned by the early-exit guard / real shutdown defer, both of
+			// which close it AFTER Runner.Close so the final sync + lease
+			// release still have a usable store.
+			replStoreDedicated = replStore
 		}
 		authDBPath, perr := resolveAuthDB(*authDB, realEnv())
 		if perr != nil {
@@ -317,9 +330,6 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			fmt.Fprintf(stderr, "serve: auth-db replication: %v\n", err)
 			return 1
 		}
-		// From here until the real shutdown defer is registered, any early
-		// return must release the lease.
-		cleanupReplOnEarlyExit = true
 	}
 
 	authS, _, err := openAuthDB(*authDB, sqlitestore.WithMaxConns(*authDBMaxConns))
@@ -333,15 +343,18 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	// `defer authS.Close()`. LIFO ordering guarantees this runs BEFORE
 	// authS.Close() — the litestream store must stop syncing the DB file
 	// before the application closes its sqlite handle. This single defer now
-	// owns shutdown; disarm the early-exit guard so the lease is not released
-	// twice.
+	// owns shutdown (runner first, then the dedicated store, if any); arming
+	// it disarms the early-exit guard above.
 	if replRunner != nil {
-		cleanupReplOnEarlyExit = false
+		replShutdownArmed = true
 		defer func() {
 			shCtx, shCancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer shCancel()
 			if cerr := replRunner.Close(shCtx); cerr != nil {
 				slog.Default().Error("auth-db replication shutdown", slog.Any("error", cerr))
+			}
+			if replStoreDedicated != nil {
+				closeStore(replStoreDedicated)
 			}
 		}()
 		// StartReplication opens the litestream store + lease heartbeat; the

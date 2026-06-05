@@ -34,6 +34,7 @@ func eachBackend(t *testing.T, fn func(t *testing.T, store storage.ObjectStore))
 		if err != nil {
 			t.Fatal(err)
 		}
+		t.Cleanup(func() { closeIfCloser(s) })
 		fn(t, s)
 	})
 	t.Run("s3compat", func(t *testing.T) {
@@ -54,6 +55,7 @@ func eachBackend(t *testing.T, fn func(t *testing.T, store storage.ObjectStore))
 		if err != nil {
 			t.Fatal(err)
 		}
+		t.Cleanup(func() { closeIfCloser(s) })
 		fn(t, s)
 	})
 	t.Run("gcs", func(t *testing.T) {
@@ -69,6 +71,7 @@ func eachBackend(t *testing.T, fn func(t *testing.T, store storage.ObjectStore))
 		if err != nil {
 			t.Fatal(err)
 		}
+		t.Cleanup(func() { closeIfCloser(s) })
 		fn(t, s)
 	})
 	t.Run("azureblob", func(t *testing.T) {
@@ -86,8 +89,17 @@ func eachBackend(t *testing.T, fn func(t *testing.T, store storage.ObjectStore))
 		if err != nil {
 			t.Fatal(err)
 		}
+		t.Cleanup(func() { closeIfCloser(s) })
 		fn(t, s)
 	})
+}
+
+// closeIfCloser releases backend resources for stores that hold them (e.g.
+// localfs's root .lock pidfile); cloud adapters without a Closer are no-ops.
+func closeIfCloser(s storage.ObjectStore) {
+	if c, ok := s.(io.Closer); ok {
+		_ = c.Close()
+	}
 }
 
 // newConformanceClient gives each test run a unique prefix so live-bucket
@@ -224,6 +236,7 @@ func TestConformance_WriteRetriesThroughCASConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { closeIfCloser(base) })
 	store := &casConflictStore{ObjectStore: base, conflicts: 2}
 	c := newConformanceClient(t, store)
 	if _, err := c.WriteLTXFile(ctx, 0, 1, 2, bytes.NewReader(ltxPayload(64))); err != nil {
