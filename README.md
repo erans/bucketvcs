@@ -59,6 +59,14 @@ Runs on **S3, R2, GCS, and Azure Blob** (all first-class), plus a local-filesyst
 
 ---
 
+> **v0.4.0 upgrade note:** No breaking changes. New in this release: the
+> embedded SQLite authdb can replicate continuously into object storage and
+> restore itself on boot — opt in with `--auth-db-replica=auto`
+> ([guide](docs/operator-guides/authdb-replication.md)). The top-level `sys/`
+> prefix in the store bucket is now **reserved for system data**; if you run
+> bucket-wide lifecycle or cleanup rules, scope them away from `sys/` (or
+> follow the guide's recommendation for `sys/authdb/ltx/`).
+
 > **v0.3.0 upgrade note:** Webhook egress now blocks deliveries to private and
 > loopback addresses by default. If your deployment delivers webhooks to an
 > internal receiver, add `--webhook-allow-cidr=<network>` (e.g.
@@ -76,7 +84,7 @@ to every [GitHub Release](https://github.com/erans/bucketvcs/releases), alongsid
 a `checksums.txt`. Pick the version you want, then grab the matching artifact:
 
 ```bash
-VER=0.3.0   # latest: https://github.com/erans/bucketvcs/releases/latest
+VER=0.4.0   # latest: https://github.com/erans/bucketvcs/releases/latest
 ```
 
 **Linux** — `.deb`, `.rpm`, or a portable tarball (swap `amd64` → `arm64` on ARM):
@@ -107,7 +115,7 @@ xattr -d com.apple.quarantine /usr/local/bin/bucketvcs 2>/dev/null || true
 **Windows** (PowerShell) — zip:
 
 ```powershell
-$ver = "0.3.0"
+$ver = "0.4.0"
 Invoke-WebRequest "https://github.com/erans/bucketvcs/releases/download/v$ver/bucketvcs_${ver}_windows_amd64.zip" -OutFile bucketvcs.zip
 Expand-Archive bucketvcs.zip -DestinationPath $Env:LOCALAPPDATA\bucketvcs
 # then add %LOCALAPPDATA%\bucketvcs to your PATH
