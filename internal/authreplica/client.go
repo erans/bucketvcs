@@ -25,8 +25,10 @@ import (
 // ReplicaClientType is reported by Type() and appears in litestream logs.
 const ReplicaClientType = "bucketvcs-objectstore"
 
-// DefaultPrefix is the reserved top-level key prefix used by --auth-db-replica=auto.
-// Repo data lives entirely under "tenants/"; GC mark/sweep never lists outside it.
+// DefaultPrefix is the reserved top-level key prefix used by
+// --auth-db-replica=auto for the authdb replica. It is deliberately outside
+// "tenants/" — the only prefix repo data and GC ever touch — so the replica
+// can never collide with (or be swept as) repo data.
 const DefaultPrefix = "sys/authdb"
 
 // casRetryLimit bounds the Head+CAS loops so adapter misbehavior cannot hang
@@ -37,6 +39,9 @@ const casRetryLimit = 8
 // Key layout mirrors litestream's file backend:
 //
 //	<prefix>/ltx/<level>/<ltx.FormatFilename(minTXID, maxTXID)>
+//
+// Level directories are decimal; the layout is owned entirely by this client and is not
+// interchangeable with stock litestream file/s3 replicas (which zero-pad levels).
 type Client struct {
 	store  storage.ObjectStore
 	prefix string
@@ -120,7 +125,7 @@ func (c *Client) OpenLTXFile(ctx context.Context, level int, minTXID, maxTXID lt
 			return nil, os.ErrNotExist
 		}
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("authreplica: get %s: %w", key, err)
 		}
 		return obj.Body, nil
 	}
@@ -131,7 +136,7 @@ func (c *Client) OpenLTXFile(ctx context.Context, level int, minTXID, maxTXID lt
 			return nil, os.ErrNotExist
 		}
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("authreplica: head %s: %w", key, err)
 		}
 		end = meta.Size - 1
 	}
@@ -139,7 +144,10 @@ func (c *Client) OpenLTXFile(ctx context.Context, level int, minTXID, maxTXID lt
 	if errors.Is(err, storage.ErrNotFound) {
 		return nil, os.ErrNotExist
 	}
-	return rc, err
+	if err != nil {
+		return nil, fmt.Errorf("authreplica: get-range %s: %w", key, err)
+	}
+	return rc, nil
 }
 
 // WriteLTXFile implements litestream.ReplicaClient. The body is buffered in
@@ -239,7 +247,7 @@ func (c *Client) DeleteAll(ctx context.Context) error {
 	for {
 		page, err := c.store.List(ctx, prefix, &storage.ListOptions{ContinuationToken: token})
 		if err != nil {
-			return err
+			return fmt.Errorf("authreplica: list %s: %w", prefix, err)
 		}
 		for _, om := range page.Objects {
 			if err := c.store.DeleteIfVersionMatches(ctx, om.Key, om.Version); err != nil &&
