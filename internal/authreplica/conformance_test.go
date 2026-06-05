@@ -4,6 +4,8 @@ package authreplica
 // (Apache-2.0, github.com/benbjohnson/litestream) — that harness lives in
 // package litestream_test and cannot be imported. Re-run this file when
 // bumping the pinned litestream version.
+//
+// Style note: backend dispatch is inlined here (not internal/storage/conformance's Factory/Run harness) — deliberate, this suite has its own client-level scenarios.
 
 import (
 	"bytes"
@@ -113,6 +115,9 @@ func TestConformance_WriteThenList(t *testing.T) {
 		defer itr.Close()
 		var n int
 		var last ltx.TXID
+		// No itr.Err() check needed: LTXFiles returns a fully-materialized
+		// slice iterator whose Err() is always nil; List/parse errors surface
+		// synchronously from LTXFiles. Revisit if Client moves to streaming.
 		for itr.Next() {
 			item := itr.Item()
 			if item.MinTXID < last {
@@ -155,8 +160,11 @@ func TestConformance_RangedRead(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, _ := io.ReadAll(rc)
+		got, err := io.ReadAll(rc)
 		rc.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
 		if !bytes.Equal(got, body[1024:1536]) {
 			t.Fatalf("range read mismatch (%d bytes)", len(got))
 		}
@@ -217,11 +225,15 @@ func TestConformance_WriteRetriesThroughCASConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := &casConflictStore{ObjectStore: base, conflicts: 2}
-	c := NewClient(store, "sys/authdb")
+	c := newConformanceClient(t, store)
 	if _, err := c.WriteLTXFile(ctx, 0, 1, 2, bytes.NewReader(ltxPayload(64))); err != nil {
 		t.Fatal(err)
 	}
 	second := ltxPayload(96)
+	// The conflict path is only reached on the SECOND write of the same key:
+	// the first write lands via PutIfAbsent (override never hit); the second
+	// gets ErrAlreadyExists and enters the Head+PutIfVersionMatches loop,
+	// consuming both forced conflicts before succeeding.
 	if _, err := c.WriteLTXFile(ctx, 0, 1, 2, bytes.NewReader(second)); err != nil {
 		t.Fatalf("overwrite through CAS conflicts failed: %v", err)
 	}
@@ -229,8 +241,11 @@ func TestConformance_WriteRetriesThroughCASConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, _ := io.ReadAll(rc)
+	got, err := io.ReadAll(rc)
 	rc.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !bytes.Equal(got, second) {
 		t.Fatal("retried write did not win")
 	}
