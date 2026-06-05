@@ -6,6 +6,8 @@ import (
 	"net/netip"
 	"strings"
 	"time"
+
+	"github.com/bucketvcs/bucketvcs/internal/authreplica"
 )
 
 // serveFlags carries every `bucketvcs serve` flag as the pointer returned by
@@ -95,6 +97,11 @@ type serveFlags struct {
 	// M27 BYOB (Bring Your Own Bucket).
 	byobKeyFile  *string
 	byobCredsTTL *time.Duration
+
+	// M28 embedded authdb replication (Litestream).
+	authDBReplica            *string
+	authDBReplicaLeaseTTL    *time.Duration
+	authDBReplicaSkipRestore *bool
 }
 
 // registerServeFlags registers the full serve flag surface on fs. The flag
@@ -245,6 +252,16 @@ func registerServeFlags(fs *flag.FlagSet) *serveFlags {
 		"Path to file containing the 32-byte AES-256-GCM key for tenant credential encryption; required when any storage_bindings row exists")
 	sf.byobCredsTTL = fs.Duration("byob-creds-ttl", time.Hour,
 		"How long to cache an open per-tenant ObjectStore before re-reading the binding and re-opening")
+
+	// M28 embedded authdb replication (Litestream). Default off; only the
+	// primary (non-replica-serve) gateway with an embedded sqlite --auth-db
+	// may replicate.
+	sf.authDBReplica = fs.String("auth-db-replica", "",
+		`Replicate the sqlite authdb via embedded Litestream: "auto" (sys/authdb/ in --store), a storage URL, or "off" (default)`)
+	sf.authDBReplicaLeaseTTL = fs.Duration("auth-db-replica-lease-ttl", authreplica.DefaultLeaseTTL,
+		"Lease validity window for the single-writer authdb replication lease (renewal runs every TTL/3)")
+	sf.authDBReplicaSkipRestore = fs.Bool("auth-db-replica-skip-restore", false,
+		"Skip restore-on-boot from the replica even when the local authdb file is missing (escape hatch; fail-open)")
 
 	return sf
 }

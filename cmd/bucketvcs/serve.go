@@ -23,6 +23,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/auth/ratelimit"
 	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
+	"github.com/bucketvcs/bucketvcs/internal/authreplica"
 	"github.com/bucketvcs/bucketvcs/internal/byob"
 	"github.com/bucketvcs/bucketvcs/internal/gateway"
 	"github.com/bucketvcs/bucketvcs/internal/gitbrowse"
@@ -206,6 +207,16 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 		*uiEnabled = false
 	}
 
+	// M28 authdb replication: validate the flag surface before opening
+	// anything. resolveAuthDBReplica returns nil when replication is off and
+	// rejects libsql/postgres --auth-db (those backends bring their own
+	// durability) and replica-serve mode (only the primary replicates).
+	replicaSpec, err := resolveAuthDBReplica(*sf.authDBReplica, *storeURL, *authDB, isReplica)
+	if err != nil {
+		fmt.Fprintf(stderr, "serve: %v\n", err)
+		return 2
+	}
+
 	store, err := openStore(*storeURL)
 	if err != nil {
 		fmt.Fprintf(stderr, "serve: open store: %v\n", err)
@@ -248,12 +259,93 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 		}
 	}
 
+	// M28 authdb replication: Prepare runs BEFORE openAuthDB. It acquires the
+	// single-writer lease and restores the authdb file from the replica iff
+	// the local file is missing (fail-closed). replicaSpec is non-nil only on
+	// the primary with an embedded sqlite --auth-db (enforced by
+	// resolveAuthDBReplica). StartReplication is called AFTER openAuthDB below.
+	var replRunner *authreplica.Runner
+	// cleanupReplOnEarlyExit covers the window between a successful Prepare and
+	// the real shutdown defer registered just after `defer authS.Close()`. Any
+	// `return` in that window (e.g. openAuthDB failure) must release the lease.
+	cleanupReplOnEarlyExit := false
+	defer func() {
+		if replRunner != nil && cleanupReplOnEarlyExit {
+			shCtx, shCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer shCancel()
+			if cerr := replRunner.Close(shCtx); cerr != nil {
+				slog.Default().Error("auth-db replication shutdown", slog.Any("error", cerr))
+			}
+		}
+	}()
+	if replicaSpec != nil {
+		replStore := store // the system ObjectStore opened from --store
+		if !replicaSpec.UseSystemStore {
+			replStore, err = openStore(replicaSpec.StoreURL)
+			if err != nil {
+				fmt.Fprintf(stderr, "serve: --auth-db-replica: %v\n", err)
+				return 1
+			}
+		}
+		authDBPath, perr := resolveAuthDB(*authDB, realEnv())
+		if perr != nil {
+			fmt.Fprintf(stderr, "serve: --auth-db-replica: %v\n", perr)
+			return 1
+		}
+		// Restore writes the authdb file at authDBPath; its parent dir must
+		// exist (mirrors openAuthDB, which MkdirAll's the same directory).
+		if perr := os.MkdirAll(filepath.Dir(authDBPath), 0o700); perr != nil {
+			fmt.Fprintf(stderr, "serve: --auth-db-replica: %v\n", perr)
+			return 1
+		}
+		replRunner, err = authreplica.Prepare(ctx, authreplica.Config{
+			DBPath:      authDBPath,
+			Store:       replStore,
+			Prefix:      replicaSpec.Prefix,
+			LeaseTTL:    *sf.authDBReplicaLeaseTTL,
+			SkipRestore: *sf.authDBReplicaSkipRestore,
+			Logger:      slog.Default(),
+		})
+		if err != nil {
+			fmt.Fprintf(stderr, "serve: auth-db replication: %v\n", err)
+			return 1
+		}
+		// From here until the real shutdown defer is registered, any early
+		// return must release the lease.
+		cleanupReplOnEarlyExit = true
+	}
+
 	authS, _, err := openAuthDB(*authDB, sqlitestore.WithMaxConns(*authDBMaxConns))
 	if err != nil {
 		fmt.Fprintf(stderr, "serve: auth-db: %v\n", err)
 		return 1
 	}
 	defer authS.Close()
+
+	// M28: register the real replication shutdown defer immediately after
+	// `defer authS.Close()`. LIFO ordering guarantees this runs BEFORE
+	// authS.Close() — the litestream store must stop syncing the DB file
+	// before the application closes its sqlite handle. This single defer now
+	// owns shutdown; disarm the early-exit guard so the lease is not released
+	// twice.
+	if replRunner != nil {
+		cleanupReplOnEarlyExit = false
+		defer func() {
+			shCtx, shCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer shCancel()
+			if cerr := replRunner.Close(shCtx); cerr != nil {
+				slog.Default().Error("auth-db replication shutdown", slog.Any("error", cerr))
+			}
+		}()
+		// StartReplication opens the litestream store + lease heartbeat; the
+		// authdb file now exists. On error, close the runner to release the
+		// lease (the shutdown defer above also covers this, but we return 1
+		// immediately and want a clean release before exit).
+		if err := replRunner.StartReplication(ctx); err != nil {
+			fmt.Fprintf(stderr, "serve: auth-db replication: %v\n", err)
+			return 1
+		}
+	}
 
 	if isReplica && authS.BackendName() != "postgres" {
 		fmt.Fprintln(stderr, "serve: --replica-of requires a postgres --auth-db (replica regions share the central postgres; a cross-region sqlite/libsql file is a misconfiguration)")
