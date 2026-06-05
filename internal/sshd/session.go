@@ -18,6 +18,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/gitproto/receivepack"
 	"github.com/bucketvcs/bucketvcs/internal/gitproto/uploadpack"
 	"github.com/bucketvcs/bucketvcs/internal/lfs"
+	"github.com/bucketvcs/bucketvcs/internal/replica"
 )
 
 // handleConn upgrades a raw TCP connection to an SSH server connection,
@@ -165,6 +166,18 @@ run:
 	var serveErr error
 	switch cmd.Op {
 	case OpUpload:
+		// Read-only replica freshness gate: a bounded-stale replica past
+		// its lag budget refuses ref advertisement (mirrors the HTTP
+		// gateway's 503). The gate error string carries the diagnostic;
+		// we surface it on stderr and exit non-zero before advertising.
+		// Same terminal-reject idiom as the OpReceive refusal above.
+		if s.opts.Replica != nil && s.opts.Replica.Gate != nil {
+			if err := s.opts.Replica.Gate.CheckAdvertise(ctx, cmd.Tenant, cmd.Repo); err != nil {
+				sendStderrLine(ch, err.Error())
+				sendExitStatus(ch, 128)
+				return
+			}
+		}
 		req := &uploadpack.EngineRequest{
 			Ctx:               ctx,
 			Tenant:            cmd.Tenant,
@@ -204,6 +217,19 @@ run:
 			}
 		}
 	case OpReceive:
+		// Read-only replica: refuse pushes with a pointer to the write
+		// region, matching the HTTP gateway's 403 refusal. We emit the
+		// refusal on stderr and exit non-zero before building the engine
+		// request, following this function's terminal-reject idiom
+		// (sendStderrLine + sendExitStatus + return, like the perm-denied
+		// and parse-error paths above). The trailing best-effort
+		// TouchSSHKeyUsage is intentionally skipped — a refused write is
+		// not a successful key use.
+		if s.opts.Replica != nil {
+			sendStderrLine(ch, replica.RefusalMessage(s.opts.Replica.WriteRegionURL))
+			sendExitStatus(ch, 128)
+			return
+		}
 		req := &receivepack.EngineRequest{
 			Ctx:             ctx,
 			Tenant:          cmd.Tenant,

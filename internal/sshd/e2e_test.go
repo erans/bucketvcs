@@ -179,7 +179,7 @@ func makeWorkRepoSSH(t *testing.T) string {
 // the auth store (grant permissions, add keys, etc.) before driving git.
 //
 // The env is fully cleaned up via t.Cleanup.
-func newSSHE2E(t *testing.T, tenant, repoID string) *sshE2EEnv {
+func newSSHE2E(t *testing.T, tenant, repoID string, optMut ...func(*Options)) *sshE2EEnv {
 	t.Helper()
 
 	// ---- object store + fixture repo ----------------------------------------
@@ -214,7 +214,7 @@ func newSSHE2E(t *testing.T, tenant, repoID string) *sshE2EEnv {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
 	// ---- SSH server ----------------------------------------------------------
-	srv, err := NewServer(Options{
+	opts := Options{
 		Addr:         "127.0.0.1:0",
 		HostKeyPath:  hostKeyPath,
 		Grace:        0,
@@ -223,7 +223,11 @@ func newSSHE2E(t *testing.T, tenant, repoID string) *sshE2EEnv {
 		Mirror:       mgr,
 		Logger:       logger,
 		AgentVersion: "e2e-test",
-	})
+	}
+	for _, mut := range optMut {
+		mut(&opts)
+	}
+	srv, err := NewServer(opts)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
