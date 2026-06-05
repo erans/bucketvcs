@@ -91,6 +91,10 @@ type serveFlags struct {
 	replicaLagBudget     *time.Duration
 	replicaCheckInterval *time.Duration
 	writeRegionURL       *string
+
+	// M27 BYOB (Bring Your Own Bucket).
+	byobKeyFile  *string
+	byobCredsTTL *time.Duration
 }
 
 // registerServeFlags registers the full serve flag surface on fs. The flag
@@ -235,6 +239,12 @@ func registerServeFlags(fs *flag.FlagSet) *serveFlags {
 		"How often to compare regional vs canonical manifest versions per active repo (default: lag-budget/4, floor 15s)")
 	sf.writeRegionURL = fs.String("write-region-url", "",
 		"Write-region gateway URL included in push-refusal messages on replicas")
+
+	// M27 BYOB (Bring Your Own Bucket).
+	sf.byobKeyFile = fs.String("byob-encryption-key", "",
+		"Path to file containing the 32-byte AES-256-GCM key for tenant credential encryption; required when any storage_bindings row exists")
+	sf.byobCredsTTL = fs.Duration("byob-creds-ttl", time.Hour,
+		"How long to cache an open per-tenant ObjectStore before re-reading the binding and re-opening")
 
 	return sf
 }
