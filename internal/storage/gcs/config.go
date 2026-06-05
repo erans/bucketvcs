@@ -1,6 +1,7 @@
 package gcs
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -35,6 +36,23 @@ func (c *Config) Validate() error {
 	}
 	if _, err := normalizePrefix(c.Prefix); err != nil {
 		return fmt.Errorf("gcs: invalid prefix: %w", err)
+	}
+	return nil
+}
+
+// ApplyCredsJSON overlays credential fields from a JSON object onto this
+// Config. Structural fields (Bucket, Prefix, Endpoint, UserProject)
+// are NOT touched — they come from the store URL and must not change.
+// Unknown JSON keys are silently ignored.
+func (c *Config) ApplyCredsJSON(raw []byte) error {
+	var m struct {
+		ServiceAccountJSON string `json:"service_account_json"`
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return fmt.Errorf("gcs: parse creds JSON: %w", err)
+	}
+	if m.ServiceAccountJSON != "" {
+		c.CredentialsJSON = []byte(m.ServiceAccountJSON)
 	}
 	return nil
 }

@@ -126,6 +126,52 @@ func openStore(url string) (storage.ObjectStore, error) {
 	}
 }
 
+// openStoreWithCreds is like openStore but applies the decrypted credential
+// JSON to the parsed config before opening. Used by the BYOB resolver to
+// open per-tenant stores. Does NOT call applyEnvToConfig — env vars are
+// operator-level; tenant creds come exclusively from credsJSON.
+func openStoreWithCreds(rawURL string, credsJSON []byte) (storage.ObjectStore, error) {
+	scheme, _, err := parseStoreURL(rawURL)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	switch scheme {
+	case "s3", "r2":
+		cfg, err := s3compat.ParseURL(rawURL)
+		if err != nil {
+			return nil, err
+		}
+		if err := cfg.ApplyCredsJSON(credsJSON); err != nil {
+			return nil, err
+		}
+		return s3compat.Open(ctx, cfg)
+	case "gcs":
+		cfg, err := gcs.ParseURL(rawURL)
+		if err != nil {
+			return nil, err
+		}
+		if err := cfg.ApplyCredsJSON(credsJSON); err != nil {
+			return nil, err
+		}
+		return gcs.Open(ctx, cfg)
+	case "azureblob":
+		cfg, err := azureblob.ParseURL(rawURL)
+		if err != nil {
+			return nil, err
+		}
+		if err := cfg.ApplyCredsJSON(credsJSON); err != nil {
+			return nil, err
+		}
+		return azureblob.Open(ctx, cfg)
+	case "localfs":
+		return openStore(rawURL) // localfs ignores credsJSON
+	default:
+		return nil, fmt.Errorf("openStoreWithCreds: unknown scheme %q", scheme)
+	}
+}
+
 // applyEnvToConfig layers env vars onto a Config seed produced by
 // ParseURL. Standard AWS_* env vars are honored by the SDK default
 // chain when AccessKeyID is left empty.
