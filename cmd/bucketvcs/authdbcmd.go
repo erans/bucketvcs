@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -109,6 +110,15 @@ func runAuthDBRestore(ctx context.Context, args []string, stdout, stderr io.Writ
 			fmt.Fprintf(stderr, "authdb restore: %v\n", err)
 			return 1
 		}
+		// A leftover -wal/-shm from the PREVIOUS database would be replayed
+		// over the freshly restored file on the next WAL-mode open, silently
+		// corrupting it. Remove them (and litestream's -txid sidecar).
+		for _, sfx := range []string{"-wal", "-shm", "-txid"} {
+			if err := os.Remove(target + sfx); err != nil && !os.IsNotExist(err) {
+				fmt.Fprintf(stderr, "authdb restore: %v\n", err)
+				return 1
+			}
+		}
 	}
 
 	st, prefix, err := openReplicaTarget(*replica, *storeURL)
@@ -147,7 +157,8 @@ func runAuthDBRestore(ctx context.Context, args []string, stdout, stderr io.Writ
 	return 0
 }
 
-// leaseHolderDoc mirrors authreplica's lease.json body for read-only status.
+// leaseHolderDoc mirrors authreplica's private leaseDoc (lease.go) — keep in sync; it cannot be imported.
+// It carries the lease.json body for read-only status.
 type leaseHolderDoc struct {
 	InstanceID string    `json:"instance_id"`
 	Hostname   string    `json:"hostname"`
@@ -176,7 +187,7 @@ func runAuthDBReplicaStatus(ctx context.Context, args []string, stdout, stderr i
 
 	// Lease holder first, when present. Absent lease is not an error: a
 	// replica that has never been served by a live node has no lease.json.
-	if doc, ok := readLeaseHolder(ctx, st, prefix); ok {
+	if doc, ok := readLeaseHolder(ctx, st, prefix, stderr); ok {
 		_ = enc.Encode(map[string]any{"lease": map[string]any{
 			"instance_id": doc.InstanceID,
 			"hostname":    doc.Hostname,
@@ -224,11 +235,15 @@ func runAuthDBReplicaStatus(ctx context.Context, args []string, stdout, stderr i
 
 // readLeaseHolder fetches and parses <prefix>/lease.json. A missing lease
 // returns (_, false) with no error — it just means no node currently (or
-// recently) held the replication lease.
-func readLeaseHolder(ctx context.Context, st storage.ObjectStore, prefix string) (leaseHolderDoc, bool) {
+// recently) held the replication lease. Any other Get error is surfaced as a
+// one-line warning to stderr and the lease line is omitted.
+func readLeaseHolder(ctx context.Context, st storage.ObjectStore, prefix string, stderr io.Writer) (leaseHolderDoc, bool) {
 	key := path.Join(prefix, "lease.json")
 	obj, err := st.Get(ctx, key, nil)
 	if err != nil {
+		if !errors.Is(err, storage.ErrNotFound) {
+			fmt.Fprintf(stderr, "authdb replica-status: lease: %v\n", err)
+		}
 		return leaseHolderDoc{}, false
 	}
 	defer obj.Body.Close()

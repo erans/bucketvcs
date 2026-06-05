@@ -108,6 +108,36 @@ func TestAuthDBRestore_RefusesOverwriteWithoutForce(t *testing.T) {
 	}
 }
 
+func TestAuthDBRestore_ForceRemovesStaleWALSidecars(t *testing.T) {
+	storeRoot, _ := seedReplica(t)
+	out := filepath.Join(t.TempDir(), "x.db")
+	if err := os.WriteFile(out, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(out+"-wal", []byte("stale-wal"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(),
+		[]string{"authdb", "restore", "--replica=localfs:" + storeRoot, "--output=" + out, "--force"},
+		&stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr.String())
+	}
+	if _, err := os.Stat(out + "-wal"); !os.IsNotExist(err) {
+		t.Fatal("stale -wal sidecar survived --force restore")
+	}
+	db, err := sql.Open("sqlite", "file:"+out+"?_pragma=journal_mode(WAL)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var v string
+	if err := db.QueryRow(`SELECT v FROM marker`).Scan(&v); err != nil || v != "present" {
+		t.Fatalf("restored db wrong after force: v=%q err=%v", v, err)
+	}
+}
+
 func TestAuthDBReplicaStatus(t *testing.T) {
 	storeRoot, _ := seedReplica(t)
 	var stdout, stderr bytes.Buffer
