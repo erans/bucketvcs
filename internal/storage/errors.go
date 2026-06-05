@@ -44,4 +44,10 @@ var (
 	// ErrNotSupported: the operation is not supported by this adapter.
 	// Inspect Capabilities() to decide before calling.
 	ErrNotSupported = errors.New("storage: not supported by adapter")
+
+	// ErrReadOnlyReplica: the store is the read-side composition of a
+	// regional replica bucket over a canonical bucket; all write methods
+	// are refused. Defense in depth under the gateway-level replica
+	// refusals — no code path may mutate either bucket.
+	ErrReadOnlyReplica = errors.New("storage: read-only replica store")
 )
