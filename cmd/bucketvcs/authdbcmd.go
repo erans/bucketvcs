@@ -129,6 +129,9 @@ func runAuthDBRestore(ctx context.Context, args []string, stdout, stderr io.Writ
 	defer closeStore(st)
 	client := authreplica.NewClient(st, prefix)
 
+	// lsdb is never Open()ed — Replica.Restore is the only operation performed,
+	// so there are no goroutines/resources to Close. Revisit if a litestream
+	// upgrade starts allocating in NewDB.
 	lsdb := litestream.NewDB(target)
 	r := litestream.NewReplicaWithClient(lsdb, client)
 	opt := litestream.NewRestoreOptions()

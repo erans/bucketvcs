@@ -346,7 +346,6 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	// owns shutdown (runner first, then the dedicated store, if any); arming
 	// it disarms the early-exit guard above.
 	if replRunner != nil {
-		replShutdownArmed = true
 		defer func() {
 			shCtx, shCancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer shCancel()
@@ -357,6 +356,10 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 				closeStore(replStoreDedicated)
 			}
 		}()
+		// Armed strictly AFTER the defer above is registered, so there is no
+		// statement window where the early-exit guard is disarmed but no
+		// real defer exists yet.
+		replShutdownArmed = true
 		// StartReplication opens the litestream store + lease heartbeat; the
 		// authdb file now exists. On error, close the runner to release the
 		// lease (the shutdown defer above also covers this, but we return 1

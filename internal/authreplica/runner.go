@@ -101,9 +101,14 @@ func Prepare(ctx context.Context, cfg Config) (*Runner, error) {
 		start := time.Now()
 		if err := lsdb.EnsureExists(ctx); err != nil {
 			_ = r.lease.Release(ctx)
+			// This path means the replica could not be READ (storage fault) —
+			// an empty replica location no-ops successfully. Do not advertise
+			// --auth-db-replica-skip-restore here: bypassing restore while
+			// live replica data exists would fork history.
 			return nil, fmt.Errorf("authreplica: restore-on-boot: %w "+
-				"(refusing to start with an empty authdb while a replica may exist; "+
-				"use --auth-db-replica-skip-restore to override)", err)
+				"(fail-closed: the replica location could not be read; fix storage "+
+				"access and restart — do NOT bypass with --auth-db-replica-skip-restore "+
+				"unless the replica location is known to hold no data)", err)
 		}
 		_, postStatErr := os.Stat(cfg.DBPath)
 		fileNowExists := postStatErr == nil
