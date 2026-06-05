@@ -39,6 +39,11 @@ func (s *Server) handleReceivePack(w http.ResponseWriter, r *http.Request, tenan
 	defer r.Body.Close()
 	body := http.MaxBytesReader(w, r.Body, s.opts.MaxBodyBytes)
 
+	store, err := s.resolveStore(r.Context(), tenant)
+	if !s.byobOK(w, err) {
+		return
+	}
+
 	req := &receivepack.EngineRequest{
 		Ctx:          r.Context(),
 		Tenant:       tenant,
@@ -47,7 +52,7 @@ func (s *Server) handleReceivePack(w http.ResponseWriter, r *http.Request, tenan
 		Stdin:        body,
 		Stdout:       w,
 		Stderr:       io.Discard,
-		Store:        s.store,
+		Store:        store,
 		Mirror:       s.mgr,
 		AgentVersion: s.opts.Version,
 		Policy:       s.opts.Policy,
@@ -55,7 +60,7 @@ func (s *Server) handleReceivePack(w http.ResponseWriter, r *http.Request, tenan
 		Hooks:        s.opts.Hooks,
 		Logger:       s.logger,
 	}
-	err := receivepack.Service(req)
+	err = receivepack.Service(req)
 	if err == nil {
 		return
 	}

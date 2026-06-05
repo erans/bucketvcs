@@ -178,6 +178,12 @@ run:
 				return
 			}
 		}
+		store, err := s.resolveStore(ctx, cmd.Tenant)
+		if err != nil {
+			sendStderrLine(ch, "storage error: "+err.Error())
+			sendExitStatus(ch, 1)
+			return
+		}
 		req := &uploadpack.EngineRequest{
 			Ctx:               ctx,
 			Tenant:            cmd.Tenant,
@@ -188,7 +194,7 @@ run:
 			Stderr:            ch.Stderr(),
 			ProtocolVersion:   pv,
 			SSH:               true,
-			Store:             s.opts.BVStore,
+			Store:             store,
 			Mirror:            s.opts.Mirror,
 			AgentVersion:      s.opts.AgentVersion,
 			BundleURIEnabled:  s.opts.BundleURIEnabled,
@@ -230,6 +236,12 @@ run:
 			sendExitStatus(ch, 128)
 			return
 		}
+		store, err := s.resolveStore(ctx, cmd.Tenant)
+		if err != nil {
+			sendStderrLine(ch, "storage error: "+err.Error())
+			sendExitStatus(ch, 1)
+			return
+		}
 		req := &receivepack.EngineRequest{
 			Ctx:             ctx,
 			Tenant:          cmd.Tenant,
@@ -239,7 +251,7 @@ run:
 			Stdout:          ch,
 			Stderr:          ch.Stderr(),
 			ProtocolVersion: pv,
-			Store:           s.opts.BVStore,
+			Store:           store,
 			Mirror:          s.opts.Mirror,
 			AgentVersion:    s.opts.AgentVersion,
 			Policy:          s.opts.Policy,

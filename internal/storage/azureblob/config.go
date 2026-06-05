@@ -1,6 +1,7 @@
 package azureblob
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -38,6 +39,27 @@ func (c *Config) Validate() error {
 	}
 	if _, err := normalizePrefix(c.Prefix); err != nil {
 		return fmt.Errorf("azureblob: invalid prefix: %w", err)
+	}
+	return nil
+}
+
+// ApplyCredsJSON overlays credential fields from a JSON object onto this
+// Config. Structural fields (Account, Container, Prefix, ServiceURL)
+// are NOT touched — they come from the store URL and must not change.
+// Unknown JSON keys are silently ignored.
+func (c *Config) ApplyCredsJSON(raw []byte) error {
+	var m struct {
+		AccountKey       string `json:"account_key"`
+		ConnectionString string `json:"connection_string"`
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return fmt.Errorf("azureblob: parse creds JSON: %w", err)
+	}
+	if m.AccountKey != "" {
+		c.AccountKey = m.AccountKey
+	}
+	if m.ConnectionString != "" {
+		c.ConnectionString = m.ConnectionString
 	}
 	return nil
 }

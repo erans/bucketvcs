@@ -159,3 +159,25 @@ func TestDoctorNonReplicaHasNoReplicaChecks(t *testing.T) {
 		t.Errorf("non-replica doctor must not run replica checks:\n%s", out.String())
 	}
 }
+
+func TestDoctorBYOBBindingsCheck(t *testing.T) {
+	storeDir, dbPath := doctorEnv(t)
+	keyFile := filepath.Join(t.TempDir(), "key.bin")
+	os.WriteFile(keyFile, make([]byte, 32), 0o600)
+
+	// No bindings → "no bindings configured" OK, exit 0.
+	var out, errb bytes.Buffer
+	code := run(context.Background(),
+		[]string{"doctor", "--store", "localfs:" + storeDir, "--auth-db", dbPath,
+			"--lfs=false", "--byob-encryption-key=" + keyFile},
+		&out, &errb)
+	if code != 0 {
+		t.Fatalf("exit=%d want 0\n%s\n%s", code, out.String(), errb.String())
+	}
+	if !strings.Contains(out.String(), "byob.bindings") {
+		t.Errorf("byob.bindings check missing:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "no bindings") {
+		t.Errorf("expected 'no bindings':\n%s", out.String())
+	}
+}

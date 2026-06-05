@@ -14,6 +14,7 @@ var (
 	ErrNoSession            = errors.New("auth: no session")
 	ErrConflict             = errors.New("auth: conflict")
 	ErrDuplicateFingerprint = errors.New("auth: duplicate fingerprint")
+	ErrNoSuchBinding        = errors.New("auth: no such storage binding")
 )
 
 // ErrInsufficientScope is returned by CheckScope when the actor's token

@@ -23,6 +23,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/auth/ratelimit"
 	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
+	"github.com/bucketvcs/bucketvcs/internal/byob"
 	"github.com/bucketvcs/bucketvcs/internal/gateway"
 	"github.com/bucketvcs/bucketvcs/internal/gitbrowse"
 	"github.com/bucketvcs/bucketvcs/internal/hooks"
@@ -257,6 +258,31 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	if isReplica && authS.BackendName() != "postgres" {
 		fmt.Fprintln(stderr, "serve: --replica-of requires a postgres --auth-db (replica regions share the central postgres; a cross-region sqlite/libsql file is a misconfiguration)")
 		return 2
+	}
+
+	// M27 BYOB: construct the per-tenant StoreResolver when a key file is
+	// provided. The resolver caches open ObjectStores for byobCredsTTL and
+	// re-opens when the binding changes. When nil, both gateways fall back to
+	// the operator store (pre-BYOB behavior).
+	var storeResolver *byob.StoreResolver
+	if *sf.byobKeyFile != "" {
+		raw, err := os.ReadFile(*sf.byobKeyFile)
+		if err != nil {
+			fmt.Fprintf(stderr, "serve: read --byob-encryption-key: %v\n", err)
+			return 1
+		}
+		raw = bytes.TrimSpace(raw)
+		if len(raw) < 32 {
+			fmt.Fprintf(stderr, "serve: --byob-encryption-key must be >= 32 bytes (got %d)\n", len(raw))
+			return 2
+		}
+		storeResolver = byob.NewResolver(byob.ResolverConfig{
+			AuthDB:    authS,
+			Operator:  store,
+			EncKey:    raw[:32],
+			CredsTTL:  *sf.byobCredsTTL,
+			OpenStore: openStoreWithCreds,
+		})
 	}
 
 	logger := slog.Default()
@@ -568,6 +594,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			OIDCStore:               oidcStore,
 			OIDCVerifier:            oidcVerifier,
 			Replica:                 replicaCfg,
+			StoreResolver:           storeResolver,
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "serve: NewServer: %v\n", err)
@@ -755,6 +782,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			Hooks:             hooksSvc,
 			Limiter:           rateLimiter,
 			Replica:           replicaCfg,
+			Resolver:          storeResolver,
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "serve: ssh new server: %v\n", err)

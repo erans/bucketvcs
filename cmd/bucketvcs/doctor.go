@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
+	"github.com/bucketvcs/bucketvcs/internal/byob"
 	"github.com/bucketvcs/bucketvcs/internal/doctor"
 	"github.com/bucketvcs/bucketvcs/internal/gateway"
 	"github.com/bucketvcs/bucketvcs/internal/replica"
@@ -231,6 +233,69 @@ func runDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 			}
 			return doctor.Result{Status: doctor.StatusOK, Detail: strings.TrimSpace(string(out))}
 		}},
+	}
+
+	if *sf.byobKeyFile != "" {
+		rawKey, _ := os.ReadFile(*sf.byobKeyFile)
+		rawKey = bytes.TrimSpace(rawKey)
+		var encKey []byte
+		if len(rawKey) >= 32 {
+			encKey = rawKey[:32]
+		}
+		checks = append(checks, doctor.Check{
+			Name: "byob.bindings",
+			Run: func(ctx context.Context) doctor.Result {
+				if authStore == nil || !authLive {
+					return doctor.Result{Status: doctor.StatusSkip, Detail: "authdb unavailable"}
+				}
+				if len(encKey) < 32 {
+					return doctor.Result{Status: doctor.StatusFail, Detail: "--byob-encryption-key file is too short (< 32 bytes)"}
+				}
+				bindings, err := authStore.ListStorageBindings(ctx)
+				if err != nil {
+					return doctor.Result{Status: doctor.StatusFail, Detail: "list bindings: " + err.Error()}
+				}
+				if len(bindings) == 0 {
+					return doctor.Result{Status: doctor.StatusOK, Detail: "no bindings configured"}
+				}
+				const staleThreshold = 30 * 24 * time.Hour
+				nowUnix := time.Now().Unix()
+				var fails, warns, oks int
+				for _, b := range bindings {
+					plain, err := byob.Decrypt(encKey, b.CredsJSON)
+					if err != nil {
+						fails++
+						continue
+					}
+					s, err := openStoreWithCreds(b.StoreURL, plain)
+					if err != nil {
+						fails++
+						continue
+					}
+					_, lerr := s.List(ctx, "", &storage.ListOptions{MaxKeys: 1})
+					closeStore(s)
+					if lerr != nil {
+						fails++
+						continue
+					}
+					if nowUnix-b.VerifiedAt > int64(staleThreshold.Seconds()) {
+						warns++
+					} else {
+						oks++
+					}
+				}
+				if fails > 0 {
+					return doctor.Result{Status: doctor.StatusFail,
+						Detail: fmt.Sprintf("%d/%d bindings unreachable or undecodable", fails, len(bindings))}
+				}
+				if warns > 0 {
+					return doctor.Result{Status: doctor.StatusWarn,
+						Detail: fmt.Sprintf("%d/%d bindings have stale verified_at (>30 days); run `bucketvcs tenant storage verify`", warns, len(bindings))}
+				}
+				return doctor.Result{Status: doctor.StatusOK,
+					Detail: fmt.Sprintf("%d binding(s) reachable, verified_at current", oks)}
+			},
+		})
 	}
 
 	if *repoFlag != "" {

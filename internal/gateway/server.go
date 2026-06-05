@@ -188,11 +188,25 @@ type Options struct {
 	// Replica.Gate, and GET /healthz/replica serves Replica.Health().
 	// See internal/replica and the multi-region operator guide.
 	Replica *replica.GatewayConfig
+
+	// StoreResolver, when non-nil, enables BYOB (Bring Your Own Bucket)
+	// mode. For every inbound Git/LFS request the gateway calls
+	// StoreResolver.Resolve(ctx, tenant) to obtain the per-tenant
+	// ObjectStore instead of using the single operator store. When nil
+	// (the default), the gateway behaves exactly as before BYOB: all
+	// tenants share the single store passed to NewServer.
+	//
+	// Note: the proxied URL handler routes (/_bundle/, /_pack/, /_lfs/)
+	// use the operator store directly and do NOT go through StoreResolver.
+	// Those routes sign/verify HMAC tokens against the operator store;
+	// per-tenant routing for proxied delivery is deferred.
+	StoreResolver byobResolver
 }
 
 // Server implements http.Handler.
 type Server struct {
 	store             storage.ObjectStore
+	resolver          byobResolver
 	mgr               *mirror.Manager
 	opts              Options
 	logger            *slog.Logger
@@ -242,7 +256,7 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
-	s := &Server{store: store, mgr: mgr, opts: opts, logger: opts.Logger}
+	s := &Server{store: store, resolver: opts.StoreResolver, mgr: mgr, opts: opts, logger: opts.Logger}
 
 	// Apply BundleURI defaults and construct the URLBuilder once at startup.
 	if opts.BundleURIEnabled {
@@ -394,7 +408,11 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 			AuthStore:        opts.AuthStore,
 			ActorFromContext: ActorFromContext,
 			NewStore: func(tenant, repo string) *lfs.Store {
-				ls := lfs.NewStore(store, lfs.RepoLFSPrefix(tenant, repo))
+				st, err := s.resolveStore(context.Background(), tenant)
+				if err != nil {
+					st = s.store // fallback on error; lfs handler returns per-object errors
+				}
+				ls := lfs.NewStore(st, lfs.RepoLFSPrefix(tenant, repo))
 				if len(proxiedKey) >= 16 && proxiedBase != "" {
 					ls = ls.WithProxied(proxiedKey, proxiedBase, tenant, repo)
 				}

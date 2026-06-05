@@ -1,6 +1,7 @@
 package s3compat
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -75,6 +76,39 @@ func (c *Config) Validate() error {
 	}
 	if c.scheme == "r2" && c.Endpoint == "" {
 		return fmt.Errorf("s3compat: r2:// requires Endpoint (set BUCKETVCS_S3_ENDPOINT)")
+	}
+	return nil
+}
+
+// ApplyCredsJSON overlays credential fields from a JSON object onto this
+// Config. Structural fields (Bucket, Prefix, Endpoint, ForcePathStyle)
+// are NOT touched — they come from the store URL and must not change.
+// Unknown JSON keys are silently ignored.
+func (c *Config) ApplyCredsJSON(raw []byte) error {
+	var m struct {
+		AccessKeyID     string `json:"access_key_id"`
+		SecretAccessKey string `json:"secret_access_key"`
+		SessionToken    string `json:"session_token"`
+		Region          string `json:"region"`
+		Profile         string `json:"profile"`
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return fmt.Errorf("s3compat: parse creds JSON: %w", err)
+	}
+	if m.AccessKeyID != "" {
+		c.AccessKeyID = m.AccessKeyID
+	}
+	if m.SecretAccessKey != "" {
+		c.SecretAccessKey = m.SecretAccessKey
+	}
+	if m.SessionToken != "" {
+		c.SessionToken = m.SessionToken
+	}
+	if m.Region != "" {
+		c.Region = m.Region
+	}
+	if m.Profile != "" {
+		c.Profile = m.Profile
 	}
 	return nil
 }

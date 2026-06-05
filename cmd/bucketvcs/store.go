@@ -1,12 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/bucketvcs/bucketvcs/internal/auth"
+	"github.com/bucketvcs/bucketvcs/internal/byob"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/storage/azureblob"
 	"github.com/bucketvcs/bucketvcs/internal/storage/gcs"
@@ -124,6 +129,95 @@ func openStore(url string) (storage.ObjectStore, error) {
 	default:
 		return nil, fmt.Errorf("unreachable: scheme %q passed parseStoreURL but openStore has no constructor", scheme)
 	}
+}
+
+// openStoreWithCreds is like openStore but applies the decrypted credential
+// JSON to the parsed config before opening. Used by the BYOB resolver to
+// open per-tenant stores. Does NOT call applyEnvToConfig — env vars are
+// operator-level; tenant creds come exclusively from credsJSON.
+func openStoreWithCreds(rawURL string, credsJSON []byte) (storage.ObjectStore, error) {
+	scheme, _, err := parseStoreURL(rawURL)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	switch scheme {
+	case "s3", "r2":
+		cfg, err := s3compat.ParseURL(rawURL)
+		if err != nil {
+			return nil, err
+		}
+		if err := cfg.ApplyCredsJSON(credsJSON); err != nil {
+			return nil, err
+		}
+		return s3compat.Open(ctx, cfg)
+	case "gcs":
+		cfg, err := gcs.ParseURL(rawURL)
+		if err != nil {
+			return nil, err
+		}
+		if err := cfg.ApplyCredsJSON(credsJSON); err != nil {
+			return nil, err
+		}
+		return gcs.Open(ctx, cfg)
+	case "azureblob":
+		cfg, err := azureblob.ParseURL(rawURL)
+		if err != nil {
+			return nil, err
+		}
+		if err := cfg.ApplyCredsJSON(credsJSON); err != nil {
+			return nil, err
+		}
+		return azureblob.Open(ctx, cfg)
+	case "localfs":
+		return openStore(rawURL) // localfs ignores credsJSON
+	default:
+		return nil, fmt.Errorf("openStoreWithCreds: unknown scheme %q", scheme)
+	}
+}
+
+// openByobStore looks up the per-tenant BYOB binding from authdb and opens
+// that store. Returns (store, true) when a binding exists; (nil, false) when
+// absent or on error — the caller falls back to the --store flag. Errors are
+// printed to stderr.
+func openByobStore(ctx context.Context, tenant, authDBPath, keyFile string, stderr io.Writer) (storage.ObjectStore, bool) {
+	rawKey, err := os.ReadFile(keyFile)
+	if err != nil {
+		fmt.Fprintf(stderr, "byob: read key: %v\n", err)
+		return nil, false
+	}
+	rawKey = bytes.TrimSpace(rawKey)
+	if len(rawKey) < 32 {
+		fmt.Fprintf(stderr, "byob: key must be >= 32 bytes\n")
+		return nil, false
+	}
+	authStore, _, err := openAuthDB(authDBPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "byob: authdb: %v\n", err)
+		return nil, false
+	}
+	defer authStore.Close()
+
+	b, err := authStore.GetStorageBinding(ctx, tenant)
+	if errors.Is(err, auth.ErrNoSuchBinding) {
+		return nil, false // no binding; caller uses --store
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "byob: binding lookup %s: %v\n", tenant, err)
+		return nil, false
+	}
+	plain, err := byob.Decrypt(rawKey[:32], b.CredsJSON)
+	if err != nil {
+		fmt.Fprintf(stderr, "byob: decrypt creds %s: %v\n", tenant, err)
+		return nil, false
+	}
+	s, err := openStoreWithCreds(b.StoreURL, plain)
+	if err != nil {
+		fmt.Fprintf(stderr, "byob: open store %s: %v\n", tenant, err)
+		return nil, false
+	}
+	return s, true
 }
 
 // applyEnvToConfig layers env vars onto a Config seed produced by

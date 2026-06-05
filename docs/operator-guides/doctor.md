@@ -26,6 +26,7 @@ failed, 2 on usage errors. `warn` and `skip` do not affect the exit code.
 | `config.hooks` | hooks root exists; bwrap present (warns when `--hooks-unsafe-no-sandbox=true`) |
 | `config.replica` | present when `--replica-of` is set: validates `--replica-mode` is `strong-current` or `bounded-stale`; `--replica-lag-budget` is >= 30 s; `--auth-db` resolves to a postgres URL (SQLite/libSQL rejected for replicas) |
 | `deps.git` | git CLI on PATH (import/export/maintenance shell out to it) |
+| `byob.bindings` | with `--byob-encryption-key`: decrypts every stored tenant binding, opens the bucket, and issues a List probe; warns when any binding's `verified_at` is older than 30 days (run `bucketvcs tenant storage verify` to refresh) |
 | `replica.canonical` | present when `--replica-of` is set: opens the canonical store URL and confirms a List succeeds — verifies the canonical bucket is reachable from this region |
 | `repo.<t>/<n>` | with `--repo tenant/name`: manifest loads, schema gate passes, up to 50 manifest-referenced pack/ref-shard keys exist in the bucket |
 

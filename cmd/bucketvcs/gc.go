@@ -41,6 +41,8 @@ func runGC(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	includeGitObjects := fs.Bool("include-git-objects", false, "When --lfs is set, also run Git-object GC (default is LFS-only)")
 	format := fs.String("format", "text", "Output format: text|json")
 	help := fs.Bool("help", false, "Show this help")
+	authDBFlag := fs.String("auth-db", "", "Path to auth DB (optional; enables BYOB store lookup for --repo)")
+	byobKeyFile := fs.String("byob-encryption-key", "", "Path to BYOB encryption key file (optional)")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -50,10 +52,6 @@ func runGC(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	if *storeURL == "" {
-		fmt.Fprintln(stderr, "gc: --store is required")
-		return 2
-	}
 	if (*repoFlag != "") == *allRepos {
 		fmt.Fprintln(stderr, "gc: exactly one of --repo or --all-repos is required")
 		return 2
@@ -82,10 +80,26 @@ func runGC(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, gc.RetentionWarning(*retention))
 	}
 
-	store, err := openStore(*storeURL)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc: open store: %v\n", err)
-		return 1
+	var store storage.ObjectStore
+	if *repoFlag != "" && *authDBFlag != "" && *byobKeyFile != "" {
+		tenantID, _, err2 := splitTenantRepo(*repoFlag)
+		if err2 == nil {
+			if ts, ok := openByobStore(ctx, tenantID, *authDBFlag, *byobKeyFile, stderr); ok {
+				store = ts
+			}
+		}
+	}
+	if store == nil {
+		if *storeURL == "" {
+			fmt.Fprintln(stderr, "gc: --store is required")
+			return 2
+		}
+		var err error
+		store, err = openStore(*storeURL)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc: open store: %v\n", err)
+			return 1
+		}
 	}
 	defer closeStore(store)
 
@@ -101,6 +115,7 @@ func runGC(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 
 	var refs []gc.RepoRef
+	var err error
 	if *allRepos {
 		refs, err = gc.DiscoverRepos(ctx, store)
 		if err != nil {

@@ -65,6 +65,11 @@ func (s *Server) handleInfoRefs(w http.ResponseWriter, r *http.Request, tenant, 
 			proto = 2
 		}
 
+		store, err := s.resolveStore(r.Context(), tenant)
+		if !s.byobOK(w, err) {
+			return
+		}
+
 		// Buffer the engine output so we can return HTTP errors on failure
 		// without having committed response headers. For V0 we prepend the
 		// Smart-HTTP service preamble (HTTP-specific framing that the
@@ -77,7 +82,7 @@ func (s *Server) handleInfoRefs(w http.ResponseWriter, r *http.Request, tenant, 
 			Repo:             repoID,
 			Stdout:           &body,
 			ProtocolVersion:  proto,
-			Store:            s.store,
+			Store:            store,
 			AgentVersion:     s.opts.Version,
 			BundleURIEnabled: s.opts.BundleURIEnabled,
 			PackURIEnabled:   s.opts.PackURIEnabled,
@@ -113,12 +118,16 @@ func (s *Server) handleInfoRefs(w http.ResponseWriter, r *http.Request, tenant, 
 	// The Smart-HTTP "# service=git-receive-pack\n" preamble is HTTP-specific
 	// framing that we emit here; the engine does not emit it.
 	var body bytes.Buffer
+	rpStore, err := s.resolveStore(r.Context(), tenant)
+	if !s.byobOK(w, err) {
+		return
+	}
 	rreq := &receivepack.EngineRequest{
 		Ctx:          r.Context(),
 		Tenant:       tenant,
 		Repo:         repoID,
 		Stdout:       &body,
-		Store:        s.store,
+		Store:        rpStore,
 		AgentVersion: s.opts.Version,
 	}
 	if err := receivepack.Advertise(rreq); err != nil {

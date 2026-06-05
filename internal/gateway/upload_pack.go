@@ -60,6 +60,11 @@ func (s *Server) handleUploadPack(w http.ResponseWriter, r *http.Request, tenant
 	}
 	body := http.MaxBytesReader(w, r.Body, limit)
 
+	store, err := s.resolveStore(r.Context(), tenant)
+	if !s.byobOK(w, err) {
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/x-git-upload-pack-result")
 	w.Header().Set("Cache-Control", "no-cache")
 
@@ -71,7 +76,7 @@ func (s *Server) handleUploadPack(w http.ResponseWriter, r *http.Request, tenant
 		Stdout:            w,
 		Stderr:            io.Discard,
 		ProtocolVersion:   2,
-		Store:             s.store,
+		Store:             store,
 		Mirror:            s.mgr,
 		AgentVersion:      s.opts.Version,
 		BundleURIEnabled:  s.opts.BundleURIEnabled,
