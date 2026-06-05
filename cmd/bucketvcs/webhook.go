@@ -7,6 +7,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/netip"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -139,6 +141,14 @@ func runWebhookEndpointAdd(ctx context.Context, args []string, stdout, stderr io
 			"secret=%s   # store this now — it will not be shown again\n",
 		ep.ID, ep.Tenant, ep.Repo, ep.URL, webhooks.FormatEvents(ep.EventMask),
 		ep.Secret)
+	// The CLI process cannot know serve's --webhook-allow-cidr config, so a
+	// literal IP in the default deny set gets a warning, not a rejection
+	// (the dial-time gate in serve is the real enforcement).
+	if u, perr := url.Parse(*urlFlag); perr == nil {
+		if ip, ierr := netip.ParseAddr(u.Hostname()); ierr == nil && (&webhooks.EgressPolicy{}).IPDenied(ip) {
+			fmt.Fprintf(stderr, "warning: %s is in the default egress deny set; deliveries will fail unless serve runs with a covering --webhook-allow-cidr\n", ip)
+		}
+	}
 	return 0
 }
 

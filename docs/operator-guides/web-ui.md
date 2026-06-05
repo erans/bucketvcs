@@ -638,13 +638,9 @@ repo-settings quota display is likewise hidden).
 The hooks tab returns HTTP 404 unconditionally for non-admin users regardless of
 service availability (authz check precedes nil check).
 
-### 8.7 Postgres caveat
+### 8.7 Repo deletion across backends
 
-Repo deletion via the web UI (or `bucketvcs repo delete`) is refused on Postgres
-auth-databases with the error `ErrCascadeUnsupportedBackend`. The webhook
-endpoint rows survive repo deletion so pending `repo.deleted` deliveries can
-drain; on Postgres that drain requires a schema change that is deferred. SQLite
-is not affected.
+Repo deletion works on every auth-db backend (sqlite, libsql, Postgres).
 
 ### 8.8 Settings observability
 

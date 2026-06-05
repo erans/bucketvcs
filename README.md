@@ -129,6 +129,8 @@ Then open `http://my-host:8080/` in a browser — the web UI serves on the same
 listener (log in with a user created via `bucketvcs user add` + `user set-password`,
 or wire up OIDC; see the [web UI guide](docs/operator-guides/web-ui.md)).
 
+`bucketvcs doctor` — read-only health checks for storage, auth-db, and config. Accepts the same flags as `serve`; swap `serve` for `doctor` to validate a deployment without binding any ports.
+
 ---
 
 ## Status

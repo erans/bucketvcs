@@ -1,6 +1,7 @@
 package sqlitestore
 
 import (
+	"context"
 	"database/sql"
 	"embed"
 	"fmt"
@@ -112,4 +113,39 @@ func applyOne(db *sql.DB, backend Backend, body string) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// SchemaVersion returns the highest applied migration number, or 0 for a
+// virgin database (schema_version table absent — the query error is treated
+// as "no migrations", matching loadAppliedVersions' convention).
+//
+// CAVEAT: every query error maps to 0, including connectivity failures on
+// remote backends. Callers that diagnose (doctor) must verify the connection
+// is live (e.g. SELECT 1) BEFORE interpreting 0 as "virgin/needs-migration".
+func (s *Store) SchemaVersion(ctx context.Context) (int, error) {
+	var v sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_version`).Scan(&v); err != nil {
+		return 0, nil
+	}
+	if !v.Valid {
+		return 0, nil
+	}
+	return int(v.Int64), nil
+}
+
+// LatestMigrationVersion returns the highest migration number shipped in
+// this binary, computed from the embedded sqlite set. The postgres set is
+// numbered in lockstep (asserted by TestMigrationSetsInLockstep).
+func LatestMigrationVersion() int {
+	entries, err := fs.ReadDir(migrationsFS, "migrations")
+	if err != nil {
+		return 0 // unreachable: embedded FS
+	}
+	max := 0
+	for _, e := range entries {
+		if v, err := parseVersion(e.Name()); err == nil && v > max {
+			max = v
+		}
+	}
+	return max
 }

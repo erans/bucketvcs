@@ -84,3 +84,17 @@ func EmitRepoRenamedMetric(ctx context.Context, logger *slog.Logger, outcome str
 		slog.Int("value", 1),
 	)
 }
+
+// EmitEgressDeniedMetric logs one webhook_egress_denied_total sample. The
+// metric deliberately carries NO host/url/tenant labels — endpoint URLs are
+// attacker-influenced and would explode cardinality under probing (same
+// reasoning as M19's proxied_url_token_invalid_total).
+func EmitEgressDeniedMetric(ctx context.Context, logger *slog.Logger) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.LogAttrs(ctx, slog.LevelInfo, "metric",
+		slog.String("name", "webhook_egress_denied_total"),
+		slog.Int("value", 1),
+	)
+}

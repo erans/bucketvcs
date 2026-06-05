@@ -221,3 +221,52 @@ func extractSecret(t *testing.T, out string) string {
 	}
 	return tail[:end]
 }
+
+// TestWebhook_AddWarnsOnDeniedIP asserts that registering an endpoint whose
+// URL names a literal IP in the default egress deny set still succeeds (the
+// CLI cannot know serve's --webhook-allow-cidr config), but prints a warning
+// on stderr.
+func TestWebhook_AddWarnsOnDeniedIP(t *testing.T) {
+	authDB := setupAuthDBForWebhook(t, "acme", "site")
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	code := runWebhook(ctx, []string{
+		"endpoint", "add",
+		"--auth-db=" + authDB,
+		"--tenant=acme",
+		"--repo=site",
+		"--url=http://127.0.0.1:9/hook",
+		"--events=push",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("add exit=%d, stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "default egress deny set") {
+		t.Errorf("expected egress warning on stderr, got: %q", stderr.String())
+	}
+}
+
+// TestWebhook_AddNoWarnOnPublicURL asserts that a public-host URL registers
+// without an egress warning (a hostname can resolve anywhere, so the CLI only
+// warns on literal denied IPs).
+func TestWebhook_AddNoWarnOnPublicURL(t *testing.T) {
+	authDB := setupAuthDBForWebhook(t, "acme", "site")
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	code := runWebhook(ctx, []string{
+		"endpoint", "add",
+		"--auth-db=" + authDB,
+		"--tenant=acme",
+		"--repo=site",
+		"--url=https://hooks.example.com/hook",
+		"--events=push",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("add exit=%d, stderr=%s", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "default egress deny set") {
+		t.Errorf("unexpected egress warning for public URL: %q", stderr.String())
+	}
+}

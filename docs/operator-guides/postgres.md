@@ -10,7 +10,8 @@ Production readiness summary:
 - PostgreSQL backend for the auth DB, selected by `--auth-db` URL scheme — **shipped**.
 - Pure-Go driver (`pgx/v5` stdlib adapter); `CGO_ENABLED=0` cross-builds stay green — **shipped**.
 - Password via `BUCKETVCS_DB_AUTH_TOKEN` env or standard libpq (`PGPASSWORD`/`~/.pgpass`); a URL-embedded password is accepted with a WARN — **shipped**.
-- All 10 migrations apply over Postgres; behavioral parity proven by a gated conformance suite — **shipped**.
+- All migrations apply over Postgres; behavioral parity proven by a gated conformance suite — **shipped**.
+- `bucketvcs repo delete` (CLI and web UI) with full cascade — supported on Postgres as of migration 0015; the `webhook_endpoints` FK that previously blocked cascade deletes on Postgres is dropped, achieving full parity with SQLite — **shipped**.
 - SQLite (modernc, pure-Go) remains the zero-dependency default — **unchanged**.
 - Multi-node concurrency hardening (race-safe webhook claiming, DB-level quota idempotency, `--auth-db-max-conns` pool sizing) — **shipped** (see `docs/multinode.md`).
 
@@ -212,7 +213,7 @@ contents after loading to confirm all migrations are recorded (the latest
 
 - **CI:** the nightly `conformance` workflow runs a gated suite
   (`go test -tags postgres -run TestPostgresConformance`) against a pinned
-  `postgres:17` container, asserting that all 10 migrations apply, UNIQUE
+  `postgres:17` container, asserting that all migrations apply, UNIQUE
   constraint violations map to `ErrConflict`, CHECK constraints are enforced,
   FK cascade works on repo deletion, and token + OIDC round-trips all match
   SQLite behavior.

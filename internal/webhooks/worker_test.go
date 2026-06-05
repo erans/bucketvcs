@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -56,6 +57,7 @@ func TestWorker_DeliversOn2xx(t *testing.T) {
 		ClaimBatchSize: 32,
 		Concurrency:    8,
 		HTTPTimeout:    1 * time.Second,
+		Egress:         &webhooks.EgressPolicy{AllowCIDRs: []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}},
 	}
 	go webhooks.StartWorker(ctx, svc, cfg)
 
@@ -120,6 +122,7 @@ func TestWorker_RetriesOn5xxThenDeliveredOn2xx(t *testing.T) {
 			10 * time.Millisecond, 10 * time.Millisecond,
 		},
 		BackoffJitterFrac: 0,
+		Egress:            &webhooks.EgressPolicy{AllowCIDRs: []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}},
 	}
 	go webhooks.StartWorker(ctx, svc, cfg)
 
@@ -168,6 +171,7 @@ func TestWorker_DeadLettersAfter5Attempts(t *testing.T) {
 			10 * time.Millisecond, 10 * time.Millisecond,
 		},
 		BackoffJitterFrac: 0,
+		Egress:            &webhooks.EgressPolicy{AllowCIDRs: []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}},
 	}
 	go webhooks.StartWorker(ctx, svc, cfg)
 
@@ -228,6 +232,7 @@ func TestWorker_StableDeliveryIDAndBodyAcrossRetries(t *testing.T) {
 			10 * time.Millisecond, 10 * time.Millisecond,
 		},
 		BackoffJitterFrac: 0,
+		Egress:            &webhooks.EgressPolicy{AllowCIDRs: []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}},
 	}
 	go webhooks.StartWorker(ctx, svc, cfg)
 
@@ -244,6 +249,51 @@ func TestWorker_StableDeliveryIDAndBodyAcrossRetries(t *testing.T) {
 	}
 	if string(gotBody[0]) != string(gotBody[1]) {
 		t.Errorf("body changed across retries:\n  attempt 1: %s\n  attempt 2: %s", gotBody[0], gotBody[1])
+	}
+}
+
+func TestWorker_EgressDeniedByDefault(t *testing.T) {
+	db := openTestDB(t, "acme", "site")
+	svc := webhooks.New(db)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	if _, err := svc.Create(ctx, webhooks.EndpointInput{
+		Tenant: "acme", Repo: "site", URL: srv.URL, EventMask: webhooks.EventPush,
+	}); err != nil {
+		t.Fatalf("Create endpoint: %v", err)
+	}
+	if err := svc.Enqueue(ctx, webhooks.EventPush, "acme", "site", "alice",
+		webhooks.PushPayload{TxID: "tx-1"}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	cfg := webhooks.WorkerConfig{
+		TickInterval:    25 * time.Millisecond,
+		ClaimBatchSize:  32,
+		Concurrency:     4,
+		HTTPTimeout:     1 * time.Second,
+		BackoffSchedule: []time.Duration{time.Hour}, // park after first failure
+		// Egress deliberately nil → default deny-private policy.
+	}
+	go webhooks.StartWorker(ctx, svc, cfg)
+
+	waitFor(t, 3*time.Second, func() bool {
+		var lastErr string
+		row := db.QueryRowContext(ctx, `SELECT COALESCE(last_error,'') FROM webhook_deliveries LIMIT 1`)
+		_ = row.Scan(&lastErr)
+		return strings.Contains(lastErr, "egress denied")
+	}, "last_error never recorded an egress denial")
+
+	if hits.Load() != 0 {
+		t.Fatalf("receiver was reached %d time(s); egress deny must block at dial", hits.Load())
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"time"
 
@@ -34,9 +35,21 @@ var ErrInvalidInput = errors.New("webhooks: invalid input")
 // the attempt to finish before replaying.
 var ErrReplayInFlight = errors.New("webhooks: delivery is in_flight; wait for the attempt to finish")
 
+// ErrEgressDeniedURL is returned by Create when the endpoint URL names a
+// literal IP (or matches a deny-host pattern) the configured egress policy
+// would refuse at delivery time. Registration-time UX sugar only — the
+// dial-time check in the worker remains the real gate (DNS at registration
+// != DNS at delivery). Only enforced when Service.Egress is set (the serve
+// process); the standalone CLI has no policy knowledge and warns instead.
+var ErrEgressDeniedURL = errors.New("webhooks: endpoint URL targets an egress-denied address")
+
 // Service exposes webhook endpoint management against the M4 authdb.
 type Service struct {
 	db sqlitestore.Querier
+
+	// Egress, when set (serve wires the flag-built policy), lets Create
+	// reject obviously-denied endpoint URLs up front. nil skips the check.
+	Egress *EgressPolicy
 }
 
 // New constructs a Service backed by the given authdb handle.
@@ -83,6 +96,9 @@ func (s *Service) Create(ctx context.Context, in EndpointInput) (Endpoint, error
 	}
 	if err := validateURL(in.URL); err != nil {
 		return Endpoint{}, fmt.Errorf("%w: invalid url: %s", ErrInvalidInput, err.Error())
+	}
+	if err := s.checkEgressURL(in.URL); err != nil {
+		return Endpoint{}, err
 	}
 	if in.EventMask == 0 {
 		return Endpoint{}, fmt.Errorf("%w: event mask must not be zero", ErrInvalidInput)
@@ -248,6 +264,27 @@ func validateURL(s string) error {
 	}
 	if u.Host == "" {
 		return errors.New("host must not be empty")
+	}
+	return nil
+}
+
+// checkEgressURL is the registration-time egress pre-check (no-op when no
+// policy is configured). It catches only what is knowable without DNS:
+// literal denied IPs and deny-host pattern matches.
+func (s *Service) checkEgressURL(rawURL string) error {
+	if s.Egress == nil {
+		return nil
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("%w: %s", ErrInvalidInput, err.Error())
+	}
+	host := u.Hostname()
+	if pat, denied := s.Egress.HostDenied(host); denied {
+		return fmt.Errorf("%w: host %q matches deny pattern %q", ErrEgressDeniedURL, host, pat)
+	}
+	if ip, perr := netip.ParseAddr(host); perr == nil && s.Egress.IPDenied(ip) {
+		return fmt.Errorf("%w: literal IP %s is in a blocked range; deliveries will fail unless serve runs with a covering --webhook-allow-cidr", ErrEgressDeniedURL, ip)
 	}
 	return nil
 }

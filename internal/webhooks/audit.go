@@ -134,3 +134,22 @@ func EmitWebhookPruned(ctx context.Context, logger *slog.Logger,
 		slog.String("actor", actor),
 	)
 }
+
+// EmitEgressDenied logs the webhooks.egress_denied audit event when the
+// delivery worker refuses to dial an endpoint under the M25 egress policy.
+// deniedBy is "host" (deny-host pattern matched, pattern populated) or "ip"
+// (resolved address in a blocked range, ip populated).
+func EmitEgressDenied(ctx context.Context, logger *slog.Logger,
+	deliveryID string, endpointID int64, host, ip, deniedBy, pattern string) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.LogAttrs(ctx, slog.LevelWarn, "webhooks.egress_denied",
+		slog.String("delivery_id", deliveryID),
+		slog.Int64("endpoint_id", endpointID),
+		slog.String("host", host),
+		slog.String("ip", ip),
+		slog.String("denied_by", deniedBy),
+		slog.String("pattern", pattern),
+	)
+}

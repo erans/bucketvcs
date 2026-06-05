@@ -10,14 +10,14 @@ import (
 
 // TestDeleteRepoCascade_SweepsDependentsKeepsWebhooks verifies that every
 // non-webhook dependent (repo_permissions, deploy ssh_keys, lfs_locks,
-// protected_refs, protected_paths, hooks) plus the repos row itself is
-// removed, while webhook_endpoints survives so a pending repo.deleted
-// delivery can drain.
+// protected_refs, protected_paths, hooks, oidc_trust_rules + oidc_rule_claims)
+// plus the repos row itself is removed, while webhook_endpoints survives so a
+// pending repo.deleted delivery can drain.
 //
-// Regression guard for the M15.1 sweep gap: protected_paths (0007) and hooks
-// (0009) carry FK ON DELETE CASCADE to repos, but the cascade can't fire while
-// foreign_keys=OFF, so they must be swept manually. Before this fix they were
-// orphaned on delete.
+// Regression guard for the M15.1 sweep gap: protected_paths (0007), hooks
+// (0009), and oidc_trust_rules (0010) carry FK ON DELETE CASCADE to repos, but
+// the cascade can't fire while foreign_keys=OFF, so they must be swept
+// manually. Before this fix they were orphaned on delete.
 func TestDeleteRepoCascade_SweepsDependentsKeepsWebhooks(t *testing.T) {
 	s := mustOpen(t)
 	defer s.Close()
@@ -62,6 +62,25 @@ func TestDeleteRepoCascade_SweepsDependentsKeepsWebhooks(t *testing.T) {
 		 VALUES ('acme', 'foo', 'pre-receive', 'lint.sh', 0, 1, 1, 1)`); err != nil {
 		t.Fatalf("seed hooks: %v", err)
 	}
+	// oidc_trust_rules (0010) carries FK (tenant, repo)→repos ON DELETE CASCADE,
+	// and oidc_rule_claims is its child via rule_id. Both must be swept manually
+	// because the cascade can't fire with foreign_keys=OFF. Seed an issuer first
+	// (oidc_trust_rules.issuer_alias FKs to oidc_issuers).
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO oidc_issuers (alias, issuer_url, created_at)
+		 VALUES ('gh', 'https://token.actions.githubusercontent.com', 1)`); err != nil {
+		t.Fatalf("seed oidc_issuers: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO oidc_trust_rules (id, issuer_alias, audience, tenant, repo, scopes, ttl_seconds, created_at)
+		 VALUES ('r1', 'gh', 'aud', 'acme', 'foo', 0, 900, 1)`); err != nil {
+		t.Fatalf("seed oidc_trust_rules: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO oidc_rule_claims (rule_id, claim_name, claim_value)
+		 VALUES ('r1', 'sub', 'repo:acme/foo:ref:refs/heads/main')`); err != nil {
+		t.Fatalf("seed oidc_rule_claims: %v", err)
+	}
 	if _, err := s.db.ExecContext(ctx,
 		`INSERT INTO webhook_endpoints (tenant, repo, url, secret, event_mask, active, created_at)
 		 VALUES ('acme', 'foo', 'https://example.test/hook', 's3cret', 1, 1, 1)`); err != nil {
@@ -88,6 +107,7 @@ func TestDeleteRepoCascade_SweepsDependentsKeepsWebhooks(t *testing.T) {
 		{"protected_refs", "tenant", "repo"},
 		{"protected_paths", "tenant", "repo"},
 		{"hooks", "tenant", "repo"},
+		{"oidc_trust_rules", "tenant", "repo"},
 	}
 	for _, c := range swept {
 		var n int
@@ -100,6 +120,16 @@ func TestDeleteRepoCascade_SweepsDependentsKeepsWebhooks(t *testing.T) {
 		if n != 0 {
 			t.Errorf("%s: count=%d after delete, want 0 (orphaned row)", c.table, n)
 		}
+	}
+
+	// oidc_rule_claims is the child of oidc_trust_rules (keyed by rule_id, not
+	// tenant/repo) and must also be swept — assert no claim rows survive.
+	var claims int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM oidc_rule_claims WHERE rule_id='r1'`).Scan(&claims); err != nil {
+		t.Errorf("oidc_rule_claims: count: %v", err)
+	} else if claims != 0 {
+		t.Errorf("oidc_rule_claims: count=%d after delete, want 0 (orphaned row)", claims)
 	}
 
 	// webhook_endpoints MUST survive (intentional — lets repo.deleted drain).
@@ -166,7 +196,7 @@ func TestDeleteRepoCascade_RestoresFKEnforcement(t *testing.T) {
 
 // TestDeleteRepoCascade_RestoresFKOnMidSequenceError verifies the restore path
 // runs even when a DELETE errors mid-sweep, AND that the sweep is atomic: the
-// seven DELETEs run in one transaction, so a mid-sweep failure rolls the whole
+// child-table DELETEs run in one transaction, so a mid-sweep failure rolls the whole
 // sweep back. We DROP the hooks table (third in the sweep) so the hooks DELETE
 // fails; the cascade must (1) return the error, (2) re-enable foreign_keys
 // before the connection is pooled, and (3) leave the rows from the

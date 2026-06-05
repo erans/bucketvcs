@@ -151,6 +151,11 @@ func (s *server) webhooksAdd(w http.ResponseWriter, r *http.Request, sr settings
 			s.redirectFlash(w, r, sr.webhooksBase(), "endpoint url already registered")
 			return
 		}
+		if errors.Is(err, webhooks.ErrEgressDeniedURL) {
+			EmitAdminActionMetric(r.Context(), s.logger, "webhook", "endpoint_add", "invalid")
+			s.redirectFlash(w, r, sr.webhooksBase(), err.Error())
+			return
+		}
 		s.logger.Error("webhooks: create endpoint", "tenant", sr.tenant, "repo", sr.repo, "err", err)
 		EmitAdminActionMetric(r.Context(), s.logger, "webhook", "endpoint_add", "error")
 		s.renderError(w, r, http.StatusInternalServerError, "internal error")

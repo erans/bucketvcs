@@ -65,104 +65,25 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	addr := fs.String("addr", "", "HTTP listen address (host:port); leave empty to disable HTTP (default 127.0.0.1:8080 when --ssh-addr is also absent)")
-	storeURL := fs.String("store", "", `Store URL (e.g. "localfs:/var/lib/bucketvcs")`)
-	mirrorDir := fs.String("mirror-dir", "", "Mirror cache directory (default $XDG_CACHE_HOME/bucketvcs/mirrors)")
-	authDB := fs.String("auth-db", "", "Path to auth.db (default: $XDG_STATE_HOME/bucketvcs/bucketvcs.db)")
-	authDBMaxConns := fs.Int("auth-db-max-conns", 10, "Max DB connections for the auth/metadata DB (Postgres only; sqlite/libsql always use 1)")
-	maxBody := fs.Int64("max-body-bytes", 1<<30, "Per-request body limit in bytes")
-	shutdownTimeout := fs.Duration("shutdown-timeout", 30*time.Second, "Graceful shutdown deadline")
-	// SSH flags.
-	sshAddr := fs.String("ssh-addr", "", "SSH listen address, e.g. 127.0.0.1:2222 (empty disables SSH)")
-	sshHostKey := fs.String("ssh-host-key", "", "Path to SSH host key (default $XDG_STATE_HOME/bucketvcs/ssh_host_ed25519_key)")
-	sshGrace := fs.Duration("ssh-grace", 10*time.Second, "Graceful shutdown deadline for in-flight SSH sessions")
-
-	// Bundle/Pack URI delivery (M11). Defaults are off so existing
-	// invocations continue to work; enabling either mode requires a
-	// signing key + base URL when the mode is auto/proxied.
-	bundleURIMode := fs.String("bundle-uri-mode", "off", "Bundle URI delivery mode: auto|direct|proxied|off")
-	packURIMode := fs.String("pack-uri-mode", "off", "Pack URI delivery mode: auto|direct|proxied|off")
-	proxiedKeyFile := fs.String("proxied-url-signing-key", "", "Path to file containing >=16 byte HMAC key for gateway-proxied URLs (required when modes are auto or proxied)")
-	proxiedBundleTTL := fs.Duration("proxied-url-bundle-ttl", 4*time.Hour, "TTL for proxied/signed bundle URLs (kept long to cover initial-clone download windows)")
-	proxiedPackTTL := fs.Duration("proxied-url-pack-ttl", time.Hour, "TTL for proxied/signed pack URLs")
-	warmCommits := fs.Int("bundle-warm-commits", 5000, "Bundle freshness threshold: warm if behind by <= N commits")
-	warmAge := fs.Duration("bundle-warm-age", 24*time.Hour, "Bundle freshness threshold: warm if generated within D")
-	proxiedBaseURL := fs.String("proxied-url-base", "", "External base URL of this gateway, e.g. https://gw.example (required when modes are auto or proxied)")
-
-	// LFS (M13). Default enabled; flip with --lfs=false.
-	lfsEnabled := fs.Bool("lfs", true, "Enable the LFS Batch API (M13)")
-	lfsPresignTTL := fs.Duration("lfs-presign-ttl", 15*time.Minute, "TTL for LFS upload/download presigned URLs")
-	lfsSSHTokenTTL := fs.Duration("lfs-ssh-token-ttl", 15*time.Minute, "TTL for bearers issued via SSH git-lfs-authenticate")
-
-	// M18 auth rate-limiting. Defaults match ratelimit.DefaultConfig()
-	// (Burst=10, RefillPerMinute=1, SweepInterval=5m). The limiter is
-	// shared between the HTTPS gateway and the SSH server; --auth-rate-
-	// limit-disabled skips construction entirely (nil Limiter is a no-op
-	// on both transports).
-	authRateLimitBurst := fs.Int("auth-rate-limit-burst", 10,
-		"Max credential failures before throttling per (IP, user)")
-	authRateLimitRefillPerMin := fs.Float64("auth-rate-limit-refill-per-minute", 1,
-		"Failures cleared per minute when idle")
-	trustProxyHeaders := fs.Bool("trust-proxy-headers", false,
-		"Honor the rightmost X-Forwarded-For hop as client IP. REQUIRED when "+
-			"deployed behind a reverse proxy / load balancer — without this "+
-			"flag every request appears to originate from the proxy IP and "+
-			"a single attacker can fill the shared bucket and 429 every client.")
-	authRateLimitDisabled := fs.Bool("auth-rate-limit-disabled", false,
-		"Disable auth rate-limiting entirely")
-
-	// M20 Tier 3 hooks. Default disabled; flip with --hooks-enabled=true and
-	// pass --hooks-root=<abs-dir>. On Linux the binary requires `bwrap` on
-	// PATH unless --hooks-unsafe-no-sandbox=true is also set. On non-Linux
-	// platforms --hooks-unsafe-no-sandbox=true is required (bwrap is Linux-
-	// only); enabling unsafe mode logs an ERROR-level slog line at startup.
-	hooksEnabled := fs.Bool("hooks-enabled", false,
-		"enable Tier 3 custom subprocess hooks (pre-receive + post-receive)")
-	hooksRoot := fs.String("hooks-root", "",
-		"absolute directory containing hook script files (required when --hooks-enabled=true)")
-	hooksUnsafeNoSandbox := fs.Bool("hooks-unsafe-no-sandbox", false,
-		"run hooks without bwrap namespace isolation. REQUIRED on macOS/non-Linux. NOT multi-tenant safe.")
-	hooksOnInternalError := fs.String("hooks-on-internal-error", "reject",
-		"behavior when a hook subprocess fails for non-rejection reasons: reject | allow")
-	hooksTimeoutSec := fs.Int("hooks-timeout-sec", 30,
-		"wall-clock timeout per hook subprocess")
-	hooksCPUSec := fs.Int("hooks-cpu-sec", 10,
-		"RLIMIT_CPU per hook subprocess (sandbox mode only)")
-	hooksMemoryMB := fs.Int("hooks-memory-mb", 256,
-		"RLIMIT_AS per hook subprocess in MiB (sandbox mode only)")
-	hooksOutputMaxKB := fs.Int("hooks-output-max-kb", 64,
-		"stdout+stderr cap per hook (bytes beyond are dropped)")
-	hooksAllowNetwork := fs.String("hooks-allow-network", "",
-		"comma-separated script_name list that gets --share-net; default empty (no network)")
-	hooksEnv := fs.String("hooks-env", "",
-		"comma-separated KEY=VALUE list passed to every hook (each entry must contain '='; values may not contain ',')")
-	hooksPostReceiveConcurrency := fs.Int("hooks-postreceive-concurrency", 8,
-		"worker pool size for post-receive hook execution")
-	hooksPostReceiveQueue := fs.Int("hooks-postreceive-queue", 256,
-		"queue capacity for post-receive jobs; full queue drops with a metric")
-
-	// M22 OIDC token-exchange. Default disabled; flip with --oidc=true.
-	oidcEnabled := fs.Bool("oidc", false,
-		"Enable the OIDC token-exchange endpoint POST /_oidc/token (M22)")
-	oidcSweepInterval := fs.Duration("oidc-sweep-interval", 5*time.Minute,
-		"Interval for sweeping expired OIDC-minted tokens")
-
-	// Web UI (M24)
-	uiEnabled := fs.Bool("ui", true, "Enable the web UI (HTTP)")
-	uiAddr := fs.String("ui-addr", "", "Optional separate listen address for the web UI; empty shares --addr")
-	uiDir := fs.String("ui-dir", "", "Serve UI templates/static from this dir instead of the embedded assets (dev)")
-	uiSessionTTL := fs.Duration("ui-session-ttl", 168*time.Hour, "Web session lifetime (sliding)")
-	uiBrowseTimeout := fs.Duration("ui-browse-timeout", 20*time.Second,
-		"Max wait for cold mirror materialization on a browse request before returning a 503 warming page")
-
-	// M24 Phase 1.5 — OIDC browser login (relying-party)
-	oidcLogin := fs.Bool("oidc-login", false, "Enable OIDC browser login (relying-party)")
-	oidcIssuer := fs.String("oidc-login-issuer", "", "OIDC issuer URL, e.g. https://accounts.google.com")
-	oidcClientID := fs.String("oidc-login-client-id", "", "OAuth2 client id")
-	oidcSecretFile := fs.String("oidc-login-client-secret-file", "", "File with the OAuth2 client secret (or env BUCKETVCS_OIDC_LOGIN_CLIENT_SECRET)")
-	oidcRedirect := fs.String("oidc-login-redirect-url", "", "OAuth2 redirect URL, e.g. https://host/login/oidc/callback")
-	oidcScopes := fs.String("oidc-login-scopes", "openid,email,profile", "Comma-separated OIDC scopes")
-	oidcLabel := fs.String("oidc-login-label", "Single sign-on", "Login-page SSO button label")
+	sf := registerServeFlags(fs)
+	addr, storeURL, mirrorDir, authDB := sf.addr, sf.storeURL, sf.mirrorDir, sf.authDB
+	authDBMaxConns, maxBody, shutdownTimeout := sf.authDBMaxConns, sf.maxBody, sf.shutdownTimeout
+	sshAddr, sshHostKey, sshGrace := sf.sshAddr, sf.sshHostKey, sf.sshGrace
+	bundleURIMode, packURIMode, proxiedKeyFile := sf.bundleURIMode, sf.packURIMode, sf.proxiedKeyFile
+	proxiedBundleTTL, proxiedPackTTL, warmCommits, warmAge := sf.proxiedBundleTTL, sf.proxiedPackTTL, sf.warmCommits, sf.warmAge
+	proxiedBaseURL := sf.proxiedBaseURL
+	lfsEnabled, lfsPresignTTL, lfsSSHTokenTTL := sf.lfsEnabled, sf.lfsPresignTTL, sf.lfsSSHTokenTTL
+	authRateLimitBurst, authRateLimitRefillPerMin := sf.authRateLimitBurst, sf.authRateLimitRefillPerMin
+	trustProxyHeaders, authRateLimitDisabled := sf.trustProxyHeaders, sf.authRateLimitDisabled
+	hooksEnabled, hooksRoot, hooksUnsafeNoSandbox := sf.hooksEnabled, sf.hooksRoot, sf.hooksUnsafeNoSandbox
+	hooksOnInternalError, hooksTimeoutSec, hooksCPUSec := sf.hooksOnInternalError, sf.hooksTimeoutSec, sf.hooksCPUSec
+	hooksMemoryMB, hooksOutputMaxKB := sf.hooksMemoryMB, sf.hooksOutputMaxKB
+	hooksAllowNetwork, hooksEnv := sf.hooksAllowNetwork, sf.hooksEnv
+	hooksPostReceiveConcurrency, hooksPostReceiveQueue := sf.hooksPostReceiveConcurrency, sf.hooksPostReceiveQueue
+	oidcEnabled, oidcSweepInterval := sf.oidcEnabled, sf.oidcSweepInterval
+	uiEnabled, uiAddr, uiDir, uiSessionTTL, uiBrowseTimeout := sf.uiEnabled, sf.uiAddr, sf.uiDir, sf.uiSessionTTL, sf.uiBrowseTimeout
+	oidcLogin, oidcIssuer, oidcClientID := sf.oidcLogin, sf.oidcIssuer, sf.oidcClientID
+	oidcSecretFile, oidcRedirect, oidcScopes, oidcLabel := sf.oidcSecretFile, sf.oidcRedirect, sf.oidcScopes, sf.oidcLabel
 
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -280,6 +201,15 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	// webhook_deliveries tables added by migration 0006). The worker is
 	// started below once HTTP and SSH listeners are configured.
 	webhookSvc := webhooks.New(authS.DB())
+
+	// M25 egress policy: shared by the delivery worker (dial-time gate) and
+	// Create's registration-time pre-check (web UI rejects literal denied
+	// IPs up front).
+	webhookEgress := &webhooks.EgressPolicy{
+		DenyHosts:  sf.webhookDenyHosts,
+		AllowCIDRs: sf.webhookAllowCIDRs,
+	}
+	webhookSvc.Egress = webhookEgress
 
 	// M24 Phase 3 web admin services. Both are db-backed and cheap to
 	// construct unconditionally; the web layer only invokes them on demand
@@ -447,7 +377,9 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	// M15 webhook delivery worker. Runs for the lifetime of serveCtx;
 	// returns when ctx is cancelled at shutdown. Backed by the same
 	// authdb as enqueue, so no extra DB handle is needed.
-	go webhooks.StartWorker(serveCtx, webhookSvc, webhooks.DefaultWorkerConfig())
+	wcfg := webhooks.DefaultWorkerConfig()
+	wcfg.Egress = webhookEgress
+	go webhooks.StartWorker(serveCtx, webhookSvc, wcfg)
 
 	// M22 OIDC expired-token sweep goroutine.
 	if *oidcEnabled {
