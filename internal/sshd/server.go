@@ -102,6 +102,12 @@ type Options struct {
 	// WriteRegionURL; git-upload-pack consults Replica.Gate. Mirrors the
 	// HTTP gateway's Options.Replica semantics. See internal/replica.
 	Replica *replica.GatewayConfig
+
+	// Resolver, when non-nil, enables BYOB (Bring Your Own Bucket) mode:
+	// each git-upload-pack and git-receive-pack session calls
+	// Resolver.Resolve(ctx, tenant) to obtain the per-tenant ObjectStore.
+	// When nil, s.opts.BVStore is used directly (default behavior).
+	Resolver byobResolver
 }
 
 // Server is the bucketvcs SSH listener. Construct via NewServer.
