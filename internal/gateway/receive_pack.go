@@ -15,6 +15,10 @@ import (
 // It is now a thin HTTP adapter: body-cap + header setup, then delegates
 // to receivepack.Service for all protocol logic.
 func (s *Server) handleReceivePack(w http.ResponseWriter, r *http.Request, tenant, repoID string) {
+	if s.opts.Replica != nil {
+		s.replicaRefuseWrite(w)
+		return
+	}
 	// M17 token scopes: receive-pack always requires an authenticated actor
 	// (RunAuth has already enforced this for write actions), but defensively
 	// nil-guard anyway. Legacy tokens (Scopes==0) bypass via CheckScope.

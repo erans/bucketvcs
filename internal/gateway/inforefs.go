@@ -21,6 +21,13 @@ func (s *Server) handleInfoRefs(w http.ResponseWriter, r *http.Request, tenant, 
 		return
 	}
 
+	// M26 replica: pushes route to the write region; refuse the
+	// receive-pack advertisement up front with the pointer message.
+	if s.opts.Replica != nil && service == "git-receive-pack" {
+		s.replicaRefuseWrite(w)
+		return
+	}
+
 	// M17 token scopes: the ref advertisement leaks branch/tag names and tip
 	// OIDs, so it is gated by the same scope as the corresponding POST
 	// handler. Without this check, a token authenticated but lacking
@@ -50,6 +57,9 @@ func (s *Server) handleInfoRefs(w http.ResponseWriter, r *http.Request, tenant, 
 	}
 
 	if service == "git-upload-pack" {
+		if !s.replicaGateCheck(w, r, tenant, repoID) {
+			return
+		}
 		proto := 0
 		if wantsV2(r.Header.Get("Git-Protocol")) {
 			proto = 2

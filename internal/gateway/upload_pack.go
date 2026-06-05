@@ -24,6 +24,9 @@ const uploadPackBodyLimit = 4 << 20 // 4 MiB
 // upload-pack POST is not supported in M3 — v0 fallback is read-only via
 // info/refs only). It delegates to uploadpack.Service for protocol work.
 func (s *Server) handleUploadPack(w http.ResponseWriter, r *http.Request, tenant, repoID string) {
+	if !s.replicaGateCheck(w, r, tenant, repoID) {
+		return
+	}
 	if !wantsV2(r.Header.Get("Git-Protocol")) {
 		http.Error(w, "protocol v2 required (Git-Protocol: version=2)", http.StatusBadRequest)
 		return

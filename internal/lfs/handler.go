@@ -16,6 +16,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/gateway/routenames"
 	"github.com/bucketvcs/bucketvcs/internal/lfs/locks"
 	"github.com/bucketvcs/bucketvcs/internal/lfs/quota"
+	"github.com/bucketvcs/bucketvcs/internal/replica"
 	"github.com/bucketvcs/bucketvcs/internal/webhooks"
 )
 
@@ -71,6 +72,11 @@ type Deps struct {
 	// EventLFSLockReleased after their respective 201/200 responses.
 	// Fail-open — enqueue errors do not affect the response.
 	Webhooks *webhooks.Service
+
+	// ReadOnlyReplica refuses LFS uploads and all locks endpoints with a
+	// 403 carrying WriteRegionURL. Downloads are unaffected.
+	ReadOnlyReplica bool
+	WriteRegionURL  string
 }
 
 // lfsRoute enumerates the LFS sub-routes the handler dispatches.
@@ -129,6 +135,17 @@ func NewHTTPHandler(deps Deps) http.Handler {
 		tenant, repo, route, lockID := parseLFSPath(r.Method, r.URL.Path)
 		if route == lfsRouteNone {
 			http.NotFound(w, r)
+			return
+		}
+
+		// M26 replica: locks endpoints coordinate writes; a read region has
+		// nothing to lock. Refuse all non-batch routes (every locks route)
+		// up front. Uploads are refused inside handleBatch once the
+		// operation is known so downloads still succeed.
+		if deps.ReadOnlyReplica && route != lfsRouteBatch {
+			logger.LogAttrs(ctx, slog.LevelInfo, "lfs.locks.replica_refused",
+				slog.String("tenant", tenant), slog.String("repo", repo))
+			WriteError(w, http.StatusForbidden, replica.RefusalMessage(deps.WriteRegionURL))
 			return
 		}
 
@@ -203,6 +220,14 @@ func handleBatch(ctx context.Context, w http.ResponseWriter, r *http.Request, de
 	if req.Operation != "upload" && req.Operation != "download" {
 		WriteError(w, http.StatusUnprocessableEntity, "unsupported operation")
 		emitBatchRequestMetric(ctx, logger, req.Operation, "error")
+		return
+	}
+
+	// M26 replica: uploads route to the write region. Downloads are
+	// served locally, so refuse only the upload operation.
+	if deps.ReadOnlyReplica && req.Operation == "upload" {
+		WriteError(w, http.StatusForbidden, replica.RefusalMessage(deps.WriteRegionURL))
+		emitBatchRequestMetric(ctx, logger, req.Operation, "forbidden")
 		return
 	}
 
