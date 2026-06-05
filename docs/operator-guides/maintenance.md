@@ -5,6 +5,11 @@ in production. It covers what the command does, when to run it, how to schedule 
 alongside `bucketvcs gc`, how to tune the three threshold triggers, what changes after
 a successful run, how to read the JSON output, and what to do when a run fails.
 
+> **Never run this against a replica (regional) bucket.** Maintenance must run only
+> in the write region against the canonical bucket — replicas lag canonical, and a
+> sweep there could delete objects the canonical manifest still references. See
+> [Multi-region](multi-region.md).
+
 ---
 
 ## 1. What `bucketvcs maintenance` Does

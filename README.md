@@ -34,6 +34,7 @@ Not a toy. bucketvcs ships the things a real Git host needs:
 - **Policy & governance** — protected refs, protected paths, custom pre/post-receive hooks, and signed, retryable **webhooks**
 - **Audit & observability** — structured audit events and metrics for every push, policy decision, and admin action
 - **Self-maintaining** — background repack, commit-graph/reachability maintenance, and operator-driven garbage collection keep storage tight
+- **Regional read replicas** — serve clone and fetch traffic close to developers via `--replica-of` over provider-replicated buckets (S3 CRR, GCS dual-region, Azure RA-GRS); all pushes stay in the write region → [operator guide](docs/operator-guides/multi-region.md)
 
 ### 🛠️ Operationally boring (the good kind)
 A single pure-Go binary. The only local state is a small SQLite file for auth and metadata — your **Git data never touches a database**. The gateway is easy to run, easy to scale out, and has nothing stateful to lose.
