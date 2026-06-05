@@ -66,6 +66,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return runWebhook(ctx, rest, stdout, stderr)
 	case "quota":
 		return runQuota(ctx, rest, stdout, stderr)
+	case "tenant":
+		return runTenant(ctx, rest, stdout, stderr)
 	case "-h", "--help", "help":
 		usage(stdout)
 		return 0
@@ -99,6 +101,7 @@ Subcommands:
   policy             Manage push policies (refs/paths/hooks subcommands)
   webhook            Manage webhook endpoints and deliveries (endpoint/delivery subcommands)
   quota              Manage LFS storage quotas (set/show/reconcile/clear)
+  tenant             Manage per-tenant storage bindings (storage subcommands)
 
 Run "bucketvcs <subcommand> --help" for subcommand flags.
 `)
