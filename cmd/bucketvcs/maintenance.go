@@ -117,16 +117,15 @@ func runMaintenance(ctx context.Context, args []string, stdout, stderr io.Writer
 
 	bitmapCoveragePct := fs.Int("bitmap-coverage-pct", 100, "Minimum percent of canonical packs that must carry a .bitmap before maintenance considers the repo bitmap-healthy. Below this triggers a force-repack. 0 disables.")
 
+	authDBFlag := fs.String("auth-db", "", "Path to auth DB (optional; enables BYOB store lookup for --repo)")
+	byobKeyFile := fs.String("byob-encryption-key", "", "Path to BYOB encryption key file (optional)")
+
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if *help {
 		fmt.Fprint(stdout, maintenanceUsage)
 		return 0
-	}
-	if *storeURL == "" {
-		fmt.Fprintln(stderr, "maintenance: --store is required")
-		return 2
 	}
 	if *repoFlag == "" && !*allRepos {
 		fmt.Fprintln(stderr, "maintenance: one of --repo or --all-repos is required")
@@ -169,10 +168,27 @@ func runMaintenance(ctx context.Context, args []string, stdout, stderr io.Writer
 		fmt.Fprintln(stderr, "maintenance: --bundle-age must be >= 0")
 		return 2
 	}
-	store, err := openStore(*storeURL)
-	if err != nil {
-		fmt.Fprintf(stderr, "maintenance: open store: %v\n", err)
-		return 1
+
+	var store storage.ObjectStore
+	if *repoFlag != "" && *authDBFlag != "" && *byobKeyFile != "" {
+		tenantID, _, err2 := splitTenantRepo(*repoFlag)
+		if err2 == nil {
+			if ts, ok := openByobStore(ctx, tenantID, *authDBFlag, *byobKeyFile, stderr); ok {
+				store = ts
+			}
+		}
+	}
+	if store == nil {
+		if *storeURL == "" {
+			fmt.Fprintln(stderr, "maintenance: --store is required")
+			return 2
+		}
+		var err error
+		store, err = openStore(*storeURL)
+		if err != nil {
+			fmt.Fprintf(stderr, "maintenance: open store: %v\n", err)
+			return 1
+		}
 	}
 	defer closeStore(store)
 
