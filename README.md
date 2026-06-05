@@ -59,19 +59,7 @@ Runs on **S3, R2, GCS, and Azure Blob** (all first-class), plus a local-filesyst
 
 ---
 
-> **v0.4.0 upgrade note:** No breaking changes. New in this release: the
-> embedded SQLite authdb can replicate continuously into object storage and
-> restore itself on boot — opt in with `--auth-db-replica=auto`
-> ([guide](docs/operator-guides/authdb-replication.md)). The top-level `sys/`
-> prefix in the store bucket is now **reserved for system data**; if you run
-> bucket-wide lifecycle or cleanup rules, scope them away from `sys/` (or
-> follow the guide's recommendation for `sys/authdb/ltx/`).
-
-> **v0.3.0 upgrade note:** Webhook egress now blocks deliveries to private and
-> loopback addresses by default. If your deployment delivers webhooks to an
-> internal receiver, add `--webhook-allow-cidr=<network>` (e.g.
-> `--webhook-allow-cidr=192.168.1.0/24`) to `bucketvcs serve`. This is a
-> breaking change for any deployment targeting internal endpoints.
+> Upgrading from an earlier release? See the **[upgrade notes](docs/upgrade-notes.md)**.
 
 ---
 
