@@ -48,6 +48,10 @@ table.tree td.age .lastmsg { overflow: hidden; text-overflow: ellipsis; }
 .readme { margin-top: 1.5rem; border-top: 1px dashed var(--dim); padding-top: .8rem;
   max-width: 72ch; }
 .readme img { max-width: 100%; }
+.readme table { border-collapse: collapse; width: 100%; margin: .8rem 0; }
+.readme table th, .readme table td { border: 1px solid var(--dim); padding: .25rem .6rem; text-align: left; }
+.readme table th { color: var(--accent); background: #111; }
+.readme table tr:nth-child(even) td { background: #111; }
 
 table.commits { border-collapse: collapse; width: 100%; }
 table.commits td { padding: .15rem .8rem .15rem 0; vertical-align: baseline; }

@@ -8,6 +8,7 @@ import (
 
 	"github.com/microcosm-cc/bluemonday"
 	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/extension"
 
 	"github.com/bucketvcs/bucketvcs/internal/browsemodel"
 )
@@ -22,12 +23,21 @@ func isMarkdownPath(p string) bool {
 // bluemonday policies are safe for concurrent use after construction.
 var ugcPolicy = bluemonday.UGCPolicy()
 
+// gfmRenderer is a goldmark instance with GFM extensions (tables, strikethrough,
+// autolinks). Built once and reused; goldmark.Markdown is safe for concurrent use.
+var gfmRenderer = goldmark.New(goldmark.WithExtensions(
+	extension.Table,
+	extension.Strikethrough,
+	extension.Linkify,
+	extension.TaskList,
+))
+
 // renderMarkdown converts Markdown to sanitized HTML safe to embed. goldmark
 // renders to HTML; bluemonday's UGC policy then strips scripts/event handlers
 // and other untrusted markup before the result is marked template.HTML.
 func renderMarkdown(src []byte) template.HTML {
 	var buf bytes.Buffer
-	if err := goldmark.Convert(src, &buf); err != nil {
+	if err := gfmRenderer.Convert(src, &buf); err != nil {
 		return ""
 	}
 	clean := ugcPolicy.SanitizeBytes(buf.Bytes())
