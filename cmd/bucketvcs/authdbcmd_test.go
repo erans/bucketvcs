@@ -25,6 +25,12 @@ func seedReplica(t *testing.T) (storeRoot, dbPath string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	storeClosed := false
+	t.Cleanup(func() {
+		if !storeClosed {
+			_ = st.Close()
+		}
+	})
 	dbPath = filepath.Join(t.TempDir(), "auth.db")
 	r, err := authreplica.Prepare(ctx, authreplica.Config{
 		DBPath: dbPath, Store: st, Prefix: authreplica.DefaultPrefix, LeaseTTL: time.Minute,
@@ -54,10 +60,14 @@ func seedReplica(t *testing.T) (storeRoot, dbPath string) {
 		t.Fatal(err)
 	}
 	// localfs takes an exclusive .lock on its root for the lifetime of the
-	// store; release it so the CLI under test can reopen the same root.
+	// store; release it so the CLI under test can reopen the same root. The
+	// explicit Close here is load-bearing (it must happen BEFORE the CLI
+	// runs, so t.Cleanup alone is too late); the cleanup below is only a
+	// safety net for t.Fatal paths above that would otherwise leak the lock.
 	if err := st.Close(); err != nil {
 		t.Fatal(err)
 	}
+	storeClosed = true
 	return storeRoot, dbPath
 }
 

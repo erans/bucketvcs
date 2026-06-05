@@ -101,7 +101,7 @@ func runAuthDBRestore(ctx context.Context, args []string, stdout, stderr io.Writ
 		}
 		target = sqlitestore.SQLitePath(p)
 	}
-	if _, err := os.Stat(target); err == nil {
+	if _, statErr := os.Stat(target); statErr == nil {
 		if *ifNotExists {
 			fmt.Fprintf(stdout, "authdb restore: %s exists; nothing to do\n", target)
 			return 0
@@ -123,6 +123,11 @@ func runAuthDBRestore(ctx context.Context, args []string, stdout, stderr io.Writ
 				return 1
 			}
 		}
+	} else if !os.IsNotExist(statErr) {
+		// Don't silently treat an unreadable target as absent — the restore
+		// would bypass the --force guard and sidecar cleanup, then fail anyway.
+		fmt.Fprintf(stderr, "authdb restore: stat %s: %v\n", target, statErr)
+		return 1
 	}
 
 	st, prefix, err := openReplicaTarget(*replica, *storeURL)
@@ -206,6 +211,9 @@ func runAuthDBReplicaStatus(ctx context.Context, args []string, stdout, stderr i
 		var maxTXID ltx.TXID
 		var latest time.Time
 		var bytes int64
+		// No itr.Err() check needed: LTXFiles returns a fully-materialized
+		// slice iterator (errors surface synchronously from LTXFiles itself).
+		// Revisit if Client moves to streaming iteration.
 		for itr.Next() {
 			it := itr.Item()
 			n++
