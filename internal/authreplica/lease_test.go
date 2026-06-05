@@ -57,6 +57,11 @@ func TestLease_RenewAndLoss(t *testing.T) {
 	if err := a.Renew(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	// Second consecutive renew proves Renew advances l.ver: a stale-version
+	// impl would CAS against the pre-first-renew version and falsely fail.
+	if err := a.Renew(context.Background()); err != nil {
+		t.Fatalf("second renew (ver-advance contract): %v", err)
+	}
 
 	// b steals after expiry; a's next renew must report loss.
 	b := NewLease(store, "sys/authdb", time.Minute)
