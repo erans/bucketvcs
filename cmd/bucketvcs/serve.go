@@ -594,7 +594,12 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			OIDCStore:               oidcStore,
 			OIDCVerifier:            oidcVerifier,
 			Replica:                 replicaCfg,
-			StoreResolver:           storeResolver,
+			StoreResolver:           func() gateway.ByobResolver {
+				if storeResolver == nil {
+					return nil
+				}
+				return storeResolver
+			}(),
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "serve: NewServer: %v\n", err)
@@ -782,7 +787,12 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			Hooks:             hooksSvc,
 			Limiter:           rateLimiter,
 			Replica:           replicaCfg,
-			Resolver:          storeResolver,
+			Resolver:          func() sshd.ByobResolver {
+				if storeResolver == nil {
+					return nil
+				}
+				return storeResolver
+			}(),
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "serve: ssh new server: %v\n", err)
@@ -928,3 +938,5 @@ func (a oidcVerifierAdapter) Verify(ctx context.Context, raw, issuer string) (ma
 	c, err := a.v.Verify(ctx, raw, issuer)
 	return map[string]any(c), err
 }
+
+

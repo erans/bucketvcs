@@ -200,13 +200,13 @@ type Options struct {
 	// use the operator store directly and do NOT go through StoreResolver.
 	// Those routes sign/verify HMAC tokens against the operator store;
 	// per-tenant routing for proxied delivery is deferred.
-	StoreResolver byobResolver
+	StoreResolver ByobResolver
 }
 
 // Server implements http.Handler.
 type Server struct {
 	store             storage.ObjectStore
-	resolver          byobResolver
+	resolver          ByobResolver
 	mgr               *mirror.Manager
 	opts              Options
 	logger            *slog.Logger

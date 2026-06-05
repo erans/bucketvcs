@@ -7,9 +7,9 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
 
-// byobResolver is satisfied by *byob.StoreResolver. Defined as an interface
+// ByobResolver is satisfied by *byob.StoreResolver. Defined as an interface
 // to avoid a direct dependency on internal/byob from the gateway package.
-type byobResolver interface {
+type ByobResolver interface {
 	Resolve(ctx context.Context, tenant string) (storage.ObjectStore, error)
 }
 

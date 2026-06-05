@@ -107,7 +107,7 @@ type Options struct {
 	// each git-upload-pack and git-receive-pack session calls
 	// Resolver.Resolve(ctx, tenant) to obtain the per-tenant ObjectStore.
 	// When nil, s.opts.BVStore is used directly (default behavior).
-	Resolver byobResolver
+	Resolver ByobResolver
 }
 
 // Server is the bucketvcs SSH listener. Construct via NewServer.
