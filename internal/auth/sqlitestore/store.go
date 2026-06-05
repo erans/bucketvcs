@@ -70,6 +70,11 @@ func (s *Store) Close() error { return s.db.Close() }
 // foreign_keys, single open conn).
 func (s *Store) DB() Querier { return s.db }
 
+// BackendName reports the resolved metadata backend kind ("sqlite", "libsql",
+// "postgres"). serve uses it to refuse non-postgres auth DBs in replica mode:
+// a cross-region file database is a misconfiguration.
+func (s *Store) BackendName() string { return s.backend.Name() }
+
 // ErrLastAdmin is returned by DeleteUser when removing the user would
 // leave the system with zero admins.
 var ErrLastAdmin = errors.New("sqlitestore: refusing to delete the last admin")

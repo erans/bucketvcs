@@ -260,7 +260,28 @@ prove they cannot recur.
 
 ---
 
-## 6. Verifying your deployment
+## 6. Multi-region
+
+This guide covers **multi-node** deployments: N gateway processes all running in
+the same region, sharing one Postgres auth database and one object-storage bucket.
+
+**Multi-region** is a separate topology: a write-region gateway backed by a
+canonical bucket, plus one or more read-only regional gateways in other regions
+backed by provider-replicated copies of that bucket. Regional gateways are
+started with `--replica-of <canonical-store-url>` and serve clone and fetch
+traffic locally while refusing pushes.
+
+Multi-node and multi-region are complementary. A common production setup runs
+multiple gateway nodes (this guide) per region and then adds regional replicas
+for geographic distribution.
+
+See the **[Multi-region operator guide](multi-region.md)** for the full topology,
+provider replication setup (S3 CRR, GCS dual-region, Azure RA-GRS), freshness
+modes, auth requirements, monitoring, and doctor checks.
+
+---
+
+## 7. Verifying your deployment
 
 1. **Startup log:** confirm each node logs `authdb opened backend=postgres`.
 

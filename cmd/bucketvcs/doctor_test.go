@@ -110,3 +110,52 @@ func TestDoctorJSON(t *testing.T) {
 		}
 	}
 }
+
+func TestDoctorReplicaChecks(t *testing.T) {
+	storeDir, dbPath := doctorEnv(t)
+	canonicalDir := t.TempDir()
+	var out, errb bytes.Buffer
+	code := run(context.Background(),
+		[]string{"doctor", "--store", "localfs:" + storeDir, "--auth-db", dbPath,
+			"--lfs=false", "--replica-of", "localfs:" + canonicalDir},
+		&out, &errb)
+	// sqlite authdb → config.replica FAILs (replicas need postgres) → exit 1.
+	if code != 1 {
+		t.Fatalf("exit=%d, want 1\n%s", code, out.String())
+	}
+	for _, want := range []string{"replica.canonical", "config.replica"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output missing %q:\n%s", want, out.String())
+		}
+	}
+	// storage.writable must SKIP (no probe write) on replicas.
+	if !strings.Contains(out.String(), "read-only replica") {
+		t.Errorf("storage.writable should skip on replicas:\n%s", out.String())
+	}
+}
+
+func TestDoctorReplicaBadMode(t *testing.T) {
+	storeDir, dbPath := doctorEnv(t)
+	var out, errb bytes.Buffer
+	code := run(context.Background(),
+		[]string{"doctor", "--store", "localfs:" + storeDir, "--auth-db", dbPath,
+			"--lfs=false", "--replica-of", "localfs:" + t.TempDir(), "--replica-mode", "eventual"},
+		&out, &errb)
+	if code != 1 || !strings.Contains(out.String(), "config.replica") {
+		t.Fatalf("bad mode must FAIL config.replica: exit=%d\n%s", code, out.String())
+	}
+}
+
+func TestDoctorNonReplicaHasNoReplicaChecks(t *testing.T) {
+	storeDir, dbPath := doctorEnv(t)
+	var out, errb bytes.Buffer
+	code := run(context.Background(),
+		[]string{"doctor", "--store", "localfs:" + storeDir, "--auth-db", dbPath, "--lfs=false"},
+		&out, &errb)
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0\n%s", code, out.String())
+	}
+	if strings.Contains(out.String(), "replica.") || strings.Contains(out.String(), "config.replica") {
+		t.Errorf("non-replica doctor must not run replica checks:\n%s", out.String())
+	}
+}

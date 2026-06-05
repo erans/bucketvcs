@@ -7,6 +7,11 @@ on GC in anger, per-cloud lifecycle recipes for incomplete multipart uploads,
 localfs operational notes, how to read audit records after an incident, and how
 to wire exit codes into your alerting stack.
 
+> **Never run this against a replica (regional) bucket.** GC must run only in
+> the write region against the canonical bucket — replicas lag canonical, and a
+> sweep there could delete objects the canonical manifest still references. See
+> [Multi-region](multi-region.md).
+
 ---
 
 ## 1. What `bucketvcs gc` Does

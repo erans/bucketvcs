@@ -84,6 +84,13 @@ type serveFlags struct {
 	// M25 webhook egress policy (populated by repeatable fs.Func flags).
 	webhookAllowCIDRs []netip.Prefix
 	webhookDenyHosts  []string
+
+	// M26 multi-region read replicas.
+	replicaOf            *string
+	replicaMode          *string
+	replicaLagBudget     *time.Duration
+	replicaCheckInterval *time.Duration
+	writeRegionURL       *string
 }
 
 // registerServeFlags registers the full serve flag surface on fs. The flag
@@ -214,6 +221,20 @@ func registerServeFlags(fs *flag.FlagSet) *serveFlags {
 	sf.oidcRedirect = fs.String("oidc-login-redirect-url", "", "OAuth2 redirect URL, e.g. https://host/login/oidc/callback")
 	sf.oidcScopes = fs.String("oidc-login-scopes", "openid,email,profile", "Comma-separated OIDC scopes")
 	sf.oidcLabel = fs.String("oidc-login-label", "Single sign-on", "Login-page SSO button label")
+
+	// M26 multi-region read replicas. Setting --replica-of activates
+	// replica mode: this gateway serves reads from --store (the regional
+	// bucket) with canonical fallback, and refuses all writes.
+	sf.replicaOf = fs.String("replica-of", "",
+		"Canonical (write-region) store URL; presence makes this a read-only regional replica gateway")
+	sf.replicaMode = fs.String("replica-mode", "strong-current",
+		"Replica freshness mode: strong-current (ref advertisement from the canonical bucket) | bounded-stale (regional manifest within --replica-lag-budget)")
+	sf.replicaLagBudget = fs.Duration("replica-lag-budget", 5*time.Minute,
+		"bounded-stale: max replication lag before this replica stops advertising refs (min 30s)")
+	sf.replicaCheckInterval = fs.Duration("replica-check-interval", 0,
+		"How often to compare regional vs canonical manifest versions per active repo (default: lag-budget/4, floor 15s)")
+	sf.writeRegionURL = fs.String("write-region-url", "",
+		"Write-region gateway URL included in push-refusal messages on replicas")
 
 	return sf
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/lfs"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/policy"
+	"github.com/bucketvcs/bucketvcs/internal/replica"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/webhooks"
 )
@@ -95,6 +96,12 @@ type Options struct {
 	// are all no-ops on a nil receiver). Mirrors gateway.Options.Limiter.
 	// See spec §30.5 / M18.
 	Limiter *ratelimit.Limiter
+
+	// Replica marks this SSH gateway as a read-only regional replica:
+	// git-receive-pack sessions are refused with a pointer to
+	// WriteRegionURL; git-upload-pack consults Replica.Gate. Mirrors the
+	// HTTP gateway's Options.Replica semantics. See internal/replica.
+	Replica *replica.GatewayConfig
 }
 
 // Server is the bucketvcs SSH listener. Construct via NewServer.

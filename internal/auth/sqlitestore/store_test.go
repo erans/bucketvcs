@@ -628,3 +628,10 @@ func mustOpen(t *testing.T) *Store {
 	}
 	return s
 }
+
+func TestBackendName(t *testing.T) {
+	s := mustOpen(t)
+	if got := s.BackendName(); got != "sqlite" {
+		t.Fatalf("BackendName=%q, want \"sqlite\"", got)
+	}
+}

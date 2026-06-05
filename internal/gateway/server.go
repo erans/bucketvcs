@@ -16,6 +16,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/lfs/locks"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/policy"
+	"github.com/bucketvcs/bucketvcs/internal/replica"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/webhooks"
 )
@@ -180,6 +181,13 @@ type Options struct {
 	OIDCStore OIDCExchangeStore
 	// OIDCVerifier verifies id_token signatures + standard claims.
 	OIDCVerifier OIDCVerifier
+
+	// Replica, when non-nil, marks this gateway as a read-only regional
+	// replica: receive-pack and LFS uploads/locks are refused with a
+	// message carrying WriteRegionURL, upload-pack entry points consult
+	// Replica.Gate, and GET /healthz/replica serves Replica.Health().
+	// See internal/replica and the multi-region operator guide.
+	Replica *replica.GatewayConfig
 }
 
 // Server implements http.Handler.
@@ -357,6 +365,9 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 
 	s.mux = http.NewServeMux()
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
+	if opts.Replica != nil {
+		s.mux.HandleFunc("/healthz/replica", s.handleHealthzReplica)
+	}
 	if len(opts.ProxiedURLSigningKey) > 0 {
 		proxied := NewProxiedHandler(store, opts.ProxiedURLSigningKey, "/_bundle/", "/_pack/", s.logger)
 		s.mux.Handle("/_bundle/", proxied)
@@ -393,6 +404,9 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 			Logger:     opts.Logger,
 			LocksStore: opts.LFSLocksStore,
 			Webhooks:   opts.Webhooks,
+
+			ReadOnlyReplica: opts.Replica != nil,
+			WriteRegionURL:  replicaWriteURL(opts.Replica),
 		})
 
 		// Mount the proxied object handler at /_lfs/ when proxied URL
@@ -405,6 +419,9 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 				Key:      proxiedKey,
 				Logger:   opts.Logger,
 				Webhooks: opts.Webhooks,
+
+				ReadOnlyReplica: opts.Replica != nil,
+				WriteRegionURL:  replicaWriteURL(opts.Replica),
 			})
 		}
 	}

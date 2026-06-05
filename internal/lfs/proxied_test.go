@@ -711,3 +711,79 @@ func TestProxied_Verify_RejectsMismatchedContentType(t *testing.T) {
 		t.Errorf("expected verify metric/audit result=error; got %s", buf.String())
 	}
 }
+
+// TestProxiedReadOnlyReplica asserts the proxied /_lfs/ handler refuses
+// upload (PUT) and verify (POST) with a clean 403 on a read-only replica
+// — even with a fully valid HMAC token replayed from the write region —
+// while download (GET) is unaffected.
+func TestProxiedReadOnlyReplica(t *testing.T) {
+	key := bytes.Repeat([]byte{0xab}, 32)
+	dir := t.TempDir()
+	l, err := localfs.Open(dir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	// Seed an object directly so the GET happy path has something to read.
+	payload := []byte("replica download payload")
+	sum := sha256.Sum256(payload)
+	oid := hex.EncodeToString(sum[:])
+	storageKey := RepoLFSPrefix("acme", "foo") + oid
+	if _, perr := l.PutIfAbsent(context.Background(), storageKey, bytes.NewReader(payload), nil); perr != nil {
+		t.Fatalf("seed PutIfAbsent: %v", perr)
+	}
+
+	h := NewProxiedObjectHandler(ProxiedDeps{
+		Store:           l,
+		Key:             key,
+		Logger:          nil,
+		ReadOnlyReplica: true,
+		WriteRegionURL:  "https://write.example.com",
+	})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	// (a) PUT with a valid lfs-put token → 403 (not 500), body mentions replica.
+	putTok := mintLFSToken(t, key, "lfs-put", "acme", "foo", oid)
+	putReq, _ := http.NewRequest(http.MethodPut, srv.URL+"/_lfs/acme/foo/"+oid+"?token="+putTok, bytes.NewReader(payload))
+	putResp, err := http.DefaultClient.Do(putReq)
+	if err != nil {
+		t.Fatalf("PUT: %v", err)
+	}
+	putBody, _ := io.ReadAll(putResp.Body)
+	putResp.Body.Close()
+	if putResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("PUT status=%d want 403; body=%s", putResp.StatusCode, putBody)
+	}
+	if !strings.Contains(string(putBody), "read-only replica") {
+		t.Errorf("PUT body=%q, want 'read-only replica'", putBody)
+	}
+
+	// (b) verify (POST) with a valid lfs-verify token → 403.
+	verTok := mintLFSToken(t, key, "lfs-verify", "acme", "foo", oid)
+	verResp := postVerifyJSON(t, srv.URL+"/_lfs/acme/foo/"+oid+"?token="+verTok, VerifyRequest{OID: oid, Size: int64(len(payload))})
+	verBody, _ := io.ReadAll(verResp.Body)
+	verResp.Body.Close()
+	if verResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("verify status=%d want 403; body=%s", verResp.StatusCode, verBody)
+	}
+	if !strings.Contains(string(verBody), "read-only replica") {
+		t.Errorf("verify body=%q, want 'read-only replica'", verBody)
+	}
+
+	// (c) GET (download) with a valid lfs-get token → unaffected (200).
+	getTok := mintLFSToken(t, key, "lfs-get", "acme", "foo", oid)
+	getResp, err := http.Get(srv.URL + "/_lfs/acme/foo/" + oid + "?token=" + getTok)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	got, _ := io.ReadAll(getResp.Body)
+	getResp.Body.Close()
+	if getResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET status=%d want 200", getResp.StatusCode)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Errorf("GET body=%q want %q", got, payload)
+	}
+}
