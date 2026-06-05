@@ -23,10 +23,10 @@ func newLocalFS(t *testing.T) storage.ObjectStore {
 	return s
 }
 
-// ltxPayload returns bytes whose first chunk parses as an LTX header is NOT
-// guaranteed here; Client falls back to store timestamps when PeekHeader
-// fails (see WriteLTXFile). Real-LTX round-trips are covered by the Runner
-// integration test in runner_test.go.
+// ltxPayload returns deterministic filler bytes. They are NOT a valid LTX
+// file: Client tolerates that by falling back to store timestamps when
+// PeekHeader fails (see WriteLTXFile). Real-LTX round-trips are covered by
+// the Runner integration test added in a later task.
 func ltxPayload(n int) []byte {
 	b := make([]byte, n)
 	for i := range b {
@@ -87,6 +87,17 @@ func TestClient_OpenLTXFile_Range(t *testing.T) {
 	rc.Close()
 	if !bytes.Equal(got, body[900:]) {
 		t.Fatalf("tail range mismatch: got %d bytes", len(got))
+	}
+
+	// offset at EOF with size=0 → empty reader, no error (reference behavior)
+	rc, err = c.OpenLTXFile(ctx, 1, 10, 20, 1000, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = io.ReadAll(rc)
+	rc.Close()
+	if err != nil || len(got) != 0 {
+		t.Fatalf("EOF tail: want empty read, got %d bytes err=%v", len(got), err)
 	}
 }
 

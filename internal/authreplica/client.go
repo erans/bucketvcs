@@ -1,5 +1,7 @@
-// Package authreplica embeds Litestream to continuously replicate the
-// sqlite authdb into a storage.ObjectStore and restore it on boot.
+// Package authreplica replicates the sqlite authdb into a
+// storage.ObjectStore via embedded Litestream. This file provides the
+// litestream.ReplicaClient adapter; lifecycle glue (lease, restore-on-boot,
+// replication runner) is layered on top in this package.
 package authreplica
 
 import (
@@ -112,7 +114,12 @@ func (c *Client) LTXFiles(ctx context.Context, level int, seek ltx.TXID, useMeta
 		}
 		token = page.NextToken
 	}
-	sort.Slice(infos, func(i, j int) bool { return infos[i].MinTXID < infos[j].MinTXID })
+	sort.Slice(infos, func(i, j int) bool {
+		if infos[i].MinTXID != infos[j].MinTXID {
+			return infos[i].MinTXID < infos[j].MinTXID
+		}
+		return infos[i].MaxTXID < infos[j].MaxTXID
+	})
 	return ltx.NewFileInfoSliceIterator(infos), nil
 }
 
@@ -137,6 +144,9 @@ func (c *Client) OpenLTXFile(ctx context.Context, level int, minTXID, maxTXID lt
 		}
 		if err != nil {
 			return nil, fmt.Errorf("authreplica: head %s: %w", key, err)
+		}
+		if offset >= meta.Size {
+			return io.NopCloser(bytes.NewReader(nil)), nil
 		}
 		end = meta.Size - 1
 	}
