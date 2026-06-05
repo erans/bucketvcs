@@ -16,6 +16,7 @@ import (
 
 	"github.com/bucketvcs/bucketvcs/internal/lfs/quota"
 	"github.com/bucketvcs/bucketvcs/internal/proxiedurl"
+	"github.com/bucketvcs/bucketvcs/internal/replica"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/webhooks"
 )
@@ -48,6 +49,13 @@ type ProxiedDeps struct {
 	// Webhooks is OPTIONAL. When non-nil, the verify handler enqueues
 	// EventLFSUpload after a successful verify (200 path). Fail-open.
 	Webhooks *webhooks.Service
+
+	// ReadOnlyReplica refuses proxied LFS upload (PUT) and verify (POST)
+	// with a clean 403 carrying WriteRegionURL — even when a valid
+	// write-region token is replayed against this replica. Downloads
+	// (GET/HEAD) are unaffected.
+	ReadOnlyReplica bool
+	WriteRegionURL  string
 }
 
 // NewProxiedObjectHandler returns the http.Handler mounted at /_lfs/
@@ -62,12 +70,14 @@ func NewProxiedObjectHandler(deps ProxiedDeps) http.Handler {
 		panic("lfs.NewProxiedObjectHandler: ProxiedDeps.Key must be >= 16 bytes")
 	}
 	h := &proxiedObjectHandler{
-		store:    deps.Store,
-		key:      deps.Key,
-		logger:   deps.Logger,
-		now:      time.Now,
-		quota:    deps.Quota,
-		webhooks: deps.Webhooks,
+		store:           deps.Store,
+		key:             deps.Key,
+		logger:          deps.Logger,
+		now:             time.Now,
+		quota:           deps.Quota,
+		webhooks:        deps.Webhooks,
+		readOnlyReplica: deps.ReadOnlyReplica,
+		writeRegionURL:  deps.WriteRegionURL,
 	}
 	if h.logger == nil {
 		h.logger = slog.Default()
@@ -76,12 +86,14 @@ func NewProxiedObjectHandler(deps ProxiedDeps) http.Handler {
 }
 
 type proxiedObjectHandler struct {
-	store    storage.ObjectStore
-	key      []byte
-	logger   *slog.Logger
-	now      func() time.Time
-	quota    *quota.Service
-	webhooks *webhooks.Service
+	store           storage.ObjectStore
+	key             []byte
+	logger          *slog.Logger
+	now             func() time.Time
+	quota           *quota.Service
+	webhooks        *webhooks.Service
+	readOnlyReplica bool
+	writeRegionURL  string
 }
 
 func (h *proxiedObjectHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -152,6 +164,16 @@ func (h *proxiedObjectHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 
 	storageKey := RepoLFSPrefix(tenant, repo) + oid
 	hash := tenant + "/" + repo + "/" + oid
+
+	// Replica refusal for the write-region surfaces (upload PUT + verify
+	// POST). The token is valid, but this gateway is a read-only replica;
+	// short-circuit BEFORE any store call so the operator gets a clean 403
+	// instead of a 500 from ErrReadOnlyReplica in the storage error branch.
+	// GET/HEAD downloads are intentionally unaffected.
+	if h.readOnlyReplica && (r.Method == http.MethodPut || r.Method == http.MethodPost) {
+		WriteError(w, http.StatusForbidden, replica.RefusalMessage(h.writeRegionURL))
+		return
+	}
 
 	if r.Method == http.MethodPost {
 		h.serveVerify(ctx, w, r, tenant, repo, oid)

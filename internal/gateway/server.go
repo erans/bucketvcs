@@ -419,6 +419,9 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 				Key:      proxiedKey,
 				Logger:   opts.Logger,
 				Webhooks: opts.Webhooks,
+
+				ReadOnlyReplica: opts.Replica != nil,
+				WriteRegionURL:  replicaWriteURL(opts.Replica),
 			})
 		}
 	}

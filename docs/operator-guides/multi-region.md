@@ -245,7 +245,10 @@ git config --global url."https://gw-us.example/".pushInsteadOf "https://gw-eu.ex
 ```
 
 **LFS uploads.** The Batch API returns an error for upload operations. LFS
-downloads work normally (object bytes come from the regional bucket).
+downloads work normally (object bytes come from the regional bucket). Proxied
+LFS upload and verify URLs (`/_lfs/...`) minted by the write region are also
+refused with a clean 403 if replayed against a replica — only downloads on that
+path are served.
 
 **LFS lock APIs.** All lock endpoints (create, list, verify, unlock) are refused;
 manage locks through the write-region gateway. LFS downloads are unaffected.

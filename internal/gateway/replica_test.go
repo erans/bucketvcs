@@ -1,14 +1,19 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/bucketvcs/bucketvcs/internal/proxiedurl"
 	"github.com/bucketvcs/bucketvcs/internal/replica"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 )
@@ -202,6 +207,58 @@ func TestHealthzReplica(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("snapshot round-trip mismatch: got=%+v want=%+v", got, want)
+	}
+}
+
+// TestReplicaRefusesProxiedLFSUpload proves the wiring through NewServer:
+// a replica server with proxied LFS enabled mounts /_lfs/ and refuses an
+// upload PUT (with a valid HMAC token) with a clean 403, not a 500 from
+// the read-only storage backend.
+func TestReplicaRefusesProxiedLFSUpload(t *testing.T) {
+	key := bytes.Repeat([]byte{0xcd}, 32)
+	storeDir := t.TempDir()
+	makeRepoInStore(t, storeDir, "acme", "demo")
+	store, err := localfs.Open(storeDir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	srv, err := NewServer(store, Options{
+		MirrorDir:               t.TempDir(),
+		Version:                 "test",
+		AuthStore:               newPermissiveAuthStore(t, "acme", "demo"),
+		Replica:                 &replica.GatewayConfig{WriteRegionURL: "https://gw-us.example"},
+		LFSEnabled:              true,
+		LFSProxiedURLSigningKey: key,
+		LFSProxiedBaseURL:       "https://replica.example",
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	payload := []byte("replica lfs upload payload")
+	sum := sha256.Sum256(payload)
+	oid := hex.EncodeToString(sum[:])
+	tok, err := proxiedurl.Mint(key, "lfs-put", "acme/demo/"+oid, time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/_lfs/acme/demo/"+oid+"?token="+tok, bytes.NewReader(payload))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT /_lfs/: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("PUT /_lfs/: status=%d want 403; body=%q", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "read-only replica") || !strings.Contains(string(body), "https://gw-us.example") {
+		t.Fatalf("PUT /_lfs/ body missing refusal markers: %q", body)
 	}
 }
 
