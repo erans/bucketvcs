@@ -53,6 +53,10 @@ the LTX file count bounded.
 Replication is **off by default**. It applies only to the embedded SQLite
 authdb backend, and only on the primary gateway.
 
+The flag can also be supplied via the `BUCKETVCS_AUTH_DB_REPLICA` environment
+variable (an explicitly passed `--auth-db-replica` flag wins over the
+environment).
+
 ### 2.1 `--auth-db-replica=auto` (replicate into the system bucket)
 
 The simplest setup reuses the `--store` bucket and writes the replica under the
@@ -480,5 +484,4 @@ any backend.)
   level-1 (30 s) / level-2 (5 m) compaction intervals and the litestream
   snapshot level are fixed; only the lease TTL and restore behavior are
   configurable.
-</content>
-</invoke>
+

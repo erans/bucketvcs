@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"net/netip"
+	"os"
 	"strings"
 	"time"
 
@@ -256,8 +257,8 @@ func registerServeFlags(fs *flag.FlagSet) *serveFlags {
 	// M28 embedded authdb replication (Litestream). Default off; only the
 	// primary (non-replica-serve) gateway with an embedded sqlite --auth-db
 	// may replicate.
-	sf.authDBReplica = fs.String("auth-db-replica", "",
-		`Replicate the sqlite authdb via embedded Litestream: "auto" (sys/authdb/ in --store), a storage URL, or "off" (default)`)
+	sf.authDBReplica = fs.String("auth-db-replica", os.Getenv("BUCKETVCS_AUTH_DB_REPLICA"),
+		`Replicate the sqlite authdb via embedded Litestream: "auto" (sys/authdb/ in --store), a storage URL, or "off" (default). Env: BUCKETVCS_AUTH_DB_REPLICA (flag wins)`)
 	sf.authDBReplicaLeaseTTL = fs.Duration("auth-db-replica-lease-ttl", authreplica.DefaultLeaseTTL,
 		"Lease validity window for the single-writer authdb replication lease (renewal runs every TTL/3)")
 	sf.authDBReplicaSkipRestore = fs.Bool("auth-db-replica-skip-restore", false,

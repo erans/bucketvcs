@@ -209,7 +209,9 @@ func (r *Runner) stopReplication(ctx context.Context) {
 		slog.String("event", "authdb.replica.replication_stopped"))
 }
 
-// SyncNow forces a full WAL→LTX→store sync. Used by tests and shutdown.
+// SyncNow forces a full WAL→LTX→store sync. Used by tests (and available to
+// callers needing a deterministic flush); shutdown's final sync happens
+// inside the litestream store Close.
 func (r *Runner) SyncNow(ctx context.Context) error {
 	r.mu.Lock()
 	lsdb := r.lsdb

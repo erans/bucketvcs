@@ -280,7 +280,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			return // the real shutdown defer owns cleanup
 		}
 		if replRunner != nil {
-			shCtx, shCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			shCtx, shCancel := context.WithTimeout(context.Background(), *shutdownTimeout)
 			defer shCancel()
 			if cerr := replRunner.Close(shCtx); cerr != nil {
 				slog.Default().Error("auth-db replication shutdown", slog.Any("error", cerr))
@@ -347,7 +347,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	// it disarms the early-exit guard above.
 	if replRunner != nil {
 		defer func() {
-			shCtx, shCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			shCtx, shCancel := context.WithTimeout(context.Background(), *shutdownTimeout)
 			defer shCancel()
 			if cerr := replRunner.Close(shCtx); cerr != nil {
 				slog.Default().Error("auth-db replication shutdown", slog.Any("error", cerr))
