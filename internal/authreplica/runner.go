@@ -76,6 +76,14 @@ func Prepare(ctx context.Context, cfg Config) (*Runner, error) {
 	if err := r.lease.Acquire(ctx); err != nil {
 		return nil, err
 	}
+	if took, prev := r.lease.TookOver(); took {
+		logger.LogAttrs(ctx, slog.LevelInfo, "authdb.replica.lease_takeover",
+			slog.Bool("audit", true),
+			slog.String("event", "authdb.replica.lease_takeover"),
+			slog.String("instance_id", r.lease.InstanceID()),
+			slog.String("previous_instance_id", prev),
+		)
+	}
 
 	lsdb := litestream.NewDB(cfg.DBPath)
 	lsdb.Logger = slog.New(newLevelFilterHandler(logger.Handler(), slog.LevelWarn))

@@ -46,6 +46,12 @@ func TestLease_TakeoverAfterExpiry(t *testing.T) {
 	if err := b.Acquire(context.Background()); err != nil {
 		t.Fatalf("takeover failed: %v", err)
 	}
+	if took, prev := b.TookOver(); !took || prev != a.InstanceID() {
+		t.Fatalf("TookOver() = (%v, %q), want (true, %q)", took, prev, a.InstanceID())
+	}
+	if took, _ := a.TookOver(); took {
+		t.Fatal("fresh acquire must not report takeover")
+	}
 }
 
 func TestLease_RenewAndLoss(t *testing.T) {

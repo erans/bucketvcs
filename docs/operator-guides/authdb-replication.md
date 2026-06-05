@@ -428,18 +428,17 @@ The following are **actually emitted** by the replication subsystem today
 | Event | Level | Meaning |
 |---|---|---|
 | `authdb.replica.restored` | INFO | Restore-on-boot recreated the local authdb from the replica (carries `db_path`, `duration_ms`). |
+| `authdb.replica.lease_takeover` | INFO | This node acquired the lease by expiring a previous holder's stale lease (carries `instance_id`, `previous_instance_id`). Expected after an unclean crash of the prior holder. |
 | `authdb.replica.lease_lost` | ERROR | This node's lease was taken over by another instance (carries `instance_id`). **Actionable — see §4.2.** |
 | `authdb.replica.replication_stopped` | ERROR | Replication stopped because the lease was lost; the node keeps serving. Always paired with `lease_lost`. |
 
 **Not emitted in this release (do not alert on these — they do not exist yet).**
 The following names appeared in early planning but are **not** implemented today:
-`authdb_replica_sync_errors_total`, `authdb_replica_last_sync_unix`,
-`authdb_replica_ltx_files`, and an `authdb.replica.lease_takeover` audit event.
+`authdb_replica_sync_errors_total`, `authdb_replica_last_sync_unix`, and
+`authdb_replica_ltx_files`.
 For sync freshness and LTX file counts, query `bucketvcs authdb replica-status`
 (§5.5) instead — `max_txid`/`latest` give you replication position and recency,
-and the per-level `files` count gives you LTX accumulation. Lease takeover is
-observable from the consumer side via `authdb.replica.lease_lost` on the node
-that *lost* the lease.
+and the per-level `files` count gives you LTX accumulation.
 
 ---
 

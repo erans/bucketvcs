@@ -48,6 +48,11 @@ type Lease struct {
 
 	id  string
 	ver storage.ObjectVersion
+
+	// tookOver records that Acquire succeeded by expiring a previous
+	// holder's lease (vs a fresh claim). Read via TookOver for auditing.
+	tookOver   bool
+	prevHolder string
 }
 
 // NewLease returns an unacquired lease at <prefix>/lease.json.
@@ -65,6 +70,10 @@ func NewLease(store storage.ObjectStore, prefix string, ttl time.Duration) *Leas
 
 // InstanceID returns this instance's random identity.
 func (l *Lease) InstanceID() string { return l.id }
+
+// TookOver reports whether the last successful Acquire expired a previous
+// holder's lease, and that holder's instance id.
+func (l *Lease) TookOver() (bool, string) { return l.tookOver, l.prevHolder }
 
 func (l *Lease) body() ([]byte, error) {
 	host, _ := os.Hostname()
@@ -127,6 +136,8 @@ func (l *Lease) Acquire(ctx context.Context) error {
 			return fmt.Errorf("authreplica: lease takeover: %w", err)
 		}
 		l.ver = ver
+		l.tookOver = true
+		l.prevHolder = doc.InstanceID
 		return nil
 	}
 	return fmt.Errorf("%w: contention exhausted %d acquire attempts", ErrLeaseHeld, acquireAttempts)
