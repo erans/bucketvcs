@@ -54,14 +54,14 @@ export BUCKETVCS_DB_AUTH_TOKEN='<strong-password>'
 bucketvcs serve \
   --auth-db 'postgres://bv@db.internal:5432/bucketvcs_auth?sslmode=require' \
   --auth-db-max-conns 10 \
-  --listen :8080 \
+  --addr :8080 \
   ...
 
 # Node 2 (identical flags, different host / container)
 bucketvcs serve \
   --auth-db 'postgres://bv@db.internal:5432/bucketvcs_auth?sslmode=require' \
   --auth-db-max-conns 10 \
-  --listen :8080 \
+  --addr :8080 \
   ...
 ```
 
