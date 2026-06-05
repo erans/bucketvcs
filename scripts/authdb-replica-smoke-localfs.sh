@@ -277,7 +277,7 @@ if [[ $HAVE_SQLITE3 -eq 1 ]]; then
         exit 1
     fi
 else
-    echo "SKIP(phase2 count): sqlite3 not on PATH; verified pitr.db exists and is non-empty ($(stat -c%s "$PITR_DB") bytes), but cannot compare token counts"
+    echo "SKIP(phase2 count): sqlite3 not on PATH; verified pitr.db exists and is non-empty ($(wc -c < "$PITR_DB") bytes), but cannot compare token counts"
 fi
 echo "PHASE2_PITR_OK"
 
