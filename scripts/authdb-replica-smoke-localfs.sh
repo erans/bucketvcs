@@ -3,7 +3,7 @@
 #
 # End-to-end smoke for embedded authdb replication (M28: Litestream into
 # sys/authdb/ of the object store, single-writer CAS lease at
-# sys/authdb/lease.json, restore-on-boot). Three phases:
+# sys/authdb/lease.json, restore-on-boot). Four phases:
 #
 #   Phase 1 — durability through total local-disk loss: replicate, destroy
 #             the local sqlite authdb + WAL + litestream scratch, restart,
@@ -14,6 +14,9 @@
 #   Phase 3 — single-writer mutual exclusion + lease visibility (see the
 #             long design note above Phase 3 — the localfs root lock, not
 #             the lease, is what fires here, and that is by design).
+#   Phase 4 — true multi-process concurrent CLI writes: while serve replicates,
+#             a separate process (this shell) mints a user+token on the same
+#             authdb file, then a wipe+restart proves the token survived.
 #
 # Requires `bucketvcs`, `git`, `curl`, `python3` on PATH. `sqlite3` is
 # optional: Phase 2's token-count assertion SKIPs (with a clear message)
@@ -380,4 +383,82 @@ else
 fi
 echo "PHASE3_LEASE_OK"
 
-# All three phases passed. The cleanup trap prints AUTHDB_REPLICA_SMOKE_OK.
+# ---------------------------------------------------------------------------
+# PHASE 4 — true multi-process concurrent CLI writes while serve runs.
+# ---------------------------------------------------------------------------
+# Phases above approximate the "CLI writes while serve replicates" topology in
+# process (see internal/authreplica/edgecase_test.go TestEdge_Concurrent...).
+# This phase exercises it for REAL: while a replicating gateway holds the authdb
+# open, the smoke shell — a genuinely separate OS process — runs `user add` +
+# `token create` against the SAME sqlite authdb file (SQLite WAL permits the
+# concurrent reader/writer; the CLI touches only --auth-db, never --store, so it
+# never contends for the localfs root .lock). We then hard-kill serve, wipe the
+# local authdb, wait out the lease, restart, and prove the concurrently-written
+# token still authenticates after restore-on-boot — i.e. the gateway replicated
+# the other process's writes.
+#
+# Phase 3 ended with serve hard-killed. On localfs the stale .lock was cleared
+# in 3b but lease.json survives; on cloud the lease will expire on its own. Wait
+# out the lease either way, then start a fresh gateway.
+sleep "$LEASE_EXPIRY_WAIT"
+
+PORT=$(free_port)
+BASE_URL="http://127.0.0.1:$PORT"
+start_serve "$PORT" "$AUTH_DB" "$WORK/mirror4" "$WORK/serve4.log"
+wait_ready "$BASE_URL"
+sleep 2  # let the gateway acquire its lease and replicate a fresh baseline
+
+# 4.1 From THIS shell (separate process), mint a new user + token on the live
+#     authdb file the gateway is replicating, and grant it read on the repo.
+"$BUCKETVCS" user add concurrent --auth-db "$AUTH_DB" >/dev/null
+CONC_TOKEN=$("$BUCKETVCS" token create concurrent --auth-db "$AUTH_DB" 2>/dev/null | sed -n 's/^token=//p' | head -1)
+if [[ -z "$CONC_TOKEN" ]]; then
+    echo "could not extract token from concurrent 'bucketvcs token create' output"
+    exit 1
+fi
+"$BUCKETVCS" repo grant concurrent acme/replica-test read --auth-db "$AUTH_DB"
+
+# 4.2 Wait for litestream to replicate the concurrent writes, then hard-kill.
+sleep 2.5
+kill -9 "$SERVE_PID" 2>/dev/null || true
+wait "$SERVE_PID" 2>/dev/null || true
+SERVE_PID=""
+
+# 4.3 Wipe the local authdb + litestream scratch (bucket copy is the only
+#     surviving source of truth), clear the stale localfs lock, wait out the
+#     lease, restart. Mirrors Phase 1.3's recovery sequence.
+rm -f "$AUTH_DB" "$AUTH_DB"-wal "$AUTH_DB"-shm
+rm -rf "$AUTH_DB"-litestream
+if [[ $IS_LOCALFS -eq 1 ]]; then
+    rm -f "$STORE_ROOT/.lock"
+fi
+if [[ -f "$AUTH_DB" ]]; then
+    echo "authdb deletion failed in phase 4 — local copy still present"
+    exit 1
+fi
+sleep "$LEASE_EXPIRY_WAIT"
+
+PORT=$(free_port)
+BASE_URL="http://127.0.0.1:$PORT"
+start_serve "$PORT" "$AUTH_DB" "$WORK/mirror4b" "$WORK/serve4b.log"
+wait_ready "$BASE_URL"
+
+if [[ ! -f "$AUTH_DB" ]]; then
+    echo "phase 4 restore-on-boot did not recreate the local authdb at $AUTH_DB"
+    exit 1
+fi
+
+# 4.4 The concurrently-written token must authenticate after restore (HTTP 200,
+#     same probe shape as Phase 1).
+code=$(curl -s -o /dev/null -w '%{http_code}' \
+    -u "concurrent:$CONC_TOKEN" \
+    "$BASE_URL/acme/replica-test.git/info/refs?service=git-upload-pack")
+if [[ "$code" != "200" ]]; then
+    echo "phase 4 post-restore auth probe expected 200 for the concurrently-written token, got $code"
+    echo "==== serve4b.log (tail) ===="
+    tail -30 "$WORK/serve4b.log" || true
+    exit 1
+fi
+echo "PHASE4_CONCURRENT_CLI_OK"
+
+# All four phases passed. The cleanup trap prints AUTHDB_REPLICA_SMOKE_OK.
