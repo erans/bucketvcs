@@ -28,6 +28,10 @@ func TestResolveAuthDBReplica(t *testing.T) {
 			authDB: "postgres://u@h/db", wantErr: "embedded sqlite"},
 		{name: "libsql dsn rejected", replica: "auto", storeURL: "localfs:/tmp/x",
 			authDB: "libsql://db.turso.io", wantErr: "embedded sqlite"},
+		{name: "http libsql dsn rejected", replica: "auto", storeURL: "localfs:/tmp/x",
+			authDB: "http://db.turso.io", wantErr: "embedded sqlite"},
+		{name: "https libsql dsn rejected", replica: "auto", storeURL: "localfs:/tmp/x",
+			authDB: "https://db.turso.io", wantErr: "embedded sqlite"},
 		{name: "replica-serve rejected", replica: "auto", storeURL: "localfs:/tmp/x",
 			isReplica: true, wantErr: "replica"},
 	}

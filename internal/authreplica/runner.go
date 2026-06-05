@@ -141,6 +141,11 @@ func (r *Runner) heartbeat(ctx context.Context) {
 			if err == nil {
 				continue
 			}
+			// Clean shutdown: Close cancels hbCtx while a renew may be in
+			// flight — that is not a renew failure, don't meter/log it.
+			if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+				return
+			}
 			if errors.Is(err, ErrLeaseLost) {
 				r.logger.LogAttrs(ctx, slog.LevelError, "authdb.replica.lease_lost",
 					slog.Bool("audit", true),
