@@ -150,6 +150,8 @@ func NewHTTPHandler(deps Deps) http.Handler {
 		// operation is known so downloads still succeed.
 		if deps.ReadOnlyReplica && route != lfsRouteBatch {
 			logger.LogAttrs(ctx, slog.LevelInfo, "lfs.locks.replica_refused",
+				slog.Bool("audit", true),
+				slog.String("event", "lfs.locks.replica_refused"),
 				slog.String("tenant", tenant), slog.String("repo", repo))
 			WriteError(w, http.StatusForbidden, replica.RefusalMessage(deps.WriteRegionURL))
 			return

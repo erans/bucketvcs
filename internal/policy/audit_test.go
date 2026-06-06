@@ -20,6 +20,7 @@ func TestEmitRefRejected_Shape(t *testing.T) {
 	line := buf.String()
 	for _, want := range []string{
 		`"msg":"policy.ref.rejected"`,
+		`"audit":true`,
 		`"event":"policy.ref.rejected"`,
 		`"tenant":"acme"`,
 		`"repo":"site"`,
@@ -41,5 +42,21 @@ func TestEmitRefRejected_NilPolicyErrorIsNoOp(t *testing.T) {
 	EmitRefRejected(context.Background(), captureLogger(&buf), "acme", "site", nil, "alice")
 	if buf.Len() != 0 {
 		t.Errorf("nil PolicyError emitted: %s", buf.String())
+	}
+}
+
+func TestEmitRefInternalError_AuditShape(t *testing.T) {
+	var buf bytes.Buffer
+	EmitRefInternalError(context.Background(), captureLogger(&buf), "acme", "site",
+		"refs/heads/main", "alice", context.Canceled)
+	line := buf.String()
+	for _, want := range []string{
+		`"msg":"policy.ref.internal_error"`,
+		`"audit":true`,
+		`"event":"policy.ref.internal_error"`,
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("missing %q in %s", want, line)
+		}
 	}
 }

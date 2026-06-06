@@ -17,6 +17,8 @@ func EmitHookRejected(ctx context.Context, logger *slog.Logger,
 		stderrStr = stderrStr[:1024] + "...[truncated for audit]"
 	}
 	logger.LogAttrs(ctx, slog.LevelWarn, "policy.hook.rejected",
+		slog.Bool("audit", true),
+		slog.String("event", "policy.hook.rejected"),
 		slog.String("tenant", tenant),
 		slog.String("repo", repo),
 		slog.String("trigger", trigger),
@@ -35,6 +37,8 @@ func EmitHookInternalError(ctx context.Context, logger *slog.Logger,
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelError, "policy.hook.internal_error",
+		slog.Bool("audit", true),
+		slog.String("event", "policy.hook.internal_error"),
 		slog.String("tenant", tenant),
 		slog.String("repo", repo),
 		slog.String("trigger", trigger),
@@ -52,6 +56,8 @@ func EmitHookLifecycle(ctx context.Context, logger *slog.Logger,
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, event,
+		slog.Bool("audit", true),
+		slog.String("event", event),
 		slog.String("tenant", tenant),
 		slog.String("repo", repo),
 		slog.String("trigger", trigger),

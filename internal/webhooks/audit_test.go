@@ -3,12 +3,67 @@ package webhooks_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/webhooks"
 )
+
+func jsonLogger(buf *bytes.Buffer) *slog.Logger {
+	return slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
+func assertAuditShape(t *testing.T, line string) {
+	t.Helper()
+	var rec map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(line)), &rec); err != nil {
+		t.Fatalf("not JSON: %v (%s)", err, line)
+	}
+	if a, ok := rec["audit"].(bool); !ok || !a {
+		t.Errorf("audit attr missing or not true: %s", line)
+	}
+	if rec["event"] != rec["msg"] {
+		t.Errorf("event (%v) != msg (%v): %s", rec["event"], rec["msg"], line)
+	}
+}
+
+// TestWebhookAuditEmitters_AuditShape covers every webhooks.Emit* audit helper
+// and asserts the audit=true + event==msg shiplog contract.
+func TestWebhookAuditEmitters_AuditShape(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(1700000000, 0)
+	type tc struct {
+		name  string
+		event string
+		run   func(*bytes.Buffer)
+	}
+	tcs := []tc{
+		{"delivered", "webhooks.delivered", func(b *bytes.Buffer) { webhooks.EmitDelivered(ctx, jsonLogger(b), "d", 1, "push", 1, 1) }},
+		{"failed", "webhooks.failed", func(b *bytes.Buffer) { webhooks.EmitFailed(ctx, jsonLogger(b), "d", 1, "push", 1, 500, "boom", 1) }},
+		{"dead_letter", "webhooks.dead_letter", func(b *bytes.Buffer) { webhooks.EmitDeadLetter(ctx, jsonLogger(b), "d", 1, "push", 5, 500) }},
+		{"enqueue_failed", "webhooks.enqueue_failed", func(b *bytes.Buffer) { webhooks.EmitEnqueueFailed(ctx, jsonLogger(b), "t", "r", "push", "boom") }},
+		{"endpoint_created", "webhooks.endpoint_created", func(b *bytes.Buffer) {
+			webhooks.EmitEndpointCreated(ctx, jsonLogger(b), 1, "t", "r", "https://x", "push")
+		}},
+		{"endpoint_removed", "webhooks.endpoint_removed", func(b *bytes.Buffer) { webhooks.EmitEndpointRemoved(ctx, jsonLogger(b), 1, "t", "r") }},
+		{"endpoint_secret_rotated", "webhooks.endpoint_secret_rotated", func(b *bytes.Buffer) { webhooks.EmitEndpointSecretRotated(ctx, jsonLogger(b), 1, "t", "r", "actor") }},
+		{"pruned", "webhooks.pruned", func(b *bytes.Buffer) { webhooks.EmitWebhookPruned(ctx, jsonLogger(b), 1, 0, now, now, false, "actor") }},
+		{"egress_denied", "webhooks.egress_denied", func(b *bytes.Buffer) { webhooks.EmitEgressDenied(ctx, jsonLogger(b), "d", 1, "h", "1.2.3.4", "ip", "") }},
+	}
+	for _, c := range tcs {
+		t.Run(c.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			c.run(&buf)
+			if !strings.Contains(buf.String(), c.event) {
+				t.Errorf("event %q missing: %s", c.event, buf.String())
+			}
+			assertAuditShape(t, buf.String())
+		})
+	}
+}
 
 func TestEmitDelivered(t *testing.T) {
 	var buf bytes.Buffer

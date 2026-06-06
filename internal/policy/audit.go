@@ -18,6 +18,7 @@ func EmitRefRejected(ctx context.Context, logger *slog.Logger, tenant, repo stri
 		return
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "policy.ref.rejected",
+		slog.Bool("audit", true),
 		slog.String("event", "policy.ref.rejected"),
 		slog.String("tenant", tenant),
 		slog.String("repo", repo),
@@ -40,6 +41,7 @@ func EmitRefInternalError(ctx context.Context, logger *slog.Logger, tenant, repo
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelError, "policy.ref.internal_error",
+		slog.Bool("audit", true),
 		slog.String("event", "policy.ref.internal_error"),
 		slog.String("tenant", tenant),
 		slog.String("repo", repo),

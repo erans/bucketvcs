@@ -3,9 +3,65 @@ package lfs
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 )
+
+// assertAuditShape decodes one JSON log line and asserts the shiplog tap
+// contract: audit==true and event==msg. Every genuine lfs.* audit emitter
+// must satisfy this so it lands in the durable activity stream.
+func assertAuditShape(t *testing.T, line string) {
+	t.Helper()
+	var rec map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(line)), &rec); err != nil {
+		t.Fatalf("not JSON: %v (%s)", err, line)
+	}
+	if a, ok := rec["audit"].(bool); !ok || !a {
+		t.Errorf("audit attr missing or not true: %s", line)
+	}
+	if rec["event"] != rec["msg"] {
+		t.Errorf("event (%v) != msg (%v): %s", rec["event"], rec["msg"], line)
+	}
+}
+
+// TestLFSAuditEmitters_AuditShape covers every lfs audit emitter and asserts
+// audit=true + event==msg. Keeps the taxonomy from drifting out of the
+// activity stream.
+func TestLFSAuditEmitters_AuditShape(t *testing.T) {
+	ctx := context.Background()
+	oid := strings.Repeat("a", 64)
+	type tc struct {
+		name  string
+		event string
+		run   func(*bytes.Buffer)
+	}
+	tcs := []tc{
+		{"batch", "lfs.batch", func(b *bytes.Buffer) { emitLFSBatch(ctx, captureLogger(b), "a/r", "u", "upload", 1, "ok") }},
+		{"object_served", "lfs.object.served", func(b *bytes.Buffer) { emitLFSObjectServed(ctx, captureLogger(b), "upload", "a/r/o", 1, 200) }},
+		{"verify", "lfs.verify", func(b *bytes.Buffer) { emitLFSVerify(ctx, captureLogger(b), "a/r", "u", oid, 1, "ok") }},
+		{"lock_create", "lfs.lock.create", func(b *bytes.Buffer) {
+			emitLFSLockCreate(ctx, captureLogger(b), "a/r", "u", "uid", "lid", "p", "refs/heads/main")
+		}},
+		{"lock_delete", "lfs.lock.delete", func(b *bytes.Buffer) { emitLFSLockDelete(ctx, captureLogger(b), "a/r", "u", "lid", false, "") }},
+		{"lock_verify", "lfs.lock.verify", func(b *bytes.Buffer) { emitLFSLockVerify(ctx, captureLogger(b), "a/r", "u", 1, 0) }},
+		{"ssh_authenticate", "lfs.ssh_authenticate", func(b *bytes.Buffer) { EmitLFSSSHAuthenticate(ctx, captureLogger(b), "a/r", "u", "upload", 900, "ok") }},
+		{"gc_mark", "lfs.gc.mark", func(b *bytes.Buffer) { EmitLFSGCMark(ctx, captureLogger(b), "a/r", "m", 1, 1, false) }},
+		{"gc_sweep", "lfs.gc.sweep", func(b *bytes.Buffer) { EmitLFSGCSweep(ctx, captureLogger(b), "a/r", "m", "s", 1, 0, 0, 0, 1, false) }},
+		{"quota_exceeded", "lfs.quota.exceeded", func(b *bytes.Buffer) { EmitLFSQuotaExceeded(ctx, captureLogger(b), "a", 1, 2, 1, "o") }},
+		{"quota_reconcile", "lfs.quota.reconcile", func(b *bytes.Buffer) { EmitLFSQuotaReconcile(ctx, captureLogger(b), "a", 1, 1, 0, false) }},
+	}
+	for _, c := range tcs {
+		t.Run(c.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			c.run(&buf)
+			if !strings.Contains(buf.String(), c.event) {
+				t.Errorf("event %q missing: %s", c.event, buf.String())
+			}
+			assertAuditShape(t, buf.String())
+		})
+	}
+}
 
 func TestEmitLFSBatch_Shape(t *testing.T) {
 	var buf bytes.Buffer

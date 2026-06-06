@@ -1,9 +1,12 @@
 package replica_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -206,5 +209,77 @@ func TestBoundedStaleRegionalOutageDoesNotClearLag(t *testing.T) {
 	}
 	if uh.Reason != "lag budget exceeded" {
 		t.Fatalf("want reason %q, got %q", "lag budget exceeded", uh.Reason)
+	}
+}
+
+// TestReplicaHealthTransitionAuditShape drives an unhealthy -> recovered
+// transition and asserts both audit events carry audit=true and event==msg,
+// the shiplog tap contract.
+func TestReplicaHealthTransitionAuditShape(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	r, err := localfs.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := localfs.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	ctl := replica.NewController(replica.ControllerConfig{
+		Mode:          replica.ModeBoundedStale,
+		LagBudget:     5 * time.Minute,
+		CheckInterval: 15 * time.Second,
+		Regional:      r,
+		Canonical:     c,
+		Logger:        logger,
+		Now:           func() time.Time { return now },
+	})
+
+	seed := func(s storage.ObjectStore, version uint64) {
+		body := strings.NewReader(rootJSON(version))
+		if md, err := s.Head(context.Background(), rootKey); err == nil {
+			if _, err := s.PutIfVersionMatches(context.Background(), rootKey, md.Version, body, nil); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		if _, err := s.PutIfAbsent(context.Background(), rootKey, body, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	seed(c, 8)
+	seed(r, 7)
+	_ = ctl.CheckAdvertise(context.Background(), "acme", "web")
+	now = now.Add(6 * time.Minute)
+	_ = ctl.CheckAdvertise(context.Background(), "acme", "web") // -> unhealthy
+
+	seed(r, 8)
+	now = now.Add(16 * time.Second)
+	_ = ctl.CheckAdvertise(context.Background(), "acme", "web") // -> recovered
+
+	out := buf.String()
+	for _, ev := range []string{"replica.repo.unhealthy", "replica.repo.recovered"} {
+		if !strings.Contains(out, ev) {
+			t.Fatalf("missing %q transition event in: %s", ev, out)
+		}
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if !strings.Contains(line, "replica.repo.") {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("not JSON: %v (%s)", err, line)
+		}
+		if a, ok := rec["audit"].(bool); !ok || !a {
+			t.Errorf("audit attr missing/not true: %s", line)
+		}
+		if rec["event"] != rec["msg"] {
+			t.Errorf("event (%v) != msg (%v): %s", rec["event"], rec["msg"], line)
+		}
 	}
 }

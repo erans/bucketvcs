@@ -53,23 +53,35 @@ bounded spool and retries on the next tick. Neither affects serving.
 
 ### 1.1 The two streams
 
-**Activity** — the existing audit taxonomy. The activity stream contains
+**Activity** — the full audit taxonomy. The activity stream contains
 *exactly* the slog records that the codebase tags `audit=true`; it is not an
-exhaustive copy of every log line. Examples of events that appear there include
-`bundle.uri.advertised`, `proxied.url.served`, and the `authdb.replica.*`
-lifecycle events. Each record is serialized as `{ts, level, event, ...attrs}`
-with the audit attributes passed through faithfully:
+exhaustive copy of every log line. As of this release the audit taxonomy was
+normalized so that **every** genuine audit emitter carries both `audit=true`
+and a matching `event` attribute. The stream therefore carries the complete
+taxonomy: `policy.*` (ref/path/hook decisions), `lfs.*` (batch, object served,
+verify, locks, GC, quotas, SSH auth), `auth.*` (token rotation, scope denials,
+rate-limit hits, OIDC exchange/login, sessions, password set), `webhooks.*`
+(delivery lifecycle, endpoint admin, egress denials), `repo.renamed`,
+`replica.repo.*` health transitions, plus the `bundle.*`, `proxied.url.served`,
+`gc.*`, `maintenance.*`, and `authdb.replica.*` events. Each record is
+serialized as `{ts, level, event, ...attrs}` with the audit attributes passed
+through faithfully:
 
 ```json
 {"ts":"2026-06-05T21:30:45.123Z","level":"INFO","event":"proxied.url.served","kind":"bundle","tenant":"acme","repo":"app","bytes_served":386,"status_code":200,"range_request":false}
 ```
 
-> **Note.** Some structured log lines that read like audit events on the
-> console (for example `policy.ref.rejected` and `auth.scope.denied`) are
-> emitted *without* the `audit=true` tag and therefore do **not** appear in the
-> shipped activity stream. The activity stream is the `audit=true`-tagged
-> taxonomy, nothing more and nothing less — treat the console log as the
-> superset.
+> **Note.** Earlier releases left several genuine audit events
+> (for example `policy.ref.rejected`, `auth.scope.denied`, and the `lfs.*`
+> events) untagged, so they did **not** reach the shipped activity stream. The
+> taxonomy was normalized in this release: every audit emitter now carries
+> `audit=true`, so the activity stream is the complete `audit=true`-tagged
+> taxonomy — nothing more and nothing less. A small number of operational
+> diagnostics that merely read like events on the console (`lfs.batch.deny`,
+> `webhooks.reclaim_failed`, `webhooks.update_failed`) are intentionally left
+> untagged; the corresponding genuine audit events (`lfs.batch`,
+> `webhooks.delivered` / `webhooks.dead_letter`) carry the audit trail. Treat
+> the console log as the superset.
 
 **Usage** — a fixed, versioned metering schema (`v:1`) emitted by new
 instrumentation. No pre-existing log line carried bytes/duration metering:

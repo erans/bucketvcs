@@ -7,7 +7,7 @@ the [operator guides](operator-guides/).
 
 ## Unreleased
 
-No breaking changes, but two behavior changes to be aware of.
+No breaking changes, but a few behavior changes to be aware of.
 
 - **Usage & activity log shipping (new, on by default).** `bucketvcs serve` now
   ships two durable NDJSON streams into the object store under the reserved
@@ -23,6 +23,14 @@ No breaking changes, but two behavior changes to be aware of.
     that matches how far back you need usage/audit data, the same way the
     replication guide recommends for `sys/authdb/ltx/`. (`sys/` is already
     reserved — GC never touches it.)
+- **Audit taxonomy normalized.** Every genuine audit emitter across
+  `policy.*`, `lfs.*`, `auth.*`, `webhooks.*`, and `hooks` (plus `repo.renamed`
+  and `replica.repo.*`) now carries `audit=true` and a matching `event`
+  attribute; previously many of these were untagged and never reached the
+  shipped activity stream. The activity stream is now the complete audit
+  taxonomy. If your log pipeline filters were keyed on the *old* shapes (e.g.
+  matching `policy.ref.rejected` or `lfs.*` only by message with no `audit`
+  field), update them to key on `audit=true` / the `event` attribute.
 - **Console log format changed.** To install the log-shipping tap, `serve` now
   sets a concrete `slog` `TextHandler` as the process default logger (in **both**
   shipping modes, including `--log-shipping=off`). Console lines change from the
