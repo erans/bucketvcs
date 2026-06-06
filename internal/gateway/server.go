@@ -398,7 +398,7 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 		s.mux.HandleFunc("/healthz/replica", s.handleHealthzReplica)
 	}
 	if len(opts.ProxiedURLSigningKey) > 0 {
-		proxied := NewProxiedHandler(store, opts.ProxiedURLSigningKey, "/_bundle/", "/_pack/", s.logger)
+		proxied := NewProxiedHandler(store, opts.ProxiedURLSigningKey, "/_bundle/", "/_pack/", s.logger, opts.Usage)
 		s.mux.Handle("/_bundle/", proxied)
 		s.mux.Handle("/_pack/", proxied)
 	}
@@ -440,6 +440,7 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 
 			ReadOnlyReplica: opts.Replica != nil,
 			WriteRegionURL:  replicaWriteURL(opts.Replica),
+			Usage:           opts.Usage,
 		})
 
 		// Mount the proxied object handler at /_lfs/ when proxied URL
@@ -455,6 +456,7 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 
 				ReadOnlyReplica: opts.Replica != nil,
 				WriteRegionURL:  replicaWriteURL(opts.Replica),
+				Usage:           opts.Usage,
 			})
 		}
 	}

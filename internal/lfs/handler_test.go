@@ -425,3 +425,144 @@ func TestHandler_Verify_GET_Returns404(t *testing.T) {
 		t.Fatalf("status=%d, want 404", resp.StatusCode)
 	}
 }
+
+// newHandlerForTestWithUsage mirrors newHandlerForTest but wires a Usage
+// sink so the usage-metering emission can be asserted.
+func newHandlerForTestWithUsage(t *testing.T, store *Store, authStore *fakeAuth, actor *auth.Actor, usage UsageSink) *httptest.Server {
+	t.Helper()
+	lfsH := NewHTTPHandler(Deps{
+		AuthStore:        authStore,
+		ActorFromContext: actorFromTestContext,
+		NewStore:         func(tenant, repo string) *Store { return store },
+		PresignTTL:       5 * time.Minute,
+		Logger:           captureLogger(&bytes.Buffer{}),
+		Usage:            usage,
+	})
+	wrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(contextWithActor(r.Context(), actor))
+		lfsH.ServeHTTP(w, r)
+	})
+	return httptest.NewServer(wrapped)
+}
+
+func TestHandler_Batch_Download_EmitsUsage(t *testing.T) {
+	// Object exists in the store with a known size; a download negotiates
+	// it and meters the negotiated size.
+	const size = int64(4096)
+	store := newBatchStore(map[string]int64{oidNew: size}, signedFn())
+	authStore := &fakeAuth{
+		repoPerm: map[string]auth.Perm{"acme/foo": auth.PermRead},
+		actors:   map[string]*auth.Actor{"pw": {Name: "alice"}},
+	}
+	actor := &auth.Actor{Name: "alice", UserID: "u-alice"}
+	sink := &usageSinkRec{}
+	srv := newHandlerForTestWithUsage(t, store, authStore, actor, sink)
+	defer srv.Close()
+
+	body, _ := json.Marshal(BatchRequest{
+		Operation: "download",
+		Transfers: []string{"basic"},
+		Objects:   []ObjectRef{{OID: oidNew, Size: size}},
+	})
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/acme/foo.git/info/lfs/objects/batch", bytes.NewReader(body))
+	req.Header.Set("Content-Type", ContentType)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+
+	evs := sink.events()
+	if len(evs) != 1 {
+		t.Fatalf("want 1 usage event, got %d: %+v", len(evs), evs)
+	}
+	ev := evs[0]
+	if ev.Kind != "lfs_download" {
+		t.Errorf("kind = %q, want lfs_download", ev.Kind)
+	}
+	if ev.Tenant != "acme" || ev.Repo != "foo" {
+		t.Errorf("tenant/repo = %q/%q", ev.Tenant, ev.Repo)
+	}
+	if ev.Actor != "alice" {
+		t.Errorf("actor = %q, want alice", ev.Actor)
+	}
+	if ev.Transport != "https" {
+		t.Errorf("transport = %q, want https", ev.Transport)
+	}
+	if ev.Bytes != size {
+		t.Errorf("bytes = %d, want %d (negotiated size)", ev.Bytes, size)
+	}
+	if ev.Status != "negotiated" {
+		t.Errorf("status = %q, want negotiated", ev.Status)
+	}
+	if ev.Objects != 1 {
+		t.Errorf("objects = %d, want 1", ev.Objects)
+	}
+	if ev.DurationMS < 0 {
+		t.Errorf("duration_ms = %d", ev.DurationMS)
+	}
+}
+
+func TestHandler_Batch_Upload_NoUsageEmitted(t *testing.T) {
+	// Upload batches must NOT emit a usage event — the verify handler owns
+	// the authoritative lfs_upload event.
+	store := newProxiedBatchStore(nil, signedFn())
+	authStore := &fakeAuth{
+		repoPerm: map[string]auth.Perm{"acme/foo": auth.PermWrite},
+		actors:   map[string]*auth.Actor{"pw": {Name: "alice"}},
+	}
+	actor := &auth.Actor{Name: "alice"}
+	sink := &usageSinkRec{}
+	srv := newHandlerForTestWithUsage(t, store, authStore, actor, sink)
+	defer srv.Close()
+
+	body, _ := json.Marshal(BatchRequest{
+		Operation: "upload",
+		Transfers: []string{"basic"},
+		Objects:   []ObjectRef{{OID: oidNew, Size: 1}},
+	})
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/acme/foo.git/info/lfs/objects/batch", bytes.NewReader(body))
+	req.Header.Set("Content-Type", ContentType)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	if evs := sink.events(); len(evs) != 0 {
+		t.Fatalf("upload must not emit usage; got %+v", evs)
+	}
+}
+
+func TestHandler_Batch_Download_NilUsageSink_NoPanic(t *testing.T) {
+	const size = int64(10)
+	store := newBatchStore(map[string]int64{oidNew: size}, signedFn())
+	authStore := &fakeAuth{
+		repoPerm: map[string]auth.Perm{"acme/foo": auth.PermRead},
+		actors:   map[string]*auth.Actor{"pw": {Name: "alice"}},
+	}
+	actor := &auth.Actor{Name: "alice"}
+	srv := newHandlerForTest(t, store, authStore, actor) // nil Usage
+	defer srv.Close()
+
+	body, _ := json.Marshal(BatchRequest{
+		Operation: "download",
+		Transfers: []string{"basic"},
+		Objects:   []ObjectRef{{OID: oidNew, Size: size}},
+	})
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/acme/foo.git/info/lfs/objects/batch", bytes.NewReader(body))
+	req.Header.Set("Content-Type", ContentType)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+}

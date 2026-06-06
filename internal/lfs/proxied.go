@@ -17,6 +17,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/lfs/quota"
 	"github.com/bucketvcs/bucketvcs/internal/proxiedurl"
 	"github.com/bucketvcs/bucketvcs/internal/replica"
+	"github.com/bucketvcs/bucketvcs/internal/shiplog"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/webhooks"
 )
@@ -56,6 +57,11 @@ type ProxiedDeps struct {
 	// (GET/HEAD) are unaffected.
 	ReadOnlyReplica bool
 	WriteRegionURL  string
+
+	// Usage is OPTIONAL. When non-nil, the verify handler emits an
+	// lfs_upload usage event after a successful verify (the object is
+	// durably accepted). Nil-safe.
+	Usage UsageSink
 }
 
 // NewProxiedObjectHandler returns the http.Handler mounted at /_lfs/
@@ -78,6 +84,7 @@ func NewProxiedObjectHandler(deps ProxiedDeps) http.Handler {
 		webhooks:        deps.Webhooks,
 		readOnlyReplica: deps.ReadOnlyReplica,
 		writeRegionURL:  deps.WriteRegionURL,
+		usage:           deps.Usage,
 	}
 	if h.logger == nil {
 		h.logger = slog.Default()
@@ -94,6 +101,7 @@ type proxiedObjectHandler struct {
 	webhooks        *webhooks.Service
 	readOnlyReplica bool
 	writeRegionURL  string
+	usage           UsageSink
 }
 
 func (h *proxiedObjectHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -345,6 +353,7 @@ func (h *proxiedObjectHandler) serveGet(ctx context.Context, w http.ResponseWrit
 // upstream at the Batch handler (handler.go handleBatch) when the
 // "upload" operation request is received and the verify URL is minted.
 func (h *proxiedObjectHandler) serveVerify(ctx context.Context, w http.ResponseWriter, r *http.Request, tenant, repo, oid string) {
+	verifyStart := h.now()
 	repoFQN := tenant + "/" + repo
 
 	// LFS spec uses application/vnd.git-lfs+json. Mirror handler.go's
@@ -418,6 +427,21 @@ func (h *proxiedObjectHandler) serveVerify(ctx context.Context, w http.ResponseW
 				webhooks.EmitEnqueueFailed(ctx, h.logger,
 					tenant, repo, "lfs.upload", werr.Error())
 			}
+		}
+		// Usage metering: the object is now durably accepted; meter the
+		// verified object size as an lfs_upload. Token-authenticated path
+		// has no actor in context, so the actor is "anonymous". Nil-safe.
+		if h.usage != nil {
+			h.usage.Usage(shiplog.UsageEvent{
+				Kind:       shiplog.KindLFSUpload,
+				Tenant:     tenant,
+				Repo:       repo,
+				Actor:      "anonymous",
+				Transport:  "https",
+				Bytes:      vreq.Size,
+				DurationMS: h.now().Sub(verifyStart).Milliseconds(),
+				Status:     "ok",
+			})
 		}
 	case errors.Is(err, ErrVerifyNotFound):
 		WriteError(w, http.StatusNotFound, "object not uploaded")

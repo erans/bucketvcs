@@ -875,3 +875,91 @@ func TestReceivePack_MarksMirrorStaleOnPostMutationFailure(t *testing.T) {
 		t.Fatalf("expected sentinel restored after SyncToCurrent, stat err=%v", err)
 	}
 }
+
+func TestReceivePack_EmitsPushUsage(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeRepoInStore(t, storeDir, "acme", "demo")
+	store, _ := localfs.Open(storeDir)
+	t.Cleanup(func() { _ = store.Close() })
+	sink := &sinkRec{}
+	srv, _ := NewServer(store, Options{
+		MirrorDir: t.TempDir(), Version: "test",
+		AuthStore: newPermissiveAuthStore(t, "acme", "demo"),
+		Usage:     sink,
+	})
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	const oldOID = "1111111111111111111111111111111111111111"
+	const newOID = "2222222222222222222222222222222222222222"
+	body := pktBody(
+		dataLine(oldOID+" "+newOID+" refs/heads/main\x00report-status\n"),
+		flush,
+	)
+	body = append(body, []byte("PACK\x00\x00\x00\x02fakebytes")...)
+
+	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	req.SetBasicAuth("perm", "perm")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	resp.Body.Close()
+
+	evs := sink.events()
+	if len(evs) != 1 {
+		t.Fatalf("want 1 push usage event, got %d: %+v", len(evs), evs)
+	}
+	ev := evs[0]
+	if ev.Kind != "push" {
+		t.Errorf("kind = %q, want push", ev.Kind)
+	}
+	if ev.Tenant != "acme" || ev.Repo != "demo" {
+		t.Errorf("tenant/repo = %q/%q", ev.Tenant, ev.Repo)
+	}
+	if ev.Transport != "https" {
+		t.Errorf("transport = %q, want https", ev.Transport)
+	}
+	if ev.Actor == "" || ev.Actor == "anonymous" {
+		t.Errorf("actor = %q, want authenticated name", ev.Actor)
+	}
+	if ev.Bytes <= 0 {
+		t.Errorf("bytes = %d, want > 0 (counted request body)", ev.Bytes)
+	}
+	if ev.DurationMS < 0 {
+		t.Errorf("duration_ms = %d", ev.DurationMS)
+	}
+	if ev.Status == "" {
+		t.Errorf("status empty")
+	}
+}
+
+func TestReceivePack_NilUsageSink_NoPanic(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeRepoInStore(t, storeDir, "acme", "demo")
+	store, _ := localfs.Open(storeDir)
+	t.Cleanup(func() { _ = store.Close() })
+	srv, _ := NewServer(store, Options{MirrorDir: t.TempDir(), Version: "test", AuthStore: newPermissiveAuthStore(t, "acme", "demo")}) // nil Usage
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	const oldOID = "1111111111111111111111111111111111111111"
+	const newOID = "2222222222222222222222222222222222222222"
+	body := pktBody(dataLine(oldOID+" "+newOID+" refs/heads/main\x00report-status\n"), flush)
+	body = append(body, []byte("PACK\x00\x00\x00\x02fakebytes")...)
+	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	req.SetBasicAuth("perm", "perm")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	resp.Body.Close()
+}

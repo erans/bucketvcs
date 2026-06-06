@@ -1,12 +1,15 @@
 package gateway
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/gitproto/uploadpack"
+	"github.com/bucketvcs/bucketvcs/internal/shiplog"
 )
 
 // uploadPackBodyLimit caps the upload-pack POST request body. A real fetch
@@ -68,12 +71,19 @@ func (s *Server) handleUploadPack(w http.ResponseWriter, r *http.Request, tenant
 	w.Header().Set("Content-Type", "application/x-git-upload-pack-result")
 	w.Header().Set("Cache-Control", "no-cache")
 
+	// Usage metering: wrap the response writer so we can report the fetch
+	// response bytes. start is taken here (the point we commit to serving a
+	// fetch — past the v2/scope/byob gates). The counting writer preserves
+	// http.Flusher for git smart-HTTP streaming.
+	cw := &countingResponseWriter{ResponseWriter: w}
+	start := time.Now()
+
 	req := &uploadpack.EngineRequest{
 		Ctx:               r.Context(),
 		Tenant:            tenant,
 		Repo:              repoID,
 		Stdin:             body,
-		Stdout:            w,
+		Stdout:            cw,
 		Stderr:            io.Discard,
 		ProtocolVersion:   2,
 		Store:             store,
@@ -92,7 +102,10 @@ func (s *Server) handleUploadPack(w http.ResponseWriter, r *http.Request, tenant
 		req.PackURIBuildURL = s.packURIBuildURL
 	}
 	req.Logger = s.logger
-	if err := uploadpack.Service(req); err != nil {
+	serveErr := uploadpack.Service(req)
+	// Emit the fetch usage event regardless of outcome (status reflects it).
+	s.emitFetchUsage(r.Context(), tenant, repoID, cw.n, start, serveErr)
+	if err := serveErr; err != nil {
 		// Map engine errors to HTTP statuses. Note: bytes may already
 		// have been written before some failures; this matches M3.
 		switch {
@@ -113,4 +126,27 @@ func (s *Server) handleUploadPack(w http.ResponseWriter, r *http.Request, tenant
 			http.Error(w, "internal storage error", http.StatusInternalServerError)
 		}
 	}
+}
+
+// emitFetchUsage records a fetch (clone folds into fetch) usage event after
+// the upload-pack engine completes. Nil-safe: when log shipping is off,
+// s.opts.Usage is nil and this is a no-op.
+func (s *Server) emitFetchUsage(ctx context.Context, tenant, repoID string, bytes int64, start time.Time, serveErr error) {
+	if s.opts.Usage == nil {
+		return
+	}
+	status := "ok"
+	if serveErr != nil {
+		status = "error"
+	}
+	s.opts.Usage.Usage(shiplog.UsageEvent{
+		Kind:       shiplog.KindFetch,
+		Tenant:     tenant,
+		Repo:       repoID,
+		Actor:      usageActor(ActorFromContext(ctx)),
+		Transport:  "https",
+		Bytes:      bytes,
+		DurationMS: time.Since(start).Milliseconds(),
+		Status:     status,
+	})
 }

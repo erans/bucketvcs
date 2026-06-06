@@ -19,6 +19,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/gitproto/uploadpack"
 	"github.com/bucketvcs/bucketvcs/internal/lfs"
 	"github.com/bucketvcs/bucketvcs/internal/replica"
+	"github.com/bucketvcs/bucketvcs/internal/shiplog"
 )
 
 // handleConn upgrades a raw TCP connection to an SSH server connection,
@@ -184,13 +185,17 @@ run:
 			sendExitStatus(ch, 1)
 			return
 		}
+		// Usage metering: count fetch response bytes on the channel write
+		// side. start is taken here, the point we commit to serving.
+		uploadCW := &countingChannelWriter{w: ch}
+		uploadStart := time.Now()
 		req := &uploadpack.EngineRequest{
 			Ctx:               ctx,
 			Tenant:            cmd.Tenant,
 			Repo:              cmd.Repo,
 			Actor:             actor,
 			Stdin:             ch,
-			Stdout:            ch,
+			Stdout:            uploadCW,
 			Stderr:            ch.Stderr(),
 			ProtocolVersion:   pv,
 			SSH:               true,
@@ -222,6 +227,7 @@ run:
 				break
 			}
 		}
+		s.emitUsage(shiplog.KindFetch, cmd.Tenant, cmd.Repo, actor, uploadCW.n, uploadStart, serveErr)
 	case OpReceive:
 		// Read-only replica: refuse pushes with a pointer to the write
 		// region, matching the HTTP gateway's 403 refusal. We emit the
@@ -242,12 +248,16 @@ run:
 			sendExitStatus(ch, 1)
 			return
 		}
+		// Usage metering: count the uploaded packfile bytes on the read
+		// side (the push payload is inbound). start is taken here.
+		receiveCR := &countingChannelReader{r: ch}
+		receiveStart := time.Now()
 		req := &receivepack.EngineRequest{
 			Ctx:             ctx,
 			Tenant:          cmd.Tenant,
 			Repo:            cmd.Repo,
 			Actor:           actor,
-			Stdin:           ch,
+			Stdin:           receiveCR,
 			Stdout:          ch,
 			Stderr:          ch.Stderr(),
 			ProtocolVersion: pv,
@@ -260,6 +270,7 @@ run:
 			Logger:          s.opts.Logger,
 		}
 		serveErr = receivepack.Serve(req)
+		s.emitUsage(shiplog.KindPush, cmd.Tenant, cmd.Repo, actor, receiveCR.n, receiveStart, serveErr)
 	case OpLFSAuthenticate:
 		// handleLFSAuthenticate owns its own exit code (0 on success,
 		// 1 on disabled/error, 128 on forbidden/anon). Returning here

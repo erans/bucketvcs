@@ -13,6 +13,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/gateway/routenames"
 	"github.com/bucketvcs/bucketvcs/internal/proxiedurl"
 	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
+	"github.com/bucketvcs/bucketvcs/internal/shiplog"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
 
@@ -27,7 +28,7 @@ import (
 //
 // logger is used for served-* metrics and the proxied.url.served audit
 // event. If nil, slog.Default() is used.
-func NewProxiedHandler(store storage.ObjectStore, key []byte, bundlePrefix, packPrefix string, logger *slog.Logger) http.Handler {
+func NewProxiedHandler(store storage.ObjectStore, key []byte, bundlePrefix, packPrefix string, logger *slog.Logger, usage UsageSink) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -38,6 +39,7 @@ func NewProxiedHandler(store storage.ObjectStore, key []byte, bundlePrefix, pack
 		packPrefix:   packPrefix,
 		now:          time.Now,
 		logger:       logger,
+		usage:        usage,
 	}
 }
 
@@ -48,9 +50,11 @@ type proxiedHandler struct {
 	packPrefix   string
 	now          func() time.Time
 	logger       *slog.Logger
+	usage        UsageSink
 }
 
 func (h *proxiedHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	reqStart := h.now()
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -61,7 +65,7 @@ func (h *proxiedHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// passes), but the HEAD short-circuits in serveObject return before
 	// reaching the emitServed call sites, so served-* metrics fire only
 	// on successful GET (200/206) paths regardless of HEAD's traversal.
-	cw := &countingWriter{ResponseWriter: w}
+	cw := &countingResponseWriter{ResponseWriter: w}
 	var kind, rest string
 	switch {
 	case strings.HasPrefix(r.URL.Path, h.bundlePrefix):
@@ -157,7 +161,7 @@ func (h *proxiedHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "pack":
 		storageKey = rkeys.CanonicalPackKey(hash)
 	}
-	h.serveObject(r.Context(), cw, r, kind, hash, tenant, repo, storageKey)
+	h.serveObject(r.Context(), cw, r, kind, hash, tenant, repo, storageKey, reqStart)
 }
 
 // validProxiedHash returns true if hash matches the on-the-wire charset
@@ -196,7 +200,7 @@ func isHex(s string, n int) bool {
 	return true
 }
 
-func (h *proxiedHandler) serveObject(ctx context.Context, w *countingWriter, r *http.Request, kind, hash, tenant, repo, key string) {
+func (h *proxiedHandler) serveObject(ctx context.Context, w *countingResponseWriter, r *http.Request, kind, hash, tenant, repo, key string, reqStart time.Time) {
 	rangeHdr := r.Header.Get("Range")
 	if rangeHdr == "" {
 		// Full object.
@@ -222,7 +226,8 @@ func (h *proxiedHandler) serveObject(ctx context.Context, w *countingWriter, r *
 		}
 		defer obj.Body.Close()
 		_, _ = io.Copy(w, obj.Body)
-		h.emitServed(ctx, kind, hash, tenant, repo, w.bytes, http.StatusOK, false)
+		h.emitServed(ctx, kind, hash, tenant, repo, w.n, http.StatusOK, false)
+		h.emitUsage(kind, tenant, repo, w.n, reqStart)
 		return
 	}
 	// Range: bytes=<start>-<end>
@@ -278,7 +283,8 @@ func (h *proxiedHandler) serveObject(ctx context.Context, w *countingWriter, r *
 	defer rc.Close()
 	w.WriteHeader(http.StatusPartialContent)
 	_, _ = io.Copy(w, rc)
-	h.emitServed(ctx, kind, hash, tenant, repo, w.bytes, http.StatusPartialContent, true)
+	h.emitServed(ctx, kind, hash, tenant, repo, w.n, http.StatusPartialContent, true)
+	h.emitUsage(kind, tenant, repo, w.n, reqStart)
 }
 
 // writeStoreError maps storage sentinel errors to HTTP status codes.
@@ -343,24 +349,27 @@ func (h *proxiedHandler) emitServed(ctx context.Context, kind, hash, tenant, rep
 	emitProxiedURLServed(ctx, h.logger, kind, hash, tenant, repo, bytesServed, statusCode, rangeRequest)
 }
 
-// countingWriter wraps an http.ResponseWriter to record the number of body
-// bytes written. Used by the proxied handler to report actual bytes served
-// in the bundle_uri_served_bytes / pack_uri_served_bytes metrics and in the
-// proxied.url.served audit event's bytes_served field. The count reflects
-// what reached the client (which may be less than Content-Length when the
-// client disconnects mid-stream).
-//
-// Intentionally does NOT promote http.Flusher / http.Hijacker / http.Pusher
-// from the wrapped writer — the proxied routes only do plain Write of
-// bundle/pack bytes (no SSE, WebSocket, or HTTP/2 push). A future handler
-// that needs those interfaces should re-wrap with explicit passthroughs.
-type countingWriter struct {
-	http.ResponseWriter
-	bytes int64
-}
-
-func (c *countingWriter) Write(p []byte) (int, error) {
-	n, err := c.ResponseWriter.Write(p)
-	c.bytes += int64(n)
-	return n, err
+// emitUsage records a bundle_serve / pack_serve usage event after a
+// successful proxied GET. The proxied endpoint is token-authenticated and
+// carries no actor in context, so the usage actor is recorded as
+// "anonymous". Nil-safe: when log shipping is off, h.usage is nil and this
+// is a no-op.
+func (h *proxiedHandler) emitUsage(kind, tenant, repo string, bytesServed int64, start time.Time) {
+	if h.usage == nil {
+		return
+	}
+	usageKind := shiplog.KindBundleServe
+	if kind == "pack" {
+		usageKind = shiplog.KindPackServe
+	}
+	h.usage.Usage(shiplog.UsageEvent{
+		Kind:       usageKind,
+		Tenant:     tenant,
+		Repo:       repo,
+		Actor:      "anonymous",
+		Transport:  "https",
+		Bytes:      bytesServed,
+		DurationMS: h.now().Sub(start).Milliseconds(),
+		Status:     "ok",
+	})
 }
