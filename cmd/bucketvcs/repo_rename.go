@@ -202,6 +202,8 @@ func repoRename(ctx context.Context, args []string, stdout, stderr io.Writer) in
 
 	webhooks.EmitRepoRenamedMetric(ctx, slog.Default(), "ok")
 	slog.Default().LogAttrs(ctx, slog.LevelInfo, "repo.renamed",
+		slog.Bool("audit", true),
+		slog.String("event", "repo.renamed"),
 		slog.String("tenant", tenant),
 		slog.String("old_name", oldName),
 		slog.String("new_name", newName),

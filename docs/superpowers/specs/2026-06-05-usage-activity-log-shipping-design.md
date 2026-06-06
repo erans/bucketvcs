@@ -87,7 +87,8 @@ sys/logs/usage/<YYYY>/<MM>/<DD>/<HHMMSS>-<instance8>-<seq6>.ndjson.gz
 
 - `instance8` = 8-hex chars of a per-boot crypto/rand instance ID → multinode
   gateways never collide; readers merge by timestamp.
-- Written with `PutIfAbsent`; on (theoretical) collision, bump seq and retry.
+- Written with `PutIfAbsent`; a PutIfAbsent collision means an identical
+  re-ship of the same file (at-least-once) and is treated as success.
 - BYOB: logs always target the **system** store, never tenant buckets.
 
 ## Lifecycle
@@ -168,6 +169,14 @@ shipper-audits-its-own-shipping loop).
 - Built-in retention — operators use bucket lifecycle rules on `sys/logs/`
   (same guidance pattern as `sys/authdb/`).
 - Prometheus `/metrics` endpoint (separate observability discussion).
+
+> **Amendment (implementation).** `fetch` usage events are request-level, not
+> operation-level: protocol-v2 `ls-refs` and `fetch` are separate HTTP POSTs and
+> each emits its own `fetch` record, so a single logical `git clone` typically
+> produces two or more `fetch` records. There is no `clone` kind (clone and
+> fetch are indistinguishable at the transport layer); aggregate by
+> `(tenant, repo, actor)` over a time window rather than counting records as
+> operations.
 
 ## Risks
 

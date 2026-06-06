@@ -37,6 +37,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/replica"
 	"github.com/bucketvcs/bucketvcs/internal/repo"
 	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
+	"github.com/bucketvcs/bucketvcs/internal/shiplog"
 	"github.com/bucketvcs/bucketvcs/internal/sshd"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/storage/fallback"
@@ -91,6 +92,17 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	replicaOf, replicaCheckInterval, writeRegionURL := sf.replicaOf, sf.replicaCheckInterval, sf.writeRegionURL
 
 	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	// Log shipping (sys/logs/) flag-value validation. The store dependency
+	// ("on requires --store") is enforced just after the generic
+	// "--store is required" gate below, so its message stays subordinate to
+	// that gate (serve already requires --store unconditionally).
+	switch *sf.logShipping {
+	case "on", "off":
+	default:
+		fmt.Fprintf(stderr, "serve: --log-shipping=%q must be \"on\" or \"off\"\n", *sf.logShipping)
 		return 2
 	}
 
@@ -223,6 +235,67 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 		return 1
 	}
 	defer closeStore(store)
+
+	// Log shipping (sys/logs/). Constructed here — AFTER openStore and AFTER
+	// `defer closeStore(store)` so LIFO makes the engine's shutdown flush run
+	// BEFORE the store closes (the flush PUTs to that store) — and BEFORE the
+	// M26 replica composition + M28 authdb-replication blocks so:
+	//   (1) the engine ships to the raw operator store, not the M26 fallback
+	//       wrapper (log objects belong in the operator's own bucket);
+	//   (2) slog.SetDefault installs the tap before those subsystems emit any
+	//       audit events (e.g. authdb.replica.restored), so the activity
+	//       stream captures them too.
+	// The engine's own Logger is built on the BASE handler (captured before
+	// SetDefault) — never the tap — to avoid self-feeding. When
+	// --log-shipping=off shipEngine stays nil and the tap is never installed;
+	// shipEngine.Usage is nil-safe at call sites.
+	//
+	// The base handler is installed as the slog default in BOTH modes so the
+	// console format does not depend on a flag that is nominally about
+	// shipping (review finding: on/off format asymmetry). We MUST NOT tap
+	// slog.Default()'s handler: when SetDefault was never called that default
+	// is the stdlib log<->slog bridge, and tapping it while re-installing the
+	// result as default creates a re-entrant cycle on the log package mutex
+	// (defaultHandler.Handle -> log.Output[mutex] -> slog.Default()[=tap] ->
+	// defaultHandler.Handle -> log.Output[same mutex] = deadlock). A concrete
+	// stderr TextHandler preserves "serve logs go to stderr".
+	base := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{})
+	slog.SetDefault(slog.New(base))
+	var shipEngine *shiplog.Engine
+	if *sf.logShipping == "on" {
+		spoolDir, serr := resolveSpoolDir(*sf.logSpoolDir, realEnv())
+		if serr != nil {
+			fmt.Fprintf(stderr, "serve: --log-spool-dir: %v\n", serr)
+			return 1
+		}
+		// Base handler rationale: see the block comment above (installed
+		// unconditionally for on/off format consistency).
+		shipEngine, serr = shiplog.New(shiplog.Config{
+			Store:         store,
+			SpoolDir:      spoolDir,
+			MaxEvents:     *sf.logShipMaxEvents,
+			MaxAge:        *sf.logShipInterval,
+			SpoolMaxBytes: *sf.logSpoolMaxBytes,
+			Logger:        slog.New(base), // base handler — never the tap (no self-feed)
+		})
+		if serr != nil {
+			fmt.Fprintf(stderr, "serve: log shipping: %v\n", serr)
+			return 1
+		}
+		slog.SetDefault(slog.New(shiplog.NewTapHandler(base, shipEngine)))
+		shipEngine.Start()
+		// Registered AFTER `defer closeStore(store)` ⇒ runs BEFORE it (LIFO),
+		// so the final flush still has an open store. Independent of authS /
+		// the authdb-replication defers. Failures are logged via the base
+		// handler (the engine is closing; do not re-enter the tap).
+		defer func() {
+			shCtx, shCancel := context.WithTimeout(context.Background(), *shutdownTimeout)
+			defer shCancel()
+			if cerr := shipEngine.Close(shCtx); cerr != nil {
+				slog.New(base).Error("log shipping shutdown", slog.Any("error", cerr))
+			}
+		}()
+	}
 
 	// M26 replica composition. The defer above was registered against the
 	// regional store value, so reassigning `store` below still closes the
@@ -709,11 +782,17 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			OIDCStore:               oidcStore,
 			OIDCVerifier:            oidcVerifier,
 			Replica:                 replicaCfg,
-			StoreResolver:           func() gateway.ByobResolver {
+			StoreResolver: func() gateway.ByobResolver {
 				if storeResolver == nil {
 					return nil
 				}
 				return storeResolver
+			}(),
+			Usage: func() gateway.UsageSink {
+				if shipEngine == nil {
+					return nil // avoid a typed-nil interface
+				}
+				return shipEngine
 			}(),
 		})
 		if err != nil {
@@ -902,11 +981,17 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			Hooks:             hooksSvc,
 			Limiter:           rateLimiter,
 			Replica:           replicaCfg,
-			Resolver:          func() sshd.ByobResolver {
+			Resolver: func() sshd.ByobResolver {
 				if storeResolver == nil {
 					return nil
 				}
 				return storeResolver
+			}(),
+			Usage: func() sshd.UsageSink {
+				if shipEngine == nil {
+					return nil // avoid a typed-nil interface
+				}
+				return shipEngine
 			}(),
 		})
 		if err != nil {
@@ -1053,5 +1138,3 @@ func (a oidcVerifierAdapter) Verify(ctx context.Context, raw, issuer string) (ma
 	c, err := a.v.Verify(ctx, raw, issuer)
 	return map[string]any(c), err
 }
-
-

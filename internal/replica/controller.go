@@ -184,11 +184,15 @@ func (c *Controller) transitionLocked(ctx context.Context, tenant, repo string, 
 	st.unhealthy = nowUnhealthy
 	if nowUnhealthy {
 		c.cfg.Logger.LogAttrs(ctx, slog.LevelWarn, "replica.repo.unhealthy",
+			slog.Bool("audit", true),
+			slog.String("event", "replica.repo.unhealthy"),
 			slog.String("tenant", tenant), slog.String("repo", repo),
 			slog.String("reason", verdict.Error()))
 		return
 	}
 	c.cfg.Logger.LogAttrs(ctx, slog.LevelInfo, "replica.repo.recovered",
+		slog.Bool("audit", true),
+		slog.String("event", "replica.repo.recovered"),
 		slog.String("tenant", tenant), slog.String("repo", repo))
 }
 

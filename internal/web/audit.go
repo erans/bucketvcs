@@ -10,6 +10,8 @@ func EmitSessionCreated(ctx context.Context, logger *slog.Logger, userID, name, 
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "auth.session.created",
+		slog.Bool("audit", true),
+		slog.String("event", "auth.session.created"),
 		slog.String("user_id", userID),
 		slog.String("user", name),
 		slog.String("provider", provider),
@@ -21,6 +23,8 @@ func EmitSessionDestroyed(ctx context.Context, logger *slog.Logger, userID, name
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "auth.session.destroyed",
+		slog.Bool("audit", true),
+		slog.String("event", "auth.session.destroyed"),
 		slog.String("user_id", userID),
 		slog.String("user", name),
 	)
@@ -31,6 +35,8 @@ func EmitOIDCLogin(ctx context.Context, logger *slog.Logger, userID, name, issue
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "auth.oidc.login",
+		slog.Bool("audit", true),
+		slog.String("event", "auth.oidc.login"),
 		slog.String("user_id", userID), slog.String("user", name),
 		slog.String("issuer", issuer), slog.String("subject", subject))
 }
@@ -40,6 +46,8 @@ func EmitOIDCIdentityLinked(ctx context.Context, logger *slog.Logger, userID, na
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "auth.oidc.identity_linked",
+		slog.Bool("audit", true),
+		slog.String("event", "auth.oidc.identity_linked"),
 		slog.String("user_id", userID), slog.String("user", name),
 		slog.String("issuer", issuer), slog.String("subject", subject), slog.String("email", email))
 }
@@ -49,5 +57,7 @@ func EmitOIDCRejected(ctx context.Context, logger *slog.Logger, issuer, reason, 
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelWarn, "auth.oidc.rejected",
+		slog.Bool("audit", true),
+		slog.String("event", "auth.oidc.rejected"),
 		slog.String("issuer", issuer), slog.String("reason", reason), slog.String("email", email))
 }

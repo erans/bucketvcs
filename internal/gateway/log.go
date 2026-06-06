@@ -55,7 +55,7 @@ func emitBundleURIAdvertised(ctx context.Context, logger *slog.Logger, repoID, f
 // emitProxiedURLServed logs a proxied.url.served audit event after a
 // successful 200/206 reply from the proxied URL endpoint. Emitted from
 // proxiedHandler post-io.Copy; the bytes_served value is the actual bytes
-// written (via countingWriter), not the Content-Length header.
+// written (via countingResponseWriter), not the Content-Length header.
 //
 // tenant and repo are the M19 multi-tenant attribution attrs — they
 // identify which (tenant, repo) pair this served object belonged to so

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bucketvcs/bucketvcs/internal/shiplog"
 	"github.com/bucketvcs/bucketvcs/internal/storage/localfs"
 )
 
@@ -593,4 +594,62 @@ func hexNibbleTest(n byte) byte {
 		return '0' + n
 	}
 	return 'a' + (n - 10)
+}
+
+func TestUploadPack_EmitsFetchUsage(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeRepoInStore(t, storeDir, "acme", "demo")
+	store, _ := localfs.Open(storeDir)
+	t.Cleanup(func() { _ = store.Close() })
+	sink := &sinkRec{}
+	srv, _ := NewServer(store, Options{
+		MirrorDir: t.TempDir(), Version: "test",
+		AuthStore: newAnonymousTestAuthStore(t, "acme", "demo", true),
+		Usage:     sink,
+	})
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	dst := t.TempDir() + "/clone.git"
+	cmd := exec.Command("git", "clone", "--bare", "-c", "protocol.version=2", ts.URL+"/acme/demo.git", dst)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git clone: %v\n%s", err, out)
+	}
+
+	// A v2 clone issues a POST git-upload-pack (the fetch). ls-refs may also
+	// arrive as a POST and emit its own fetch event; require at least one
+	// fetch event with non-zero bytes (the packfile-bearing one).
+	evs := sink.events()
+	var fetch *shiplog.UsageEvent
+	for i := range evs {
+		ev := evs[i]
+		if ev.Kind != "fetch" {
+			t.Fatalf("unexpected kind %q", ev.Kind)
+		}
+		if ev.Bytes > 0 {
+			fetch = &evs[i]
+		}
+	}
+	if fetch == nil {
+		t.Fatalf("no fetch usage event with bytes>0; got %+v", evs)
+	}
+	if fetch.Tenant != "acme" || fetch.Repo != "demo" {
+		t.Errorf("tenant/repo = %q/%q", fetch.Tenant, fetch.Repo)
+	}
+	if fetch.Transport != "https" {
+		t.Errorf("transport = %q", fetch.Transport)
+	}
+	if fetch.Actor == "" {
+		t.Errorf("actor empty")
+	}
+	if fetch.Status != "ok" {
+		t.Errorf("status = %q, want ok", fetch.Status)
+	}
+	if fetch.DurationMS < 0 {
+		t.Errorf("duration_ms = %d", fetch.DurationMS)
+	}
 }

@@ -11,18 +11,20 @@ import (
 // envLookup is a small abstraction over os.Getenv so resolveAuthDB and
 // resolveHostKey are testable without mutating process state.
 type envLookup struct {
-	BUCKETVCS_AUTH_DB      string
-	BUCKETVCS_SSH_HOST_KEY string
-	XDG_STATE_HOME         string
-	HOME                   string
+	BUCKETVCS_AUTH_DB       string
+	BUCKETVCS_SSH_HOST_KEY  string
+	BUCKETVCS_LOG_SPOOL_DIR string
+	XDG_STATE_HOME          string
+	HOME                    string
 }
 
 func realEnv() *envLookup {
 	return &envLookup{
-		BUCKETVCS_AUTH_DB:      os.Getenv("BUCKETVCS_AUTH_DB"),
-		BUCKETVCS_SSH_HOST_KEY: os.Getenv("BUCKETVCS_SSH_HOST_KEY"),
-		XDG_STATE_HOME:         os.Getenv("XDG_STATE_HOME"),
-		HOME:                   os.Getenv("HOME"),
+		BUCKETVCS_AUTH_DB:       os.Getenv("BUCKETVCS_AUTH_DB"),
+		BUCKETVCS_SSH_HOST_KEY:  os.Getenv("BUCKETVCS_SSH_HOST_KEY"),
+		BUCKETVCS_LOG_SPOOL_DIR: os.Getenv("BUCKETVCS_LOG_SPOOL_DIR"),
+		XDG_STATE_HOME:          os.Getenv("XDG_STATE_HOME"),
+		HOME:                    os.Getenv("HOME"),
 	}
 }
 

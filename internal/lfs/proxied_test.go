@@ -787,3 +787,95 @@ func TestProxiedReadOnlyReplica(t *testing.T) {
 		t.Errorf("GET body=%q want %q", got, payload)
 	}
 }
+
+func TestProxied_Verify_EmitsUsage(t *testing.T) {
+	key := bytes.Repeat([]byte{0xab}, 32)
+	sink := &usageSinkRec{}
+	h := NewProxiedObjectHandler(ProxiedDeps{
+		Store:  newTestLocalfs(t),
+		Key:    key,
+		Logger: captureLogger(&bytes.Buffer{}),
+		Usage:  sink,
+	})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	oid, size := putForVerifyTest(t, srv.URL, key, "acme", "foo", []byte("verify-usage"))
+	verTok := mintLFSToken(t, key, "lfs-verify", "acme", "foo", oid)
+	resp := postVerifyJSON(t, srv.URL+"/_lfs/acme/foo/"+oid+"?token="+verTok, VerifyRequest{OID: oid, Size: size})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d want 200", resp.StatusCode)
+	}
+
+	evs := sink.events()
+	if len(evs) != 1 {
+		t.Fatalf("want 1 usage event, got %d: %+v", len(evs), evs)
+	}
+	ev := evs[0]
+	if ev.Kind != "lfs_upload" {
+		t.Errorf("kind = %q, want lfs_upload", ev.Kind)
+	}
+	if ev.Tenant != "acme" || ev.Repo != "foo" {
+		t.Errorf("tenant/repo = %q/%q", ev.Tenant, ev.Repo)
+	}
+	if ev.Actor != "anonymous" {
+		t.Errorf("actor = %q, want anonymous (token-auth has no actor)", ev.Actor)
+	}
+	if ev.Transport != "https" {
+		t.Errorf("transport = %q, want https", ev.Transport)
+	}
+	if ev.Bytes != size {
+		t.Errorf("bytes = %d, want %d (verified object size)", ev.Bytes, size)
+	}
+	if ev.Status != "ok" {
+		t.Errorf("status = %q, want ok", ev.Status)
+	}
+	if ev.DurationMS < 0 {
+		t.Errorf("duration_ms = %d", ev.DurationMS)
+	}
+}
+
+func TestProxied_Verify_NilUsageSink_NoPanic(t *testing.T) {
+	key := bytes.Repeat([]byte{0xab}, 32)
+	h := NewProxiedObjectHandler(ProxiedDeps{
+		Store:  newTestLocalfs(t),
+		Key:    key,
+		Logger: captureLogger(&bytes.Buffer{}),
+	}) // nil Usage
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	oid, size := putForVerifyTest(t, srv.URL, key, "acme", "foo", []byte("verify-nilsink"))
+	verTok := mintLFSToken(t, key, "lfs-verify", "acme", "foo", oid)
+	resp := postVerifyJSON(t, srv.URL+"/_lfs/acme/foo/"+oid+"?token="+verTok, VerifyRequest{OID: oid, Size: size})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d want 200", resp.StatusCode)
+	}
+}
+
+func TestProxied_Verify_FailureEmitsNoUsage(t *testing.T) {
+	// A verify for an object that was never uploaded returns 404 and must
+	// NOT emit an lfs_upload usage event.
+	key := bytes.Repeat([]byte{0xab}, 32)
+	sink := &usageSinkRec{}
+	h := NewProxiedObjectHandler(ProxiedDeps{
+		Store:  newTestLocalfs(t),
+		Key:    key,
+		Logger: captureLogger(&bytes.Buffer{}),
+		Usage:  sink,
+	})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	verTok := mintLFSToken(t, key, "lfs-verify", "acme", "foo", goodOID)
+	resp := postVerifyJSON(t, srv.URL+"/_lfs/acme/foo/"+goodOID+"?token="+verTok, VerifyRequest{OID: goodOID, Size: 1})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status=%d want 404", resp.StatusCode)
+	}
+	if evs := sink.events(); len(evs) != 0 {
+		t.Fatalf("failed verify must not emit usage; got %+v", evs)
+	}
+}

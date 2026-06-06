@@ -1,14 +1,17 @@
 package gateway
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/gitproto/receivepack"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
+	"github.com/bucketvcs/bucketvcs/internal/shiplog"
 )
 
 // handleReceivePack implements POST /<tenant>/<repo>.git/git-receive-pack.
@@ -44,12 +47,18 @@ func (s *Server) handleReceivePack(w http.ResponseWriter, r *http.Request, tenan
 		return
 	}
 
+	// Usage metering: wrap the request body so we can report the uploaded
+	// packfile bytes (the push payload arrives on the body, not the
+	// response). start is taken here, the point we commit to serving a push.
+	cr := &countingReader{r: body}
+	start := time.Now()
+
 	req := &receivepack.EngineRequest{
 		Ctx:          r.Context(),
 		Tenant:       tenant,
 		Repo:         repoID,
 		Actor:        ActorFromContext(r.Context()),
-		Stdin:        body,
+		Stdin:        cr,
 		Stdout:       w,
 		Stderr:       io.Discard,
 		Store:        store,
@@ -61,6 +70,11 @@ func (s *Server) handleReceivePack(w http.ResponseWriter, r *http.Request, tenan
 		Logger:       s.logger,
 	}
 	err = receivepack.Service(req)
+	// Emit the push usage event after the engine completes. The flush-only
+	// probe carries no pack and is not a push attempt, so it is excluded.
+	if !errors.Is(err, receivepack.ErrFlushOnlyProbe) {
+		s.emitPushUsage(r.Context(), tenant, repoID, cr.n, start, err)
+	}
 	if err == nil {
 		return
 	}
@@ -94,6 +108,30 @@ func (s *Server) handleReceivePack(w http.ResponseWriter, r *http.Request, tenan
 			"err", err, "tenant", tenant, "repo", repoID)
 		http.Error(w, "internal storage error", http.StatusInternalServerError)
 	}
+}
+
+// emitPushUsage records a push usage event after the receive-pack engine
+// completes. Bytes is the uploaded packfile size (counted on the request
+// body). Nil-safe: when log shipping is off, s.opts.Usage is nil and this
+// is a no-op.
+func (s *Server) emitPushUsage(ctx context.Context, tenant, repoID string, bytes int64, start time.Time, serveErr error) {
+	if s.opts.Usage == nil {
+		return
+	}
+	status := "ok"
+	if serveErr != nil {
+		status = "error"
+	}
+	s.opts.Usage.Usage(shiplog.UsageEvent{
+		Kind:       shiplog.KindPush,
+		Tenant:     tenant,
+		Repo:       repoID,
+		Actor:      usageActor(ActorFromContext(ctx)),
+		Transport:  "https",
+		Bytes:      bytes,
+		DurationMS: time.Since(start).Milliseconds(),
+		Status:     status,
+	})
 }
 
 // markMirrorStale removes the mirror's manifest-version sentinel so the

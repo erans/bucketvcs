@@ -17,6 +17,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/lfs/locks"
 	"github.com/bucketvcs/bucketvcs/internal/lfs/quota"
 	"github.com/bucketvcs/bucketvcs/internal/replica"
+	"github.com/bucketvcs/bucketvcs/internal/shiplog"
 	"github.com/bucketvcs/bucketvcs/internal/webhooks"
 )
 
@@ -77,6 +78,11 @@ type Deps struct {
 	// 403 carrying WriteRegionURL. Downloads are unaffected.
 	ReadOnlyReplica bool
 	WriteRegionURL  string
+
+	// Usage is OPTIONAL. When non-nil, the Batch handler emits an
+	// lfs_download usage event for download-operation requests after Build
+	// returns. Nil-safe: nil disables usage metering (log shipping off).
+	Usage UsageSink
 }
 
 // lfsRoute enumerates the LFS sub-routes the handler dispatches.
@@ -144,6 +150,8 @@ func NewHTTPHandler(deps Deps) http.Handler {
 		// operation is known so downloads still succeed.
 		if deps.ReadOnlyReplica && route != lfsRouteBatch {
 			logger.LogAttrs(ctx, slog.LevelInfo, "lfs.locks.replica_refused",
+				slog.Bool("audit", true),
+				slog.String("event", "lfs.locks.replica_refused"),
 				slog.String("tenant", tenant), slog.String("repo", repo))
 			WriteError(w, http.StatusForbidden, replica.RefusalMessage(deps.WriteRegionURL))
 			return
@@ -179,6 +187,7 @@ func NewHTTPHandler(deps Deps) http.Handler {
 // lives here. The caller has already verified the route, method, and
 // actor.
 func handleBatch(ctx context.Context, w http.ResponseWriter, r *http.Request, deps Deps, tenant, repo string, actor *auth.Actor, logger *slog.Logger) {
+	batchStart := time.Now()
 	// LFS spec requires application/vnd.git-lfs+json on Batch
 	// requests. Reject mismatched Content-Types to surface client
 	// bugs early. We tolerate an empty Content-Type (some clients
@@ -362,6 +371,42 @@ func handleBatch(ctx context.Context, w http.ResponseWriter, r *http.Request, de
 	// Audit + request-level metric.
 	emitBatchRequestMetric(ctx, logger, req.Operation, "ok")
 	emitLFSBatch(ctx, logger, tenant+"/"+repo, actorName(actor), req.Operation, len(resp.Objects), "ok")
+
+	// Usage metering: download operations meter the negotiated transfer
+	// volume (sum of the object sizes we returned download actions for).
+	// Status is "negotiated" because the bytes are the agreed-upon sizes,
+	// not bytes actually transferred (direct-mode LFS transfers happen
+	// against the object store / a signed URL, out of band of this handler).
+	// Upload batches are NOT metered here — the verify handler emits the
+	// authoritative lfs_upload event once an object is durably accepted.
+	if req.Operation == "download" && deps.Usage != nil {
+		var total int64
+		var n int
+		for _, o := range resp.Objects {
+			// Errored objects (missing, presign failure, etc.) carry no
+			// real transfer — exclude them so metering reflects only the
+			// objects we actually returned a download action for. Sizes are
+			// authoritative (the stored size, set by buildOne), not the
+			// client's claimed ref.Size.
+			if o.Error == nil {
+				total += o.Size
+				n++
+			}
+		}
+		if n > 0 {
+			deps.Usage.Usage(shiplog.UsageEvent{
+				Kind:       shiplog.KindLFSDownload,
+				Tenant:     tenant,
+				Repo:       repo,
+				Actor:      usageActorName(actor),
+				Transport:  "https",
+				Bytes:      total,
+				DurationMS: time.Since(batchStart).Milliseconds(),
+				Status:     "negotiated",
+				Objects:    n,
+			})
+		}
+	}
 }
 
 // handleVerify lived here in M13 P3 and processed the OLD route
@@ -379,6 +424,22 @@ func actorName(a *auth.Actor) string {
 		return ""
 	}
 	return a.Name
+}
+
+// usageActorName derives the usage-stream actor string: prefer the
+// human-readable Name, fall back to UserID, and use "anonymous" when there
+// is no actor (LFS public-read flows have a nil actor).
+func usageActorName(a *auth.Actor) string {
+	if a == nil {
+		return "anonymous"
+	}
+	if a.Name != "" {
+		return a.Name
+	}
+	if a.UserID != "" {
+		return a.UserID
+	}
+	return "anonymous"
 }
 
 // parseLFSPath parses /<tenant>/<repo>.git/info/lfs/... paths and

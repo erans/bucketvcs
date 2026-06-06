@@ -13,6 +13,8 @@ func EmitDelivered(ctx context.Context, logger *slog.Logger,
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "webhooks.delivered",
+		slog.Bool("audit", true),
+		slog.String("event", "webhooks.delivered"),
 		slog.String("delivery_id", deliveryID),
 		slog.Int64("endpoint_id", endpointID),
 		slog.String("event_type", eventType),
@@ -30,6 +32,8 @@ func EmitFailed(ctx context.Context, logger *slog.Logger,
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelWarn, "webhooks.failed",
+		slog.Bool("audit", true),
+		slog.String("event", "webhooks.failed"),
 		slog.String("delivery_id", deliveryID),
 		slog.Int64("endpoint_id", endpointID),
 		slog.String("event_type", eventType),
@@ -48,6 +52,8 @@ func EmitDeadLetter(ctx context.Context, logger *slog.Logger,
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelError, "webhooks.dead_letter",
+		slog.Bool("audit", true),
+		slog.String("event", "webhooks.dead_letter"),
 		slog.String("delivery_id", deliveryID),
 		slog.Int64("endpoint_id", endpointID),
 		slog.String("event_type", eventType),
@@ -65,6 +71,8 @@ func EmitEnqueueFailed(ctx context.Context, logger *slog.Logger,
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelError, "webhooks.enqueue_failed",
+		slog.Bool("audit", true),
+		slog.String("event", "webhooks.enqueue_failed"),
 		slog.String("tenant", tenant),
 		slog.String("repo", repo),
 		slog.String("event_type", eventType),
@@ -79,6 +87,8 @@ func EmitEndpointCreated(ctx context.Context, logger *slog.Logger,
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "webhooks.endpoint_created",
+		slog.Bool("audit", true),
+		slog.String("event", "webhooks.endpoint_created"),
 		slog.Int64("endpoint_id", endpointID),
 		slog.String("tenant", tenant),
 		slog.String("repo", repo),
@@ -94,6 +104,8 @@ func EmitEndpointRemoved(ctx context.Context, logger *slog.Logger,
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "webhooks.endpoint_removed",
+		slog.Bool("audit", true),
+		slog.String("event", "webhooks.endpoint_removed"),
 		slog.Int64("endpoint_id", endpointID),
 		slog.String("tenant", tenant),
 		slog.String("repo", repo),
@@ -109,6 +121,8 @@ func EmitEndpointSecretRotated(ctx context.Context, logger *slog.Logger,
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "webhooks.endpoint_secret_rotated",
+		slog.Bool("audit", true),
+		slog.String("event", "webhooks.endpoint_secret_rotated"),
 		slog.Int64("endpoint_id", endpointID),
 		slog.String("tenant", tenant),
 		slog.String("repo", repo),
@@ -126,6 +140,8 @@ func EmitWebhookPruned(ctx context.Context, logger *slog.Logger,
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "webhooks.pruned",
+		slog.Bool("audit", true),
+		slog.String("event", "webhooks.pruned"),
 		slog.Int64("delivered_rows", deliveredRows),
 		slog.Int64("dead_letter_rows", deadLetterRows),
 		slog.Int64("delivered_cutoff_unix", deliveredCutoff.Unix()),
@@ -145,6 +161,8 @@ func EmitEgressDenied(ctx context.Context, logger *slog.Logger,
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelWarn, "webhooks.egress_denied",
+		slog.Bool("audit", true),
+		slog.String("event", "webhooks.egress_denied"),
 		slog.String("delivery_id", deliveryID),
 		slog.Int64("endpoint_id", endpointID),
 		slog.String("host", host),

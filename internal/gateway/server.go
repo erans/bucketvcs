@@ -17,9 +17,19 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/policy"
 	"github.com/bucketvcs/bucketvcs/internal/replica"
+	"github.com/bucketvcs/bucketvcs/internal/shiplog"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/webhooks"
 )
+
+// UsageSink receives operation-metering events from the gateway handlers
+// (fetch/push/LFS/bundle/pack serves). Defined here as a small interface so
+// handler tests can fake it; *shiplog.Engine satisfies it (and its Usage is
+// nil-safe). Call sites MUST nil-check before invoking, because the field is
+// nil whenever log shipping is disabled.
+type UsageSink interface {
+	Usage(shiplog.UsageEvent)
+}
 
 // Options configures a Server.
 type Options struct {
@@ -201,6 +211,11 @@ type Options struct {
 	// Those routes sign/verify HMAC tokens against the operator store;
 	// per-tenant routing for proxied delivery is deferred.
 	StoreResolver ByobResolver
+
+	// Usage, when non-nil, receives operation-metering events
+	// (fetch/push/LFS/bundle/pack serves). nil disables usage metering;
+	// handlers must nil-check before calling. Satisfied by *shiplog.Engine.
+	Usage UsageSink
 }
 
 // Server implements http.Handler.
@@ -383,7 +398,7 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 		s.mux.HandleFunc("/healthz/replica", s.handleHealthzReplica)
 	}
 	if len(opts.ProxiedURLSigningKey) > 0 {
-		proxied := NewProxiedHandler(store, opts.ProxiedURLSigningKey, "/_bundle/", "/_pack/", s.logger)
+		proxied := NewProxiedHandler(store, opts.ProxiedURLSigningKey, "/_bundle/", "/_pack/", s.logger, opts.Usage)
 		s.mux.Handle("/_bundle/", proxied)
 		s.mux.Handle("/_pack/", proxied)
 	}
@@ -425,6 +440,7 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 
 			ReadOnlyReplica: opts.Replica != nil,
 			WriteRegionURL:  replicaWriteURL(opts.Replica),
+			Usage:           opts.Usage,
 		})
 
 		// Mount the proxied object handler at /_lfs/ when proxied URL
@@ -440,6 +456,7 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 
 				ReadOnlyReplica: opts.Replica != nil,
 				WriteRegionURL:  replicaWriteURL(opts.Replica),
+				Usage:           opts.Usage,
 			})
 		}
 	}

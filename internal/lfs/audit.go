@@ -17,6 +17,7 @@ func emitLFSBatch(ctx context.Context, logger *slog.Logger, repo, user, op strin
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "lfs.batch",
+		slog.Bool("audit", true),
 		slog.String("event", "lfs.batch"),
 		slog.String("repo", repo),
 		slog.String("user", user),
@@ -38,6 +39,7 @@ func emitLFSObjectServed(ctx context.Context, logger *slog.Logger, op, hash stri
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "lfs.object.served",
+		slog.Bool("audit", true),
 		slog.String("event", "lfs.object.served"),
 		slog.String("op", op),
 		slog.String("hash", hash),
@@ -60,6 +62,7 @@ func emitLFSVerify(ctx context.Context, logger *slog.Logger, repo, user, oid str
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "lfs.verify",
+		slog.Bool("audit", true),
 		slog.String("event", "lfs.verify"),
 		slog.String("repo", repo),
 		slog.String("user", user),
@@ -81,6 +84,7 @@ func emitLFSLockCreate(ctx context.Context, logger *slog.Logger, repo, user, own
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "lfs.lock.create",
+		slog.Bool("audit", true),
 		slog.String("event", "lfs.lock.create"),
 		slog.String("repo", repo),
 		slog.String("user", user),
@@ -102,6 +106,7 @@ func emitLFSLockDelete(ctx context.Context, logger *slog.Logger, repo, user, loc
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "lfs.lock.delete",
+		slog.Bool("audit", true),
 		slog.String("event", "lfs.lock.delete"),
 		slog.String("repo", repo),
 		slog.String("user", user),
@@ -120,6 +125,7 @@ func emitLFSLockVerify(ctx context.Context, logger *slog.Logger, repo, user stri
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "lfs.lock.verify",
+		slog.Bool("audit", true),
 		slog.String("event", "lfs.lock.verify"),
 		slog.String("repo", repo),
 		slog.String("user", user),
@@ -147,6 +153,7 @@ func EmitLFSSSHAuthenticate(ctx context.Context, logger *slog.Logger, repo, user
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "lfs.ssh_authenticate",
+		slog.Bool("audit", true),
 		slog.String("event", "lfs.ssh_authenticate"),
 		slog.String("repo", repo),
 		slog.String("user", user),
@@ -171,6 +178,7 @@ func EmitLFSGCMark(ctx context.Context, logger *slog.Logger, repo, markID string
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "lfs.gc.mark",
+		slog.Bool("audit", true),
 		slog.String("event", "lfs.gc.mark"),
 		slog.String("repo", repo),
 		slog.String("mark_id", markID),
@@ -195,6 +203,7 @@ func EmitLFSGCSweep(ctx context.Context, logger *slog.Logger, repo, markID, swee
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "lfs.gc.sweep",
+		slog.Bool("audit", true),
 		slog.String("event", "lfs.gc.sweep"),
 		slog.String("repo", repo),
 		slog.String("mark_id", markID),
@@ -219,6 +228,7 @@ func EmitLFSQuotaExceeded(ctx context.Context, logger *slog.Logger, tenant strin
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "lfs.quota.exceeded",
+		slog.Bool("audit", true),
 		slog.String("event", "lfs.quota.exceeded"),
 		slog.String("tenant", tenant),
 		slog.Int64("current_bytes", currentBytes),
@@ -238,6 +248,7 @@ func EmitLFSQuotaReconcile(ctx context.Context, logger *slog.Logger, tenant stri
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "lfs.quota.reconcile",
+		slog.Bool("audit", true),
 		slog.String("event", "lfs.quota.reconcile"),
 		slog.String("tenant", tenant),
 		slog.Int64("before_bytes", beforeBytes),

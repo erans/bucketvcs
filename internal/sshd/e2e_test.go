@@ -981,3 +981,89 @@ func TestE2E_LFSAuthenticate_DeployKey_Rejected(t *testing.T) {
 		t.Errorf("expected empty stdout, got %q", stdout)
 	}
 }
+
+// TestE2E_SSHUsageMetering drives a real clone (fetch) and push over SSH and
+// asserts that the wired usage sink receives one fetch and one push event
+// with the SSH transport and populated tenant/repo/actor.
+func TestE2E_SSHUsageMetering(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("SSH e2e uses bash scripts; not supported on Windows")
+	}
+	skipIfNoSSHGit(t)
+
+	sink := &usageSinkRec{}
+	env := newSSHE2E(t, "acme", "web", func(o *Options) { o.Usage = sink })
+	seedAliceWithKey(t, env, env.clientPubKey)
+	if err := env.store.Grant(context.Background(), "alice", "acme", "web", "write"); err != nil {
+		t.Fatalf("Grant write: %v", err)
+	}
+	script := writeSSHCommandScript(t, env.clientKeyPath, env.knownHostsPath)
+
+	// Clone (fetch).
+	workdir := t.TempDir()
+	out, err := gitWithSSH(t, script, "-C", workdir, "clone", sshRemoteURL(env, "acme", "web"), "usageclone")
+	if err != nil {
+		t.Fatalf("clone failed: %v\n%s", err, out)
+	}
+	repoDir := filepath.Join(workdir, "usageclone")
+
+	// Make a commit and push.
+	if err := os.WriteFile(filepath.Join(repoDir, "b.txt"), []byte("usage\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustExecSSH(t, repoDir, "git", "add", ".")
+	mustExecSSH(t, repoDir, "git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "usage")
+	out, err = gitWithSSH(t, script, "-C", repoDir, "push", "origin", "HEAD:refs/heads/main")
+	if err != nil {
+		t.Fatalf("push failed: %v\n%s", err, out)
+	}
+
+	// Assert a fetch event with bytes>0 (the clone packfile is outbound).
+	fetches := sink.byKind("fetch")
+	if len(fetches) == 0 {
+		t.Fatalf("no fetch usage event recorded; got %+v", sink.events())
+	}
+	var gotFetch bool
+	for _, ev := range fetches {
+		if ev.Transport != "ssh" {
+			t.Errorf("fetch transport = %q, want ssh", ev.Transport)
+		}
+		if ev.Tenant != "acme" || ev.Repo != "web" {
+			t.Errorf("fetch tenant/repo = %q/%q", ev.Tenant, ev.Repo)
+		}
+		if ev.Actor != "alice" {
+			t.Errorf("fetch actor = %q, want alice", ev.Actor)
+		}
+		if ev.DurationMS < 0 {
+			t.Errorf("fetch duration_ms = %d", ev.DurationMS)
+		}
+		if ev.Bytes > 0 {
+			gotFetch = true
+		}
+	}
+	if !gotFetch {
+		t.Errorf("no fetch event with bytes>0; got %+v", fetches)
+	}
+
+	// Assert a push event with bytes>0 (the pushed packfile is inbound).
+	pushes := sink.byKind("push")
+	if len(pushes) != 1 {
+		t.Fatalf("want 1 push usage event, got %d: %+v", len(pushes), pushes)
+	}
+	p := pushes[0]
+	if p.Transport != "ssh" {
+		t.Errorf("push transport = %q, want ssh", p.Transport)
+	}
+	if p.Tenant != "acme" || p.Repo != "web" {
+		t.Errorf("push tenant/repo = %q/%q", p.Tenant, p.Repo)
+	}
+	if p.Actor != "alice" {
+		t.Errorf("push actor = %q, want alice", p.Actor)
+	}
+	if p.Bytes <= 0 {
+		t.Errorf("push bytes = %d, want > 0 (counted uploaded pack)", p.Bytes)
+	}
+	if p.Status == "" {
+		t.Errorf("push status empty")
+	}
+}

@@ -13,6 +13,8 @@ func EmitTokenRotated(ctx context.Context, logger *slog.Logger,
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "auth.token.rotated",
+		slog.Bool("audit", true),
+		slog.String("event", "auth.token.rotated"),
 		slog.String("token_id", tokenID),
 		slog.String("user_id", userID),
 		slog.String("actor", actor),
@@ -32,6 +34,8 @@ func EmitScopeDenied(ctx context.Context, logger *slog.Logger,
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelWarn, "auth.scope.denied",
+		slog.Bool("audit", true),
+		slog.String("event", "auth.scope.denied"),
 		slog.String("user_id", userID),
 		slog.String("token_id_prefix", tokenIDPrefix),
 		slog.String("tenant", tenant),
@@ -52,6 +56,8 @@ func EmitRateLimitHit(ctx context.Context, logger *slog.Logger,
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelWarn, "auth.ratelimit.hit",
+		slog.Bool("audit", true),
+		slog.String("event", "auth.ratelimit.hit"),
 		slog.String("ip", ip),
 		slog.String("user", user),
 		slog.String("bucket", bucket),
@@ -67,6 +73,8 @@ func EmitOIDCExchanged(ctx context.Context, logger *slog.Logger,
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "auth.oidc.exchanged",
+		slog.Bool("audit", true),
+		slog.String("event", "auth.oidc.exchanged"),
 		slog.String("issuer", issuerAlias),
 		slog.String("sub", sub),
 		slog.String("tenant", tenant),
@@ -84,6 +92,8 @@ func EmitOIDCRejected(ctx context.Context, logger *slog.Logger,
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelWarn, "auth.oidc.rejected",
+		slog.Bool("audit", true),
+		slog.String("event", "auth.oidc.rejected"),
 		slog.String("issuer", issuerAlias),
 		slog.String("ip", ip),
 		slog.String("reason", reason),
@@ -96,6 +106,8 @@ func EmitPasswordSet(ctx context.Context, logger *slog.Logger, user string) {
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "auth.password.set",
+		slog.Bool("audit", true),
+		slog.String("event", "auth.password.set"),
 		slog.String("user", user),
 	)
 }
