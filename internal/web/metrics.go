@@ -12,7 +12,7 @@ func EmitLoginMetric(ctx context.Context, logger *slog.Logger, result, provider 
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "metric",
-		slog.String("name", "web_login_total"),
+		slog.String("metric_name", "web_login_total"),
 		slog.String("result", result),
 		slog.String("provider", provider),
 		slog.Int("value", 1),
@@ -26,7 +26,7 @@ func EmitBrowseMetric(ctx context.Context, logger *slog.Logger, view string) {
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "metric",
-		slog.String("name", "web_browse_total"),
+		slog.String("metric_name", "web_browse_total"),
 		slog.String("view", view),
 		slog.Int("value", 1),
 	)
@@ -38,7 +38,7 @@ func EmitRequestMetric(ctx context.Context, logger *slog.Logger, route string, s
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "metric",
-		slog.String("name", "web_requests_total"),
+		slog.String("metric_name", "web_requests_total"),
 		slog.String("route", route),
 		slog.Int("status", status),
 		slog.Int("value", 1),
@@ -53,7 +53,7 @@ func EmitAdminActionMetric(ctx context.Context, logger *slog.Logger, domain, act
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "metric",
-		slog.String("name", "web_admin_actions_total"),
+		slog.String("metric_name", "web_admin_actions_total"),
 		slog.String("domain", domain),
 		slog.String("action", action),
 		slog.String("result", result),

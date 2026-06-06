@@ -49,15 +49,10 @@ time=2026-06-05T21:30:45.123Z level=INFO msg=metric metric_name=policy_refs_chec
 Counters are **cumulative** unless a specific feature guide says otherwise
 (gauges and point-sample histograms are called out per metric in those guides).
 
-> **Attribute-key caveat.** The metric *name* is carried under one of two
-> attribute keys depending on which subsystem emitted it: most emitters use
-> **`metric_name`** (gateway upload-pack, maintenance, GC, LFS, OIDC,
-> hooks/policy, the log shipper, authdb replication), while a handful use
-> **`name`** (webhooks, the read-replica controller, the fallback store, the
-> web UI, the auth rate limiter, code-browse). Both always carry `value`. A
-> parser that wants every metric should match `msg=metric` and read whichever
-> of `metric_name` / `name` is present. The per-feature guide for each metric
-> states the exact shape.
+> **Attribute-key note.** The metric *name* is always carried under the
+> **`metric_name`** attribute, across every subsystem; `value` is always
+> present too. (Some subsystems previously emitted the name under `name` —
+> this was normalized to `metric_name` everywhere in this release.)
 
 ### (c) Audit events
 
@@ -118,7 +113,7 @@ emitted by `serve` and shipping was on.
 | Signal | `msg` | Distinguishing attrs |
 |---|---|---|
 | Application log | human string | (none reserved) |
-| Metric | `metric` | `metric_name` *or* `name` + `value` (+ label attrs) |
+| Metric | `metric` | `metric_name` + `value` (+ label attrs) |
 | Audit event | the event name | `audit=true` + `event=<same name>` |
 
 The default console format is slog **text** (`k=v`). If you wire a JSON handler
@@ -218,6 +213,3 @@ consequences worth stating precisely:
 - **Metrics are log lines.** A `kill -9` can lose the OS-buffer tail of the
   active spool file (no fsync-per-event); the durable streams are an audit
   trail, not a write-ahead log ([log shipping §4](log-shipping.md#4-delivery-semantics)).
-- **Metric-name attribute key is not uniform** (`metric_name` vs `name`); see
-  §1(b). A future normalization may unify it; until then, parsers should accept
-  both.

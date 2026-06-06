@@ -322,7 +322,7 @@ The load balancer liveness probe should stay on `/healthz`.
 ### Metrics
 
 Four metrics are emitted as structured slog records with `msg="metric"` and
-`name=<metric>`:
+`metric_name=<metric>`:
 
 | Metric | Type | Meaning |
 |---|---|---|

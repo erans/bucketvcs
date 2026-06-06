@@ -67,7 +67,7 @@ func isRoot(key string) bool { return strings.HasSuffix(key, rootSuffix) }
 // is my regional bucket" signal. No key label (cardinality).
 func (s *Store) emitFallback(ctx context.Context) {
 	s.logger.LogAttrs(ctx, slog.LevelInfo, "metric",
-		slog.String("name", "replica_fallback_reads_total"),
+		slog.String("metric_name", "replica_fallback_reads_total"),
 		slog.Int("value", 1),
 	)
 }

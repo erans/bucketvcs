@@ -12,7 +12,7 @@ func EmitDeliveryMetric(ctx context.Context, logger *slog.Logger, outcome string
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "metric",
-		slog.String("name", "webhooks_delivery_total"),
+		slog.String("metric_name", "webhooks_delivery_total"),
 		slog.String("outcome", outcome),
 		slog.Int("value", 1),
 	)
@@ -24,7 +24,7 @@ func EmitQueueDepthGauge(ctx context.Context, logger *slog.Logger, status string
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "metric",
-		slog.String("name", "webhooks_queue_depth"),
+		slog.String("metric_name", "webhooks_queue_depth"),
 		slog.String("status", status),
 		slog.Int64("value", depth),
 	)
@@ -36,7 +36,7 @@ func EmitAttemptDuration(ctx context.Context, logger *slog.Logger, outcome strin
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "metric",
-		slog.String("name", "webhooks_attempt_duration_ms"),
+		slog.String("metric_name", "webhooks_attempt_duration_ms"),
 		slog.String("outcome", outcome),
 		slog.Int64("value", durationMs),
 	)
@@ -48,7 +48,7 @@ func EmitEndpointsActiveGauge(ctx context.Context, logger *slog.Logger, count in
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "metric",
-		slog.String("name", "webhooks_endpoints_active"),
+		slog.String("metric_name", "webhooks_endpoints_active"),
 		slog.Int64("value", count),
 	)
 }
@@ -61,7 +61,7 @@ func EmitWebhookPrunedMetric(ctx context.Context, logger *slog.Logger, outcome s
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "metric",
-		slog.String("name", "webhook_deliveries_pruned_total"),
+		slog.String("metric_name", "webhook_deliveries_pruned_total"),
 		slog.String("outcome", outcome),
 		slog.Int64("value", count),
 	)
@@ -79,7 +79,7 @@ func EmitRepoRenamedMetric(ctx context.Context, logger *slog.Logger, outcome str
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "metric",
-		slog.String("name", "repo_renamed_total"),
+		slog.String("metric_name", "repo_renamed_total"),
 		slog.String("outcome", outcome),
 		slog.Int("value", 1),
 	)
@@ -94,7 +94,7 @@ func EmitEgressDeniedMetric(ctx context.Context, logger *slog.Logger) {
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "metric",
-		slog.String("name", "webhook_egress_denied_total"),
+		slog.String("metric_name", "webhook_egress_denied_total"),
 		slog.Int("value", 1),
 	)
 }

@@ -415,7 +415,7 @@ event (`delivery_id`, `endpoint_id`, `host`, `ip`, `denied_by`, `pattern`).
 
 ### 7.1 Metrics
 
-Four metrics, all emitted as structured slog records with `msg="metric"` and a `name=<metric>` attr to distinguish them from audit events:
+Four metrics, all emitted as structured slog records with `msg="metric"` and a `metric_name=<metric>` attr to distinguish them from audit events:
 
 | Metric | Type | Labels | Emission point |
 |---|---|---|---|
@@ -424,7 +424,7 @@ Four metrics, all emitted as structured slog records with `msg="metric"` and a `
 | `webhooks_queue_depth` | gauge | `status={pending,in_flight,dead_letter}` | reserved for periodic gauge emission (see §7.4) |
 | `webhooks_endpoints_active` | gauge | none | reserved for periodic gauge emission |
 
-The point-sample shape matches the policy + LFS metrics; a scraping sidecar can aggregate by `(name, outcome)` from the raw slog stream.
+The point-sample shape matches the policy + LFS metrics; a scraping sidecar can aggregate by `(metric_name, outcome)` from the raw slog stream.
 
 ### 7.2 Audit events
 
@@ -452,7 +452,7 @@ journalctl -u bucketvcs --since "24 hours ago" | grep "webhooks.dead_letter"
 
 # Delivery counter aggregated by outcome:
 journalctl -u bucketvcs --since "1 hour ago" \
-  | grep 'name=webhooks_delivery_total' \
+  | grep 'metric_name=webhooks_delivery_total' \
   | sed -E 's/.*outcome=([^ ]+).*/\1/' | sort | uniq -c
 ```
 

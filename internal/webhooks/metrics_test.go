@@ -33,3 +33,32 @@ func TestEmitQueueDepthGauge(t *testing.T) {
 		t.Errorf("queue depth gauge missing fields: %s", out)
 	}
 }
+
+// TestMetricNameKeyIsCanonical is a drift guard: every webhooks metric must
+// carry its name under the canonical metric_name attribute, never under the
+// legacy name key. See docs/upgrade-notes.md (Unreleased) for the normalization.
+func TestMetricNameKeyIsCanonical(t *testing.T) {
+	emit := func(logger *slog.Logger) {
+		ctx := context.Background()
+		webhooks.EmitDeliveryMetric(ctx, logger, "delivered")
+		webhooks.EmitQueueDepthGauge(ctx, logger, "pending", 1)
+		webhooks.EmitAttemptDuration(ctx, logger, "delivered", 5)
+		webhooks.EmitEndpointsActiveGauge(ctx, logger, 1)
+		webhooks.EmitWebhookPrunedMetric(ctx, logger, "delivered", 1)
+		webhooks.EmitRepoRenamedMetric(ctx, logger, "ok")
+		webhooks.EmitEgressDeniedMetric(ctx, logger)
+	}
+	var buf bytes.Buffer
+	emit(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if !strings.Contains(line, "msg=metric") {
+			continue
+		}
+		if !strings.Contains(line, "metric_name=") {
+			t.Errorf("metric line missing metric_name= key: %s", line)
+		}
+		if strings.Contains(line, " name=") {
+			t.Errorf("metric line uses legacy name= key: %s", line)
+		}
+	}
+}

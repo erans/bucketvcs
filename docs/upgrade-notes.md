@@ -5,6 +5,15 @@ anything to check before rolling a new version. Newest first. Install
 instructions live in the [README](../README.md#install); full feature docs in
 the [operator guides](operator-guides/).
 
+## Unreleased
+
+- **Metric log lines now uniformly use the `metric_name` attribute.** Previously
+  the webhooks, hooks, web-UI, read-replica controller, fallback store, auth
+  rate-limiter, and code-browse metrics carried the metric name under a `name`
+  attribute instead. All emitters now use `metric_name` (the convention already
+  used everywhere else). Any log-pipeline filters or dashboards keyed on
+  `name=<metric>` for those subsystems must be updated to `metric_name=<metric>`.
+
 ## v0.5.0
 
 No breaking changes, but a few behavior changes to be aware of.
