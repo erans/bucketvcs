@@ -170,6 +170,14 @@ shipper-audits-its-own-shipping loop).
   (same guidance pattern as `sys/authdb/`).
 - Prometheus `/metrics` endpoint (separate observability discussion).
 
+> **Amendment (implementation).** `fetch` usage events are request-level, not
+> operation-level: protocol-v2 `ls-refs` and `fetch` are separate HTTP POSTs and
+> each emits its own `fetch` record, so a single logical `git clone` typically
+> produces two or more `fetch` records. There is no `clone` kind (clone and
+> fetch are indistinguishable at the transport layer); aggregate by
+> `(tenant, repo, actor)` over a time window rather than counting records as
+> operations.
+
 ## Risks
 
 - **On-by-default** changes upgrade behavior (new writes appear under

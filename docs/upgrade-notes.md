@@ -5,6 +5,33 @@ anything to check before rolling a new version. Newest first. Install
 instructions live in the [README](../README.md#install); full feature docs in
 the [operator guides](operator-guides/).
 
+## Unreleased
+
+No breaking changes, but two behavior changes to be aware of.
+
+- **Usage & activity log shipping (new, on by default).** `bucketvcs serve` now
+  ships two durable NDJSON streams into the object store under the reserved
+  `sys/logs/` prefix — **activity** (the `audit=true` taxonomy) and **usage**
+  (operation metering: fetch/push/LFS/bundle/pack bytes and durations),
+  gzipped. This is **on by default** whenever `--store` is configured; pass
+  `--log-shipping=off` to restore the previous stderr-only behavior. Tunables:
+  `--log-ship-max-events` (1000), `--log-ship-interval` (15m), `--log-spool-dir`
+  (state dir), `--log-spool-max-bytes` (256MB). See the
+  [log-shipping guide](operator-guides/log-shipping.md).
+  - **Lifecycle rule recommended.** New objects now appear under `sys/logs/`.
+    Add a bucket object-lifecycle rule scoped to `sys/logs/` with a retention
+    that matches how far back you need usage/audit data, the same way the
+    replication guide recommends for `sys/authdb/ltx/`. (`sys/` is already
+    reserved — GC never touches it.)
+- **Console log format changed.** To install the log-shipping tap, `serve` now
+  sets a concrete `slog` `TextHandler` as the process default logger (in **both**
+  shipping modes, including `--log-shipping=off`). Console lines change from the
+  stdlib bridge format —
+  `2026/06/05 17:43:19 INFO msg ...` — to slog's `key=value` format —
+  `time=2026-06-05T17:43:19.000-07:00 level=INFO msg=... key=value`. If you parse
+  `serve`'s stderr (log scrapers, alert regexes), update your patterns
+  accordingly.
+
 ## v0.4.0
 
 No breaking changes.
