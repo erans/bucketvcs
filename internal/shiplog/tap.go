@@ -95,6 +95,12 @@ func (h *TapHandler) marshal(rec slog.Record) ([]byte, error) {
 		cur[g] = next
 		cur = next
 	}
+	// Known limitation: handler-level attrs are all written into the deepest
+	// WithGroup scope, but slog semantics place attrs added BEFORE a
+	// WithGroup at the outer scope (.With("a",1).WithGroup("g") should keep
+	// "a" at root). Latent: audit emission sites use inline per-record attrs
+	// and never combine With + WithGroup. Fix by tracking attrs per group if
+	// that ever changes.
 	for _, a := range h.attrs {
 		putAttr(cur, a)
 	}

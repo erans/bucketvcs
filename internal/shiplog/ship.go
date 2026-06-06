@@ -309,6 +309,7 @@ func (e *Engine) Close(ctx context.Context) error {
 			}
 		}
 		shipErr = e.ShipPending(ctx)
+		e.emitMetricsIfChanged(ctx) // flush final counters into the metric stream
 	})
 	return shipErr
 }

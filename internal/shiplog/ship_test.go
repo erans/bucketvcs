@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -399,5 +400,111 @@ func TestClose_IdleShipsNothing(t *testing.T) {
 	}
 	if n := len(listKeys(t, st, "sys/logs/")); n != 0 {
 		t.Fatalf("idle engine shipped %d objects", n)
+	}
+}
+
+// metricRecorder is a slog.Handler that collects every metric_name attr value
+// emitted on "metric" messages. Used to verify emitMetricsIfChanged behaviour.
+type metricRecorder struct {
+	mu      sync.Mutex
+	emitted []string // metric_name values in emission order
+}
+
+func (r *metricRecorder) Enabled(context.Context, slog.Level) bool { return true }
+func (r *metricRecorder) WithAttrs([]slog.Attr) slog.Handler       { return r }
+func (r *metricRecorder) WithGroup(string) slog.Handler            { return r }
+func (r *metricRecorder) Handle(_ context.Context, rec slog.Record) error {
+	if rec.Message != "metric" {
+		return nil
+	}
+	rec.Attrs(func(a slog.Attr) bool {
+		if a.Key == "metric_name" {
+			r.mu.Lock()
+			r.emitted = append(r.emitted, a.Value.String())
+			r.mu.Unlock()
+			return false
+		}
+		return true
+	})
+	return nil
+}
+
+func (r *metricRecorder) names() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.emitted))
+	copy(out, r.emitted)
+	return out
+}
+
+func (r *metricRecorder) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.emitted)
+}
+
+// TestEmitMetricsIfChanged_OnlyChangedCountersEmit verifies the diff-gate:
+// emitMetricsIfChanged emits ONLY the counters that moved since the last call.
+func TestEmitMetricsIfChanged_OnlyChangedCountersEmit(t *testing.T) {
+	rec := &metricRecorder{}
+	logger := slog.New(rec)
+	e, _, _ := newTestEngine(t, func(c *Config) { c.Logger = logger })
+	ctx := context.Background()
+
+	// --- first call: no counters moved → nothing emitted ---
+	e.emitMetricsIfChanged(ctx)
+	if n := rec.count(); n != 0 {
+		t.Fatalf("call on zero counters: want 0 emissions, got %d: %v", n, rec.names())
+	}
+
+	// --- bump shippedFiles + shippedEvents via a real ship ---
+	for i := 0; i < 5; i++ {
+		e.Enqueue(StreamActivity, []byte(`{"i":1}`))
+	}
+	drainAppends(t, e)
+	if err := e.ShipPending(ctx); err != nil {
+		t.Fatalf("ship failed: %v", err)
+	}
+	if e.shippedFiles.Load() == 0 {
+		t.Fatal("ship did not advance shippedFiles")
+	}
+
+	// --- second call: shippedFiles + shippedEvents changed → both emitted ---
+	before := rec.count()
+	e.emitMetricsIfChanged(ctx)
+	after := rec.count()
+	gotNames := rec.names()[before:after]
+	hasShippedFiles := false
+	hasShippedEvents := false
+	for _, n := range gotNames {
+		switch n {
+		case "shiplog_shipped_files_total":
+			hasShippedFiles = true
+		case "shiplog_shipped_events_total":
+			hasShippedEvents = true
+		}
+	}
+	if !hasShippedFiles {
+		t.Errorf("second call: shiplog_shipped_files_total not emitted (got %v)", gotNames)
+	}
+	if !hasShippedEvents {
+		t.Errorf("second call: shiplog_shipped_events_total not emitted (got %v)", gotNames)
+	}
+
+	// --- third call: counters unchanged → nothing new emitted ---
+	stable := rec.count()
+	e.emitMetricsIfChanged(ctx)
+	if n := rec.count(); n != stable {
+		t.Fatalf("third call (no movement): want 0 new emissions, got %d new: %v",
+			n-stable, rec.names()[stable:])
+	}
+
+	// --- bump dropped counter directly, then call again ---
+	e.dropped.Add(1)
+	dropBase := rec.count()
+	e.emitMetricsIfChanged(ctx)
+	dropNames := rec.names()[dropBase:]
+	if len(dropNames) != 1 || dropNames[0] != "shiplog_dropped_events_total" {
+		t.Fatalf("fourth call (only dropped bumped): want [shiplog_dropped_events_total], got %v", dropNames)
 	}
 }
