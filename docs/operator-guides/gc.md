@@ -676,6 +676,15 @@ is an aborted import, not data corruption.
 
 ## 7. Reading Mark and Sweep Records for Post-Incident Analysis
 
+> **Not shipped.** GC runs as a one-shot `bucketvcs gc` process, outside
+> `bucketvcs serve`. Its audit events (`gc.mark.completed` / `gc.sweep.completed`)
+> and metrics reach the CLI's stderr only — they are **not** carried into the
+> shipped `sys/logs/activity/` stream (which only captures events emitted from
+> `serve`). The durable forensic artifacts for GC are the mark/sweep records
+> described below, stored under each repo's `gc/` prefix. See the shipped-vs-CLI
+> split in [log shipping §1.1](log-shipping.md#11-the-two-streams) and the
+> [observability overview](observability.md).
+
 Mark records are stored at `gc/marks/mk_<ulid>.json` within each repository
 prefix. Sweep records are stored at `gc/sweeps/sw_<ulid>.json`. Both use
 ULID keys that sort lexicographically by time (most recent last in ascending

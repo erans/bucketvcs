@@ -474,6 +474,16 @@ unreachable and sweeps them.
 
 ## 6. JSON Output Schema
 
+> **Not shipped.** Maintenance runs as a one-shot `bucketvcs maintenance`
+> process, outside `bucketvcs serve`. Its audit events (`maintenance.started` /
+> `maintenance.completed`, `bundle.generated` / `bundle.retired`) and metrics
+> reach the CLI's stderr only — they are **not** carried into the shipped
+> `sys/logs/activity/` stream (which only captures events emitted from `serve`).
+> Use the JSON report below, or scrape the command's stderr, for a durable
+> record. See the shipped-vs-CLI split in
+> [log shipping §1.1](log-shipping.md#11-the-two-streams) and the
+> [observability overview](observability.md).
+
 Use `--output=json` to get a machine-readable report. The output is a JSON array,
 one object per repo. In single-repo mode (`--repo`), the array has exactly one element.
 An empty `--all-repos` result is `[]`, never `null`.

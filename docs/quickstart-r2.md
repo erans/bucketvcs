@@ -118,6 +118,12 @@ bucketvcs inspect-manifest --store="$STORE" acme my-repo   # sanity check
 bucketvcs serve --store="$STORE" --auth-db="$AUTHDB" --addr=127.0.0.1:8080
 ```
 
+> **Logs:** `serve` ships audit and usage (metering) records durably to
+> `sys/logs/` in your `$STORE` bucket by default — see
+> [log shipping](operator-guides/log-shipping.md) and the
+> [observability overview](operator-guides/observability.md). Pass
+> `--log-shipping=off` to opt out.
+
 > **Metadata DB:** `--auth-db` is a local SQLite file here, independent of your
 > `$STORE` bucket. It can also be a managed **Turso/libSQL** or **PostgreSQL**
 > database, chosen by the `--auth-db` scheme — the secret always comes from the

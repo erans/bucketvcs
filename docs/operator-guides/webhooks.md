@@ -408,6 +408,11 @@ event (`delivery_id`, `endpoint_id`, `host`, `ip`, `denied_by`, `pattern`).
 
 ## 7. Observability
 
+> The audit events below are emitted from `bucketvcs serve` and are therefore
+> **shipped durably** to `sys/logs/activity/` in the store by default (the
+> webhook worker runs inside `serve`) — see [log shipping](log-shipping.md) and
+> the [observability overview](observability.md).
+
 ### 7.1 Metrics
 
 Four metrics, all emitted as structured slog records with `msg="metric"` and a `name=<metric>` attr to distinguish them from audit events:

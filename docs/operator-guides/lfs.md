@@ -679,6 +679,14 @@ flat-attribute slog shape — each event has a
 top-level `event=<name>` attr plus event-specific attrs. The audit
 stream is the same stdout/stderr stream that carries metrics.
 
+> **Durable shipping.** The `serve`-emitted events (`lfs.batch`,
+> `lfs.object.served`, `lfs.verify`, the `lfs.lock.*` events, `lfs.quota.exceeded`)
+> are **shipped** to `sys/logs/activity/` by default — see
+> [log shipping](log-shipping.md) and the [observability overview](observability.md).
+> The CLI-emitted events `lfs.gc.mark` / `lfs.gc.sweep` (`bucketvcs gc --lfs`)
+> and `lfs.quota.reconcile` (`bucketvcs quota reconcile`) run outside `serve` and
+> are **not** shipped — they reach stderr only ([log shipping §1.1](log-shipping.md#11-the-two-streams)).
+
 #### `event=lfs.batch`
 
 Emitted at the end of every Batch request that reached the write-check

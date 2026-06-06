@@ -68,6 +68,14 @@ bucketvcs serve \
 Put an HTTP load balancer (nginx, HAProxy, a cloud LB) in front of the nodes.
 There is no sticky-session requirement; any node can handle any request.
 
+**Give each node its own log spool dir.** Log shipping (on by default) spools
+unshipped records to a local directory and, at boot, adopts and ships any
+leftover files it finds there. Two nodes sharing one `--log-spool-dir` (e.g. a
+shared volume) can each adopt the other's in-progress files and double-ship.
+On distinct hosts the default per-host state dir already separates them; if you
+co-locate nodes or mount a shared volume, set a distinct `--log-spool-dir` per
+node. See [log shipping §5](log-shipping.md#5-multinode).
+
 ### 2.2 Connection pool sizing
 
 `--auth-db-max-conns` sets `MaxOpenConns` for the Postgres connection pool on

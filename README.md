@@ -32,7 +32,7 @@ Not a toy. bucketvcs ships the things a real Git host needs:
 - **Keyless CI** — OIDC token exchange (RFC 8693): your pipeline trades its IdP identity for a short-lived, repo-scoped token, so there are no long-lived secrets to leak
 - **Fine-grained auth** — scoped access tokens with rotation, SSH user & deploy keys, and per-IP rate-limiting on credential failures
 - **Policy & governance** — protected refs, protected paths, custom pre/post-receive hooks, and signed, retryable **webhooks**
-- **Audit & observability** — structured audit events and metrics for every push, policy decision, and admin action, with durable **log shipping** of the activity and usage (metering) streams into your bucket → [operator guide](docs/operator-guides/log-shipping.md)
+- **Audit & observability** — structured audit events and metrics for every push, policy decision, and admin action, with durable **log shipping** of the activity and usage (metering) streams into your bucket → [observability overview](docs/operator-guides/observability.md) · [log shipping](docs/operator-guides/log-shipping.md)
 - **Self-maintaining** — background repack, commit-graph/reachability maintenance, and operator-driven garbage collection keep storage tight
 - **Regional read replicas** — serve clone and fetch traffic close to developers via `--replica-of` over provider-replicated buckets (S3 CRR, GCS dual-region, Azure RA-GRS); all pushes stay in the write region → [operator guide](docs/operator-guides/multi-region.md)
 - **Bring-your-own-bucket** — tenants can supply their own S3/GCS/Azure storage; bucketvcs routes their git traffic to their bucket. See [the operator guide](docs/operator-guides/byob.md)

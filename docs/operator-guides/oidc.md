@@ -338,6 +338,11 @@ Credential failures at `/_oidc/token` count against the per-IP rate limiter (sha
 
 Two structured events emitted to the gateway's slog stream:
 
+> These events are emitted inside `bucketvcs serve`, so they are **shipped
+> durably** to `sys/logs/activity/` by default — see
+> [log shipping](log-shipping.md) and the
+> [observability overview](observability.md).
+
 | Event | Level | Key attrs | When |
 |---|---|---|---|
 | `auth.oidc.exchanged` | INFO | `issuer`, `sub`, `tenant`, `repo`, `scopes`, `ttl_sec` | Successful exchange — token minted. |

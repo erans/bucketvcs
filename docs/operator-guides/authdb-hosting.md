@@ -183,8 +183,10 @@ automatically the first time each backend is opened.
   PostgreSQL; SQLite/libSQL are refused at startup on replica gateways. Do not
   try to share a SQLite file over NFS to fake it.
 - **Putting tenant data under the `sys/` prefix** when using model (b). That
-  prefix is reserved for the authdb replica; keep your own objects out of it (see
-  the [replication guide §3](authdb-replication.md#3-the-reserved-sys-prefix)).
+  prefix is reserved for system data — the authdb replica (`sys/authdb/`) and
+  durable shipped logs (`sys/logs/`); keep your own objects out of it (see the
+  [replication guide §3](authdb-replication.md#3-the-reserved-sys-prefix) and
+  [log shipping §3](log-shipping.md#3-the-reserved-sys-prefix-and-key-layout)).
 - **Forgetting durability entirely on a single node.** Model (a)'s durability is
   the host disk. If that is not backed up, add `--auth-db-replica=auto` (b) — it
   is one flag.
