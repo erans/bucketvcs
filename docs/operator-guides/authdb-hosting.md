@@ -30,7 +30,7 @@ durability story is simply **the host disk**: if that disk is lost and not
 backed up, the authdb is gone (your Git data in the bucket is unaffected, but
 the tokens and grants that authorize access to it are not).
 
-### (b) Embedded SQLite + object-store replication (M28)
+### (b) Embedded SQLite + object-store replication
 
 The same embedded SQLite backend, plus continuous replication of the authdb
 into an object store via embedded Litestream:

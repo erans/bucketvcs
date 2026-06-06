@@ -1280,8 +1280,8 @@ migration 0004 exists but stays empty.
 - **Webhooks on threshold crossing** — webhooks themselves are deferred.
 - **Cross-repo dedupe / shared-OID pooling** — pooling LFS objects by
   OID across an entire tenant maximizes storage savings but costs
-  control-plane complexity for repo-scoped access decisions. M13
-  intentionally chose per-repo isolation to keep the access model
+  control-plane complexity for repo-scoped access decisions. The LFS
+  design intentionally chose per-repo isolation to keep the access model
   identical to the Git object path. Trigger: a tenant whose LFS
   storage cost is dominated by the same asset replicated across many
   forks of one repo.

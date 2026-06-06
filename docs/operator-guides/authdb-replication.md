@@ -137,7 +137,7 @@ data — that silently discards the replica.
   *"replication is for the embedded sqlite backend; libsql/postgres bring their
   own durability"*. Use the backend's native replication instead.
 - **Replica-serve mode.** Combining `--auth-db-replica` with `--replica-of`
-  (an M26 regional read replica) is rejected: *"not allowed in replica-serve
+  (a regional read replica) is rejected: *"not allowed in replica-serve
   mode (--replica-of); only the primary replicates the authdb"*. Only the write
   region's primary replicates the authdb.
 - **`auto` without `--store`.** `--auth-db-replica=auto` requires `--store`.
@@ -506,7 +506,7 @@ any backend.)
 - **Embedded SQLite backend only.** PostgreSQL and libSQL authdb backends are
   rejected (§2.5); use their native replication.
 - **Primary only.** The authdb is replicated only by the write-region primary.
-  M26 regional read replicas (`--replica-of`) cannot replicate the authdb, and
+  Regional read replicas (`--replica-of`) cannot replicate the authdb, and
   combining the two flags is rejected at startup.
 - **BYOB buckets never hold the authdb.** Per-tenant bring-your-own-bucket
   storage is a data plane for that tenant's repos only; the authdb replica lives

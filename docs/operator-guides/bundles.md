@@ -74,7 +74,7 @@ See also:
   and index pipeline that bundle generation runs alongside.
 - [`bucketvcs gc`](gc.md) for the retention rules that
   constrain bundle URL TTLs.
-- [Reachability index](reachability.md) for the M10
+- [Reachability index](reachability.md) for the reachability
   compaction that keeps negotiation fast for incremental fetches.
 
 ---

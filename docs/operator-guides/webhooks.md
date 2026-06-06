@@ -365,7 +365,8 @@ service), punch a hole with the repeatable flag:
 bucketvcs serve ... --webhook-allow-cidr=192.168.1.0/24
 ```
 
-`--webhook-allow-cidr=0.0.0.0/0` restores the fully-open pre-M25 behavior.
+`--webhook-allow-cidr=0.0.0.0/0` disables the private-range blocking entirely
+(not recommended).
 
 **To deny by hostname** — useful for internal names that resolve to *public*
 IPs (split-horizon DNS, internal apps behind public load balancers):
