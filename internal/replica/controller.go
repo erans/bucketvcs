@@ -176,7 +176,7 @@ func (c *Controller) transitionLocked(ctx context.Context, tenant, repo string, 
 	nowUnhealthy := verdict != nil
 	if nowUnhealthy {
 		c.cfg.Logger.LogAttrs(ctx, slog.LevelInfo, "metric",
-			slog.String("name", "replica_advert_unhealthy_total"), slog.Int("value", 1))
+			slog.String("metric_name", "replica_advert_unhealthy_total"), slog.Int("value", 1))
 	}
 	if nowUnhealthy == st.unhealthy {
 		return
@@ -201,9 +201,9 @@ func (c *Controller) transitionLocked(ctx context.Context, tenant, repo string, 
 func (c *Controller) emitLagMetricsLocked(ctx context.Context, now time.Time) {
 	maxLag, lagging := c.lagStatsLocked(now)
 	c.cfg.Logger.LogAttrs(ctx, slog.LevelInfo, "metric",
-		slog.String("name", "replica_lag_seconds"), slog.Float64("value", maxLag.Seconds()))
+		slog.String("metric_name", "replica_lag_seconds"), slog.Float64("value", maxLag.Seconds()))
 	c.cfg.Logger.LogAttrs(ctx, slog.LevelInfo, "metric",
-		slog.String("name", "replica_repos_lagging"), slog.Int("value", lagging))
+		slog.String("metric_name", "replica_repos_lagging"), slog.Int("value", lagging))
 }
 
 func (c *Controller) lagStatsLocked(now time.Time) (maxLag time.Duration, lagging int) {

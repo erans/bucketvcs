@@ -11,7 +11,7 @@ func EmitPreReceiveMetric(ctx context.Context, logger *slog.Logger, tenant, repo
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "metric",
-		slog.String("name", "hooks_pre_receive_total"),
+		slog.String("metric_name", "hooks_pre_receive_total"),
 		slog.String("tenant", tenant),
 		slog.String("repo", repo),
 		slog.String("outcome", outcome),
@@ -24,7 +24,7 @@ func EmitPreReceiveDuration(ctx context.Context, logger *slog.Logger, tenant, re
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "metric",
-		slog.String("name", "hooks_pre_receive_duration_seconds"),
+		slog.String("metric_name", "hooks_pre_receive_duration_seconds"),
 		slog.String("tenant", tenant),
 		slog.String("repo", repo),
 		slog.Float64("value", float64(durNanos)/1e9),
@@ -37,7 +37,7 @@ func EmitPostReceiveMetric(ctx context.Context, logger *slog.Logger, tenant, rep
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "metric",
-		slog.String("name", "hooks_post_receive_total"),
+		slog.String("metric_name", "hooks_post_receive_total"),
 		slog.String("tenant", tenant),
 		slog.String("repo", repo),
 		slog.String("outcome", outcome),
@@ -50,7 +50,7 @@ func EmitPostReceiveDuration(ctx context.Context, logger *slog.Logger, tenant, r
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "metric",
-		slog.String("name", "hooks_post_receive_duration_seconds"),
+		slog.String("metric_name", "hooks_post_receive_duration_seconds"),
 		slog.String("tenant", tenant),
 		slog.String("repo", repo),
 		slog.Float64("value", float64(durNanos)/1e9),

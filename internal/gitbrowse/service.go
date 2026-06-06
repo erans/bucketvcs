@@ -53,7 +53,7 @@ func (s *Service) openMirror(ctx context.Context, tenant, repo string) (*mirror.
 	defer cancel()
 	m, err := s.mgr.Open(octx, tenant, repo)
 	s.logger.LogAttrs(ctx, slog.LevelInfo, "metric",
-		slog.String("name", "web_browse_mirror_wait_seconds"),
+		slog.String("metric_name", "web_browse_mirror_wait_seconds"),
 		slog.Float64("value", time.Since(start).Seconds()),
 	)
 	if err != nil {

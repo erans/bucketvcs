@@ -14,7 +14,7 @@ func EmitRateLimitMetric(ctx context.Context, logger *slog.Logger, outcome strin
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "metric",
-		slog.String("name", "auth_ratelimit_total"),
+		slog.String("metric_name", "auth_ratelimit_total"),
 		slog.String("outcome", outcome),
 		slog.Int("value", 1),
 	)
