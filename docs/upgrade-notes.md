@@ -5,7 +5,7 @@ anything to check before rolling a new version. Newest first. Install
 instructions live in the [README](../README.md#install); full feature docs in
 the [operator guides](operator-guides/).
 
-## Unreleased
+## v0.5.0
 
 No breaking changes, but a few behavior changes to be aware of.
 
