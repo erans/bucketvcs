@@ -58,11 +58,6 @@ type event struct {
 	line   []byte
 }
 
-// nl is the newline appended after each spooled event line. Written as a
-// separate Write so we never mutate (via append) the caller's ev.line backing
-// array, which may be reused by the caller after Enqueue returns.
-var nl = []byte{'\n'}
-
 // streamState is owned exclusively by the intake goroutine.
 type streamState struct {
 	f       *os.File
@@ -219,7 +214,17 @@ func (e *Engine) resumeIntake() { go e.intakeLoop() }
 // intakeLoop is the single writer of spool files.
 func (e *Engine) intakeLoop() {
 	defer close(e.intakeDone)
-	age := time.NewTicker(time.Minute) // age-trigger granularity
+	// Age-trigger granularity: check at least once a minute, and faster when
+	// MaxAge itself is sub-minute (clamped to 1s) so a short
+	// --log-ship-interval is honored rather than floored to ~60s of latency.
+	tick := time.Minute
+	if e.cfg.MaxAge < tick {
+		tick = e.cfg.MaxAge
+	}
+	if tick < time.Second {
+		tick = time.Second
+	}
+	age := time.NewTicker(tick)
 	defer age.Stop()
 	for {
 		select {
@@ -264,14 +269,26 @@ func (e *Engine) append(ev event) {
 			return
 		}
 	}
-	if _, err := st.f.Write(ev.line); err != nil {
+	// One buffered write per event: copying (instead of appending into the
+	// caller's slice) avoids mutating the producer's backing array, and a
+	// single Write means a failure can never leave a half-written line that
+	// the next event would concatenate onto (malformed NDJSON).
+	buf := make([]byte, len(ev.line)+1)
+	copy(buf, ev.line)
+	buf[len(buf)-1] = '\n'
+	if _, err := st.f.Write(buf); err != nil {
+		// The file may now hold a partial line; abandon it so the next event
+		// opens a fresh file rather than corrupting this one further. The
+		// partial file ships as-is (consumers must tolerate a torn last line
+		// in crash scenarios anyway).
 		e.dropped.Add(1)
 		e.logger.Error("shiplog: append", slog.Any("error", err))
-		return
-	}
-	if _, err := st.f.Write(nl); err != nil {
-		e.dropped.Add(1)
-		e.logger.Error("shiplog: append", slog.Any("error", err))
+		_ = st.f.Close()
+		if st.count > 0 {
+			e.rotateStream(ev.stream, st)
+		} else {
+			st.f = nil
+		}
 		return
 	}
 	if st.count == 0 {

@@ -41,7 +41,7 @@ func (e *Engine) Usage(ev UsageEvent) {
 	if e == nil {
 		return
 	}
-	line, err := json.Marshal(usageWire{V: 1, TS: time.Now().UTC().Format(time.RFC3339Nano), UsageEvent: ev})
+	line, err := json.Marshal(usageWire{V: 1, TS: e.cfg.Now().UTC().Format(time.RFC3339Nano), UsageEvent: ev})
 	if err != nil {
 		return
 	}
