@@ -448,6 +448,11 @@ Even so, as **belt-and-suspenders on R2**:
 The following are **actually emitted** by the replication subsystem today
 (verified in `internal/authreplica/runner.go`):
 
+> The `authdb.replica.*` audit events are emitted by the replica runner inside
+> `bucketvcs serve`, so they are **shipped durably** to `sys/logs/activity/` by
+> default — see [log shipping](log-shipping.md) and the
+> [observability overview](observability.md).
+
 ### Metrics
 
 | Metric | Type | Emitted when |

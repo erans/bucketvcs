@@ -61,6 +61,16 @@ bucket. The regional gateway reads pack bytes locally from `--store`; it consult
 (bounded-stale mode). `--write-region-url` is embedded in push-refusal messages
 so developers know where to push.
 
+**Replica logs ship to the regional bucket.** Log shipping is unconditional
+when on (the default), and the shipper is wired to the raw operator `--store` —
+which for a replica is its *regional* bucket. So each regional gateway ships its
+own activity and usage records into its own `sys/logs/` under `--store`, **not**
+into the write region. Every region therefore holds the log timeline for the
+traffic it served; collect `sys/logs/` from every regional bucket (and the write
+region) and merge on `ts` to reconstruct a global view. Pass `--log-shipping=off`
+to opt out per node. See [log shipping](log-shipping.md) and the
+[observability overview](observability.md#5-where-durable-shipping-lands-multi-tenant-and-multi-region).
+
 ---
 
 ## 2. Setting up provider replication

@@ -691,6 +691,11 @@ add no new event names.
 
 OIDC login and settings-form actions emit additional events; see §6.4 and §8.8.
 
+> These web-login audit events are emitted inside `bucketvcs serve`, so they are
+> **shipped durably** to `sys/logs/activity/` by default — see
+> [log shipping](log-shipping.md) and the
+> [observability overview](observability.md).
+
 ---
 
 ## 10. Deferred work

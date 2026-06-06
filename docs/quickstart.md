@@ -143,6 +143,11 @@ reverse proxy or load balancer in front of it. If it sits behind a proxy, start
 it with `--trust-proxy-headers` so client IPs (used for audit and rate
 limiting) are read correctly.
 
+**Logs:** by default, `serve` ships audit and usage (metering) records durably
+to `sys/logs/` in your store — see [log shipping](operator-guides/log-shipping.md)
+and the [observability overview](operator-guides/observability.md). Pass
+`--log-shipping=off` to opt out.
+
 ---
 
 ## 6. Push and clone

@@ -187,6 +187,11 @@ Operators alert on `policy_refs_check_total{outcome=internal_error}` and investi
 
 ## 5. Observability
 
+> The `policy.*` audit events below are emitted on the receive-pack path inside
+> `bucketvcs serve`, so they are **shipped durably** to `sys/logs/activity/` by
+> default — see [log shipping](log-shipping.md) and the
+> [observability overview](observability.md).
+
 ### 5.1 Metric: `policy_refs_check_total{outcome}`
 
 One emission per ref-update slot that step 8b processes. Outcomes:

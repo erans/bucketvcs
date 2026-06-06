@@ -210,6 +210,11 @@ shared bucket for tenants that should be using a BYOB bucket. Synchronise the
 key file via your secret-management system (Vault, AWS Secrets Manager, etc.)
 and verify with `bucketvcs doctor --byob-encryption-key ...` on each node.
 
+**Logs always ship to the system store.** Audit and usage records ship to
+`sys/logs/` in the operator's shared `--store`, never to a tenant's bound
+bucket — see [log shipping](log-shipping.md) and the
+[observability overview](observability.md).
+
 ---
 
 ## 6. GC and maintenance

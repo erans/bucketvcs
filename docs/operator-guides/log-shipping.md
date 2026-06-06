@@ -10,6 +10,10 @@ gzipped on upload.
 Shipping is **on by default** whenever `--store` is configured. Pass
 `--log-shipping=off` to restore the previous stderr-only behavior.
 
+For the bigger picture of where all three signals (application logs, metrics,
+audit events) live and how to read them, see the
+[observability overview](observability.md).
+
 The companion design document is
 `docs/superpowers/specs/2026-06-05-usage-activity-log-shipping-design.md`.
 
