@@ -247,8 +247,20 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	//       stream captures them too.
 	// The engine's own Logger is built on the BASE handler (captured before
 	// SetDefault) — never the tap — to avoid self-feeding. When
-	// --log-shipping=off this block adds zero calls: shipEngine stays nil and
-	// the tap is never installed. shipEngine.Usage is nil-safe at call sites.
+	// --log-shipping=off shipEngine stays nil and the tap is never installed;
+	// shipEngine.Usage is nil-safe at call sites.
+	//
+	// The base handler is installed as the slog default in BOTH modes so the
+	// console format does not depend on a flag that is nominally about
+	// shipping (review finding: on/off format asymmetry). We MUST NOT tap
+	// slog.Default()'s handler: when SetDefault was never called that default
+	// is the stdlib log<->slog bridge, and tapping it while re-installing the
+	// result as default creates a re-entrant cycle on the log package mutex
+	// (defaultHandler.Handle -> log.Output[mutex] -> slog.Default()[=tap] ->
+	// defaultHandler.Handle -> log.Output[same mutex] = deadlock). A concrete
+	// stderr TextHandler preserves "serve logs go to stderr".
+	base := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{})
+	slog.SetDefault(slog.New(base))
 	var shipEngine *shiplog.Engine
 	if *sf.logShipping == "on" {
 		spoolDir, serr := resolveSpoolDir(*sf.logSpoolDir, realEnv())
@@ -256,17 +268,8 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			fmt.Fprintf(stderr, "serve: --log-spool-dir: %v\n", serr)
 			return 1
 		}
-		// Base handler for the tap. We MUST NOT tap slog.Default()'s handler
-		// here: when SetDefault was never called, that default is the stdlib
-		// log<->slog bridge, and bridges in both directions. Tapping it and
-		// re-installing the result as the default creates a re-entrant cycle
-		// (defaultHandler.Handle -> log.Output[mutex] -> slog.Default()[=tap]
-		// -> defaultHandler.Handle -> log.Output[same mutex] = deadlock).
-		// A concrete handler writing to process stderr preserves the existing
-		// "serve logs go to stderr" behavior while keeping the tap pass-through
-		// outside the bridge. The engine's own Logger uses this same base
-		// handler (never the tap) so engine diagnostics never self-feed.
-		base := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{})
+		// Base handler rationale: see the block comment above (installed
+		// unconditionally for on/off format consistency).
 		shipEngine, serr = shiplog.New(shiplog.Config{
 			Store:         store,
 			SpoolDir:      spoolDir,
