@@ -5,7 +5,9 @@ anything to check before rolling a new version. Newest first. Install
 instructions live in the [README](../README.md#install); full feature docs in
 the [operator guides](operator-guides/).
 
-## Unreleased
+## v0.5.1
+
+No breaking changes.
 
 - **Metric log lines now uniformly use the `metric_name` attribute.** Previously
   the webhooks, hooks, web-UI, read-replica controller, fallback store, auth
