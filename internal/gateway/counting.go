@@ -29,13 +29,14 @@ func usageActor(a *auth.Actor) string {
 // bytes_served, and the smart-HTTP handlers (upload-pack) use it to meter
 // fetch response bytes for the usage stream.
 //
-// Flush is promoted from the wrapped writer because git smart-HTTP responses
-// are streamed: net/http's chunked-transfer flushing is invoked by the
-// protocol layer via http.Flusher, and dropping it would buffer the whole
-// response. http.Hijacker/io.ReaderFrom are intentionally NOT promoted — the
-// gateway smart-HTTP and proxied serve paths only do plain Write (no
-// connection takeover; the engine copies via io.Copy into this writer, which
-// does not assert ReaderFrom on the destination once it is wrapped).
+// Flush is promoted from the wrapped writer purely as forward-compat hygiene:
+// nothing on the current serve paths calls http.Flusher (the engine copies the
+// whole response via io.Copy), but a future streaming caller through this
+// wrapper should not silently lose flushing. http.Hijacker/io.ReaderFrom are
+// intentionally NOT promoted — the gateway smart-HTTP and proxied serve paths
+// only do plain Write (no connection takeover; the engine copies via io.Copy
+// into this writer, which does not assert ReaderFrom on the destination once it
+// is wrapped).
 type countingResponseWriter struct {
 	http.ResponseWriter
 	n int64
@@ -47,8 +48,10 @@ func (w *countingResponseWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// Flush passes through to the wrapped writer when it implements http.Flusher.
-// Required for git smart-HTTP streaming (chunked pkt-line flushes).
+// Flush forwards to the underlying writer when it supports http.Flusher.
+// Nothing on the current serve paths invokes Flusher (pkt-line "flush" is a
+// protocol byte sequence, not an http.Flusher call) — promoted purely so a
+// future streaming caller through this wrapper doesn't silently lose it.
 func (w *countingResponseWriter) Flush() {
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
 		f.Flush()

@@ -379,20 +379,31 @@ func handleBatch(ctx context.Context, w http.ResponseWriter, r *http.Request, de
 	// authoritative lfs_upload event once an object is durably accepted.
 	if req.Operation == "download" && deps.Usage != nil {
 		var total int64
+		var n int
 		for _, o := range resp.Objects {
-			total += o.Size
+			// Errored objects (missing, presign failure, etc.) carry no
+			// real transfer — exclude them so metering reflects only the
+			// objects we actually returned a download action for. Sizes are
+			// authoritative (the stored size, set by buildOne), not the
+			// client's claimed ref.Size.
+			if o.Error == nil {
+				total += o.Size
+				n++
+			}
 		}
-		deps.Usage.Usage(shiplog.UsageEvent{
-			Kind:       shiplog.KindLFSDownload,
-			Tenant:     tenant,
-			Repo:       repo,
-			Actor:      usageActorName(actor),
-			Transport:  "https",
-			Bytes:      total,
-			DurationMS: time.Since(batchStart).Milliseconds(),
-			Status:     "negotiated",
-			Objects:    len(resp.Objects),
-		})
+		if n > 0 {
+			deps.Usage.Usage(shiplog.UsageEvent{
+				Kind:       shiplog.KindLFSDownload,
+				Tenant:     tenant,
+				Repo:       repo,
+				Actor:      usageActorName(actor),
+				Transport:  "https",
+				Bytes:      total,
+				DurationMS: time.Since(batchStart).Milliseconds(),
+				Status:     "negotiated",
+				Objects:    n,
+			})
+		}
 	}
 }
 

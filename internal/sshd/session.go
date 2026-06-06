@@ -270,7 +270,11 @@ run:
 			Logger:          s.opts.Logger,
 		}
 		serveErr = receivepack.Serve(req)
-		s.emitUsage(shiplog.KindPush, cmd.Tenant, cmd.Repo, actor, receiveCR.n, receiveStart, serveErr)
+		// The flush-only probe carries no pack and is not a push attempt,
+		// so it is excluded from usage metering (mirrors HTTPS receive_pack.go).
+		if !errors.Is(serveErr, receivepack.ErrFlushOnlyProbe) {
+			s.emitUsage(shiplog.KindPush, cmd.Tenant, cmd.Repo, actor, receiveCR.n, receiveStart, serveErr)
+		}
 	case OpLFSAuthenticate:
 		// handleLFSAuthenticate owns its own exit code (0 on success,
 		// 1 on disabled/error, 128 on forbidden/anon). Returning here

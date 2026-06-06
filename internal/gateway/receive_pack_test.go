@@ -938,6 +938,47 @@ func TestReceivePack_EmitsPushUsage(t *testing.T) {
 	}
 }
 
+// TestReceivePack_FlushOnlyProbe_EmitsNoUsage verifies that the flush-only
+// auth/connectivity probe (a body of exactly "0000") carries no pack and is
+// not a push attempt, so no usage event is emitted even when a sink is wired.
+// Companion to TestReceivePack_AcceptsLargeRequestProbe (status) and
+// TestReceivePack_EmitsPushUsage (real push emits exactly one).
+func TestReceivePack_FlushOnlyProbe_EmitsNoUsage(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	storeDir := t.TempDir()
+	makeRepoInStore(t, storeDir, "acme", "demo")
+	store, _ := localfs.Open(storeDir)
+	t.Cleanup(func() { _ = store.Close() })
+	sink := &sinkRec{}
+	srv, _ := NewServer(store, Options{
+		MirrorDir: t.TempDir(), Version: "test",
+		AuthStore: newPermissiveAuthStore(t, "acme", "demo"),
+		Usage:     sink,
+	})
+	t.Cleanup(func() { _ = srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	body := pktBody(flush) // exactly 4 bytes: "0000"
+	req, _ := http.NewRequest("POST", ts.URL+"/acme/demo.git/git-receive-pack", bytes.NewReader(body))
+	req.SetBasicAuth("perm", "perm")
+	req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("probe status: %d", resp.StatusCode)
+	}
+
+	if evs := sink.events(); len(evs) != 0 {
+		t.Fatalf("flush-only probe must emit no usage; got %d: %+v", len(evs), evs)
+	}
+}
+
 func TestReceivePack_NilUsageSink_NoPanic(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires git binary")

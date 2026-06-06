@@ -199,6 +199,11 @@ func buildOne(ctx context.Context, ref ObjectRef, op string, store *Store, ttl t
 			out.Error = &ObjectError{Code: 404, Message: "object not found"}
 			return out
 		}
+		// Report the AUTHORITATIVE stored size, not the client's claimed
+		// ref.Size. The LFS batch response size for a download is the real
+		// object size, and downstream usage metering sums these — so a
+		// client claiming a wrong size must not skew the billed bytes.
+		out.Size = size
 		url, hdr, err := store.PresignGet(ctx, ref.OID, ttl)
 		if errors.Is(err, storage.ErrNotSupported) {
 			url2, hdr2 := store.ProxiedGetURL(ref.OID, ttl)

@@ -506,6 +506,57 @@ func TestHandler_Batch_Download_EmitsUsage(t *testing.T) {
 	}
 }
 
+// TestHandler_Batch_Download_AuthoritativeSize_ExcludesErrored asserts that a
+// download batch meters the AUTHORITATIVE stored size of existing objects
+// (ignoring a client-claimed size that disagrees) and excludes objects that
+// errored (e.g. missing). A batch of one existing object (real size 4096,
+// client claims a wrong 1) plus one missing object must emit
+// Bytes == 4096, Objects == 1.
+func TestHandler_Batch_Download_AuthoritativeSize_ExcludesErrored(t *testing.T) {
+	const realSize = int64(4096)
+	const claimedWrong = int64(1)
+	store := newBatchStore(map[string]int64{oidNew: realSize}, signedFn())
+	authStore := &fakeAuth{
+		repoPerm: map[string]auth.Perm{"acme/foo": auth.PermRead},
+		actors:   map[string]*auth.Actor{"pw": {Name: "alice"}},
+	}
+	actor := &auth.Actor{Name: "alice", UserID: "u-alice"}
+	sink := &usageSinkRec{}
+	srv := newHandlerForTestWithUsage(t, store, authStore, actor, sink)
+	defer srv.Close()
+
+	body, _ := json.Marshal(BatchRequest{
+		Operation: "download",
+		Transfers: []string{"basic"},
+		Objects: []ObjectRef{
+			{OID: oidNew, Size: claimedWrong}, // exists; client lies about size
+			{OID: oidMissing, Size: 999},      // not in store -> 404 error object
+		},
+	})
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/acme/foo.git/info/lfs/objects/batch", bytes.NewReader(body))
+	req.Header.Set("Content-Type", ContentType)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+
+	evs := sink.events()
+	if len(evs) != 1 {
+		t.Fatalf("want 1 usage event, got %d: %+v", len(evs), evs)
+	}
+	ev := evs[0]
+	if ev.Bytes != realSize {
+		t.Errorf("bytes = %d, want %d (authoritative stored size, not client-claimed %d)", ev.Bytes, realSize, claimedWrong)
+	}
+	if ev.Objects != 1 {
+		t.Errorf("objects = %d, want 1 (errored/missing object excluded)", ev.Objects)
+	}
+}
+
 func TestHandler_Batch_Upload_NoUsageEmitted(t *testing.T) {
 	// Upload batches must NOT emit a usage event — the verify handler owns
 	// the authoritative lfs_upload event.
