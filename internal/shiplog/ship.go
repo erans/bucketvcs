@@ -157,12 +157,16 @@ func (e *Engine) shipOne(ctx context.Context, path string) error {
 		return fmt.Errorf("shiplog: gzip close %s: %w", filepath.Base(path), err)
 	}
 
-	if _, err := e.cfg.Store.PutIfAbsent(ctx, key, bytes.NewReader(buf.Bytes()), nil); err != nil &&
-		!errors.Is(err, storage.ErrAlreadyExists) {
-		return fmt.Errorf("shiplog: put %s: %w", key, err)
+	if _, putErr := e.cfg.Store.PutIfAbsent(ctx, key, bytes.NewReader(buf.Bytes()), nil); putErr == nil {
+		// New upload: count the file and its events.
+		e.shippedFiles.Add(1)
+		e.shippedEvents.Add(cr.newlines)
+	} else if errors.Is(putErr, storage.ErrAlreadyExists) {
+		// Duplicate re-ship (crash between PUT and local delete): treat as
+		// success so the file is removed, but do NOT double-count metrics.
+	} else {
+		return fmt.Errorf("shiplog: put %s: %w", key, putErr)
 	}
-	e.shippedFiles.Add(1)
-	e.shippedEvents.Add(cr.newlines)
 	return nil
 }
 
@@ -281,15 +285,28 @@ func (e *Engine) emitMetricsIfChanged(ctx context.Context) {
 
 // Close stops intake, rotates non-empty actives, ships everything pending
 // (bounded by ctx), and stops the ship loop. Safe to call once.
+// If ctx expires mid-close the error is returned immediately; because closeOnce
+// has already fired a retry will not re-run the body — callers should treat a
+// ctx-cancelled Close as a best-effort partial flush.
 func (e *Engine) Close(ctx context.Context) error {
 	var shipErr error
 	e.closeOnce.Do(func() {
 		e.closed.Store(true)
 		close(e.done) // intakeLoop drains, rotates non-empty actives, exits
-		<-e.intakeDone
+		select {
+		case <-e.intakeDone:
+		case <-ctx.Done():
+			shipErr = ctx.Err()
+			return
+		}
 		if e.shipCancel != nil {
 			e.shipCancel()
-			<-e.shipDone
+			select {
+			case <-e.shipDone:
+			case <-ctx.Done():
+				shipErr = ctx.Err()
+				return
+			}
 		}
 		shipErr = e.ShipPending(ctx)
 	})

@@ -102,7 +102,9 @@ func (h *TapHandler) marshal(rec slog.Record) ([]byte, error) {
 		putAttr(cur, a)
 		return true
 	})
-	delete(root, "audit") // redundant in the activity stream
+	// Strip the "audit" routing key from whichever map holds it.
+	// When no WithGroup is active, cur == root so both cases are covered.
+	delete(cur, "audit")
 	return json.Marshal(root)
 }
 

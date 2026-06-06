@@ -153,7 +153,8 @@ func TestShip_FailedPutKeepsFileAndRetries(t *testing.T) {
 
 func TestShip_AlreadyExistsIsSuccess(t *testing.T) {
 	// At-least-once: a crash between PUT and local delete re-ships the same
-	// key; PutIfAbsent → ErrAlreadyExists must count as shipped.
+	// key; PutIfAbsent → ErrAlreadyExists must count as shipped (file removed)
+	// but must NOT increment shippedFiles/shippedEvents (no double-counting).
 	e, st, spool := newTestEngine(t, nil)
 	for i := 0; i < 5; i++ {
 		e.Enqueue(StreamActivity, []byte(`{"x":1}`))
@@ -175,6 +176,14 @@ func TestShip_AlreadyExistsIsSuccess(t *testing.T) {
 	}
 	if n := len(spoolFiles(t, spool, ".pending.")); n != 0 {
 		t.Fatalf("file not deleted after AlreadyExists: %d", n)
+	}
+	// Duplicate re-ship must NOT double-count metrics.
+	if got := e.ShippedEvents(); got != 0 {
+		t.Fatalf("shippedEvents must not advance on ErrAlreadyExists re-ship, got %d", got)
+	}
+	// shippedFiles is not exported directly; verify via the internal field.
+	if got := e.shippedFiles.Load(); got != 0 {
+		t.Fatalf("shippedFiles must not advance on ErrAlreadyExists re-ship, got %d", got)
 	}
 }
 

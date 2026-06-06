@@ -95,7 +95,40 @@ func TestTap_GroupedAttrsAreNested(t *testing.T) {
 	}
 }
 
-func TestTap_WithAttrsPreservesRouting(t *testing.T) {	e, _, spool := newTestEngine(t, nil)
+func TestTap_WithGroupAuditKeyStripped(t *testing.T) {
+	// When audit=true is emitted inline on a logger that was built with
+	// WithGroup("g"), the attrs land in the nested "g" map. Verify that the
+	// "audit" key is stripped from that nested map, not only from root.
+	e, _, spool := newTestEngine(t, nil)
+	logger := slog.New(NewTapHandler(&memHandler{}, e)).WithGroup("g")
+	logger.LogAttrs(context.Background(), slog.LevelInfo, "g.event",
+		slog.Bool("audit", true), slog.String("event", "g.event"),
+		slog.String("detail", "yes"),
+	)
+	recs := readActivitySpool(t, e, spool)
+	if len(recs) != 1 {
+		t.Fatalf("want 1 record, got %d", len(recs))
+	}
+	r := recs[0]
+	// The "g" group map must exist and contain "detail" but NOT "audit".
+	gMap, ok := r["g"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected nested group 'g', got: %v", r)
+	}
+	if _, found := gMap["audit"]; found {
+		t.Fatalf("audit key not stripped from nested group 'g': %v", gMap)
+	}
+	if gMap["detail"] != "yes" {
+		t.Fatalf("expected detail=yes in group 'g', got: %v", gMap)
+	}
+	// "audit" must also not appear at root.
+	if _, found := r["audit"]; found {
+		t.Fatalf("audit key leaked to root: %v", r)
+	}
+}
+
+func TestTap_WithAttrsPreservesRouting(t *testing.T) {
+	e, _, spool := newTestEngine(t, nil)
 	logger := slog.New(NewTapHandler(&memHandler{}, e)).With(slog.String("region", "eu"))
 	logger.LogAttrs(context.Background(), slog.LevelInfo, "y.event",
 		slog.Bool("audit", true), slog.String("event", "y.event"))
