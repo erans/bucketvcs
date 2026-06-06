@@ -19,9 +19,18 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/policy"
 	"github.com/bucketvcs/bucketvcs/internal/replica"
+	"github.com/bucketvcs/bucketvcs/internal/shiplog"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 	"github.com/bucketvcs/bucketvcs/internal/webhooks"
 )
+
+// UsageSink receives operation-metering events from the SSH exec paths
+// (fetch/push). Mirrors gateway.UsageSink; defined here so sshd tests can
+// fake it without importing gateway. *shiplog.Engine satisfies it and its
+// Usage is nil-safe. Call sites MUST nil-check before invoking.
+type UsageSink interface {
+	Usage(shiplog.UsageEvent)
+}
 
 // Options configures the SSH listener and the underlying engine seam.
 type Options struct {
@@ -108,6 +117,11 @@ type Options struct {
 	// Resolver.Resolve(ctx, tenant) to obtain the per-tenant ObjectStore.
 	// When nil, s.opts.BVStore is used directly (default behavior).
 	Resolver ByobResolver
+
+	// Usage, when non-nil, receives operation-metering events (fetch/push)
+	// from the SSH exec paths. nil disables usage metering; call sites must
+	// nil-check before calling. Satisfied by *shiplog.Engine.
+	Usage UsageSink
 }
 
 // Server is the bucketvcs SSH listener. Construct via NewServer.

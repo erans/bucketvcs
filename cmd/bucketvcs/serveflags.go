@@ -9,7 +9,18 @@ import (
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/authreplica"
+	"github.com/bucketvcs/bucketvcs/internal/shiplog"
 )
+
+// envOr returns the value of environment variable key, or def when unset.
+// Used for flags that carry an env-var twin (flag value wins when passed,
+// otherwise the env default applies).
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
 
 // serveFlags carries every `bucketvcs serve` flag as the pointer returned by
 // the flag package. Registered via registerServeFlags so `bucketvcs doctor`
@@ -103,6 +114,13 @@ type serveFlags struct {
 	authDBReplica            *string
 	authDBReplicaLeaseTTL    *time.Duration
 	authDBReplicaSkipRestore *bool
+
+	// Usage & activity log shipping (sys/logs/). On by default.
+	logShipping      *string
+	logShipMaxEvents *int
+	logShipInterval  *time.Duration
+	logSpoolDir      *string
+	logSpoolMaxBytes *int64
 }
 
 // registerServeFlags registers the full serve flag surface on fs. The flag
@@ -263,6 +281,20 @@ func registerServeFlags(fs *flag.FlagSet) *serveFlags {
 		"Lease validity window for the single-writer authdb replication lease (renewal runs every TTL/3)")
 	sf.authDBReplicaSkipRestore = fs.Bool("auth-db-replica-skip-restore", false,
 		"Skip restore-on-boot from the replica even when the local authdb file is missing (escape hatch; fail-open)")
+
+	// Usage & activity log shipping (sys/logs/ in --store). Default on; flip
+	// with --log-shipping=off. Activity = audit events (the slog tap), usage =
+	// operation metering. Env twin: BUCKETVCS_LOG_SHIPPING (flag wins).
+	sf.logShipping = fs.String("log-shipping", envOr("BUCKETVCS_LOG_SHIPPING", "on"),
+		`Ship activity (audit) and usage logs to sys/logs/ in --store: "on" (default) or "off". Env: BUCKETVCS_LOG_SHIPPING`)
+	sf.logShipMaxEvents = fs.Int("log-ship-max-events", 1000,
+		"Rotate and ship a log spool file after this many events")
+	sf.logShipInterval = fs.Duration("log-ship-interval", 15*time.Minute,
+		"Rotate and ship a non-empty log spool file after this long since its first event")
+	sf.logSpoolDir = fs.String("log-spool-dir", "",
+		"Local spool directory for unshipped logs (default: state dir; one per instance)")
+	sf.logSpoolMaxBytes = fs.Int64("log-spool-max-bytes", shiplog.DefaultSpoolMaxBytes,
+		"Cap on unshipped spool bytes; oldest pending file is dropped at the cap")
 
 	return sf
 }
