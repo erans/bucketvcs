@@ -42,6 +42,22 @@ func bucketKeyForPending(prefix, name string) (string, error) {
 		prefix, stream, when.Format("2006/01/02"), when.Format("150405"), instance, seq), nil
 }
 
+// pendingSortKey returns a chronological sort key for a pending file name of
+// the shape "<stream>-<instance>-<seq>.pending.<ts>.ndjson". The key is
+// "<ts>/<seq>" so that drop-oldest in enforceCap sorts by rotation timestamp
+// (then sequence) rather than by instance-id, which is what lexical sorting of
+// the raw name would otherwise do (the instance segment precedes the ts). For
+// names that don't parse, the raw base name is returned so the entry still has
+// a deterministic — if not chronologically meaningful — position.
+func pendingSortKey(name string) string {
+	m := pendingNameRe.FindStringSubmatch(name)
+	if m == nil {
+		return name
+	}
+	// m[1]=stream, m[2]=instance, m[3]=seq, m[4]=ts
+	return m[4] + "/" + m[3]
+}
+
 // adoptLeftovers runs at New: every file in the spool dir from a previous
 // run becomes pending. Orphaned ACTIVE files (a crash before rotation) are
 // renamed to pending names using their mtime so the key derivation works.
@@ -77,7 +93,9 @@ func (e *Engine) adoptLeftovers() error {
 			e.pending = append(e.pending, renamed)
 		}
 	}
-	sort.Strings(e.pending) // oldest-first by name (ts embedded)
+	sort.Slice(e.pending, func(i, j int) bool {
+		return pendingSortKey(filepath.Base(e.pending[i])) < pendingSortKey(filepath.Base(e.pending[j]))
+	}) // oldest-first by rotation ts (then seq), not by instance-id
 	return nil
 }
 
@@ -204,6 +222,14 @@ func (e *Engine) removePending(path string) {
 func (e *Engine) enforceCap() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	// Re-establish chronological order before dropping: adoptLeftovers sorts
+	// correctly at startup, but rotateStream appends new pending files in
+	// monotonic-per-instance order that can interleave with adopted leftovers
+	// whose ts is newer than this instance's early rotations. Re-sorting here
+	// (the list is small) guarantees drop-oldest is always chronological.
+	sort.Slice(e.pending, func(i, j int) bool {
+		return pendingSortKey(filepath.Base(e.pending[i])) < pendingSortKey(filepath.Base(e.pending[j]))
+	})
 	var total int64
 	sizes := make([]int64, len(e.pending))
 	for i, p := range e.pending {
@@ -298,6 +324,18 @@ func (e *Engine) Close(ctx context.Context) error {
 		case <-ctx.Done():
 			shipErr = ctx.Err()
 			return
+		}
+		// An Enqueue racing Close can land one event on e.ch after intakeLoop
+		// has already drained and exited. Drain any such stragglers and count
+		// each as dropped so the metric reflects the event was never spooled.
+		for {
+			select {
+			case <-e.ch:
+				e.dropped.Add(1)
+				continue
+			default:
+			}
+			break
 		}
 		if e.shipCancel != nil {
 			e.shipCancel()

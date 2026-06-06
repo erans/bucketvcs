@@ -218,6 +218,58 @@ func TestShip_BoundedSpoolDropsOldest(t *testing.T) {
 	}
 }
 
+// TestEnforceCap_DropsChronologicallyOldest is the M-final regression: when the
+// spool holds pending files from two instance IDs whose lexical order disagrees
+// with their rotation timestamps, enforceCap must drop the chronologically
+// OLDEST file (smallest ts), not the lexically-first one. The instance segment
+// precedes the ts in the name, so a naive sort.Strings would key on instance-id
+// and drop the wrong (newer) file after a crash+restart.
+func TestEnforceCap_DropsChronologicallyOldest(t *testing.T) {
+	st, err := localfs.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spool := t.TempDir()
+
+	// "ffffffff" instance, OLDEST ts (Jan) — lexically sorts LAST.
+	oldName := "usage-ffffffff-000001.pending.20260101T000000.ndjson"
+	// "00000000" instance, NEWEST ts (Jun) — lexically sorts FIRST.
+	newName := "usage-00000000-000001.pending.20260601T000000.ndjson"
+
+	// Each file is 50 bytes so the pair (100B) exceeds a 60B cap and exactly
+	// one drop restores the invariant.
+	body := []byte(strings.Repeat("x", 49) + "\n")
+	for _, n := range []string{oldName, newName} {
+		if err := os.WriteFile(filepath.Join(spool, n), body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	e, err := New(Config{
+		Store:         st,
+		SpoolDir:      spool,
+		SpoolMaxBytes: 60, // fits one 50B file, not both
+		pauseIntake:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	e.enforceCap()
+
+	// The chronologically OLDEST (Jan / ffffffff) must be gone; the NEWEST
+	// (Jun / 00000000) must survive.
+	if _, err := os.Stat(filepath.Join(spool, oldName)); !os.IsNotExist(err) {
+		t.Fatalf("chronologically oldest file should have been dropped, stat err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(spool, newName)); err != nil {
+		t.Fatalf("chronologically newest file must survive, stat err=%v", err)
+	}
+	if got := e.DroppedFiles(); got != 1 {
+		t.Fatalf("want exactly 1 dropped file, got %d", got)
+	}
+}
+
 func TestClose_RotatesAndShipsFinal(t *testing.T) {
 	st, err := localfs.Open(t.TempDir())
 	if err != nil {

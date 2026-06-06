@@ -58,6 +58,11 @@ type event struct {
 	line   []byte
 }
 
+// nl is the newline appended after each spooled event line. Written as a
+// separate Write so we never mutate (via append) the caller's ev.line backing
+// array, which may be reused by the caller after Enqueue returns.
+var nl = []byte{'\n'}
+
 // streamState is owned exclusively by the intake goroutine.
 type streamState struct {
 	f       *os.File
@@ -259,7 +264,12 @@ func (e *Engine) append(ev event) {
 			return
 		}
 	}
-	if _, err := st.f.Write(append(ev.line, '\n')); err != nil {
+	if _, err := st.f.Write(ev.line); err != nil {
+		e.dropped.Add(1)
+		e.logger.Error("shiplog: append", slog.Any("error", err))
+		return
+	}
+	if _, err := st.f.Write(nl); err != nil {
 		e.dropped.Add(1)
 		e.logger.Error("shiplog: append", slog.Any("error", err))
 		return

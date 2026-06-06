@@ -53,19 +53,65 @@ bounded spool and retries on the next tick. Neither affects serving.
 
 ### 1.1 The two streams
 
-**Activity** — the full audit taxonomy. The activity stream contains
-*exactly* the slog records that the codebase tags `audit=true`; it is not an
-exhaustive copy of every log line. As of this release the audit taxonomy was
-normalized so that **every** genuine audit emitter carries both `audit=true`
-and a matching `event` attribute. The stream therefore carries the complete
-taxonomy: `policy.*` (ref/path/hook decisions), `lfs.*` (batch, object served,
-verify, locks, GC, quotas, SSH auth), `auth.*` (token rotation, scope denials,
-rate-limit hits, OIDC exchange/login, sessions, password set), `webhooks.*`
-(delivery lifecycle, endpoint admin, egress denials), `repo.renamed`,
-`replica.repo.*` health transitions, plus the `bundle.*`, `proxied.url.served`,
-`gc.*`, `maintenance.*`, and `authdb.replica.*` events. Each record is
-serialized as `{ts, level, event, ...attrs}` with the audit attributes passed
-through faithfully:
+**Activity** — the `audit=true` taxonomy *emitted from the running `serve`
+process*. The activity stream contains *exactly* the slog records that the
+codebase tags `audit=true` **and that are produced inside `serve`** — it is
+not an exhaustive copy of every log line, and it is **not** every event in the
+audit taxonomy. The slog tap that feeds the activity stream is installed only
+by `bucketvcs serve` (via `slog.SetDefault`), so audit events emitted by
+one-shot CLI subcommands — which run in their own process with no tap — are
+**not** shipped.
+
+As of this release the taxonomy was normalized so that every genuine audit
+emitter carries both `audit=true` and a matching `event` attribute. What
+actually reaches the activity stream:
+
+**Shipped by `serve`:**
+
+- `policy.*` — ref/path/hook decisions (`policy.ref.rejected`,
+  `policy.ref.internal_error`, `policy.hook.rejected`,
+  `policy.hook.internal_error`), emitted on the receive-pack path.
+- `lfs.*` *(serve subset)* — `lfs.batch`, `lfs.object.served`, `lfs.verify`,
+  `lfs.lock.create` / `lfs.lock.delete` / `lfs.lock.verify`,
+  `lfs.quota.exceeded`, `lfs.ssh_authenticate`, `lfs.locks.replica_refused`.
+- `auth.*` — token rotation (`auth.token.rotated`), scope denials
+  (`auth.scope.denied`), rate-limit hits (`auth.ratelimit.hit`), password set
+  (`auth.password.set`), and the web-login events
+  (`auth.oidc.exchanged` / `auth.oidc.login` / `auth.oidc.identity_linked` /
+  `auth.oidc.rejected`, `auth.session.created` / `auth.session.destroyed`).
+- `webhooks.*` — delivery lifecycle (`webhooks.delivered`, `webhooks.failed`,
+  `webhooks.dead_letter`), endpoint admin (`webhooks.endpoint_created` /
+  `webhooks.endpoint_removed` / `webhooks.endpoint_secret_rotated`,
+  `webhooks.pruned`), egress denials (`webhooks.egress_denied`), and
+  `webhooks.enqueue_failed`. The webhook worker runs inside `serve`.
+- `bundle.uri.advertised` and `proxied.url.served` — the gateway advertise /
+  serve paths.
+- `replica.repo.recovered` / `replica.repo.unhealthy` — the read-replica
+  freshness controller.
+- `authdb.replica.*` — `authdb.replica.lease_lost` / `lease_takeover` /
+  `replication_stopped` / `restored` from the authdb-replica runner.
+
+**Audit-tagged but emitted by CLI subcommands — NOT shipped today:** these
+events are genuine (`audit=true`) but their only emitter runs in a one-shot
+`bucketvcs <subcommand>` process, which has no tap installed, so they never
+reach the activity stream:
+
+- `gc.*` — `gc.mark.completed` / `gc.sweep.completed` (`bucketvcs gc`).
+- `maintenance.*` — `maintenance.started` / `maintenance.completed` plus
+  `bundle.generated` / `bundle.retired` (`bucketvcs maintenance`).
+- `lfs.gc.*` — `lfs.gc.mark` / `lfs.gc.sweep` (`bucketvcs gc --lfs`).
+- `lfs.quota.reconcile` (`bucketvcs quota reconcile`). The web admin
+  reconcile button emits a *non-audit* `quota.reconciled` line instead, so it
+  is not shipped either.
+- `repo.renamed` (`bucketvcs repo rename`). The web rename path likewise emits
+  a non-audit admin line, so neither path ships.
+
+To capture the CLI-only events, scrape stderr from those subcommands (e.g.
+ship the cron job's output), or run the operation from a context that writes
+to the same log sink. The tap only lives in `serve`.
+
+Each shipped record is serialized as `{ts, level, event, ...attrs}` with the
+audit attributes passed through faithfully:
 
 ```json
 {"ts":"2026-06-05T21:30:45.123Z","level":"INFO","event":"proxied.url.served","kind":"bundle","tenant":"acme","repo":"app","bytes_served":386,"status_code":200,"range_request":false}
@@ -75,8 +121,7 @@ through faithfully:
 > (for example `policy.ref.rejected`, `auth.scope.denied`, and the `lfs.*`
 > events) untagged, so they did **not** reach the shipped activity stream. The
 > taxonomy was normalized in this release: every audit emitter now carries
-> `audit=true`, so the activity stream is the complete `audit=true`-tagged
-> taxonomy — nothing more and nothing less. A small number of operational
+> `audit=true`. A small number of operational
 > diagnostics that merely read like events on the console (`lfs.batch.deny`,
 > `webhooks.reclaim_failed`, `webhooks.update_failed`) are intentionally left
 > untagged; the corresponding genuine audit events (`lfs.batch`,
@@ -233,11 +278,15 @@ for f in ./usage/*.ndjson.gz; do gunzip -c "$f"; done \
   | awk -F'\t' '{b[$1"/"$2"\t"$3]+=$4} END{for (k in b) print k, b[k]}'
 ```
 
-Tail the activity (audit) stream for a single repo:
+Tail the activity (audit) stream for a single repo. **Repo identifiers vary
+per emitter**: `policy.*` and `proxied.url.served` carry separate `tenant` +
+`repo` fields; `lfs.*` carries a single `repo` of the form `"tenant/repo"`;
+`bundle.uri.advertised` carries `repo_id` (`"tenant/repo"`). The filter below
+matches all three:
 
 ```bash
 for f in ./activity/*.ndjson.gz; do gunzip -c "$f"; done \
-  | jq -c 'select(.repo=="app" or .repo_id=="acme/app")'
+  | jq -c 'select(.repo=="acme/app" or .repo_id=="acme/app" or (.tenant=="acme" and .repo=="app"))'
 ```
 
 Because the layout is `Hive`-style date partitions of gzipped NDJSON, it loads
