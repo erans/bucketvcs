@@ -270,3 +270,100 @@ func TestWireShape_CodeBuild(t *testing.T) {
 		}
 	}
 }
+
+func TestWireShape_AzureWebhook(t *testing.T) {
+	recv := make(chan capturedHTTP, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		recv <- capturedHTTP{method: r.Method, path: r.URL.Path, headers: r.Header.Clone(), body: b}
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	const secret = "azure-shared-secret"
+	svc, _ := newTestSvc(t)
+	tr, err := svc.Create(context.Background(), TriggerInput{
+		Tenant: "acme", Repo: "app", Name: "aw", Kind: KindAzureWebhook,
+		Config:     Config{AzureWebhookURL: srv.URL, Secret: secret},
+		RefInclude: []string{"refs/heads/main"}, TokenMode: TokenInject,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	d := &httpDeliverer{client: srv.Client(), mintFn: fixedMint}
+	runWorkerOnce(t, svc, map[Kind]Deliverer{KindAzureWebhook: d})
+
+	var got capturedHTTP
+	select {
+	case got = <-recv:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no request received within 3s — worker did not deliver")
+	}
+	if got.method != http.MethodPost || got.path != "/" {
+		t.Fatalf("got %s %s, want POST /", got.method, got.path)
+	}
+	if ct := got.headers.Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type=%q, want application/json", ct)
+	}
+	// Azure default signature header, HMAC-SHA1 over the raw body (no timestamp).
+	wantSig := signAzureSHA1(tr.Secret, got.body, 0)
+	if sig := got.headers.Get("X-Hub-Signature"); sig != wantSig {
+		t.Errorf("X-Hub-Signature=%q, want %q", sig, wantSig)
+	}
+	assertGolden(t, "azurewebhook_body.golden.json", got.body)
+}
+
+func TestWireShape_AzureWebhook_CustomHeaderAndUnsigned(t *testing.T) {
+	// Custom header when a secret is set.
+	recv := make(chan capturedHTTP, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		recv <- capturedHTTP{headers: r.Header.Clone(), body: b}
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	svc, _ := newTestSvc(t)
+	tr, err := svc.Create(context.Background(), TriggerInput{
+		Tenant: "acme", Repo: "app", Name: "awc", Kind: KindAzureWebhook,
+		Config:     Config{AzureWebhookURL: srv.URL, Secret: "s", AzureSigHeader: "X-Custom-Sig"},
+		RefInclude: []string{"refs/heads/main"},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	d := &httpDeliverer{client: srv.Client(), mintFn: fixedMint}
+	runWorkerOnce(t, svc, map[Kind]Deliverer{KindAzureWebhook: d})
+	got := <-recv
+	if got.headers.Get("X-Custom-Sig") == "" {
+		t.Error("custom header X-Custom-Sig not set")
+	}
+	if got.headers.Get("X-Hub-Signature") != "" {
+		t.Error("default X-Hub-Signature should not be set when custom header configured")
+	}
+	_ = tr
+
+	// Unsigned: no secret → no signature header at all.
+	recv2 := make(chan capturedHTTP, 1)
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		recv2 <- capturedHTTP{headers: r.Header.Clone(), body: b}
+		w.WriteHeader(200)
+	}))
+	defer srv2.Close()
+	svc2, _ := newTestSvc(t)
+	if _, err := svc2.Create(context.Background(), TriggerInput{
+		Tenant: "acme", Repo: "app", Name: "awu", Kind: KindAzureWebhook,
+		Config:     Config{AzureWebhookURL: srv2.URL}, // no secret
+		RefInclude: []string{"refs/heads/main"},
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	d2 := &httpDeliverer{client: srv2.Client(), mintFn: fixedMint}
+	runWorkerOnce(t, svc2, map[Kind]Deliverer{KindAzureWebhook: d2})
+	got2 := <-recv2
+	if got2.headers.Get("X-Hub-Signature") != "" || got2.headers.Get("X-Custom-Sig") != "" {
+		t.Error("unsigned azurewebhook must send no signature header")
+	}
+}

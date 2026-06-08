@@ -1,0 +1,1 @@
+{"actor":"tester","bvts_token":"bvts_TESTTOKEN","head_oid":"1111111111111111111111111111111111111111","ref_update":{"refname":"refs/heads/main","old_oid":"0000000000000000000000000000000000000000","new_oid":"1111111111111111111111111111111111111111"},"repo":"app","tenant":"acme","tx_id":"tx-test"}
