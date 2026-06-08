@@ -307,6 +307,24 @@ func scanTrigger(sc rowScanner) (Trigger, error) {
 	return tr, nil
 }
 
+// findByName looks up a trigger by (tenant, repo, name). Returns ErrNotFound
+// when no row matches.
+func (s *Service) findByName(ctx context.Context, tenant, repo, name string) (Trigger, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, tenant, repo, name, kind, config_json, ref_include, ref_exclude,
+		        token_mode, token_scopes, token_ttl_seconds, active, created_at
+		 FROM build_triggers WHERE tenant=? AND repo=? AND name=?`,
+		tenant, repo, name)
+	tr, err := scanTrigger(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Trigger{}, ErrNotFound
+		}
+		return Trigger{}, fmt.Errorf("buildtrigger: findByName %s/%s/%s: %w", tenant, repo, name, err)
+	}
+	return tr, nil
+}
+
 // nonNil returns s, or an empty non-nil slice so JSON encodes [] not null.
 func nonNil(s []string) []string {
 	if s == nil {

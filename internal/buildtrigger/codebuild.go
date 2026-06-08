@@ -23,10 +23,10 @@ type startBuildAPI interface {
 // metadata) is preferred; static keys are a fallback for environments that
 // cannot use it.
 type AWSConnector struct {
-	Region    string
-	Profile   string
-	AccessKey string
-	SecretKey string
+	Region    string `yaml:"region"`
+	Profile   string `yaml:"profile"`
+	AccessKey string `yaml:"access_key"`
+	SecretKey string `yaml:"secret_key"`
 }
 
 // codeBuildDeliverer starts an AWS CodeBuild build via SigV4 StartBuild. The
