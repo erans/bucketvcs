@@ -134,3 +134,42 @@ func TestWireShape_Generic(t *testing.T) {
 	assertSig(t, tr.Secret, got.headers.Get("BucketVCS-Signature"), got.body)
 	assertGolden(t, "generic_body.golden.json", got.body)
 }
+
+func TestWireShape_CloudBuild(t *testing.T) {
+	recv := make(chan capturedHTTP, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		recv <- capturedHTTP{method: r.Method, path: r.URL.Path, headers: r.Header.Clone(), body: b}
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	svc, _ := newTestSvc(t)
+	tr, err := svc.Create(context.Background(), TriggerInput{
+		Tenant: "acme", Repo: "app", Name: "cb", Kind: KindCloudBuild,
+		Config: Config{URL: srv.URL}, RefInclude: []string{"refs/heads/main"},
+		TokenMode: TokenInject,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	d := &httpDeliverer{client: srv.Client(), mintFn: fixedMint}
+	runWorkerOnce(t, svc, map[Kind]Deliverer{KindCloudBuild: d})
+
+	var got capturedHTTP
+	select {
+	case got = <-recv:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no request received within 3s — worker did not deliver")
+	}
+	assertSig(t, tr.Secret, got.headers.Get("BucketVCS-Signature"), got.body)
+	assertGolden(t, "cloudbuild_body.golden.json", got.body)
+
+	if !bytes.Contains(got.body, []byte(`"ref":"refs/heads/main"`)) {
+		t.Errorf("cloudbuild body missing flattened ref: %s", got.body)
+	}
+	if !bytes.Contains(got.body, []byte(`"commit":"`+wsHeadOID+`"`)) {
+		t.Errorf("cloudbuild body missing flattened commit: %s", got.body)
+	}
+}
