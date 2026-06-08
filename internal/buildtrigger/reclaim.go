@@ -31,3 +31,33 @@ func Reclaim(ctx context.Context, db sqlitestore.Querier, threshold time.Duratio
 	}
 	return nil
 }
+
+// DeadLetterOrphans dead-letters pending deliveries whose trigger has been
+// removed. build_trigger_deliveries deliberately does NOT FK to build_triggers
+// (design §2.2), so removing a trigger leaves its deliveries to drain; the claim
+// path INNER-JOINs build_triggers and therefore can never claim an orphaned
+// row. Without this sweep such a row leaks as permanently pending (design §7:
+// "Missing trigger for an orphaned delivery → dead-letter").
+//
+// Only status='pending' rows are swept; in_flight rows are being worked by a
+// live worker and are recovered by Reclaim, not here. attempts is preserved.
+// Returns the number of rows dead-lettered. Called at worker startup AND
+// periodically from the worker loop, alongside Reclaim.
+func DeadLetterOrphans(ctx context.Context, db sqlitestore.Querier) (int64, error) {
+	now := time.Now().Unix()
+	res, err := db.ExecContext(ctx,
+		`UPDATE build_trigger_deliveries
+		   SET status='dead_letter', last_error='trigger removed', next_attempt_at=?
+		 WHERE status='pending'
+		   AND trigger_id NOT IN (SELECT id FROM build_triggers)`,
+		now,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("buildtrigger: dead-letter orphans: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("buildtrigger: dead-letter orphans rows affected: %w", err)
+	}
+	return n, nil
+}

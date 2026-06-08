@@ -104,6 +104,13 @@ func StartWorker(ctx context.Context, svc *Service, cfg WorkerConfig) {
 		logger.LogAttrs(ctx, slog.LevelError, "buildtrigger.reclaim_failed",
 			slog.String("error", err.Error()))
 	}
+	if n, err := DeadLetterOrphans(ctx, svc.db); err != nil {
+		logger.LogAttrs(ctx, slog.LevelError, "buildtrigger.dead_letter_orphans_failed",
+			slog.String("error", err.Error()))
+	} else if n > 0 {
+		logger.LogAttrs(ctx, slog.LevelInfo, "buildtrigger.orphans_dead_lettered",
+			slog.Int64("count", n))
+	}
 
 	sem := make(chan struct{}, cfg.Concurrency)
 	var wg sync.WaitGroup
@@ -127,6 +134,14 @@ func StartWorker(ctx context.Context, svc *Service, cfg WorkerConfig) {
 					logger.LogAttrs(ctx, slog.LevelError, "buildtrigger.reclaim_failed",
 						slog.String("error", err.Error()),
 						slog.String("phase", "periodic"))
+				}
+				if n, err := DeadLetterOrphans(ctx, svc.db); err != nil {
+					logger.LogAttrs(ctx, slog.LevelError, "buildtrigger.dead_letter_orphans_failed",
+						slog.String("error", err.Error()),
+						slog.String("phase", "periodic"))
+				} else if n > 0 {
+					logger.LogAttrs(ctx, slog.LevelInfo, "buildtrigger.orphans_dead_lettered",
+						slog.Int64("count", n))
 				}
 			}
 			claimed, err := claim(ctx, svc.db, cfg.ClaimBatchSize)
