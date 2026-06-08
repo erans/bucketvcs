@@ -61,9 +61,10 @@ It is explicitly *not* an attempt to cover every Azure build surface (see §1.2)
   (`_apis/pipelines/{id}/runs`) only.
 - **`templateParameters`** on the REST body. We use run `variables` (no
   pipeline-YAML pre-declaration required).
-- **Azure-specific permanent-vs-retryable error classification** beyond
-  missing-connector. Non-2xx (incl. 401/404) retries then dead-letters, same as
-  today's HTTP deliverer.
+- **Azure-specific permanent-vs-retryable error classification.** All delivery
+  errors (incl. missing connector, 401/404) retry then dead-letter, same as
+  today's HTTP deliverer. A permanent-failure fast-path is a future worker
+  enhancement.
 - **HMAC algorithm as a knob.** Azure computes SHA-1 for incoming webhooks; only
   the header *name* is configurable.
 
@@ -157,17 +158,23 @@ azure_connectors:
 
 Resolved at worker startup into `map[string]AzureConnector` and passed to
 `ProductionDeliverers()`. The deliverer looks up `Config.AzureConnector` by
-name; a missing name is a **permanent (non-retryable) error**, same as
-CodeBuild's missing-connector handling.
+name; a missing name returns an error. The M30 worker has no permanent-failure
+fast-path, so that error flows through the normal backoff schedule and
+dead-letters on exhaustion (an operator who deletes a still-referenced
+connector will see those triggers dead-letter — surfaced via the existing
+dead-letter metric/audit).
 
 ### 4.3 Validation at `store.Create()` (extends the existing `switch kind`)
 
 - `KindAzureWebhook`: require `AzureWebhookURL` and run the existing
   HTTPS/egress scheme check the generic kind already applies; `Secret` optional
-  (Azure permits unsigned webhooks); `AzureSigHeader` defaults to
-  `X-Hub-Signature` when empty.
+  (Azure permits unsigned webhooks). Unlike generic/cloudbuild, the secret is
+  **not auto-generated** — it must match the secret configured on the Azure
+  incoming-webhook service connection, so an omitted secret means "unsigned",
+  not "generate one". `AzureSigHeader` defaults to `X-Hub-Signature` when empty.
 - `KindAzurePipelines`: require `AzureConnector`, `AzureProject`, and
-  `AzurePipelineID > 0`.
+  `AzurePipelineID > 0`. Default `TokenMode` is `inject` (mirroring its
+  CodeBuild twin); `azurewebhook` defaults to `none` (mirroring generic).
 
 ## 5. Webhook deliverer — signature-profile generalization
 
@@ -243,8 +250,9 @@ Baked-in decisions:
 3. **`BV_*` variable naming** matches the CodeBuild env-var convention exactly,
    so operators see identical names across AWS and Azure.
 4. **Success = HTTP 2xx** (200 with a `Run` object). Any non-2xx is recorded
-   with its status code and flows through normal retry/backoff/dead-letter; no
-   special-casing beyond missing-connector (permanent).
+   with its status code and flows through normal retry/backoff/dead-letter. No
+   error special-casing — missing connector and 4xx alike retry then
+   dead-letter.
 
 **Implementation:** hand-rolled HTTP over the egress-policy-bound client
 (consistent with the existing outbound style; small dependency surface). The
