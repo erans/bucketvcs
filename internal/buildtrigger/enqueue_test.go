@@ -173,4 +173,3 @@ func TestEnqueue_CrossRepoIsolation(t *testing.T) {
 		t.Fatalf("cross-repo push must produce zero deliveries, got %d", len(rows))
 	}
 }
-

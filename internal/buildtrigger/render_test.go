@@ -9,9 +9,13 @@ func TestRenderBody_GenericIncludesContext(t *testing.T) {
 	p := BuildPayload{Tenant: "acme", Repo: "app", HeadOID: "abc",
 		RefUpdate: RefUpdate{Refname: "refs/heads/main"}}
 	body, err := RenderBody(KindGeneric, p, "")
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	var m map[string]any
-	if err := json.Unmarshal(body, &m); err != nil { t.Fatal(err) }
+	if err := json.Unmarshal(body, &m); err != nil {
+		t.Fatal(err)
+	}
 	if m["repo"] != "app" || m["head_oid"] != "abc" {
 		t.Fatalf("missing context: %v", m)
 	}
@@ -28,9 +32,13 @@ func TestRenderBody_CloudBuildInjectsTokenAndFlattens(t *testing.T) {
 	p := BuildPayload{Tenant: "acme", Repo: "app",
 		RefUpdate: RefUpdate{Refname: "refs/heads/main", NewOID: "c0ffee"}}
 	body, err := RenderBody(KindCloudBuild, p, "bvts_secret")
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	var m map[string]any
-	if err := json.Unmarshal(body, &m); err != nil { t.Fatal(err) }
+	if err := json.Unmarshal(body, &m); err != nil {
+		t.Fatal(err)
+	}
 	if m["bvts_token"] != "bvts_secret" {
 		t.Fatalf("expected injected token, got %v", m["bvts_token"])
 	}
