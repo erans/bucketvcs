@@ -141,6 +141,8 @@ The web UI is **optional** — omit `--ui` or pass `--ui=false` if you only need
 
 `bucketvcs doctor` — read-only health checks for storage, auth-db, and config. Accepts the same flags as `serve`; swap `serve` for `doctor` to validate a deployment without binding any ports.
 
+**Next:** want pushes to kick off CI? Wire up [build triggers](docs/build-triggers.md) to start a Google Cloud Build, AWS CodeBuild, or any HTTP endpoint on push.
+
 ---
 
 ## Web UI
