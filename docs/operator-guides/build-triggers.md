@@ -346,7 +346,7 @@ BucketVCS supports two Azure modes, mirroring the two integration styles used fo
 
 ### 5.3 Azure error handling
 
-A missing/misconfigured connector, a 401/404, or any non-2xx response is retried on the standard backoff schedule (1m, 30m, 2h, 12h) and then dead-lettered — observe via the `build_trigger_deadletter_total` metric and the `build.trigger.deadletter` audit event, and recover with `bucketvcs build delivery replay`.
+A missing/misconfigured connector or a non-transient 4xx (e.g. 401/404) is a permanent failure: it dead-letters **immediately** with `reason=permanent` rather than retrying. Transient failures (5xx, 408, 429, network errors) retry on the standard backoff schedule (1m, 30m, 2h, 12h) and then dead-letter with `reason=exhausted`. Observe via the `build_trigger_deadletter_total` metric and the `build.trigger.deadletter` audit event (both carry the `reason` label/attr), and recover with `bucketvcs build delivery replay` after fixing the configuration. See §9.2 for the full permanent-vs-transient breakdown.
 
 ---
 
