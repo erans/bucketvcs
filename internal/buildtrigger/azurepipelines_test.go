@@ -2,8 +2,30 @@ package buildtrigger
 
 import (
 	"encoding/json"
+	"net/http"
 	"testing"
 )
+
+func TestNewAzurePipelinesClientFactory_ResolvesAndErrors(t *testing.T) {
+	f := newAzurePipelinesClientFactory(map[string]AzureConnector{
+		"prod":  {OrgURL: "https://dev.azure.com/Org", PAT: "p"},
+		"nopat": {OrgURL: "https://dev.azure.com/Org"},
+	}, http.DefaultClient)
+
+	if _, err := f(Trigger{Config: Config{AzureConnector: "missing"}}); err == nil {
+		t.Error("want error for unknown connector name")
+	}
+	if _, err := f(Trigger{Config: Config{AzureConnector: "nopat"}}); err == nil {
+		t.Error("want error for connector missing pat")
+	}
+	conn, err := f(Trigger{Config: Config{AzureConnector: "prod"}})
+	if err != nil {
+		t.Fatalf("resolve prod: %v", err)
+	}
+	if conn.orgURL != "https://dev.azure.com/Org" || conn.pat != "p" || conn.client == nil {
+		t.Errorf("resolved conn = %+v (client nil=%v)", conn, conn.client == nil)
+	}
+}
 
 func TestBuildAzureRunBody_ShapeAndSecretFlag(t *testing.T) {
 	p := BuildPayload{

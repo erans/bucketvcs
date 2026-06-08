@@ -212,6 +212,17 @@ triggers:
 	}
 }
 
+func TestParseServeConfig_ExpandsEnv(t *testing.T) {
+	t.Setenv("BVTEST_AZURE_PAT", "secret-from-env")
+	cfg, err := ParseServeConfig([]byte("build:\n  azure_connectors:\n    prod:\n      org_url: https://dev.azure.com/Org\n      pat: ${BVTEST_AZURE_PAT}\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := cfg.Build.AzureConnectors["prod"].PAT; got != "secret-from-env" {
+		t.Errorf("PAT=%q, want secret-from-env (env not expanded)", got)
+	}
+}
+
 func TestParseServeConfig_AzureConnectors(t *testing.T) {
 	yaml := `
 build:
