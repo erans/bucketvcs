@@ -16,8 +16,9 @@ type ServeConfig struct {
 
 // BuildSection groups all build-trigger operator configuration.
 type BuildSection struct {
-	Defaults      Defaults                `yaml:"defaults"`
-	AWSConnectors map[string]AWSConnector `yaml:"aws_connectors"`
+	Defaults        Defaults                  `yaml:"defaults"`
+	AWSConnectors   map[string]AWSConnector   `yaml:"aws_connectors"`
+	AzureConnectors map[string]AzureConnector `yaml:"azure_connectors"`
 }
 
 // Defaults are server-wide fallbacks applied when a trigger omits the
