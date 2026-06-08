@@ -2,6 +2,8 @@ package buildtrigger
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -90,5 +92,32 @@ func TestHTTPDeliverer_MintErrorIsRetryable(t *testing.T) {
 	}}
 	if _, err := d.Deliver(context.Background(), tr, BuildPayload{}); err == nil {
 		t.Fatal("mint failure must surface as a delivery error (retryable), not a silent success")
+	}
+}
+
+func TestHTTPStatusPermanent(t *testing.T) {
+	cases := map[int]bool{
+		400: true, 401: true, 403: true, 404: true, 422: true,
+		408: false, 429: false,
+		500: false, 502: false, 503: false,
+		200: false, 302: false,
+	}
+	for code, want := range cases {
+		if got := httpStatusPermanent(code); got != want {
+			t.Errorf("httpStatusPermanent(%d)=%v, want %v", code, got, want)
+		}
+	}
+}
+
+func TestPermanentf_IsErrPermanent(t *testing.T) {
+	err := permanentf("HTTP %d", 404)
+	if !errors.Is(err, ErrPermanent) {
+		t.Fatal("permanentf result should satisfy errors.Is(err, ErrPermanent)")
+	}
+	if !strings.Contains(err.Error(), "HTTP 404") {
+		t.Errorf("error message lost detail: %q", err.Error())
+	}
+	if errors.Is(fmt.Errorf("plain"), ErrPermanent) {
+		t.Error("a plain error must not be ErrPermanent")
 	}
 }

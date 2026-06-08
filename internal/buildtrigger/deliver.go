@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -113,4 +114,21 @@ func webhookURL(tr Trigger) string {
 		return tr.Config.AzureWebhookURL
 	}
 	return tr.Config.URL
+}
+
+// ErrPermanent marks a delivery error that must NOT be retried (a configuration
+// error or a non-transient 4xx). recordResult routes it straight to dead_letter
+// regardless of attempt count.
+var ErrPermanent = errors.New("permanent delivery error")
+
+// permanentf wraps a formatted error so errors.Is(err, ErrPermanent) is true.
+func permanentf(format string, a ...any) error {
+	return fmt.Errorf("%w: "+format, append([]any{ErrPermanent}, a...)...)
+}
+
+// httpStatusPermanent reports whether an HTTP status is a permanent failure:
+// any 4xx except 408 (Request Timeout) and 429 (Too Many Requests), which are
+// transient and should be retried.
+func httpStatusPermanent(code int) bool {
+	return code >= 400 && code < 500 && code != 408 && code != 429
 }
