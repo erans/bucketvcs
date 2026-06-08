@@ -1,0 +1,61 @@
+# Cloud Build inline build config for a bucketvcs `cloudbuild` build trigger
+# (token-mode = inject).
+#
+# A Cloud Build *webhook* trigger has no connected source repo, so this build
+# clones the bucketvcs repository itself, checks out the pushed commit, and
+# builds it. The short-lived pull token and the commit SHA arrive in the
+# webhook body that bucketvcs POSTs, and are mapped to substitutions when you
+# create the trigger (see README.md in this directory).
+#
+# Body fields a bucketvcs `cloudbuild`-kind trigger sends (see internal/buildtrigger/render.go):
+#   bvts_token  -> _BVTS_TOKEN   (short-lived, single-repo, read-only pull token)
+#   commit      -> _COMMIT       (pushed commit SHA; == ref_update.new_oid)
+#   tenant      -> _TENANT
+#   repo        -> _REPO
+#   ref         -> (available as $(body.ref) if you want it)
+#
+# _REPO_HOST is NOT in the body — it is your bucketvcs instance's public host,
+# set as a static substitution at trigger-creation time.
+#
+# SECURITY NOTE: in inject mode the token travels in the webhook request and is
+# visible as a build substitution in the Cloud Build console/logs. It is
+# short-TTL, single-repo, and read-only, so the blast radius is bounded. For a
+# token that never leaves the build, use the OIDC-pull variant documented in
+# docs/operator-guides/build-triggers.md §3.
+
+substitutions:
+  _BVTS_TOKEN: ""   # <- $(body.bvts_token)
+  _COMMIT: ""       # <- $(body.commit)
+  _TENANT: ""       # <- $(body.tenant)
+  _REPO: ""         # <- $(body.repo)
+  _REPO_HOST: ""    # <- static, e.g. your-instance.example.com (host only, no scheme)
+
+steps:
+  - id: clone
+    name: gcr.io/cloud-builders/git
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        git clone "https://x-access-token:${_BVTS_TOKEN}@${_REPO_HOST}/${_TENANT}/${_REPO}" src
+        cd src
+        git checkout "${_COMMIT}"
+        echo "checked out $(git rev-parse HEAD)"
+
+  - id: build-and-test
+    name: golang:1.26
+    dir: src
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        go build ./...
+        # Fast smoke; broaden to `go test ./...` for a full run.
+        go test ./internal/buildtrigger/...
+
+options:
+  # Required when the build runs as the default / a non-bucket service account
+  # (otherwise Cloud Build errors asking for a logs bucket).
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: 1200s
