@@ -11,6 +11,7 @@ import (
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/auth/ratelimit"
+	"github.com/bucketvcs/bucketvcs/internal/buildtrigger"
 	"github.com/bucketvcs/bucketvcs/internal/hooks"
 	"github.com/bucketvcs/bucketvcs/internal/lfs"
 	"github.com/bucketvcs/bucketvcs/internal/lfs/locks"
@@ -160,6 +161,9 @@ type Options struct {
 	// emits EventPush + EventPolicyRefRejected, and the LFS verify/lock
 	// paths emit their respective events. nil disables all enqueues.
 	Webhooks *webhooks.Service
+
+	// BuildTriggers enables M30 build-trigger enqueue on receive-pack.
+	BuildTriggers *buildtrigger.Service
 
 	// Hooks is OPTIONAL. When non-nil, EngineRequest.Hooks is populated
 	// for receive-pack and pre-receive/post-receive subprocess execution

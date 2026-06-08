@@ -54,20 +54,21 @@ func (s *Server) handleReceivePack(w http.ResponseWriter, r *http.Request, tenan
 	start := time.Now()
 
 	req := &receivepack.EngineRequest{
-		Ctx:          r.Context(),
-		Tenant:       tenant,
-		Repo:         repoID,
-		Actor:        ActorFromContext(r.Context()),
-		Stdin:        cr,
-		Stdout:       w,
-		Stderr:       io.Discard,
-		Store:        store,
-		Mirror:       s.mgr,
-		AgentVersion: s.opts.Version,
-		Policy:       s.opts.Policy,
-		Webhooks:     s.opts.Webhooks,
-		Hooks:        s.opts.Hooks,
-		Logger:       s.logger,
+		Ctx:           r.Context(),
+		Tenant:        tenant,
+		Repo:          repoID,
+		Actor:         ActorFromContext(r.Context()),
+		Stdin:         cr,
+		Stdout:        w,
+		Stderr:        io.Discard,
+		Store:         store,
+		Mirror:        s.mgr,
+		AgentVersion:  s.opts.Version,
+		Policy:        s.opts.Policy,
+		Webhooks:      s.opts.Webhooks,
+		BuildTriggers: s.opts.BuildTriggers,
+		Hooks:         s.opts.Hooks,
+		Logger:        s.logger,
 	}
 	err = receivepack.Service(req)
 	// Emit the push usage event after the engine completes. The flush-only

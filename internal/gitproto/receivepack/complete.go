@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/bucketvcs/bucketvcs/internal/buildtrigger"
 	"github.com/bucketvcs/bucketvcs/internal/gitcli"
 	"github.com/bucketvcs/bucketvcs/internal/hooks"
 	"github.com/bucketvcs/bucketvcs/internal/importer"
@@ -593,6 +594,36 @@ func completeReceivePack(eng *EngineRequest, w io.Writer, m *mirror.Mirror, rp *
 		}
 	}
 
+	// M30 build triggers: fire CI builds for matching refs. Fail-open —
+	// enqueue errors never affect the receive outcome.
+	if eng.BuildTriggers != nil {
+		var refUpdates []buildtrigger.RefUpdate
+		for i, u := range rp.Updates {
+			if statuses[i] != "" {
+				continue
+			}
+			refUpdates = append(refUpdates, buildtrigger.RefUpdate{
+				Refname: u.Refname,
+				OldOID:  u.OldOID,
+				NewOID:  u.NewOID,
+			})
+		}
+		if len(refUpdates) > 0 {
+			push := buildtrigger.PushInfo{
+				Tenant:     tenant,
+				Repo:       repoID,
+				Actor:      actorName,
+				TxID:       viewAfter.Header.LatestTx,
+				HeadOID:    buildTriggerHeadOID(refUpdates),
+				RefUpdates: refUpdates,
+			}
+			if err := eng.BuildTriggers.Enqueue(ctx, push); err != nil {
+				buildtrigger.EmitEnqueueFailed(ctx, eng.loggerOrDefault(),
+					tenant, repoID, err.Error())
+			}
+		}
+	}
+
 	// Step 15: success. Fill in "ok <ref>" for every accepted command;
 	// rejected ones already carry their "ng <ref> <reason>".
 	for i, u := range rp.Updates {
@@ -808,6 +839,17 @@ func pushHeadOID(updates []webhooks.RefUpdate) string {
 	}
 	for _, u := range updates {
 		if u.NewOID != oidconst.NullOIDHex {
+			return u.NewOID
+		}
+	}
+	return ""
+}
+
+// buildTriggerHeadOID returns the first non-null NewOID among the updates, or
+// "" if none (mirrors pushHeadOID for buildtrigger.RefUpdate).
+func buildTriggerHeadOID(updates []buildtrigger.RefUpdate) string {
+	for _, u := range updates {
+		if u.NewOID != "" && u.NewOID != oidconst.NullOIDHex {
 			return u.NewOID
 		}
 	}
