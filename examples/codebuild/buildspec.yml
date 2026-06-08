@@ -1,0 +1,40 @@
+# AWS CodeBuild buildspec for a bucketvcs `codebuild` build trigger.
+#
+# Unlike Cloud Build, CodeBuild has no inbound webhook: bucketvcs starts this
+# build by calling the CodeBuild StartBuild API (SigV4) and injects the build
+# context as environment-variable overrides. This is a NO_SOURCE project, so the
+# build clones the bucketvcs repository itself, checks out the pushed commit,
+# and builds it.
+#
+# Environment variables injected by bucketvcs on each StartBuild
+# (see internal/buildtrigger/codebuild.go):
+#   BVTS_TOKEN  short-lived, single-repo, read-only pull token (token-mode=inject)
+#   BV_REPO     "<tenant>/<repo>", e.g. acme/bucketvcs
+#   BV_COMMIT   pushed commit SHA
+#   BV_REF      pushed ref, e.g. refs/heads/main
+#
+# BUCKETVCS_HOST is NOT injected by bucketvcs — it is your instance's public
+# host. Set it as a static environment variable on the CodeBuild project (see
+# create-project.yaml / README.md), host only, no scheme.
+#
+# Recommended project environment image: golang:1.26 (Docker Hub) — it includes
+# Go and git, so no runtime-versions install step is needed.
+#
+# SECURITY NOTE: in inject mode BVTS_TOKEN is passed as a build environment
+# variable (visible in the CodeBuild console for the build's lifetime). It is
+# short-TTL, single-repo, and read-only. For a token that never leaves the
+# build, use the OIDC-pull variant in docs/operator-guides/build-triggers.md §3
+# (note: OIDC-pull from CodeBuild needs extra plumbing — AWS does not natively
+# mint arbitrary-audience OIDC tokens — so inject is the practical default here).
+
+version: 0.2
+
+phases:
+  build:
+    commands:
+      - git clone "https://x-access-token:${BVTS_TOKEN}@${BUCKETVCS_HOST}/${BV_REPO}" src
+      - cd src && git checkout "${BV_COMMIT}"
+      - echo "checked out $(git rev-parse HEAD) for ${BV_REF}"
+      - go build ./...
+      # Fast smoke; broaden to `go test ./...` for a full run.
+      - go test ./internal/buildtrigger/...

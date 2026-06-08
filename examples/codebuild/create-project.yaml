@@ -1,0 +1,40 @@
+# aws codebuild create-project --cli-input-yaml file://create-project.yaml
+#
+# Creates the NO_SOURCE CodeBuild project that bucketvcs drives via StartBuild.
+# Fill in the placeholders: ACCOUNT_ID, the region you pass to the trigger, your
+# bucketvcs public host (BUCKETVCS_HOST), and the service-role ARN.
+#
+# The buildspec below is the same content as buildspec.yml, inlined because a
+# NO_SOURCE project has no source to read a buildspec file from.
+
+name: bvcs-build
+description: Build bucketvcs on push, driven by a bucketvcs codebuild trigger.
+
+source:
+  type: NO_SOURCE
+  buildspec: |
+    version: 0.2
+    phases:
+      build:
+        commands:
+          - git clone "https://x-access-token:${BVTS_TOKEN}@${BUCKETVCS_HOST}/${BV_REPO}" src
+          - cd src && git checkout "${BV_COMMIT}"
+          - echo "checked out $(git rev-parse HEAD) for ${BV_REF}"
+          - go build ./...
+          - go test ./internal/buildtrigger/...
+
+artifacts:
+  type: NO_ARTIFACTS
+
+environment:
+  type: LINUX_CONTAINER
+  image: golang:1.26                 # Docker Hub; includes Go + git
+  computeType: BUILD_GENERAL1_SMALL
+  imagePullCredentialsType: CODEBUILD # required to pull a public Docker Hub image
+  environmentVariables:
+    - name: BUCKETVCS_HOST
+      value: your-instance.example.com   # host only, no scheme
+      type: PLAINTEXT
+
+# A CodeBuild service role with the standard CloudWatch Logs permissions.
+serviceRole: arn:aws:iam::ACCOUNT_ID:role/bvcs-codebuild-role
