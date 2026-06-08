@@ -90,6 +90,7 @@ func TestStore_GetRoundTrip(t *testing.T) {
 		t.Fatalf("get: %v", err)
 	}
 	if got.Kind != KindCodeBuild || got.Config.AWSProject != "app-release" ||
+		got.Config.AWSConnector != "default" ||
 		len(got.RefInclude) != 1 || len(got.RefExclude) != 1 ||
 		got.TokenMode != TokenInject || got.TokenScopes != auth.ScopeRepoRead ||
 		got.TokenTTL != 10*time.Minute || !got.Active {
@@ -108,11 +109,42 @@ func TestStore_CreateValidation(t *testing.T) {
 		{Tenant: "acme", Repo: "app", Name: "n", Kind: KindGeneric, Config: Config{URL: "https://x"}, RefInclude: []string{"["}},
 		{Tenant: "acme", Repo: "app", Name: "n", Kind: KindGeneric, Config: Config{URL: "https://x"}, TokenTTL: 2 * time.Hour},
 		{Tenant: "acme", Repo: "app", Name: "bad name", Kind: KindGeneric, Config: Config{URL: "https://x"}},
+		// empty Repo
+		{Tenant: "acme", Repo: "", Name: "n", Kind: KindGeneric, Config: Config{URL: "https://x"}},
+		// empty Name
+		{Tenant: "acme", Repo: "app", Name: "", Kind: KindGeneric, Config: Config{URL: "https://x"}},
+		// negative TokenTTL
+		{Tenant: "acme", Repo: "app", Name: "n", Kind: KindGeneric, Config: Config{URL: "https://x"}, TokenTTL: -1 * time.Second},
+		// invalid TokenMode
+		{Tenant: "acme", Repo: "app", Name: "n", Kind: KindGeneric, Config: Config{URL: "https://x"}, TokenMode: "bogus"},
+		// codebuild with AWSProject set but AWSRegion empty
+		{Tenant: "acme", Repo: "app", Name: "n", Kind: KindCodeBuild, Config: Config{AWSProject: "p", AWSRegion: ""}},
 	}
 	for i, in := range bad {
 		if _, err := svc.Create(ctx, in); !errors.Is(err, ErrInvalidInput) {
 			t.Fatalf("case %d: want ErrInvalidInput, got %v", i, err)
 		}
+	}
+}
+
+func TestStore_GetNotFound(t *testing.T) {
+	svc, _ := newTestSvc(t)
+	ctx := context.Background()
+	_, err := svc.Get(ctx, "bvbt_doesnotexist")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+}
+
+func TestStore_EnableDisableNotFound(t *testing.T) {
+	svc, _ := newTestSvc(t)
+	ctx := context.Background()
+	const missing = "bvbt_nosuchid"
+	if err := svc.Enable(ctx, missing); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Enable: want ErrNotFound, got %v", err)
+	}
+	if err := svc.Disable(ctx, missing); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Disable: want ErrNotFound, got %v", err)
 	}
 }
 
