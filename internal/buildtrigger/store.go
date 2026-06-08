@@ -154,8 +154,8 @@ func (s *Service) Create(ctx context.Context, in TriggerInput) (Trigger, error) 
 		Name:        in.Name,
 		Kind:        in.Kind,
 		Config:      cfg,
-		RefInclude:  in.RefInclude,
-		RefExclude:  in.RefExclude,
+		RefInclude:  nonNil(in.RefInclude),
+		RefExclude:  nonNil(in.RefExclude),
 		TokenMode:   mode,
 		TokenScopes: scopes,
 		TokenTTL:    ttl,
@@ -274,7 +274,7 @@ func scanTrigger(sc rowScanner) (Trigger, error) {
 	)
 	if err := sc.Scan(&tr.ID, &tr.Tenant, &tr.Repo, &tr.Name, &kind, &configJSON, &refIncJSON, &refExcJSON,
 		&mode, &scopes, &ttlSeconds, &active, &createdAt); err != nil {
-		return Trigger{}, err
+		return Trigger{}, fmt.Errorf("buildtrigger: scan row: %w", err)
 	}
 	tr.Kind = Kind(kind)
 	if len(configJSON) > 0 {
@@ -282,11 +282,19 @@ func scanTrigger(sc rowScanner) (Trigger, error) {
 			return Trigger{}, fmt.Errorf("buildtrigger: decode config: %w", err)
 		}
 	}
-	if err := json.Unmarshal(refIncJSON, &tr.RefInclude); err != nil {
-		return Trigger{}, fmt.Errorf("buildtrigger: decode ref_include: %w", err)
+	if len(refIncJSON) > 0 {
+		if err := json.Unmarshal(refIncJSON, &tr.RefInclude); err != nil {
+			return Trigger{}, fmt.Errorf("buildtrigger: decode ref_include: %w", err)
+		}
+	} else {
+		tr.RefInclude = []string{}
 	}
-	if err := json.Unmarshal(refExcJSON, &tr.RefExclude); err != nil {
-		return Trigger{}, fmt.Errorf("buildtrigger: decode ref_exclude: %w", err)
+	if len(refExcJSON) > 0 {
+		if err := json.Unmarshal(refExcJSON, &tr.RefExclude); err != nil {
+			return Trigger{}, fmt.Errorf("buildtrigger: decode ref_exclude: %w", err)
+		}
+	} else {
+		tr.RefExclude = []string{}
 	}
 	tr.TokenMode = TokenMode(mode)
 	tr.TokenScopes = auth.TokenScope(scopes)

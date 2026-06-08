@@ -54,8 +54,8 @@ func TestStore_CreateListGetRemove(t *testing.T) {
 	if err != nil || len(got) != 1 {
 		t.Fatalf("list: %v len=%d", err, len(got))
 	}
-	if got[0].Secret != "" || got[0].SecretPreview == "" {
-		t.Fatal("list must hide secret, show preview")
+	if got[0].Secret != "" || got[0].Config.Secret != "" || got[0].SecretPreview == "" {
+		t.Fatal("list must hide secret and config.secret, show preview")
 	}
 	if _, err := svc.Create(ctx, TriggerInput{
 		Tenant: "acme", Repo: "app", Name: "main-cb", Kind: KindGeneric, Config: Config{URL: "https://x"},
