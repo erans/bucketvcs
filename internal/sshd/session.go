@@ -266,6 +266,7 @@ run:
 			AgentVersion:    s.opts.AgentVersion,
 			Policy:          s.opts.Policy,
 			Webhooks:        s.opts.Webhooks,
+			BuildTriggers:   s.opts.BuildTriggers,
 			Hooks:           s.opts.Hooks,
 			Logger:          s.opts.Logger,
 		}

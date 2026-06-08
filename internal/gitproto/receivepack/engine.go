@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
+	"github.com/bucketvcs/bucketvcs/internal/buildtrigger"
 	"github.com/bucketvcs/bucketvcs/internal/hooks"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/policy"
@@ -51,6 +52,11 @@ type EngineRequest struct {
 	// Enqueue failures are logged and never affect the receive outcome
 	// (fail-open).
 	Webhooks *webhooks.Service
+
+	// BuildTriggers is OPTIONAL (M30). When non-nil, a successful receive
+	// enqueues build-trigger deliveries for matching refs. Enqueue failures
+	// are logged and never affect the receive outcome (fail-open).
+	BuildTriggers *buildtrigger.Service
 
 	// Logger is OPTIONAL. Used by step 8b's metric + audit emission.
 	// nil falls back to slog.Default() at emission time.

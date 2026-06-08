@@ -228,6 +228,10 @@ func randomHex(n int) (string, error) {
 // oidcSystemUserID is the reserved user inserted by migration 0010.
 const oidcSystemUserID = "_oidc"
 
+// buildSystemUserID is the reserved user inserted by migration 0017.
+// Build-trigger-minted tokens are owned by this principal.
+const buildSystemUserID = "_build"
+
 // OIDCMaxTTLSeconds is the hard ceiling on an OIDC trust rule's token TTL.
 // Enforced at rule creation (the store is the chokepoint all minting flows
 // through) so the short-lived-token blast-radius control cannot be bypassed
@@ -278,14 +282,7 @@ func (s *Store) MintOIDCToken(ctx context.Context, p MintOIDCParams) (string, er
 // user and returns the number removed. Scoped to _oidc so it never touches
 // operator-managed user tokens.
 func (s *Store) SweepExpiredOIDCTokens(ctx context.Context) (int64, error) {
-	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM tokens WHERE user_id = ? AND expires_at IS NOT NULL AND expires_at < ?`,
-		oidcSystemUserID, time.Now().Unix())
-	if err != nil {
-		return 0, err
-	}
-	n, _ := res.RowsAffected()
-	return n, nil
+	return s.sweepExpiredTokensForUser(ctx, oidcSystemUserID)
 }
 
 // ErrNoSuchOIDCIssuer and ErrNoSuchOIDCRule are not-found sentinels.

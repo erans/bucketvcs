@@ -80,8 +80,7 @@ func (s *Store) BackendName() string { return s.backend.Name() }
 var ErrLastAdmin = errors.New("sqlitestore: refusing to delete the last admin")
 
 // ErrReservedUser is returned when an operation targets a reserved system
-// user (e.g. the OIDC minting principal "_oidc") that must not be disabled
-// or deleted.
+// user ("_oidc" or "_build") that must not be disabled or deleted.
 var ErrReservedUser = errors.New("sqlitestore: cannot modify reserved system user")
 
 // User is the row shape returned by user-lookup methods.
@@ -152,13 +151,13 @@ func (s *Store) GetUserByName(ctx context.Context, name string) (*auth.User, err
 	return u, nil
 }
 
-// ListUsers returns all non-reserved users ordered by name. The reserved
-// system user "_oidc" is excluded so it does not appear in operator-facing
-// output or CLI listings.
+// ListUsers returns all non-reserved users ordered by name. Reserved
+// system users ("_oidc", "_build") are excluded so they do not appear in
+// operator-facing output or CLI listings.
 func (s *Store) ListUsers(ctx context.Context) ([]*User, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, COALESCE(email,''), is_admin, created_at, disabled_at FROM users WHERE name != ? ORDER BY name`,
-		oidcSystemUserID,
+		`SELECT id, name, COALESCE(email,''), is_admin, created_at, disabled_at FROM users WHERE name != ? AND name != ? ORDER BY name`,
+		oidcSystemUserID, buildSystemUserID,
 	)
 	if err != nil {
 		return nil, err
@@ -194,7 +193,7 @@ func (s *Store) ListUsers(ctx context.Context) ([]*User, error) {
 // admin" means. Re-enabling has no such guard: re-enabling can only
 // strictly increase the count of enabled admins.
 func (s *Store) SetUserDisabled(ctx context.Context, name string, disabled bool) error {
-	if name == oidcSystemUserID {
+	if name == oidcSystemUserID || name == buildSystemUserID {
 		return ErrReservedUser
 	}
 	if disabled {
@@ -257,7 +256,7 @@ func (s *Store) SetUserDisabled(ctx context.Context, name string, disabled bool)
 // can't authenticate, so leaving "the last admin disabled" would lock
 // every operator out.
 func (s *Store) DeleteUser(ctx context.Context, name string) error {
-	if name == oidcSystemUserID {
+	if name == oidcSystemUserID || name == buildSystemUserID {
 		return ErrReservedUser
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -620,7 +619,7 @@ func (s *Store) SetRepoPublic(ctx context.Context, tenant, repo string, public b
 // Grant creates or replaces a permission row. perm must be "read", "write",
 // or "admin". Refuses if the (tenant, repo) is not registered.
 func (s *Store) Grant(ctx context.Context, userName, tenant, repo, perm string) error {
-	if userName == oidcSystemUserID {
+	if userName == oidcSystemUserID || userName == buildSystemUserID {
 		return ErrReservedUser
 	}
 	if perm != "read" && perm != "write" && perm != "admin" {

@@ -64,6 +64,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return runPolicy(ctx, rest, stdout, stderr)
 	case "webhook":
 		return runWebhook(ctx, rest, stdout, stderr)
+	case "build":
+		return runBuild(ctx, rest, stdout, stderr)
 	case "quota":
 		return runQuota(ctx, rest, stdout, stderr)
 	case "tenant":
