@@ -90,15 +90,25 @@ func TestWorker_DeadLetterAfterExhaustion(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := &flakyDeliverer{failuresLeft: 1 << 30}
+	capH := &captureHandler{}
 	cfg := WorkerConfig{
 		TickInterval:    5 * time.Millisecond,
 		BackoffSchedule: []time.Duration{2 * time.Millisecond, 2 * time.Millisecond},
 		Deliverers:      map[Kind]Deliverer{KindGeneric: d},
+		Logger:          slog.New(capH),
 	}
 	wctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	go StartWorker(wctx, svc, cfg)
 	waitUntil(t, 3*time.Second, func() bool { return svc.countByStatus(ctx, "dead_letter") == 1 })
+	// Ordinary exhaustion must report reason=exhausted (not permanent), so
+	// existing dashboards keep their meaning.
+	if !capH.hasMetricReason("build_trigger_deadletter_total", "exhausted") {
+		t.Error("expected build_trigger_deadletter_total with reason=exhausted")
+	}
+	if !capH.hasAuditReason("build.trigger.deadletter", "exhausted") {
+		t.Error("expected build.trigger.deadletter audit with reason=exhausted")
+	}
 }
 
 // permanentDeliverer always returns a permanent error, recording call count.
@@ -148,6 +158,29 @@ func (h *captureHandler) hasMetricReason(metricName, reason string) bool {
 	return false
 }
 
+// hasAuditReason reports whether any captured record is an audit event with the
+// given event name and reason attrs.
+func (h *captureHandler) hasAuditReason(event, reason string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range h.records {
+		var ev, rsn string
+		r.Attrs(func(a slog.Attr) bool {
+			switch a.Key {
+			case "event":
+				ev = a.Value.String()
+			case "reason":
+				rsn = a.Value.String()
+			}
+			return true
+		})
+		if ev == event && rsn == reason {
+			return true
+		}
+	}
+	return false
+}
+
 func TestWorker_PermanentErrorDeadLettersImmediately(t *testing.T) {
 	svc, _ := newTestSvc(t)
 	ctx := context.Background()
@@ -183,5 +216,8 @@ func TestWorker_PermanentErrorDeadLettersImmediately(t *testing.T) {
 	}
 	if !capH.hasMetricReason("build_trigger_deadletter_total", "permanent") {
 		t.Error("expected build_trigger_deadletter_total with reason=permanent")
+	}
+	if !capH.hasAuditReason("build.trigger.deadletter", "permanent") {
+		t.Error("expected build.trigger.deadletter audit with reason=permanent")
 	}
 }
