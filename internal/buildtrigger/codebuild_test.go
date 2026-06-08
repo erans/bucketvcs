@@ -2,6 +2,7 @@ package buildtrigger
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/service/codebuild"
@@ -64,5 +65,40 @@ func TestCodeBuildDeliverer_NoTokenWhenModeNone(t *testing.T) {
 		if *ev.Name == "BVTS_TOKEN" {
 			t.Fatal("token must be absent in TokenNone mode")
 		}
+	}
+}
+
+func TestCodeBuildDeliverer_MintErrorNoStartBuild(t *testing.T) {
+	fake := &fakeStartBuild{}
+	mintErr := errors.New("mint failed")
+	d := &codeBuildDeliverer{
+		clientFor: func(Trigger) (startBuildAPI, error) { return fake, nil },
+		mintFn:    func(context.Context, Trigger, BuildPayload) (string, error) { return "", mintErr },
+	}
+	tr := Trigger{Kind: KindCodeBuild, TokenMode: TokenInject,
+		Config: Config{AWSRegion: "us-east-1", AWSProject: "p"}}
+	_, err := d.Deliver(context.Background(), tr, BuildPayload{HeadOID: "abc"})
+	if err == nil {
+		t.Fatal("expected error from mint failure, got nil")
+	}
+	if fake.in != nil {
+		t.Fatal("StartBuild must not be called when mint fails")
+	}
+}
+
+func TestCodeBuildDeliverer_SourceVersionFallbackToNewOID(t *testing.T) {
+	fake := &fakeStartBuild{}
+	d := &codeBuildDeliverer{
+		clientFor: func(Trigger) (startBuildAPI, error) { return fake, nil },
+		mintFn:    func(context.Context, Trigger, BuildPayload) (string, error) { return "", nil },
+	}
+	tr := Trigger{Kind: KindCodeBuild, TokenMode: TokenNone,
+		Config: Config{AWSRegion: "us-east-1", AWSProject: "p"}}
+	p := BuildPayload{HeadOID: "", RefUpdate: RefUpdate{Refname: "refs/heads/main", NewOID: "fallback-oid"}}
+	if _, err := d.Deliver(context.Background(), tr, p); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	if fake.in == nil || *fake.in.SourceVersion != "fallback-oid" {
+		t.Fatalf("expected SourceVersion=fallback-oid, got %+v", fake.in)
 	}
 }
