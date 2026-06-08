@@ -20,9 +20,11 @@ import (
 const buildUsage = `Usage: bucketvcs build <object> <action> [flags]
 
 Objects + actions:
-  trigger add     --auth-db=<path> --tenant=<t> --repo=<r> --name=<n> --kind=<generic|cloudbuild|codebuild>
+  trigger add     --auth-db=<path> --tenant=<t> --repo=<r> --name=<n> --kind=<generic|cloudbuild|codebuild|azurewebhook|azurepipelines>
                   generic/cloudbuild: --url=<https://...> [--secret=<s>]
                   codebuild:          --aws-region=<r> --aws-project=<p> [--aws-connector=<c>]
+                  azurewebhook:       --azure-webhook-url=<u> [--secret=<s>] [--azure-sig-header=<h>]
+                  azurepipelines:     --azure-connector=<c> --azure-project=<p> --azure-pipeline-id=<n>
                   [--ref-include=<csv>] [--ref-exclude=<csv>]
                   [--token-mode=<none|inject>] [--token-scopes=<csv|all|repo:*|lfs:*>]
                   [--token-ttl=<dur>]
@@ -102,12 +104,17 @@ func runBuildTriggerAdd(ctx context.Context, args []string, stdout, stderr io.Wr
 	tenant := fs.String("tenant", "", "Tenant ID (required)")
 	repo := fs.String("repo", "", "Repo ID (required)")
 	name := fs.String("name", "", "Trigger name (required)")
-	kind := fs.String("kind", "", "Trigger kind: generic|cloudbuild|codebuild (required)")
+	kind := fs.String("kind", "", "Trigger kind: generic|cloudbuild|codebuild|azurewebhook|azurepipelines (required)")
 	urlFlag := fs.String("url", "", "Receiver URL (generic/cloudbuild)")
 	secret := fs.String("secret", "", "Shared secret (generic/cloudbuild; generated if omitted)")
 	awsRegion := fs.String("aws-region", "", "AWS region (codebuild)")
 	awsProject := fs.String("aws-project", "", "CodeBuild project name (codebuild)")
 	awsConnector := fs.String("aws-connector", "", "AWS connector name (codebuild, optional)")
+	azureWebhookURL := fs.String("azure-webhook-url", "", "Azure incoming-webhook URL (azurewebhook)")
+	azureSigHeader := fs.String("azure-sig-header", "", "Azure webhook signature header (azurewebhook, default X-Hub-Signature)")
+	azureConnector := fs.String("azure-connector", "", "Azure connector name (azurepipelines)")
+	azureProject := fs.String("azure-project", "", "Azure DevOps project (azurepipelines)")
+	azurePipelineID := fs.Int("azure-pipeline-id", 0, "Azure pipeline ID (azurepipelines)")
 	refInclude := fs.String("ref-include", "", "Ref include globs (csv, optional)")
 	refExclude := fs.String("ref-exclude", "", "Ref exclude globs (csv, optional)")
 	tokenMode := fs.String("token-mode", "", "Token mode: none|inject (optional)")
@@ -127,11 +134,16 @@ func runBuildTriggerAdd(ctx context.Context, args []string, stdout, stderr io.Wr
 		Name:   *name,
 		Kind:   buildtrigger.Kind(*kind),
 		Config: buildtrigger.Config{
-			URL:          *urlFlag,
-			Secret:       *secret,
-			AWSRegion:    *awsRegion,
-			AWSProject:   *awsProject,
-			AWSConnector: *awsConnector,
+			URL:             *urlFlag,
+			Secret:          *secret,
+			AWSRegion:       *awsRegion,
+			AWSProject:      *awsProject,
+			AWSConnector:    *awsConnector,
+			AzureWebhookURL: *azureWebhookURL,
+			AzureSigHeader:  *azureSigHeader,
+			AzureConnector:  *azureConnector,
+			AzureProject:    *azureProject,
+			AzurePipelineID: *azurePipelineID,
 		},
 		RefInclude: splitCSV(*refInclude),
 		RefExclude: splitCSV(*refExclude),

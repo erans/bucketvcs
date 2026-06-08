@@ -27,8 +27,13 @@ type applyTrigger struct {
 	Secret       string   `yaml:"secret"`
 	AWSRegion    string   `yaml:"aws_region"`
 	AWSProject   string   `yaml:"aws_project"`
-	AWSConnector string   `yaml:"aws_connector"`
-	RefInclude   []string `yaml:"ref_include"`
+	AWSConnector    string `yaml:"aws_connector"`
+	AzureWebhookURL string `yaml:"azure_webhook_url"`
+	AzureSigHeader  string `yaml:"azure_sig_header"`
+	AzureConnector  string `yaml:"azure_connector"`
+	AzureProject    string `yaml:"azure_project"`
+	AzurePipelineID int    `yaml:"azure_pipeline_id"`
+	RefInclude      []string `yaml:"ref_include"`
 	RefExclude   []string `yaml:"ref_exclude"`
 	TokenMode    string   `yaml:"token_mode"`
 	TokenScopes  []string `yaml:"token_scopes"`
@@ -124,11 +129,16 @@ func toInput(at applyTrigger) (TriggerInput, error) {
 		Name:   at.Name,
 		Kind:   Kind(at.Kind),
 		Config: Config{
-			URL:          at.URL,
-			Secret:       at.Secret,
-			AWSRegion:    at.AWSRegion,
-			AWSProject:   at.AWSProject,
-			AWSConnector: at.AWSConnector,
+			URL:             at.URL,
+			Secret:          at.Secret,
+			AWSRegion:       at.AWSRegion,
+			AWSProject:      at.AWSProject,
+			AWSConnector:    at.AWSConnector,
+			AzureWebhookURL: at.AzureWebhookURL,
+			AzureSigHeader:  at.AzureSigHeader,
+			AzureConnector:  at.AzureConnector,
+			AzureProject:    at.AzureProject,
+			AzurePipelineID: at.AzurePipelineID,
 		},
 		RefInclude: at.RefInclude,
 		RefExclude: at.RefExclude,

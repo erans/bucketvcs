@@ -2,6 +2,7 @@ package buildtrigger
 
 import (
 	"fmt"
+	"os"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -16,8 +17,9 @@ type ServeConfig struct {
 
 // BuildSection groups all build-trigger operator configuration.
 type BuildSection struct {
-	Defaults      Defaults                `yaml:"defaults"`
-	AWSConnectors map[string]AWSConnector `yaml:"aws_connectors"`
+	Defaults        Defaults                  `yaml:"defaults"`
+	AWSConnectors   map[string]AWSConnector   `yaml:"aws_connectors"`
+	AzureConnectors map[string]AzureConnector `yaml:"azure_connectors"`
 }
 
 // Defaults are server-wide fallbacks applied when a trigger omits the
@@ -36,9 +38,15 @@ type Defaults struct {
 // ParseServeConfig unmarshals YAML into a ServeConfig and post-processes the
 // token_ttl string into a time.Duration. Returns an error if the YAML is
 // malformed or token_ttl is not a valid Go duration string.
+//
+// Before unmarshaling, ${VAR} / $VAR references in the YAML are expanded from
+// the process environment (os.ExpandEnv), so secrets such as connector PATs and
+// AWS keys can be supplied via env vars instead of being written in plaintext.
+// An undefined variable expands to the empty string. Literal values containing
+// '$' are not supported in this config.
 func ParseServeConfig(data []byte) (ServeConfig, error) {
 	var cfg ServeConfig
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	if err := yaml.Unmarshal([]byte(os.ExpandEnv(string(data))), &cfg); err != nil {
 		return ServeConfig{}, fmt.Errorf("buildtrigger: parse config: %w", err)
 	}
 	if raw := cfg.Build.Defaults.TokenTTLRaw; raw != "" {

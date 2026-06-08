@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
@@ -47,7 +48,7 @@ func (s *Service) Create(ctx context.Context, in TriggerInput) (Trigger, error) 
 	}
 
 	switch in.Kind {
-	case KindGeneric, KindCloudBuild, KindCodeBuild:
+	case KindGeneric, KindCloudBuild, KindCodeBuild, KindAzureWebhook, KindAzurePipelines:
 	default:
 		return Trigger{}, fmt.Errorf("%w: unknown kind %q", ErrInvalidInput, in.Kind)
 	}
@@ -61,10 +62,10 @@ func (s *Service) Create(ctx context.Context, in TriggerInput) (Trigger, error) 
 		ttl = defaultTokenTTL
 	}
 
-	// Token mode: default none, except codebuild defaults inject.
+	// Token mode: default none, except codebuild/azurepipelines default inject.
 	mode := in.TokenMode
 	if mode == "" {
-		if in.Kind == KindCodeBuild {
+		if in.Kind == KindCodeBuild || in.Kind == KindAzurePipelines {
 			mode = TokenInject
 		} else {
 			mode = TokenNone
@@ -110,6 +111,19 @@ func (s *Service) Create(ctx context.Context, in TriggerInput) (Trigger, error) 
 	case KindCodeBuild:
 		if cfg.AWSRegion == "" || cfg.AWSProject == "" {
 			return Trigger{}, fmt.Errorf("%w: codebuild requires aws_region and aws_project", ErrInvalidInput)
+		}
+	case KindAzureWebhook:
+		if cfg.AzureWebhookURL == "" {
+			return Trigger{}, fmt.Errorf("%w: azurewebhook requires azure_webhook_url", ErrInvalidInput)
+		}
+		if !strings.HasPrefix(cfg.AzureWebhookURL, "http://") && !strings.HasPrefix(cfg.AzureWebhookURL, "https://") {
+			return Trigger{}, fmt.Errorf("%w: azurewebhook azure_webhook_url must be http or https", ErrInvalidInput)
+		}
+		// Secret is operator-supplied (must match the Azure service-connection
+		// secret) and is NOT auto-generated; an empty secret means unsigned.
+	case KindAzurePipelines:
+		if cfg.AzureConnector == "" || cfg.AzureProject == "" || cfg.AzurePipelineID <= 0 {
+			return Trigger{}, fmt.Errorf("%w: azurepipelines requires azure_connector, azure_project, and azure_pipeline_id > 0", ErrInvalidInput)
 		}
 	}
 

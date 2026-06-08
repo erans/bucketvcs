@@ -11,9 +11,11 @@ import (
 type Kind string
 
 const (
-	KindGeneric    Kind = "generic"
-	KindCloudBuild Kind = "cloudbuild"
-	KindCodeBuild  Kind = "codebuild"
+	KindGeneric        Kind = "generic"
+	KindCloudBuild     Kind = "cloudbuild"
+	KindCodeBuild      Kind = "codebuild"
+	KindAzureWebhook   Kind = "azurewebhook"
+	KindAzurePipelines Kind = "azurepipelines"
 )
 
 // TokenMode controls short-lived token injection.
@@ -58,6 +60,18 @@ type Config struct {
 	AWSRegion    string `json:"aws_region,omitempty"`
 	AWSProject   string `json:"aws_project,omitempty"`
 	AWSConnector string `json:"aws_connector,omitempty"`
+
+	// Azure webhook (KindAzureWebhook). Reuses Secret for the HMAC shared
+	// secret (SHA-1). AzureSigHeader defaults to "X-Hub-Signature".
+	AzureWebhookURL string `json:"azure_webhook_url,omitempty"`
+	AzureSigHeader  string `json:"azure_sig_header,omitempty"`
+
+	// Azure Pipelines REST (KindAzurePipelines). AzureConnector names a
+	// connector resolved from the server --build-config YAML (holds org URL +
+	// PAT); never stored in the authdb.
+	AzureConnector  string `json:"azure_connector,omitempty"`
+	AzureProject    string `json:"azure_project,omitempty"`
+	AzurePipelineID int    `json:"azure_pipeline_id,omitempty"`
 }
 
 // TriggerInput is the operator-supplied data for Create.

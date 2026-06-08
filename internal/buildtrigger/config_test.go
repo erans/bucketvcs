@@ -211,3 +211,35 @@ triggers:
 		t.Fatalf("URL=%q want https://new", triggers[0].Config.URL)
 	}
 }
+
+func TestParseServeConfig_ExpandsEnv(t *testing.T) {
+	t.Setenv("BVTEST_AZURE_PAT", "secret-from-env")
+	cfg, err := ParseServeConfig([]byte("build:\n  azure_connectors:\n    prod:\n      org_url: https://dev.azure.com/Org\n      pat: ${BVTEST_AZURE_PAT}\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := cfg.Build.AzureConnectors["prod"].PAT; got != "secret-from-env" {
+		t.Errorf("PAT=%q, want secret-from-env (env not expanded)", got)
+	}
+}
+
+func TestParseServeConfig_AzureConnectors(t *testing.T) {
+	yaml := `
+build:
+  azure_connectors:
+    prod:
+      org_url: https://dev.azure.com/MyOrg
+      pat: secret-pat
+`
+	cfg, err := ParseServeConfig([]byte(yaml))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	c, ok := cfg.Build.AzureConnectors["prod"]
+	if !ok {
+		t.Fatal("azure connector \"prod\" not parsed")
+	}
+	if c.OrgURL != "https://dev.azure.com/MyOrg" || c.PAT != "secret-pat" {
+		t.Errorf("parsed connector = %+v", c)
+	}
+}

@@ -9,6 +9,8 @@ Production readiness summary:
 - Generic (signed JSON POST to any HTTPS endpoint) — **shipped**.
 - Google Cloud Build (signed JSON POST, OIDC-pull recommended) — **shipped**.
 - AWS CodeBuild (SigV4 `StartBuild` API) — **shipped**.
+- Azure DevOps incoming webhook (`azurewebhook`, HMAC-SHA1 POST) — **shipped**.
+- Azure DevOps Run Pipeline REST (`azurepipelines`, PAT via named connector) — **shipped**.
 - Short-lived minted `bvts_` tokens for OIDC-pull and inject modes — **shipped**.
 - At-least-once delivery with bounded retries + dead-letter (same schedule as webhooks) — **shipped**.
 - Single-writer worker per `bucketvcs serve` process (in-process sqlite queue) — **shipped**.
@@ -17,7 +19,7 @@ Production readiness summary:
 - Manual operator test / replay via CLI — **shipped**.
 - Egress SSRF protection via shared webhook egress policy — **shipped** (see §2).
 - Fail-open enqueue (a CI hiccup never blocks a push) — **shipped**.
-- Native GCP `RunBuildTrigger` connector, GitHub/GitLab/Tekton presets, per-commit path filters, build-status callback, full server config file, Cloud Build issuer auto-registration helper — **deferred** (see §9).
+- Native GCP `RunBuildTrigger` connector, GitHub/GitLab/Tekton presets, per-commit path filters, build-status callback, full server config file, Cloud Build issuer auto-registration helper — **deferred** (see §12).
 - Schema 16 → 17 (`0017_build_triggers.sql`) is forward-only and applied by the existing `RunMigrations`.
 
 ---
@@ -31,6 +33,8 @@ Production readiness summary:
 | `generic` | Signed JSON POST to any `http://` or `https://` URL | Shared HMAC secret (same scheme as webhooks); optional `bvts_` token injection |
 | `cloudbuild` | Signed JSON POST to a Google Cloud Build HTTP trigger URL | Same as generic; OIDC-pull (recommended, no credential in trigger) or inject |
 | `codebuild` | SigV4 `StartBuild` call to AWS CodeBuild | Ambient credential chain or named connector; optional `bvts_` token injection |
+| `azurewebhook` | HMAC-SHA1 signed JSON POST to an Azure Pipelines incoming-webhook URL | Shared secret matching the Azure service-connection secret (no Azure credential stored); optional `bvts_` token injection |
+| `azurepipelines` | `Run Pipeline` REST API call to Azure DevOps | PAT via named connector in `--build-config`; optional `bvts_` token injection |
 
 Every trigger fires once per matching ref per push. One push that updates two matching refs produces two separate delivery rows.
 
@@ -283,11 +287,74 @@ phases:
 
 ---
 
-## 5. Generic trigger
+## 5. Azure DevOps
+
+BucketVCS supports two Azure modes, mirroring the two integration styles used for Cloud Build and CodeBuild:
+
+- **`azurewebhook`** — the Cloud Build twin. BucketVCS POSTs a JSON body to an Azure Pipelines *incoming-webhook* URL, signed with HMAC-SHA1 in the `X-Hub-Signature` header. BucketVCS holds **no** Azure credential — only a shared secret that must match the one configured on the Azure service connection.
+- **`azurepipelines`** — the CodeBuild twin. BucketVCS calls the `Run Pipeline` REST API directly, authenticating with a Personal Access Token resolved from a **named connector** in `--build-config` (the PAT is never stored in the authdb).
+
+### 5.1 azurewebhook setup
+
+1. In Azure DevOps: **Project Settings → Service connections → New → Incoming WebHook.** Set a **WebHook Name**, a **Secret**, and the **HTTP header name** (default `X-Hub-Signature`).
+2. Reference it in your pipeline YAML and run the pipeline once so the trigger arms:
+
+   ```yaml
+   resources:
+     webhooks:
+       - webhook: MyHook
+         connection: MyIncomingWebhookConnection
+   ```
+
+3. Create the trigger (the secret must equal the service-connection secret):
+
+   ```bash
+   bucketvcs build trigger add --auth-db=/var/lib/bucketvcs/auth.db \
+     --tenant=acme --repo=app --name=azure-ci --kind=azurewebhook \
+     --azure-webhook-url='https://dev.azure.com/MyOrg/_apis/public/distributedtask/webhooks/MyHook?api-version=6.0-preview' \
+     --secret='<same-secret-as-service-connection>' \
+     --ref-include='refs/heads/main'
+   ```
+
+   The pushed payload is available inside the pipeline as `${{ parameters.MyHook.<jsonPath> }}` (e.g. `${{ parameters.MyHook.head_oid }}`).
+
+   > **Note:** the signature is HMAC-**SHA1** (`sha1=<hex>`), not SHA-256, and covers the raw body only. Omitting `--secret` sends the webhook **unsigned** (Azure permits this; BucketVCS does not auto-generate an Azure secret).
+
+### 5.2 azurepipelines setup
+
+1. Create a PAT in Azure DevOps with **Build → Read & execute** scope.
+2. Add a connector to `--build-config`:
+
+   ```yaml
+   build:
+     azure_connectors:
+       prod:
+         org_url: https://dev.azure.com/MyOrg
+         pat: ${AZURE_DEVOPS_PAT}
+   ```
+
+3. Create the trigger:
+
+   ```bash
+   bucketvcs build trigger add --auth-db=/var/lib/bucketvcs/auth.db \
+     --tenant=acme --repo=app --name=azure-run --kind=azurepipelines \
+     --azure-connector=prod --azure-project=MyProject --azure-pipeline-id=42 \
+     --ref-include='refs/heads/main'
+   ```
+
+   BucketVCS POSTs to `{org_url}/MyProject/_apis/pipelines/42/runs?api-version=7.1`, pins the run to the pushed ref via `resources.repositories.self.refName`, and passes push metadata as `BV_*` run variables (`BV_REPO`, `BV_REF`, `BV_COMMIT`, `BV_ACTOR`, `BV_TX_ID`). With `--token-mode=inject` (the default for this kind), a short-lived `BVTS_TOKEN` variable is added with `isSecret: true`.
+
+### 5.3 Azure error handling
+
+A missing/misconfigured connector, a 401/404, or any non-2xx response is retried on the standard backoff schedule (1m, 30m, 2h, 12h) and then dead-lettered — observe via the `build_trigger_deadletter_total` metric and the `build.trigger.deadletter` audit event, and recover with `bucketvcs build delivery replay`.
+
+---
+
+## 6. Generic trigger
 
 The `generic` kind signs a JSON POST to any HTTP/HTTPS endpoint. Use it for API Gateway/Lambda, Jenkins, Tekton, or any custom receiver.
 
-### 5.1 Create a generic trigger
+### 6.1 Create a generic trigger
 
 ```bash
 RESULT=$(bucketvcs build trigger add \
@@ -310,7 +377,7 @@ The `--secret` flag lets you supply your own secret. When omitted, the gateway g
 
 If `--token-mode` is omitted the default is `none`. Specifying `inject` causes the POST body to include a `bvts_token` field.
 
-### 5.2 POST body shape
+### 6.2 POST body shape
 
 Every `generic` and `cloudbuild` POST carries this JSON body:
 
@@ -343,7 +410,7 @@ Every `generic` and `cloudbuild` POST carries this JSON body:
 
 `old_oid == "0000...0"` means a ref creation. `new_oid == "0000...0"` means a ref deletion.
 
-### 5.3 Signature verification
+### 6.3 Signature verification
 
 Every POST carries:
 
@@ -365,11 +432,11 @@ For receiver-side Python and Go verification snippets, see [Webhooks §4](webhoo
 
 ---
 
-## 6. Declarative `build apply -f`
+## 7. Declarative `build apply -f`
 
 For GitOps-style trigger management, describe all triggers in a single YAML file and apply it idempotently.
 
-### 6.1 Document shape
+### 7.1 Document shape
 
 ```yaml
 # triggers.yml
@@ -419,7 +486,7 @@ Field reference:
 | Field | Kind | Notes |
 |---|---|---|
 | `tenant`, `repo`, `name` | all | Primary key; `name` must be unique per `(tenant, repo)` |
-| `kind` | all | `generic`, `cloudbuild`, or `codebuild` |
+| `kind` | all | `generic`, `cloudbuild`, `codebuild`, `azurewebhook`, or `azurepipelines` |
 | `url` | generic, cloudbuild | Receiver URL |
 | `secret` | generic, cloudbuild | Shared HMAC secret; generated if empty |
 | `aws_region` | codebuild | AWS region |
@@ -431,7 +498,7 @@ Field reference:
 | `token_scopes` | all | List of scope names (`repo:read`, etc.) |
 | `token_ttl` | all | Go duration string; max `1h` |
 
-### 6.2 Apply
+### 7.2 Apply
 
 ```bash
 bucketvcs build apply \
@@ -456,20 +523,24 @@ bucketvcs build apply \
 
 ---
 
-## 7. CLI reference
+## 8. CLI reference
 
 All `build` subcommands require `--auth-db=<path>` pointing to the authdb (`bucketvcs.db`).
 
-### 7.1 Trigger management
+### 8.1 Trigger management
 
 ```
 bucketvcs build trigger add \
     --auth-db=<path> \
-    --tenant=<t> --repo=<r> --name=<n> --kind=<generic|cloudbuild|codebuild> \
-    # generic/cloudbuild:
+    --tenant=<t> --repo=<r> --name=<n> --kind=<generic|cloudbuild|codebuild|azurewebhook|azurepipelines> \
+    # generic/cloudbuild/azurewebhook:
     [--url=<https://...>] [--secret=<s>] \
+    # azurewebhook:
+    [--azure-webhook-url=<https://...>] [--azure-sig-header=<header>] \
     # codebuild:
     [--aws-region=<r>] [--aws-project=<p>] [--aws-connector=<c>] \
+    # azurepipelines:
+    [--azure-connector=<c>] [--azure-project=<p>] [--azure-pipeline-id=<n>] \
     # common:
     [--ref-include=<csv>] [--ref-exclude=<csv>] \
     [--token-mode=<none|inject>] [--token-scopes=<csv|all|repo:*|lfs:*>] \
@@ -481,11 +552,11 @@ bucketvcs build trigger enable --auth-db=<path> --id=<trigger-id>
 bucketvcs build trigger disable --auth-db=<path> --id=<trigger-id>
 ```
 
-`trigger add` prints the trigger ID and, for `generic`/`cloudbuild`, the secret (shown **once only** — there is no way to retrieve it later; remove and re-add to rotate).
+`trigger add` prints the trigger ID and, for `generic`/`cloudbuild`/`azurewebhook`, the secret (shown **once only** — there is no way to retrieve it later; remove and re-add to rotate).
 
 `trigger disable` keeps the row but stops new enqueues. Pending deliveries for the disabled trigger are also skipped by the worker (the claim query filters `active=1`). `trigger enable` reverses it.
 
-### 7.2 Test a trigger
+### 8.2 Test a trigger
 
 ```bash
 bucketvcs build test --auth-db=<path> --id=<trigger-id>
@@ -494,7 +565,7 @@ bucketvcs build test --auth-db=<path> --id=<trigger-id>
 
 `build test` synthesizes a push against the trigger's first non-glob `ref_include` entry (or `refs/heads/main` when none is set) and enqueues a delivery. The resulting `delivery_id` can be tracked with `build delivery show`.
 
-### 7.3 Delivery operations
+### 8.3 Delivery operations
 
 ```bash
 # List deliveries (filter by trigger, status, limit):
@@ -519,9 +590,9 @@ bucketvcs build delivery replay --auth-db=<path> --id=<delivery-id>
 
 ---
 
-## 8. Operations and observability
+## 9. Operations and observability
 
-### 8.1 Retry semantics
+### 9.1 Retry semantics
 
 Build triggers use the same schedule as webhooks:
 
@@ -533,20 +604,20 @@ Build triggers use the same schedule as webhooks:
 | 4 | ~12 hours | ~2.5 hours |
 | 5 (final) | dead_letter | ~14.5 hours |
 
-Backoff carries ±25% uniform jitter. After 5 failures the row moves to `dead_letter`. Operators replay via `build delivery replay` (see §7.3).
+Backoff carries ±25% uniform jitter. After 5 failures the row moves to `dead_letter`. Operators replay via `build delivery replay` (see §8.3).
 
-### 8.2 Metrics
+### 9.2 Metrics
 
 Four metrics emitted as structured slog records with `msg="metric"` and `metric_name=<name>`:
 
 | Metric | Labels | Emission point |
 |---|---|---|
-| `build_trigger_fired_total` | `kind={generic,cloudbuild,codebuild}`, `result={delivered,failed_retry,dead_letter}` | once per attempt outcome |
+| `build_trigger_fired_total` | `kind={generic,cloudbuild,codebuild,azurewebhook,azurepipelines}`, `result={delivered,failed_retry,dead_letter}` | once per attempt outcome |
 | `build_trigger_delivery_duration_ms` | `result=...` | once per attempt, measures wall time |
 | `build_trigger_deadletter_total` | none | once per retry-budget exhaustion |
 | `build_token_minted_total` | none | once per token mint |
 
-### 8.3 Audit events
+### 9.3 Audit events
 
 Seven structured events:
 
@@ -560,15 +631,15 @@ Seven structured events:
 | `build.trigger.enqueue_failed` | ERROR | tenant, repo, error |
 | Lifecycle (`build.trigger.added/removed/enabled/disabled`) | INFO | trigger_id, tenant, repo |
 
-### 8.4 Fail-open enqueue
+### 9.4 Fail-open enqueue
 
 If the `Enqueue` INSERT fails (sqlite write failure, schema error), the push **does not abort**. The gateway emits `build.trigger.enqueue_failed` and the push reports success to the client. Operators MUST treat repeated `enqueue_failed` events as P1 — builds will be silently missed.
 
-### 8.5 Replica behavior
+### 9.5 Replica behavior
 
 The build trigger worker (`StartWorker`) and the token sweep (`SweepExpiredBuildTokens`) run only in the write-region gateway process. Read-replica gateways (M26 `--replica-of`) do not run a worker and do not enqueue deliveries; pushes are refused by replicas, so no deliveries are created there.
 
-### 8.6 Quick log filter
+### 9.6 Quick log filter
 
 ```bash
 # Dead-lettered deliveries that need operator attention:
@@ -586,31 +657,31 @@ journalctl -u bucketvcs --since "1 hour ago" \
 
 ---
 
-## 9. Security notes
+## 10. Security notes
 
-### 9.1 Minted token blast radius
+### 10.1 Minted token blast radius
 
 An injected `bvts_` token is single-repo and read-only by default. A leaked token can read the target repo until it expires (at most 1 hour; swept within `--build-sweep-interval` after expiry). It cannot access any other repo, write to the repo, or administer BucketVCS. Keep TTLs short (≤15 min for most workloads).
 
-### 9.2 Egress policy on generic/cloudbuild
+### 10.2 Egress policy on generic/cloudbuild
 
 Build triggers and webhooks share the egress policy. Any endpoint URL that resolves to a loopback, link-local, or private address is denied by default. A misconfigured trigger pointing at an internal metadata endpoint (e.g. `169.254.169.254`) will dead-letter after 5 attempts — it will not leak credentials to the metadata service.
 
-### 9.3 Never commit static AWS keys
+### 10.3 Never commit static AWS keys
 
 The `aws_connectors[*].access_key` and `aws_connectors[*].secret_key` fields in `--build-config` should be left empty when the build host can use the ambient credential chain (IAM instance profile, ECS task role, EKS pod identity). Static keys in a YAML config file are a foot-gun — use the `profile` field and the AWS shared credentials file, or rely on the ambient chain.
 
-### 9.4 Trigger management is admin-scoped
+### 10.4 Trigger management is admin-scoped
 
 The `bucketvcs build` CLI operates on the authdb directly (out-of-band, not via the HTTPS API). Guard access to `--auth-db` like any privileged credential. A future release may expose trigger CRUD via a `storage:admin`-scoped API endpoint.
 
-### 9.5 Secret storage and rotation
+### 10.5 Secret storage and rotation
 
-For `generic` and `cloudbuild` triggers, the HMAC secret is shown **once at creation**. To rotate: `bucketvcs build trigger remove --id=<id>` then `bucketvcs build trigger add ...` with new parameters. Update the receiver's secret in lockstep. Pending deliveries for the removed trigger will never be delivered.
+For `generic`, `cloudbuild`, and `azurewebhook` triggers, the HMAC secret is shown **once at creation**. To rotate: `bucketvcs build trigger remove --id=<id>` then `bucketvcs build trigger add ...` with new parameters. Update the receiver's secret in lockstep. Pending deliveries for the removed trigger will never be delivered.
 
 ---
 
-## 10. Worked example: generic + inject (localfs)
+## 11. Worked example: generic + inject (localfs)
 
 This mirrors `scripts/smoke_buildtriggers.sh`.
 
@@ -658,7 +729,7 @@ git clone "https://x-access-token:${BVTS_TOKEN}@127.0.0.1:8080/acme/app.git"
 
 ---
 
-## 11. Deferred / not yet supported
+## 12. Deferred / not yet supported
 
 The following items from the design spec §1.2 are explicitly out of scope for M30:
 

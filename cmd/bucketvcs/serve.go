@@ -515,6 +515,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	// build config (named AWS connectors) is loaded once at startup.
 	var buildSvc *buildtrigger.Service
 	var buildConnectors map[string]buildtrigger.AWSConnector
+	var buildAzureConnectors map[string]buildtrigger.AzureConnector
 	if *buildTriggersEnabled {
 		buildSvc = buildtrigger.New(authS.DB())
 		if *buildConfigPath != "" {
@@ -529,6 +530,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 				return 1
 			}
 			buildConnectors = cfg.Build.AWSConnectors
+			buildAzureConnectors = cfg.Build.AzureConnectors
 		}
 	}
 
@@ -721,7 +723,8 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			bcfg.Egress = webhookEgress
 			bcfg.MintFn = buildtrigger.NewMintFunc(authS, logger)
 			bcfg.Connectors = buildConnectors
-			bcfg.Deliverers = buildtrigger.ProductionDeliverers(bcfg.MintFn, buildConnectors, webhookEgress, bcfg.HTTPTimeout)
+			bcfg.AzureConnectors = buildAzureConnectors
+			bcfg.Deliverers = buildtrigger.ProductionDeliverers(bcfg.MintFn, buildConnectors, buildAzureConnectors, webhookEgress, bcfg.HTTPTimeout)
 			go buildtrigger.StartWorker(serveCtx, buildSvc, bcfg)
 
 			go func() {

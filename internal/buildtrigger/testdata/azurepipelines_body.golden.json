@@ -1,0 +1,1 @@
+{"resources":{"repositories":{"self":{"refName":"refs/heads/main"}}},"variables":{"BVTS_TOKEN":{"value":"bvts_TESTTOKEN","isSecret":true},"BV_ACTOR":{"value":"tester"},"BV_COMMIT":{"value":"1111111111111111111111111111111111111111"},"BV_REF":{"value":"refs/heads/main"},"BV_REPO":{"value":"acme/app"},"BV_TX_ID":{"value":"tx-test"}}}
