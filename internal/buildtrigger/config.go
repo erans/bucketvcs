@@ -16,7 +16,7 @@ type ServeConfig struct {
 
 // BuildSection groups all build-trigger operator configuration.
 type BuildSection struct {
-	Defaults      Defaults               `yaml:"defaults"`
+	Defaults      Defaults                `yaml:"defaults"`
 	AWSConnectors map[string]AWSConnector `yaml:"aws_connectors"`
 }
 
@@ -24,13 +24,13 @@ type BuildSection struct {
 // corresponding field. Individual trigger settings take precedence.
 type Defaults struct {
 	// TokenTTL is the parsed duration; zero means "use the hardcoded default".
-	TokenTTL    time.Duration `yaml:"-"`
+	TokenTTL time.Duration `yaml:"-"`
 	// TokenTTLRaw is the raw string from YAML (e.g. "15m") before parsing.
-	TokenTTLRaw string        `yaml:"token_ttl"`
+	TokenTTLRaw string `yaml:"token_ttl"`
 	// TokenScopes is a list of scope names (e.g. ["repo:read","lfs:read"]).
-	TokenScopes []string      `yaml:"token_scopes"`
+	TokenScopes []string `yaml:"token_scopes"`
 	// Audience is the optional audience claim for minted tokens.
-	Audience    string        `yaml:"audience"`
+	Audience string `yaml:"audience"`
 }
 
 // ParseServeConfig unmarshals YAML into a ServeConfig and post-processes the
