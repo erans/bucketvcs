@@ -111,9 +111,12 @@ hardening.
 
 Deliveries are enqueued durably and retried on a backoff schedule
 (`1m → 30m → 2h → 12h`), then dead-lettered and replayable — a momentary blip at
-the build system never loses the event. Enqueue is **fail-open**: if the trigger
-machinery hiccups, your push still succeeds. (Details:
-[operator guide §8](operator-guides/build-triggers.md).)
+the build system never loses the event. **Permanent** failures (a 4xx other than
+408/429, a bad URL scheme, or an unknown Azure connector) skip the retries and
+dead-letter immediately with `reason=permanent`, so a misconfiguration surfaces
+in seconds rather than ~14h; fix it and `build delivery replay`. Enqueue is
+**fail-open**: if the trigger machinery hiccups, your push still succeeds.
+(Details: [operator guide §8](operator-guides/build-triggers.md).)
 
 ---
 

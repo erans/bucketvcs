@@ -62,7 +62,7 @@ func EmitFailed(ctx context.Context, logger *slog.Logger,
 // EmitDeadLetter logs the build.trigger.deadletter audit event when an attempt
 // exhausts the retry budget.
 func EmitDeadLetter(ctx context.Context, logger *slog.Logger,
-	deliveryID, triggerID string, totalAttempts, finalStatusCode int) {
+	deliveryID, triggerID string, totalAttempts, finalStatusCode int, reason string) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -73,6 +73,7 @@ func EmitDeadLetter(ctx context.Context, logger *slog.Logger,
 		slog.String("trigger_id", triggerID),
 		slog.Int("total_attempts", totalAttempts),
 		slog.Int("final_status_code", finalStatusCode),
+		slog.String("reason", reason),
 	)
 }
 

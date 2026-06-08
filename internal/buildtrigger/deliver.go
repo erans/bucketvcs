@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,7 +35,7 @@ type httpDeliverer struct {
 func (d *httpDeliverer) Deliver(ctx context.Context, tr Trigger, p BuildPayload) (int, error) {
 	url := webhookURL(tr)
 	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-		return 0, fmt.Errorf("egress denied: trigger URL scheme must be http or https")
+		return 0, permanentf("egress denied: trigger URL scheme must be http or https")
 	}
 	var token string
 	if tr.TokenMode == TokenInject {
@@ -71,6 +72,9 @@ func (d *httpDeliverer) Deliver(ctx context.Context, tr Trigger, p BuildPayload)
 	_, _ = io.CopyN(io.Discard, resp.Body, 512)
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return resp.StatusCode, nil
+	}
+	if httpStatusPermanent(resp.StatusCode) {
+		return resp.StatusCode, permanentf("HTTP %d", resp.StatusCode)
 	}
 	return resp.StatusCode, fmt.Errorf("HTTP %d", resp.StatusCode)
 }
@@ -113,4 +117,21 @@ func webhookURL(tr Trigger) string {
 		return tr.Config.AzureWebhookURL
 	}
 	return tr.Config.URL
+}
+
+// ErrPermanent marks a delivery error that must NOT be retried (a configuration
+// error or a non-transient 4xx). recordResult routes it straight to dead_letter
+// regardless of attempt count.
+var ErrPermanent = errors.New("permanent delivery error")
+
+// permanentf wraps a formatted error so errors.Is(err, ErrPermanent) is true.
+func permanentf(format string, a ...any) error {
+	return fmt.Errorf("%w: "+format, append([]any{ErrPermanent}, a...)...)
+}
+
+// httpStatusPermanent reports whether an HTTP status is a permanent failure:
+// any 4xx except 408 (Request Timeout) and 429 (Too Many Requests), which are
+// transient and should be retried.
+func httpStatusPermanent(code int) bool {
+	return code >= 400 && code < 500 && code != 408 && code != 429
 }

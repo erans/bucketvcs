@@ -346,7 +346,7 @@ BucketVCS supports two Azure modes, mirroring the two integration styles used fo
 
 ### 5.3 Azure error handling
 
-A missing/misconfigured connector, a 401/404, or any non-2xx response is retried on the standard backoff schedule (1m, 30m, 2h, 12h) and then dead-lettered — observe via the `build_trigger_deadletter_total` metric and the `build.trigger.deadletter` audit event, and recover with `bucketvcs build delivery replay`.
+A missing/misconfigured connector or a non-transient 4xx (e.g. 401/404) is a permanent failure: it dead-letters **immediately** with `reason=permanent` rather than retrying. Transient failures (5xx, 408, 429, network errors) retry on the standard backoff schedule (1m, 30m, 2h, 12h) and then dead-letter with `reason=exhausted`. Observe via the `build_trigger_deadletter_total` metric and the `build.trigger.deadletter` audit event (both carry the `reason` label/attr), and recover with `bucketvcs build delivery replay` after fixing the configuration. See §9.2 for the full permanent-vs-transient breakdown.
 
 ---
 
@@ -606,7 +606,25 @@ Build triggers use the same schedule as webhooks:
 
 Backoff carries ±25% uniform jitter. After 5 failures the row moves to `dead_letter`. Operators replay via `build delivery replay` (see §8.3).
 
-### 9.2 Metrics
+### 9.2 Permanent vs. transient failures
+
+For HTTP-delivered triggers (`generic`, `cloudbuild`, `azurewebhook`,
+`azurepipelines`), bucketvcs distinguishes failures that cannot succeed on retry
+from transient ones:
+
+- **Permanent** (dead-letters **immediately**, `reason=permanent`): any 4xx
+  response except `408` and `429`, a non-`http(s)` URL scheme, or an unknown
+  `azure_connector`. Fix the configuration, then `bucketvcs build delivery
+  replay --id=<id>`.
+- **Transient** (retries `1m → 30m → 2h → 12h`, then dead-letters with
+  `reason=exhausted`): `5xx`, `408`, `429`, network errors, and token-mint blips.
+
+`codebuild` errors are currently always treated as transient (retry-only).
+The breakdown is exposed as the `reason` label on
+`build_trigger_deadletter_total` and as the `reason` attribute on the
+`build.trigger.deadletter` audit event.
+
+### 9.3 Metrics
 
 Four metrics emitted as structured slog records with `msg="metric"` and `metric_name=<name>`:
 
@@ -614,10 +632,10 @@ Four metrics emitted as structured slog records with `msg="metric"` and `metric_
 |---|---|---|
 | `build_trigger_fired_total` | `kind={generic,cloudbuild,codebuild,azurewebhook,azurepipelines}`, `result={delivered,failed_retry,dead_letter}` | once per attempt outcome |
 | `build_trigger_delivery_duration_ms` | `result=...` | once per attempt, measures wall time |
-| `build_trigger_deadletter_total` | none | once per retry-budget exhaustion |
+| `build_trigger_deadletter_total` | `reason={permanent,exhausted}` | once per retry-budget exhaustion or immediate permanent dead-letter |
 | `build_token_minted_total` | none | once per token mint |
 
-### 9.3 Audit events
+### 9.4 Audit events
 
 Seven structured events:
 
@@ -626,20 +644,20 @@ Seven structured events:
 | `build.trigger.fired` | INFO | delivery_id, trigger_id, kind, ref_count |
 | `build.trigger.delivered` | INFO | delivery_id, trigger_id, attempts, duration_ms |
 | `build.trigger.failed` | WARN | delivery_id, trigger_id, attempts, status_code, error, next_attempt_at |
-| `build.trigger.deadletter` | ERROR | delivery_id, trigger_id, total_attempts, final_status_code |
+| `build.trigger.deadletter` | ERROR | delivery_id, trigger_id, total_attempts, final_status_code, reason={permanent,exhausted} |
 | `build.token.minted` | INFO | tenant, repo, token_label, ttl_seconds (token value is NEVER logged) |
 | `build.trigger.enqueue_failed` | ERROR | tenant, repo, error |
 | Lifecycle (`build.trigger.added/removed/enabled/disabled`) | INFO | trigger_id, tenant, repo |
 
-### 9.4 Fail-open enqueue
+### 9.5 Fail-open enqueue
 
 If the `Enqueue` INSERT fails (sqlite write failure, schema error), the push **does not abort**. The gateway emits `build.trigger.enqueue_failed` and the push reports success to the client. Operators MUST treat repeated `enqueue_failed` events as P1 — builds will be silently missed.
 
-### 9.5 Replica behavior
+### 9.6 Replica behavior
 
 The build trigger worker (`StartWorker`) and the token sweep (`SweepExpiredBuildTokens`) run only in the write-region gateway process. Read-replica gateways (M26 `--replica-of`) do not run a worker and do not enqueue deliveries; pushes are refused by replicas, so no deliveries are created there.
 
-### 9.6 Quick log filter
+### 9.7 Quick log filter
 
 ```bash
 # Dead-lettered deliveries that need operator attention:

@@ -3,6 +3,7 @@ package buildtrigger
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
@@ -364,7 +365,12 @@ func recordResult(ctx context.Context, svc *Service, cfg WorkerConfig, row claim
 		return
 	}
 	maxAttempts := len(cfg.BackoffSchedule) + 1
-	if row.Attempts >= maxAttempts {
+	permanent := errors.Is(err, ErrPermanent)
+	if permanent || row.Attempts >= maxAttempts {
+		reason := "exhausted"
+		if permanent {
+			reason = "permanent"
+		}
 		// next_attempt_at reset to NOW (schema NOT NULL constraint) so
 		// `delivery list` doesn't show stale "still due" timestamps on
 		// terminal dead_letter rows.
@@ -383,8 +389,8 @@ func recordResult(ctx context.Context, svc *Service, cfg WorkerConfig, row claim
 		}
 		EmitFired(ctx, logger, row.Kind, "dead_letter")
 		EmitAttemptDuration(ctx, logger, "dead_letter", durationMs)
-		EmitDeadLetterMetric(ctx, logger)
-		EmitDeadLetter(ctx, logger, row.ID, row.TriggerID, row.Attempts, statusCode)
+		EmitDeadLetterMetric(ctx, logger, reason)
+		EmitDeadLetter(ctx, logger, row.ID, row.TriggerID, row.Attempts, statusCode, reason)
 		return
 	}
 	idx := row.Attempts - 1
