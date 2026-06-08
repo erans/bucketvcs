@@ -121,3 +121,54 @@ func TestPermanentf_IsErrPermanent(t *testing.T) {
 		t.Error("a plain error must not be ErrPermanent")
 	}
 }
+
+func TestHTTPDeliverer_4xxIsPermanent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(404)
+	}))
+	defer srv.Close()
+	tr := Trigger{Kind: KindGeneric, TokenMode: TokenNone, Config: Config{URL: srv.URL, Secret: "s"}}
+	d := &httpDeliverer{client: srv.Client()}
+	code, err := d.Deliver(context.Background(), tr, BuildPayload{Repo: "app"})
+	if code != 404 || err == nil {
+		t.Fatalf("want 404+error, got code=%d err=%v", code, err)
+	}
+	if !errors.Is(err, ErrPermanent) {
+		t.Errorf("404 should be permanent: %v", err)
+	}
+}
+
+func TestHTTPDeliverer_5xxIsRetryable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(503)
+	}))
+	defer srv.Close()
+	tr := Trigger{Kind: KindGeneric, TokenMode: TokenNone, Config: Config{URL: srv.URL, Secret: "s"}}
+	d := &httpDeliverer{client: srv.Client()}
+	_, err := d.Deliver(context.Background(), tr, BuildPayload{Repo: "app"})
+	if err == nil || errors.Is(err, ErrPermanent) {
+		t.Errorf("503 must be a retryable (non-permanent) error, got %v", err)
+	}
+}
+
+func TestHTTPDeliverer_429IsRetryable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(429)
+	}))
+	defer srv.Close()
+	tr := Trigger{Kind: KindGeneric, TokenMode: TokenNone, Config: Config{URL: srv.URL, Secret: "s"}}
+	d := &httpDeliverer{client: srv.Client()}
+	_, err := d.Deliver(context.Background(), tr, BuildPayload{Repo: "app"})
+	if err == nil || errors.Is(err, ErrPermanent) {
+		t.Errorf("429 must be retryable (rate limit), got %v", err)
+	}
+}
+
+func TestHTTPDeliverer_BadSchemeIsPermanent(t *testing.T) {
+	tr := Trigger{Kind: KindGeneric, TokenMode: TokenNone, Config: Config{URL: "ftp://x", Secret: "s"}}
+	d := &httpDeliverer{client: http.DefaultClient}
+	_, err := d.Deliver(context.Background(), tr, BuildPayload{})
+	if !errors.Is(err, ErrPermanent) {
+		t.Fatalf("bad URL scheme should be permanent, got %v", err)
+	}
+}

@@ -35,7 +35,7 @@ type httpDeliverer struct {
 func (d *httpDeliverer) Deliver(ctx context.Context, tr Trigger, p BuildPayload) (int, error) {
 	url := webhookURL(tr)
 	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-		return 0, fmt.Errorf("egress denied: trigger URL scheme must be http or https")
+		return 0, permanentf("egress denied: trigger URL scheme must be http or https")
 	}
 	var token string
 	if tr.TokenMode == TokenInject {
@@ -72,6 +72,9 @@ func (d *httpDeliverer) Deliver(ctx context.Context, tr Trigger, p BuildPayload)
 	_, _ = io.CopyN(io.Discard, resp.Body, 512)
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return resp.StatusCode, nil
+	}
+	if httpStatusPermanent(resp.StatusCode) {
+		return resp.StatusCode, permanentf("HTTP %d", resp.StatusCode)
 	}
 	return resp.StatusCode, fmt.Errorf("HTTP %d", resp.StatusCode)
 }
