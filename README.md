@@ -30,7 +30,7 @@ Not a toy. bucketvcs ships the things a real Git host needs:
 
 - **Git LFS** — batch transfer, file locks, per-tenant quotas, and LFS garbage collection
 - **Keyless CI** — OIDC token exchange (RFC 8693): your pipeline trades its IdP identity for a short-lived, repo-scoped token, so there are no long-lived secrets to leak
-- **Build triggers** — fire Google Cloud Build, AWS CodeBuild, or any HTTP endpoint on push, with ref filters and a short-lived clone token → [guide & quickstarts](docs/build-triggers.md)
+- **Build triggers** — fire Google Cloud Build, AWS CodeBuild, Azure Pipelines, or any HTTP endpoint on push, with ref filters and a short-lived clone token → [guide & quickstarts](docs/build-triggers.md)
 - **Fine-grained auth** — scoped access tokens with rotation, SSH user & deploy keys, and per-IP rate-limiting on credential failures
 - **Policy & governance** — protected refs, protected paths, custom pre/post-receive hooks, and signed, retryable **webhooks**
 - **Audit & observability** — structured audit events and metrics for every push, policy decision, and admin action, with durable **log shipping** of the activity and usage (metering) streams into your bucket → [observability overview](docs/operator-guides/observability.md) · [log shipping](docs/operator-guides/log-shipping.md)
@@ -141,7 +141,7 @@ The web UI is **optional** — omit `--ui` or pass `--ui=false` if you only need
 
 `bucketvcs doctor` — read-only health checks for storage, auth-db, and config. Accepts the same flags as `serve`; swap `serve` for `doctor` to validate a deployment without binding any ports.
 
-**Next:** want pushes to kick off CI? Wire up [build triggers](docs/build-triggers.md) to start a Google Cloud Build, AWS CodeBuild, or any HTTP endpoint on push.
+**Next:** want pushes to kick off CI? Wire up [build triggers](docs/build-triggers.md) to start a Google Cloud Build, AWS CodeBuild, Azure Pipelines run, or any HTTP endpoint on push.
 
 ---
 

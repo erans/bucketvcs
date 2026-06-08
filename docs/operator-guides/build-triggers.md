@@ -26,7 +26,7 @@ Production readiness summary:
 
 ## 1. Overview and concepts
 
-### 1.1 Three trigger kinds
+### 1.1 Five trigger kinds
 
 | Kind | How it fires | Credential model |
 |---|---|---|
