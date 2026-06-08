@@ -31,13 +31,15 @@ func EmitAttemptDuration(ctx context.Context, logger *slog.Logger, result string
 	)
 }
 
-// EmitDeadLetterMetric logs one build_trigger_deadletter_total sample.
-func EmitDeadLetterMetric(ctx context.Context, logger *slog.Logger) {
+// EmitDeadLetterMetric logs one build_trigger_deadletter_total{reason} sample.
+// reason is one of: permanent, exhausted.
+func EmitDeadLetterMetric(ctx context.Context, logger *slog.Logger, reason string) {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "metric",
 		slog.String("metric_name", "build_trigger_deadletter_total"),
+		slog.String("reason", reason),
 		slog.Int("value", 1),
 	)
 }

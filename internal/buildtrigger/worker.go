@@ -383,8 +383,8 @@ func recordResult(ctx context.Context, svc *Service, cfg WorkerConfig, row claim
 		}
 		EmitFired(ctx, logger, row.Kind, "dead_letter")
 		EmitAttemptDuration(ctx, logger, "dead_letter", durationMs)
-		EmitDeadLetterMetric(ctx, logger)
-		EmitDeadLetter(ctx, logger, row.ID, row.TriggerID, row.Attempts, statusCode)
+		EmitDeadLetterMetric(ctx, logger, "exhausted")
+		EmitDeadLetter(ctx, logger, row.ID, row.TriggerID, row.Attempts, statusCode, "exhausted")
 		return
 	}
 	idx := row.Attempts - 1
