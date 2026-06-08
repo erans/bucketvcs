@@ -79,6 +79,11 @@ type serveFlags struct {
 	oidcEnabled       *bool
 	oidcSweepInterval *time.Duration
 
+	// M30 build triggers.
+	buildTriggersEnabled *bool
+	buildConfigPath      *string
+	buildSweepInterval   *time.Duration
+
 	// Web UI (M24).
 	uiEnabled       *bool
 	uiAddr          *string
@@ -234,6 +239,14 @@ func registerServeFlags(fs *flag.FlagSet) *serveFlags {
 		"Enable the OIDC token-exchange endpoint POST /_oidc/token (M22)")
 	sf.oidcSweepInterval = fs.Duration("oidc-sweep-interval", 5*time.Minute,
 		"Interval for sweeping expired OIDC-minted tokens")
+
+	// M30 build triggers. Default disabled; flip with --build-triggers=true.
+	sf.buildTriggersEnabled = fs.Bool("build-triggers", false,
+		"Enable M30 build triggers (enqueue on push + delivery worker)")
+	sf.buildConfigPath = fs.String("build-config", "",
+		"Path to scoped build config YAML (aws_connectors, defaults)")
+	sf.buildSweepInterval = fs.Duration("build-sweep-interval", 5*time.Minute,
+		"Interval for sweeping expired build-minted tokens")
 
 	// Web UI (M24)
 	sf.uiEnabled = fs.Bool("ui", true, "Enable the web UI (HTTP)")

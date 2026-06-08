@@ -24,6 +24,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/auth/ratelimit"
 	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
 	"github.com/bucketvcs/bucketvcs/internal/authreplica"
+	"github.com/bucketvcs/bucketvcs/internal/buildtrigger"
 	"github.com/bucketvcs/bucketvcs/internal/byob"
 	"github.com/bucketvcs/bucketvcs/internal/gateway"
 	"github.com/bucketvcs/bucketvcs/internal/gitbrowse"
@@ -86,6 +87,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	hooksAllowNetwork, hooksEnv := sf.hooksAllowNetwork, sf.hooksEnv
 	hooksPostReceiveConcurrency, hooksPostReceiveQueue := sf.hooksPostReceiveConcurrency, sf.hooksPostReceiveQueue
 	oidcEnabled, oidcSweepInterval := sf.oidcEnabled, sf.oidcSweepInterval
+	buildTriggersEnabled, buildConfigPath, buildSweepInterval := sf.buildTriggersEnabled, sf.buildConfigPath, sf.buildSweepInterval
 	uiEnabled, uiAddr, uiDir, uiSessionTTL, uiBrowseTimeout := sf.uiEnabled, sf.uiAddr, sf.uiDir, sf.uiSessionTTL, sf.uiBrowseTimeout
 	oidcLogin, oidcIssuer, oidcClientID := sf.oidcLogin, sf.oidcIssuer, sf.oidcClientID
 	oidcSecretFile, oidcRedirect, oidcScopes, oidcLabel := sf.oidcSecretFile, sf.oidcRedirect, sf.oidcScopes, sf.oidcLabel
@@ -507,6 +509,29 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	}
 	webhookSvc.Egress = webhookEgress
 
+	// M30 build triggers. Backed by the same authdb (migration 0017). The
+	// Service is a no-op when nil, so when --build-triggers is off neither the
+	// gateway/sshd enqueue path nor the worker below does anything. The scoped
+	// build config (named AWS connectors) is loaded once at startup.
+	var buildSvc *buildtrigger.Service
+	var buildConnectors map[string]buildtrigger.AWSConnector
+	if *buildTriggersEnabled {
+		buildSvc = buildtrigger.New(authS.DB())
+		if *buildConfigPath != "" {
+			data, rerr := os.ReadFile(*buildConfigPath)
+			if rerr != nil {
+				fmt.Fprintf(stderr, "serve: read --build-config: %v\n", rerr)
+				return 1
+			}
+			cfg, perr := buildtrigger.ParseServeConfig(data)
+			if perr != nil {
+				fmt.Fprintf(stderr, "serve: parse --build-config: %v\n", perr)
+				return 1
+			}
+			buildConnectors = cfg.Build.AWSConnectors
+		}
+	}
+
 	// M24 Phase 3 web admin services. Both are db-backed and cheap to
 	// construct unconditionally; the web layer only invokes them on demand
 	// from the settings/admin pages. hooksStore is the CRUD Store (distinct
@@ -683,6 +708,42 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 		go webhooks.StartWorker(serveCtx, webhookSvc, wcfg)
 	}
 
+	// M30 build-trigger delivery worker + expired build-token sweep. Like the
+	// webhook worker, both run only in the write region: on replicas the worker
+	// is NOT started (deliveries fire from the write region). The Service is nil
+	// when --build-triggers is off, so this whole block is skipped.
+	if *buildTriggersEnabled && buildSvc != nil {
+		if isReplica {
+			slog.Default().Info("replica mode: build-trigger delivery worker not started (deliveries fire from the write region)",
+				"mode", replicaMode.String())
+		} else {
+			bcfg := buildtrigger.DefaultWorkerConfig()
+			bcfg.Egress = webhookEgress
+			bcfg.MintFn = buildtrigger.NewMintFunc(authS, logger)
+			bcfg.Connectors = buildConnectors
+			bcfg.Deliverers = buildtrigger.ProductionDeliverers(bcfg.MintFn, buildConnectors, webhookEgress, bcfg.HTTPTimeout)
+			go buildtrigger.StartWorker(serveCtx, buildSvc, bcfg)
+
+			go func() {
+				t := time.NewTicker(*buildSweepInterval)
+				defer t.Stop()
+				for {
+					select {
+					case <-serveCtx.Done():
+						return
+					case <-t.C:
+						if n, err := authS.SweepExpiredBuildTokens(serveCtx); err != nil {
+							logger.LogAttrs(serveCtx, slog.LevelWarn, "build token sweep error", slog.String("err", err.Error()))
+						} else if n > 0 {
+							logger.LogAttrs(serveCtx, slog.LevelInfo, "metric",
+								slog.String("metric_name", "build_tokens_swept_total"), slog.Int64("value", n))
+						}
+					}
+				}
+			}()
+		}
+	}
+
 	// M22 OIDC expired-token sweep goroutine.
 	if *oidcEnabled {
 		if *addr == "" && ln == nil {
@@ -775,6 +836,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			LFSLocksStore:           lfsLocksStore,
 			Policy:                  policySvc,
 			Webhooks:                webhookSvc,
+			BuildTriggers:           buildSvc,
 			Hooks:                   hooksSvc,
 			Limiter:                 rateLimiter,
 			TrustProxyHeaders:       *trustProxyHeaders,
@@ -978,6 +1040,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			LFSSSHTokenTTL:    lfsSSHTTL,
 			Policy:            policySvc,
 			Webhooks:          webhookSvc,
+			BuildTriggers:     buildSvc,
 			Hooks:             hooksSvc,
 			Limiter:           rateLimiter,
 			Replica:           replicaCfg,
