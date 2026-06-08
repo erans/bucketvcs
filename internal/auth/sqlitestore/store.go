@@ -80,8 +80,7 @@ func (s *Store) BackendName() string { return s.backend.Name() }
 var ErrLastAdmin = errors.New("sqlitestore: refusing to delete the last admin")
 
 // ErrReservedUser is returned when an operation targets a reserved system
-// user (e.g. the OIDC minting principal "_oidc") that must not be disabled
-// or deleted.
+// user ("_oidc" or "_build") that must not be disabled or deleted.
 var ErrReservedUser = errors.New("sqlitestore: cannot modify reserved system user")
 
 // User is the row shape returned by user-lookup methods.

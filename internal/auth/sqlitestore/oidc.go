@@ -282,14 +282,7 @@ func (s *Store) MintOIDCToken(ctx context.Context, p MintOIDCParams) (string, er
 // user and returns the number removed. Scoped to _oidc so it never touches
 // operator-managed user tokens.
 func (s *Store) SweepExpiredOIDCTokens(ctx context.Context) (int64, error) {
-	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM tokens WHERE user_id = ? AND expires_at IS NOT NULL AND expires_at < ?`,
-		oidcSystemUserID, time.Now().Unix())
-	if err != nil {
-		return 0, err
-	}
-	n, _ := res.RowsAffected()
-	return n, nil
+	return s.sweepExpiredTokensForUser(ctx, oidcSystemUserID)
 }
 
 // ErrNoSuchOIDCIssuer and ErrNoSuchOIDCRule are not-found sentinels.
