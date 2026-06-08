@@ -40,8 +40,8 @@ func TestOpen_CreatesFileAndAppliesMigrations(t *testing.T) {
 	if err := s.db.raw().QueryRow("SELECT MAX(version) FROM schema_version").Scan(&v); err != nil {
 		t.Fatalf("schema_version: %v", err)
 	}
-	if v != 16 {
-		t.Errorf("schema_version = %d, want 16", v)
+	if v != 17 {
+		t.Errorf("schema_version = %d, want 17", v)
 	}
 }
 
@@ -201,10 +201,10 @@ func TestListUsers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListUsers: %v", err)
 	}
-	// 2 = alice + bob. The _oidc system user (seeded by migration 0010) is
-	// filtered from ListUsers and must not appear here.
+	// 2 = alice + bob. The _oidc and _build system users (seeded by migrations
+	// 0010 and 0017) are filtered from ListUsers and must not appear here.
 	if len(got) != 2 {
-		t.Fatalf("len = %d, want 2 (alice + bob; _oidc is hidden from list)", len(got))
+		t.Fatalf("len = %d, want 2 (alice + bob; _oidc and _build are hidden from list)", len(got))
 	}
 }
 

@@ -228,6 +228,10 @@ func randomHex(n int) (string, error) {
 // oidcSystemUserID is the reserved user inserted by migration 0010.
 const oidcSystemUserID = "_oidc"
 
+// buildSystemUserID is the reserved user inserted by migration 0017.
+// Build-trigger-minted tokens are owned by this principal.
+const buildSystemUserID = "_build"
+
 // OIDCMaxTTLSeconds is the hard ceiling on an OIDC trust rule's token TTL.
 // Enforced at rule creation (the store is the chokepoint all minting flows
 // through) so the short-lived-token blast-radius control cannot be bypassed
