@@ -44,6 +44,9 @@ type WorkerConfig struct {
 	// Connectors is the named AWS connector map used to build the production
 	// CodeBuild deliverer (Deliverers == nil).
 	Connectors map[string]AWSConnector
+	// AzureConnectors is the named Azure DevOps connector map used to build the
+	// production Azure Pipelines deliverer (Deliverers == nil).
+	AzureConnectors map[string]AzureConnector
 }
 
 // DefaultWorkerConfig returns the production defaults (mirrors webhooks §6).
@@ -97,7 +100,7 @@ func StartWorker(ctx context.Context, svc *Service, cfg WorkerConfig) {
 	// Build the production deliverer set when the caller didn't inject one
 	// (tests inject directly; production builds an egress-gated HTTP client).
 	if cfg.Deliverers == nil {
-		cfg.Deliverers = ProductionDeliverers(cfg.MintFn, cfg.Connectors, cfg.Egress, cfg.HTTPTimeout)
+		cfg.Deliverers = ProductionDeliverers(cfg.MintFn, cfg.Connectors, cfg.AzureConnectors, cfg.Egress, cfg.HTTPTimeout)
 	}
 
 	if err := Reclaim(ctx, svc.db, cfg.ReclaimThreshold); err != nil {
@@ -457,23 +460,32 @@ func NewMintFunc(store *sqlitestore.Store, logger *slog.Logger) MintFunc {
 }
 
 // ProductionDeliverers builds the per-kind deliverer set used in production:
-// generic + cloudbuild share a signed-JSON HTTP deliverer over an egress-gated
-// client; codebuild uses the SigV4 StartBuild deliverer.
-func ProductionDeliverers(mint MintFunc, connectors map[string]AWSConnector, egress *webhooks.EgressPolicy, timeout time.Duration) map[Kind]Deliverer {
+// generic + cloudbuild + azurewebhook share a signed-JSON HTTP deliverer over
+// an egress-gated client (signature scheme selected per-kind); codebuild uses
+// the SigV4 StartBuild deliverer; azurepipelines uses the PAT Run Pipeline
+// REST deliverer.
+func ProductionDeliverers(mint MintFunc, connectors map[string]AWSConnector, azureConnectors map[string]AzureConnector, egress *webhooks.EgressPolicy, timeout time.Duration) map[Kind]Deliverer {
 	if egress == nil {
 		egress = &webhooks.EgressPolicy{} // secure default: deny private/loopback/link-local
 	}
+	client := webhooks.NewHTTPClient(egress, timeout)
 	httpD := &httpDeliverer{
-		client: webhooks.NewHTTPClient(egress, timeout),
+		client: client,
 		mintFn: mint,
 	}
 	cbD := &codeBuildDeliverer{
 		clientFor: newCodeBuildClientFactory(connectors),
 		mintFn:    mint,
 	}
+	azD := &azurePipelinesDeliverer{
+		clientFor: newAzurePipelinesClientFactory(azureConnectors, client),
+		mintFn:    mint,
+	}
 	return map[Kind]Deliverer{
-		KindGeneric:    httpD,
-		KindCloudBuild: httpD,
-		KindCodeBuild:  cbD,
+		KindGeneric:        httpD,
+		KindCloudBuild:     httpD,
+		KindAzureWebhook:   httpD,
+		KindCodeBuild:      cbD,
+		KindAzurePipelines: azD,
 	}
 }
