@@ -45,7 +45,7 @@ Minted tokens are:
 
 - **Short-lived**: hard ceiling 1 hour; operator-configured per trigger via `--token-ttl` (default: `--build-sweep-interval`, effectively 5 min unless overridden in `--build-config`).
 - **Single-repo**: scope_perm is bound to `(tenant, repo)` — the injected token cannot access any other repo.
-- **Read-only by default**: default scopes `repo:read`. Override with `--token-scopes`.
+- **Read-only by default**: default scopes `repo:read,lfs:read` — the build can also pull LFS objects from the same repo. Override with `--token-scopes`.
 - **Revocable**: expired tokens are swept on the `--build-sweep-interval` tick (default 5 min).
 - **Owned by `_build`**: a reserved system user that cannot be disabled, deleted, or granted repo permissions manually.
 
@@ -222,6 +222,8 @@ Flags specific to `codebuild`:
 | `--aws-project` | yes | CodeBuild project name |
 | `--aws-connector` | no | Named connector from `--build-config`; omit to use ambient credential chain |
 
+Note: for `codebuild` triggers, `--token-mode` defaults to `inject` when omitted (because AWS CodeBuild cannot perform OIDC-pull against the gateway). For `generic` and `cloudbuild` triggers the default is `none`.
+
 ### 4.2 AWS connector configuration (`--build-config`)
 
 The optional `--build-config` YAML lets operators define named AWS connectors shared across triggers, and set server-wide token defaults.
@@ -300,7 +302,7 @@ RESULT=$(bucketvcs build trigger add \
     --token-scopes=repo:read \
     --token-ttl=15m)
 echo "$RESULT"
-# trigger_id=bvbd_...  tenant=acme  repo=app  name=lambda-ci  kind=generic
+# trigger_id=bvbt_...  tenant=acme  repo=app  name=lambda-ci  kind=generic
 # secret=NQpV4o7...    # store this now — it will not be shown again
 ```
 
