@@ -324,13 +324,20 @@ func generateSecret() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(buf[:]), nil
 }
 
-// generateID returns a "bvbt_"-prefixed id from 12 random bytes.
-func generateID() (string, error) {
+// generateIDWithPrefix returns a prefixed id from 12 random bytes encoded as
+// base64-url-no-padding. Both trigger ids ("bvbt_") and delivery ids ("bvbd_")
+// use this helper.
+func generateIDWithPrefix(prefix string) (string, error) {
 	var buf [12]byte
 	if _, err := rand.Read(buf[:]); err != nil {
 		return "", err
 	}
-	return "bvbt_" + base64.RawURLEncoding.EncodeToString(buf[:]), nil
+	return prefix + base64.RawURLEncoding.EncodeToString(buf[:]), nil
+}
+
+// generateID returns a "bvbt_"-prefixed trigger id.
+func generateID() (string, error) {
+	return generateIDWithPrefix("bvbt_")
 }
 
 func secretPreview(secret string) string {
