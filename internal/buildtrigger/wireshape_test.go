@@ -3,6 +3,7 @@ package buildtrigger
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"io"
 	"net/http"
@@ -14,6 +15,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/codebuild"
 	"github.com/bucketvcs/bucketvcs/internal/webhooks"
 )
 
@@ -171,5 +176,97 @@ func TestWireShape_CloudBuild(t *testing.T) {
 	}
 	if !bytes.Contains(got.body, []byte(`"commit":"`+wsHeadOID+`"`)) {
 		t.Errorf("cloudbuild body missing flattened commit: %s", got.body)
+	}
+}
+
+type sbWire struct {
+	ProjectName                  string `json:"projectName"`
+	SourceVersion                string `json:"sourceVersion"`
+	EnvironmentVariablesOverride []struct {
+		Name  string `json:"name"`
+		Value string `json:"value"`
+		Type  string `json:"type"`
+	} `json:"environmentVariablesOverride"`
+}
+
+type sbCapture struct {
+	req    sbWire
+	target string
+	auth   string
+}
+
+func TestWireShape_CodeBuild(t *testing.T) {
+	recv := make(chan sbCapture, 1)
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		var req sbWire
+		_ = json.Unmarshal(b, &req)
+		recv <- sbCapture{req: req, target: r.Header.Get("X-Amz-Target"), auth: r.Header.Get("Authorization")}
+		w.Header().Set("Content-Type", "application/x-amz-json-1.1")
+		_, _ = w.Write([]byte(`{"build":{"id":"b-1"}}`))
+	}))
+	defer fake.Close()
+
+	clientFor := func(Trigger) (startBuildAPI, error) {
+		cfg, err := awsconfig.LoadDefaultConfig(context.Background(),
+			awsconfig.WithRegion("us-east-1"),
+			awsconfig.WithCredentialsProvider(
+				credentials.NewStaticCredentialsProvider("AKIATEST", "secret", "")))
+		if err != nil {
+			return nil, err
+		}
+		return codebuild.NewFromConfig(cfg, func(o *codebuild.Options) {
+			o.BaseEndpoint = aws.String(fake.URL)
+		}), nil
+	}
+
+	svc, _ := newTestSvc(t)
+	if _, err := svc.Create(context.Background(), TriggerInput{
+		Tenant: "acme", Repo: "app", Name: "cbld", Kind: KindCodeBuild,
+		Config:     Config{AWSRegion: "us-east-1", AWSProject: "app-release"},
+		RefInclude: []string{"refs/heads/main"}, TokenMode: TokenInject,
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	d := &codeBuildDeliverer{clientFor: clientFor, mintFn: fixedMint}
+	runWorkerOnce(t, svc, map[Kind]Deliverer{KindCodeBuild: d})
+
+	var got sbCapture
+	select {
+	case got = <-recv:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no StartBuild received within 3s — worker did not deliver")
+	}
+
+	if got.auth == "" {
+		t.Error("missing Authorization header — request was not SigV4-signed")
+	}
+	if !strings.HasSuffix(got.target, ".StartBuild") {
+		t.Errorf("X-Amz-Target=%q, want a *.StartBuild target", got.target)
+	}
+	if got.req.ProjectName != "app-release" {
+		t.Errorf("projectName=%q, want app-release", got.req.ProjectName)
+	}
+	if got.req.SourceVersion != wsHeadOID {
+		t.Errorf("sourceVersion=%q, want %s", got.req.SourceVersion, wsHeadOID)
+	}
+	wantEnv := map[string]string{
+		"BV_REF":     "refs/heads/main",
+		"BV_REPO":    "acme/app",
+		"BV_COMMIT":  wsHeadOID,
+		"BVTS_TOKEN": "bvts_TESTTOKEN",
+	}
+	gotEnv := map[string]string{}
+	for _, ev := range got.req.EnvironmentVariablesOverride {
+		gotEnv[ev.Name] = ev.Value
+		if ev.Type != "PLAINTEXT" {
+			t.Errorf("env %s type=%q, want PLAINTEXT", ev.Name, ev.Type)
+		}
+	}
+	for k, v := range wantEnv {
+		if gotEnv[k] != v {
+			t.Errorf("env %s=%q, want %q", k, gotEnv[k], v)
+		}
 	}
 }
