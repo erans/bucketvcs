@@ -1,8 +1,11 @@
 package buildtrigger
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -94,5 +97,54 @@ func TestAzureRunURL(t *testing.T) {
 	want := "https://dev.azure.com/MyOrg/MyProject/_apis/pipelines/42/runs?api-version=7.1"
 	if got != want {
 		t.Errorf("url=%q, want %q", got, want)
+	}
+}
+
+func TestAzurePipelines_4xxIsPermanent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(401)
+	}))
+	defer srv.Close()
+	d := &azurePipelinesDeliverer{
+		clientFor: func(Trigger) (azureConn, error) {
+			return azureConn{orgURL: srv.URL, pat: "p", client: srv.Client()}, nil
+		},
+	}
+	tr := Trigger{Kind: KindAzurePipelines, TokenMode: TokenNone,
+		Config: Config{AzureConnector: "prod", AzureProject: "P", AzurePipelineID: 1}}
+	code, err := d.Deliver(context.Background(), tr, BuildPayload{RefUpdate: RefUpdate{Refname: "refs/heads/main"}})
+	if code != 401 || !errors.Is(err, ErrPermanent) {
+		t.Fatalf("401 should be permanent, got code=%d err=%v", code, err)
+	}
+}
+
+func TestAzurePipelines_5xxIsRetryable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+	}))
+	defer srv.Close()
+	d := &azurePipelinesDeliverer{
+		clientFor: func(Trigger) (azureConn, error) {
+			return azureConn{orgURL: srv.URL, pat: "p", client: srv.Client()}, nil
+		},
+	}
+	tr := Trigger{Kind: KindAzurePipelines, TokenMode: TokenNone,
+		Config: Config{AzureConnector: "prod", AzureProject: "P", AzurePipelineID: 1}}
+	_, err := d.Deliver(context.Background(), tr, BuildPayload{RefUpdate: RefUpdate{Refname: "refs/heads/main"}})
+	if err == nil || errors.Is(err, ErrPermanent) {
+		t.Errorf("500 must be retryable, got %v", err)
+	}
+}
+
+func TestAzurePipelines_UnknownConnectorIsPermanent(t *testing.T) {
+	// Empty connector map → factory returns an error for any connector name.
+	d := &azurePipelinesDeliverer{
+		clientFor: newAzurePipelinesClientFactory(map[string]AzureConnector{}, http.DefaultClient),
+	}
+	tr := Trigger{Kind: KindAzurePipelines, TokenMode: TokenNone,
+		Config: Config{AzureConnector: "missing", AzureProject: "P", AzurePipelineID: 1}}
+	_, err := d.Deliver(context.Background(), tr, BuildPayload{RefUpdate: RefUpdate{Refname: "refs/heads/main"}})
+	if !errors.Is(err, ErrPermanent) {
+		t.Fatalf("unknown connector should be permanent, got %v", err)
 	}
 }

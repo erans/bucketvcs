@@ -38,7 +38,7 @@ type azurePipelinesDeliverer struct {
 func (d *azurePipelinesDeliverer) Deliver(ctx context.Context, tr Trigger, p BuildPayload) (int, error) {
 	conn, err := d.clientFor(tr)
 	if err != nil {
-		return 0, fmt.Errorf("azure connector: %w", err)
+		return 0, permanentf("azure connector: %v", err)
 	}
 	var token string
 	if tr.TokenMode == TokenInject {
@@ -70,6 +70,9 @@ func (d *azurePipelinesDeliverer) Deliver(ctx context.Context, tr Trigger, p Bui
 	_, _ = io.CopyN(io.Discard, resp.Body, 512)
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return resp.StatusCode, nil
+	}
+	if httpStatusPermanent(resp.StatusCode) {
+		return resp.StatusCode, permanentf("HTTP %d", resp.StatusCode)
 	}
 	return resp.StatusCode, fmt.Errorf("HTTP %d", resp.StatusCode)
 }
