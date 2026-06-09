@@ -123,6 +123,41 @@ func httpRespErr(status int) error {
 	}
 }
 
+// errStartBuild is a startBuildAPI fake that always returns err.
+type errStartBuild struct{ err error }
+
+func (f errStartBuild) StartBuild(ctx context.Context, in *codebuild.StartBuildInput, _ ...func(*codebuild.Options)) (*codebuild.StartBuildOutput, error) {
+	return nil, f.err
+}
+
+func TestCodeBuildDeliverer_PermanentError(t *testing.T) {
+	d := &codeBuildDeliverer{
+		clientFor: func(Trigger) (startBuildAPI, error) {
+			return errStartBuild{err: fakeAPIError{"ResourceNotFoundException"}}, nil
+		},
+		mintFn: func(context.Context, Trigger, BuildPayload) (string, error) { return "", nil },
+	}
+	tr := Trigger{Kind: KindCodeBuild, TokenMode: TokenNone, Config: Config{AWSProject: "p"}}
+	_, err := d.Deliver(context.Background(), tr, BuildPayload{Repo: "app"})
+	if !errors.Is(err, ErrPermanent) {
+		t.Fatalf("ResourceNotFoundException should be permanent, got %v", err)
+	}
+}
+
+func TestCodeBuildDeliverer_ThrottlingIsRetryable(t *testing.T) {
+	d := &codeBuildDeliverer{
+		clientFor: func(Trigger) (startBuildAPI, error) {
+			return errStartBuild{err: fakeAPIError{"ThrottlingException"}}, nil
+		},
+		mintFn: func(context.Context, Trigger, BuildPayload) (string, error) { return "", nil },
+	}
+	tr := Trigger{Kind: KindCodeBuild, TokenMode: TokenNone, Config: Config{AWSProject: "p"}}
+	_, err := d.Deliver(context.Background(), tr, BuildPayload{Repo: "app"})
+	if err == nil || errors.Is(err, ErrPermanent) {
+		t.Fatalf("throttling must be retryable, got %v", err)
+	}
+}
+
 func TestCodeBuildPermanent(t *testing.T) {
 	cases := []struct {
 		name string

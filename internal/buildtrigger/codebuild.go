@@ -92,6 +92,9 @@ func (d *codeBuildDeliverer) Deliver(ctx context.Context, tr Trigger, p BuildPay
 		EnvironmentVariablesOverride: envOverrides,
 	})
 	if err != nil {
+		if codeBuildPermanent(err) {
+			return 0, permanentf("codebuild StartBuild: %v", err)
+		}
 		return 0, fmt.Errorf("codebuild StartBuild: %w", err)
 	}
 	_ = out // Build.Id is available in out.Build for future correlation.
