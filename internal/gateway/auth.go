@@ -73,6 +73,12 @@ func RunAuth(w http.ResponseWriter, r *http.Request, store auth.Store, rr *Route
 
 	flags, err := store.GetRepoFlags(ctx, rr.Tenant, rr.Repo)
 	if errors.Is(err, auth.ErrNoSuchRepo) {
+		// Alias fallback: a renamed-away name resolves to its live target.
+		if f2, ok := resolveAlias(ctx, store, rr, logger); ok {
+			flags, err = f2, nil
+		}
+	}
+	if errors.Is(err, auth.ErrNoSuchRepo) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return nil, false
 	}
@@ -150,4 +156,30 @@ func RunAuth(w http.ResponseWriter, r *http.Request, store auth.Store, rr *Route
 func challenge(w http.ResponseWriter, body string) {
 	w.Header().Set("WWW-Authenticate", authRealm)
 	http.Error(w, body, http.StatusUnauthorized)
+}
+
+// resolveAlias attempts to resolve rr.Repo as a rename alias to a live repo.
+// On success it rewrites rr.Repo to the canonical name, emits the metric, and
+// returns that repo's flags with ok=true. Used only after GetRepoFlags
+// returned ErrNoSuchRepo for the original name.
+//
+// RoutedRequest carries no dedicated IsLFS predicate; LFS ops (OpLFSBatch and
+// the OpLFSLocks* family) share the "https" transport label because they arrive
+// on the same HTTPS listener as git smart-HTTP.
+func resolveAlias(ctx context.Context, store auth.Store, rr *RoutedRequest, logger *slog.Logger) (auth.RepoFlags, bool) {
+	resolver, ok := store.(auth.RepoAliasResolver)
+	if !ok {
+		return auth.RepoFlags{}, false
+	}
+	target, found, err := resolver.ResolveAlias(ctx, rr.Tenant, rr.Repo)
+	if err != nil || !found {
+		return auth.RepoFlags{}, false
+	}
+	f2, err := store.GetRepoFlags(ctx, rr.Tenant, target)
+	if err != nil {
+		return auth.RepoFlags{}, false // dangling alias → treat as not found
+	}
+	auth.EmitRepoAliasResolvedMetric(ctx, logger, "https")
+	rr.Repo = target
+	return f2, true
 }

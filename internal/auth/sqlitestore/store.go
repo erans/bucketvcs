@@ -548,14 +548,11 @@ type Repo struct {
 	CreatedAt  int64
 }
 
-// RegisterRepo idempotently inserts a (tenant, name) into repos.
+// RegisterRepo idempotently inserts a (tenant, name) into repos and drops
+// any alias of the same name in the same transaction — a live repo always
+// shadows a stale alias.
 func (s *Store) RegisterRepo(ctx context.Context, tenant, name string) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO repos (tenant, name, public_read, created_at)
-		 VALUES (?, ?, 0, ?)
-		 ON CONFLICT(tenant, name) DO NOTHING`,
-		tenant, name, time.Now().Unix(),
-	)
+	_, err := s.registerRepo(ctx, tenant, name)
 	return err
 }
 
@@ -566,18 +563,36 @@ func (s *Store) RegisterRepo(ctx context.Context, tenant, name string) error {
 // Use this instead of pre-checking with GetRepoFlags + then calling
 // RegisterRepo — that pattern races with a concurrent registration.
 func (s *Store) RegisterRepoIfNew(ctx context.Context, tenant, name string) (bool, error) {
-	res, err := s.db.ExecContext(ctx,
+	return s.registerRepo(ctx, tenant, name)
+}
+
+// registerRepo inserts the repo (idempotent) and, whether or not the insert
+// was new, drops any alias of the same name in the same transaction — a live
+// repo always shadows a stale alias.
+func (s *Store) registerRepo(ctx context.Context, tenant, name string) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{})
+	if err != nil {
+		return false, fmt.Errorf("sqlitestore.registerRepo: begin: %w", err)
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx,
 		`INSERT INTO repos (tenant, name, public_read, created_at)
 		 VALUES (?, ?, 0, ?)
 		 ON CONFLICT(tenant, name) DO NOTHING`,
-		tenant, name, time.Now().Unix(),
-	)
+		tenant, name, time.Now().Unix())
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("sqlitestore.registerRepo: insert: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM repo_aliases WHERE tenant=? AND old_name=?`, tenant, name); err != nil {
+		return false, fmt.Errorf("sqlitestore.registerRepo: shadow alias: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("sqlitestore.registerRepo: rows: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("sqlitestore.registerRepo: commit: %w", err)
 	}
 	return n > 0, nil
 }

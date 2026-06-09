@@ -713,7 +713,7 @@ After `bucketvcs repo rename <tenant>/<old> <new>` succeeds:
 1. Stop the gateway (or rely on the localfs single-writer lock during the auth-rename step on localfs; cloud backends require a controlled cutover).
 2. Move the storage tree: `aws s3 mv s3://bucket/tenants/<tenant>/repos/<old>/ s3://bucket/tenants/<tenant>/repos/<new>/ --recursive` (or backend-equivalent).
 3. Rewrite absolute path references in the manifest body — every `pack_key`, `idx_key`, and `indexes.*.key` field currently embeds the old prefix. The simplest operator-side approach is to download `tenants/<tenant>/repos/<new>/manifest/root.json`, sed-replace `tenants/<tenant>/repos/<old>/` to `tenants/<tenant>/repos/<new>/`, and PUT it back atomically.
-4. Restart the gateway. Push/clone against the new name should now succeed; the old name returns 404 from the auth layer.
+4. Restart the gateway. Push/clone against the new name should now succeed. The old name now redirects (see §14.6 *Repo rename redirects*).
 
 A future release may automate this storage step via a `bucketvcs storage rename` helper that respects the manifest indirection. For now it is an operator runbook.
 
@@ -723,3 +723,36 @@ A future release may automate this storage step via a `bucketvcs storage rename`
 - No undo. The rename is committed when the sqlite transaction commits; reverse direction must be done with a second `repo rename` call.
 - LFS quotas are per-tenant (`quotas(tenant)` from migration 0004 has no `repo` column), so a same-tenant rename leaves the tenant-wide byte counter unaffected. If you complete an out-of-band storage migration afterwards, run `bucketvcs quota reconcile --tenant=<tenant>` to correct for any tenant-level drift that accumulated during the cutover.
 - The `webhook_endpoints` row for the old name is migrated to the new name; subscribers continue to receive events under their existing endpoint ID. The endpoint secret is NOT rotated. If you want the new name to surface as a different endpoint, `webhook endpoint rotate-secret --id=<N>` after the rename.
+
+### 14.6 Repo rename redirects
+
+Renaming a repo (`bucketvcs repo rename <tenant>/<old> <new>`, or the web UI
+Settings → Rename form) now leaves the **old name working**:
+
+- **Web UI:** requests to `/{tenant}/{old}/…` return **302** to `/{tenant}/{new}/…`
+  (sub-path and query preserved).
+- **Git (HTTPS + SSH) and LFS:** clone/fetch/push against the old name resolve
+  transparently to the renamed repo. SSH additionally prints
+  `bucketvcs: repository renamed to <tenant>/<new>; update your remote`.
+
+The redirect is backed by a `repo_aliases` row created at rename time. It
+**stops** as soon as the old name is reused: registering a new repo with the old
+name removes the alias (a live repo always shadows an alias). Chained renames
+(`a→b→c`) keep the oldest alias resolving to the current name.
+
+Authorization is unchanged: an alias resolves the *name* but auth is still
+enforced on the canonical repo — a private target stays private.
+
+Manage aliases:
+
+```bash
+bucketvcs repo alias list   --auth-db=<path> <tenant>/<name>     # aliases resolving to this repo
+bucketvcs repo alias remove --auth-db=<path> <tenant>/<old-name> # drop a redirect early
+```
+
+Observe old-name traffic via the `repo_alias_resolved_total{transport}` metric
+(`transport` ∈ `ui|https|ssh`; LFS shares the `https` label).
+
+**Storage is still moved out of band** — aliasing resolves *names*, not bytes.
+The existing requirement to relocate `tenants/<tenant>/repos/<old>/…` to
+`…/<new>/…` after a rename is unchanged.

@@ -77,6 +77,9 @@ func (s *server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	}
 	sess := SessionFromContext(r.Context())
 	if _, err := s.store.GetVisibleRepo(r.Context(), actorFromSession(sess), br.tenant, br.repo); err != nil {
+		if s.aliasRedirect(w, r, br.tenant, br.repo) {
+			return
+		}
 		// Uniform 404 for both not-found and not-authorized (anti-enumeration).
 		s.renderError(w, r, http.StatusNotFound, "not found")
 		return
