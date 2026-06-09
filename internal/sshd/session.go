@@ -118,6 +118,19 @@ run:
 	}
 
 	flags, err := s.opts.Store.GetRepoFlags(ctx, cmd.Tenant, cmd.Repo)
+	if errors.Is(err, auth.ErrNoSuchRepo) {
+		// Alias fallback: a renamed-away name resolves to its live target.
+		if resolver, ok := s.opts.Store.(auth.RepoAliasResolver); ok {
+			if target, found, rerr := resolver.ResolveAlias(ctx, cmd.Tenant, cmd.Repo); rerr == nil && found {
+				if f2, e2 := s.opts.Store.GetRepoFlags(ctx, cmd.Tenant, target); e2 == nil {
+					sendStderrLine(ch, "bucketvcs: repository renamed to "+cmd.Tenant+"/"+target+"; update your remote")
+					auth.EmitRepoAliasResolvedMetric(ctx, s.opts.Logger, "ssh")
+					cmd.Repo = target
+					flags, err = f2, nil
+				}
+			}
+		}
+	}
 	if err != nil {
 		if errors.Is(err, auth.ErrNoSuchRepo) {
 			sendStderrLine(ch, "bucketvcs: repository not found")

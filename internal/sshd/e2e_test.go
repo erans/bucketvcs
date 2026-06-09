@@ -982,6 +982,138 @@ func TestE2E_LFSAuthenticate_DeployKey_Rejected(t *testing.T) {
 	}
 }
 
+// TestSession_ResolvesAlias verifies that the SSH gateway transparently
+// resolves a repo rename alias to its live canonical target. The object store
+// is seeded with data under the canonical name ("b"); the auth store is seeded
+// with an alias "a"→"b" via RegisterRepo+RenameRepo. git ls-remote against
+// "acme/a.git" must succeed (not return "repository not found"), and the
+// deprecation hint "repository renamed to acme/b" must appear on stderr.
+// A truly-missing name must still exit 128 with "repository not found".
+func TestSession_ResolvesAlias(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("SSH e2e uses bash scripts; not supported on Windows")
+	}
+	skipIfNoSSHGit(t)
+
+	ctx := context.Background()
+
+	// ---- object store + fixture repo seeded under canonical name "b" ----------
+	storeDir := t.TempDir()
+	makeRepoForSSH(t, storeDir, "acme", "b") // canonical name
+	objStore, err := localfs.Open(storeDir)
+	if err != nil {
+		t.Fatalf("localfs.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = objStore.Close() })
+
+	// ---- auth store: register "a", rename to "b" (alias a→b) -----------------
+	authStore, err := sqlitestore.Open(filepath.Join(t.TempDir(), "auth.db"))
+	if err != nil {
+		t.Fatalf("sqlitestore.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = authStore.Close() })
+	if err := authStore.RegisterRepo(ctx, "acme", "a"); err != nil {
+		t.Fatalf("RegisterRepo a: %v", err)
+	}
+	if err := authStore.RenameRepo(ctx, "acme", "a", "b"); err != nil {
+		t.Fatalf("RenameRepo a→b: %v", err)
+	}
+
+	// ---- mirror manager -------------------------------------------------------
+	mirrorDir := t.TempDir()
+	mgr, err := mirror.NewManager(mirrorDir, objStore)
+	if err != nil {
+		t.Fatalf("mirror.NewManager: %v", err)
+	}
+	t.Cleanup(func() { _ = mgr.Close() })
+
+	// ---- SSH server -----------------------------------------------------------
+	hostKeyPath := filepath.Join(t.TempDir(), "host_key")
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	srv, err := NewServer(Options{
+		Addr:         "127.0.0.1:0",
+		HostKeyPath:  hostKeyPath,
+		Grace:        0,
+		Store:        authStore,
+		BVStore:      objStore,
+		Mirror:       mgr,
+		Logger:       logger,
+		AgentVersion: "e2e-alias-test",
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	if err := srv.Listen(); err != nil {
+		t.Fatalf("srv.Listen: %v", err)
+	}
+	srvCtx, srvCancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		srvCancel()
+		_ = srv.Close()
+	})
+	go srv.Serve(srvCtx) //nolint:errcheck
+
+	// ---- known_hosts pinning --------------------------------------------------
+	hostPriv, err := loadPrivKeyForKnownHosts(hostKeyPath)
+	if err != nil {
+		t.Fatalf("load host key: %v", err)
+	}
+	sshAddr := srv.Addr().(*net.TCPAddr)
+	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(khPath, []byte(buildKnownHostsEntry(sshAddr, hostPriv.PublicKey())+"\n"), 0o600); err != nil {
+		t.Fatalf("write known_hosts: %v", err)
+	}
+
+	// ---- client keypair for alice + grant read on canonical "b" ---------------
+	_, clientPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	clientSigner, err := ssh.NewSignerFromKey(clientPriv)
+	if err != nil {
+		t.Fatalf("NewSignerFromKey: %v", err)
+	}
+	pemBlock, err := ssh.MarshalPrivateKey(clientPriv, "")
+	if err != nil {
+		t.Fatalf("MarshalPrivateKey: %v", err)
+	}
+	clientKeyPath := filepath.Join(t.TempDir(), "alice_key")
+	if err := os.WriteFile(clientKeyPath, pem.EncodeToMemory(pemBlock), 0o600); err != nil {
+		t.Fatalf("write client key: %v", err)
+	}
+
+	env := &sshE2EEnv{
+		store:          authStore,
+		sshAddr:        sshAddr.String(),
+		knownHostsPath: khPath,
+		clientKeyPath:  clientKeyPath,
+		clientPubKey:   clientSigner.PublicKey(),
+	}
+	seedAliceWithKey(t, env, env.clientPubKey)
+	// Grant read on the canonical (live) name "b".
+	if err := authStore.Grant(ctx, "alice", "acme", "b", "read"); err != nil {
+		t.Fatalf("Grant read on b: %v", err)
+	}
+	script := writeSSHCommandScript(t, env.clientKeyPath, env.knownHostsPath)
+
+	// ---- scenario A: ls-remote via alias "a" must succeed ---------------------
+	t.Run("AliasResolves_LsRemoteSucceeds", func(t *testing.T) {
+		out, err := gitWithSSH(t, script, "ls-remote", "ssh://git@"+sshAddr.String()+"/acme/a.git")
+		if err != nil {
+			t.Fatalf("ls-remote via alias failed: %v\n%s", err, out)
+		}
+		if !containsAnySSH(string(out), "refs/heads/main", "HEAD") {
+			t.Fatalf("ls-remote output missing expected refs:\n%s", out)
+		}
+	})
+
+	// ---- scenario B: truly-missing name still exits 128 with "not found" ------
+	t.Run("TrulyMissing_ReturnsNotFound", func(t *testing.T) {
+		out, err := gitWithSSH(t, script, "ls-remote", "ssh://git@"+sshAddr.String()+"/acme/nope.git")
+		expectSSHGitFails(t, out, err, "repository not found", "fatal")
+	})
+}
+
 // TestE2E_SSHUsageMetering drives a real clone (fetch) and push over SSH and
 // asserts that the wired usage sink receives one fetch and one push event
 // with the SSH transport and populated tenant/repo/actor.
