@@ -3,10 +3,14 @@ package buildtrigger
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/codebuild"
 	cbtypes "github.com/aws/aws-sdk-go-v2/service/codebuild/types"
+	smithy "github.com/aws/smithy-go"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 type fakeStartBuild struct{ in *codebuild.StartBuildInput }
@@ -100,5 +104,45 @@ func TestCodeBuildDeliverer_SourceVersionFallbackToNewOID(t *testing.T) {
 	}
 	if fake.in == nil || *fake.in.SourceVersion != "fallback-oid" {
 		t.Fatalf("expected SourceVersion=fallback-oid, got %+v", fake.in)
+	}
+}
+
+// fakeAPIError satisfies smithy.APIError for classifier tests.
+type fakeAPIError struct{ code string }
+
+func (e fakeAPIError) Error() string                 { return e.code }
+func (e fakeAPIError) ErrorCode() string             { return e.code }
+func (e fakeAPIError) ErrorMessage() string          { return e.code }
+func (e fakeAPIError) ErrorFault() smithy.ErrorFault { return smithy.FaultUnknown }
+
+func httpRespErr(status int) error {
+	return &awshttp.ResponseError{
+		ResponseError: &smithyhttp.ResponseError{
+			Response: &smithyhttp.Response{Response: &http.Response{StatusCode: status}},
+		},
+	}
+}
+
+func TestCodeBuildPermanent(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"resource-not-found", fakeAPIError{"ResourceNotFoundException"}, true},
+		{"invalid-input", fakeAPIError{"InvalidInputException"}, true},
+		{"access-denied", fakeAPIError{"AccessDeniedException"}, true},
+		{"throttling", fakeAPIError{"ThrottlingException"}, false},
+		{"request-limit", fakeAPIError{"RequestLimitExceeded"}, false},
+		{"http-404", httpRespErr(404), true},
+		{"http-503", httpRespErr(503), false},
+		{"http-429", httpRespErr(429), false},
+		{"plain", errors.New("boom"), false},
+		{"nil-ish-plain", errors.New(""), false},
+	}
+	for _, tc := range cases {
+		if got := codeBuildPermanent(tc.err); got != tc.want {
+			t.Errorf("%s: codeBuildPermanent=%v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

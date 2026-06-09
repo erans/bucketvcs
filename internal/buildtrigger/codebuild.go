@@ -2,13 +2,16 @@ package buildtrigger
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/codebuild"
 	cbtypes "github.com/aws/aws-sdk-go-v2/service/codebuild/types"
+	smithy "github.com/aws/smithy-go"
 )
 
 // startBuildAPI is the minimal CodeBuild surface this deliverer needs. It
@@ -131,4 +134,26 @@ func newCodeBuildClientFactory(connectors map[string]AWSConnector) func(Trigger)
 		}
 		return codebuild.NewFromConfig(cfg), nil
 	}
+}
+
+// codeBuildPermanent reports whether a StartBuild error is a permanent failure
+// (won't succeed on retry). Mirrors the s3compat classification house pattern:
+// match the API error code, fall back to HTTP status, default to retryable.
+func codeBuildPermanent(err error) bool {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.ErrorCode() {
+		case "ThrottlingException", "RequestLimitExceeded", "TooManyRequestsException":
+			return false // transient — retry
+		case "ResourceNotFoundException", "InvalidInputException", "AccessDeniedException":
+			return true
+		}
+	}
+	var httpErr *awshttp.ResponseError
+	if errors.As(err, &httpErr) {
+		if httpErr.Response != nil && httpErr.Response.Response != nil {
+			return httpStatusPermanent(httpErr.Response.Response.StatusCode)
+		}
+	}
+	return false // default: prefer retry over wrongly-permanent
 }
