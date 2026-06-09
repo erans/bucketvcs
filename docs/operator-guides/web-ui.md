@@ -590,6 +590,13 @@ contain the old prefix; rewrite them as part of the migration. If LFS quotas
 drifted during the cutover, run `bucketvcs quota reconcile --tenant=<tenant>`.
 See the `repo rename` CLI guide for the full out-of-band procedure.
 
+After a successful rename the **old name keeps working**: the web UI returns a
+302 redirect to the new name (sub-path and query preserved); HTTPS/SSH git and
+LFS transparently resolve to the renamed repo. The redirect is removed
+automatically if the old name is later registered as a new repo. Manage aliases
+with `bucketvcs repo alias list / remove`; see webhooks guide §14.6 for full
+details.
+
 ### 8.4 Form mechanics
 
 Every settings GET issues a CSRF token embedded in a hidden `csrf_token` form
