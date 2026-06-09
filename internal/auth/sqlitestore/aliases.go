@@ -6,7 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/bucketvcs/bucketvcs/internal/auth"
 )
+
+// Compile-time check: *Store implements auth.RepoAliasResolver.
+var _ auth.RepoAliasResolver = (*Store)(nil)
 
 // Alias is one repo rename alias: (Tenant, OldName) currently resolves to
 // the live repo Target.
