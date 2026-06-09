@@ -5,12 +5,14 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/auth/ratelimit"
+	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
 )
 
 // fakeStore is an in-memory minimal auth.Store for middleware tests.
@@ -437,4 +439,60 @@ func TestRunAuth_AnonymousReadsDontTripLimiter(t *testing.T) {
 			t.Fatalf("attempt %d: 429 on anon read; must never throttle credential-less requests", i)
 		}
 	}
+}
+
+// TestRunAuth_ResolvesAlias verifies that RunAuth transparently resolves a
+// rename alias to the live target repo. Uses a real *sqlitestore.Store because
+// the alias resolver is part of the store implementation (fakeStore does not
+// implement auth.RepoAliasResolver).
+func TestRunAuth_ResolvesAlias(t *testing.T) {
+	ctx := context.Background()
+
+	// Open a real store in a temp dir so that RepoAliasResolver is available.
+	dir := t.TempDir()
+	st, err := sqlitestore.Open(filepath.Join(dir, "auth.db"))
+	if err != nil {
+		t.Fatalf("sqlitestore.Open: %v", err)
+	}
+	defer st.Close()
+
+	// Register "a", then rename "a" → "b". This creates an alias a→b and
+	// makes "b" the live repo; "a" no longer exists as a live repo.
+	if err := st.RegisterRepo(ctx, "acme", "a"); err != nil {
+		t.Fatalf("RegisterRepo a: %v", err)
+	}
+	if err := st.RenameRepo(ctx, "acme", "a", "b"); err != nil {
+		t.Fatalf("RenameRepo a→b: %v", err)
+	}
+	// Make "b" public-read so an anonymous request is authorized.
+	if err := st.SetRepoPublic(ctx, "acme", "b", true); err != nil {
+		t.Fatalf("SetRepoPublic b: %v", err)
+	}
+
+	t.Run("old_name_resolves_not_404", func(t *testing.T) {
+		rr := &RoutedRequest{Tenant: "acme", Repo: "a", Op: OpUploadPack, RequiredAction: auth.ActionRead}
+		w := httptest.NewRecorder()
+		r := req(t, "POST", "/acme/a.git/git-upload-pack", "", "", "")
+		_, ok := RunAuth(w, r, st, rr, nil, false, nil)
+		if !ok {
+			t.Fatalf("expected allow via alias, got status %d body=%q", w.Code, w.Body.String())
+		}
+		// After successful resolution, rr.Repo must be the canonical name.
+		if rr.Repo != "b" {
+			t.Fatalf("rr.Repo = %q, want %q", rr.Repo, "b")
+		}
+	})
+
+	t.Run("truly_missing_name_still_404s", func(t *testing.T) {
+		rr := &RoutedRequest{Tenant: "acme", Repo: "nope", Op: OpUploadPack, RequiredAction: auth.ActionRead}
+		w := httptest.NewRecorder()
+		r := req(t, "POST", "/acme/nope.git/git-upload-pack", "", "", "")
+		_, ok := RunAuth(w, r, st, rr, nil, false, nil)
+		if ok {
+			t.Fatal("expected 404 for truly-unknown repo")
+		}
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", w.Code)
+		}
+	})
 }
