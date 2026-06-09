@@ -1,6 +1,6 @@
 # Build Triggers (operator guide)
 
-This guide covers the M30 build triggers feature. It explains the three trigger kinds, how the gateway enqueues and delivers builds on push, how minted tokens work, how to manage triggers with the `bucketvcs build` CLI, and how to read the metrics + audit events.
+This guide covers the build triggers feature. It explains the five trigger kinds, how the gateway enqueues and delivers builds on push, how minted tokens work, how to manage triggers with the `bucketvcs build` CLI, and how to read the metrics + audit events.
 
 The companion design document is `docs/superpowers/specs/2026-06-07-m30-build-triggers-design.md`.
 

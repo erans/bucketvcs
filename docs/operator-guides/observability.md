@@ -160,7 +160,9 @@ guide's observability section.
 |---|---|
 | Bundle & pack acceleration | [bundles §8](bundles.md#8-observability-reference) |
 | Git LFS | [lfs §6](lfs.md#6-observability-reference) |
+| Build triggers | [build-triggers §9](build-triggers.md#9-operations-and-observability) |
 | Webhooks | [webhooks §7](webhooks.md#7-observability) |
+| Repo rename / aliases | [webhooks §14.6](webhooks.md#146-repo-rename-redirects) |
 | Protected refs / paths / hooks | [hooks-policy §5](hooks-policy.md#5-observability) |
 | OIDC token exchange | [oidc §7](oidc.md#7-observability) |
 | Web UI (login, browse, admin) | [web-ui §9](web-ui.md#9-observability) |
