@@ -16,6 +16,12 @@ type webAdapter struct{ s *sqlitestore.Store }
 
 func newWebAdapter(s *sqlitestore.Store) *webAdapter { return &webAdapter{s: s} }
 
+// Compile-time guards: *webAdapter must satisfy the web DataStore AND the
+// optional auth.RepoAliasResolver capability (the web handler type-asserts to
+// the latter at runtime; this assertion makes a missing forwarder a build
+// failure rather than a silently-dead redirect).
+var _ auth.RepoAliasResolver = (*webAdapter)(nil)
+
 func (a *webAdapter) VerifyPassword(ctx context.Context, u, p string) (*auth.Actor, error) {
 	return a.s.VerifyPassword(ctx, u, p)
 }
@@ -76,6 +82,14 @@ func (a *webAdapter) DeleteRepoCascade(ctx context.Context, tenant, repo string)
 
 func (a *webAdapter) RegisterRepoIfNew(ctx context.Context, tenant, name string) (bool, error) {
 	return a.s.RegisterRepoIfNew(ctx, tenant, name)
+}
+
+// ResolveAlias forwards to the store so the web UI can 302-redirect renamed-away
+// repo names. Required for *webAdapter to satisfy auth.RepoAliasResolver (the
+// web handler type-asserts its DataStore to that interface); without this
+// forwarder the assertion fails and the redirect silently no-ops.
+func (a *webAdapter) ResolveAlias(ctx context.Context, tenant, name string) (string, bool, error) {
+	return a.s.ResolveAlias(ctx, tenant, name)
 }
 
 func (a *webAdapter) FindUserByEmail(ctx context.Context, email string) (*auth.Actor, error) {
