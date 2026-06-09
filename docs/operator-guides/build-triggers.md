@@ -619,7 +619,12 @@ from transient ones:
 - **Transient** (retries `1m → 30m → 2h → 12h`, then dead-letters with
   `reason=exhausted`): `5xx`, `408`, `429`, network errors, and token-mint blips.
 
-`codebuild` errors are currently always treated as transient (retry-only).
+`codebuild` `StartBuild` errors are classified the same way: `ResourceNotFoundException`
+(project missing), `InvalidInputException`, `AccessDeniedException`, and other
+non-throttling 4xx responses are permanent; throttling (`ThrottlingException`,
+`RequestLimitExceeded`) and 5xx remain transient. The AWS config/credential-load
+step stays retry-only (it can fail transiently, and real credential errors
+surface at `StartBuild` as a 403).
 The breakdown is exposed as the `reason` label on
 `build_trigger_deadletter_total` and as the `reason` attribute on the
 `build.trigger.deadletter` audit event.
