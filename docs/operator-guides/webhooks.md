@@ -201,9 +201,14 @@ Triggered when `bucketvcs repo register` registers a tenant/repo for the first t
 
 Carries only the envelope — no extra fields.
 
-### repo.deleted / repo.renamed (reserved)
+### repo.deleted / repo.renamed
 
-Listed in the taxonomy and `--events=all` will match them, but no CLI exists to emit them today. They are reserved for when `bucketvcs repo delete` / `bucketvcs repo rename` ship.
+Emitted by `bucketvcs repo delete` and `bucketvcs repo rename` respectively (and
+the web UI rename form). `repo.deleted` carries the envelope; `repo.renamed`
+additionally carries `old_name` and `new_name`. Both are enqueued **before** the
+auth transaction commits — treat them as at-least-once and reconcile against
+current state. See the [Repositories operator guide](repositories.md) for the
+full lifecycle.
 
 ---
 
@@ -656,103 +661,12 @@ Both signals land in the CLI process's slog stderr — the prune CLI runs out-of
 
 ---
 
-## 14. Repo rename: auth-only semantics
+## 14. Repo rename & deletion
 
-```
-bucketvcs repo rename <tenant>/<old-name> <new-name> \
-    --auth-db=/var/lib/bucketvcs/auth.db \
-    --store=<storage-url> \
-    [--actor=<string>]
-```
+Repo lifecycle — register, access control, **rename (with old-name redirects
+and aliases)**, and delete — is documented in the
+[Repositories operator guide](repositories.md). Rename and delete emit the
+`repo.renamed` / `repo.deleted` webhooks described in §3 above; the rename's
+at-least-once enqueue-before-commit ordering is covered in
+[repositories §3.3](repositories.md#33-webhook-ordering--at-least-once-before-commit).
 
-The rename CLI updates **auth.db only**. Storage keys at `tenants/<tenant>/repos/<old-name>/...` are NOT migrated by this command — the operator is responsible for moving them out of band (`aws s3 mv`, `gsutil mv`, etc.) AND for rewriting the absolute key references in the manifest body (`pack_key`, `idx_key`, index keys all contain the old prefix).
-
-### 14.1 What the CLI does atomically
-
-A single sqlite transaction over the `RenameRepo` helper updates every FK-bearing dependent table plus a small set of repo-scoped tables without FKs:
-
-- `repos(tenant, name)` — the primary row
-- `repo_permissions` — user grants (FK)
-- `ssh_keys` — per-repo deploy keys (FK; column names: `scope_tenant`, `scope_repo`)
-- `protected_refs` — ref protection rules (FK)
-- `protected_paths` — path protection rules (FK)
-- `hooks` — pre/post-receive hook rules (FK)
-- `webhook_endpoints` — endpoint registrations (FK)
-- `lfs_locks` — active locks (no FK to `repos`; updated for value consistency)
-- `webhook_deliveries` — historical webhook delivery rows are joined by `endpoint_id` FK; they follow the endpoint row automatically (no separate UPDATE)
-
-NOT touched by `RenameRepo`:
-
-- `quotas` — keyed by `tenant` only (`PRIMARY KEY tenant` from migration 0004), no `repo` column. Same-tenant rename leaves the tenant-wide byte counter unchanged.
-
-The transaction runs with `PRAGMA defer_foreign_keys = TRUE` so intermediate states (rows pointing at a row that hasn't been renamed yet) are tolerated until the COMMIT.
-
-### 14.2 Refusal conditions
-
-The CLI refuses (exit 1, no auth mutation, no webhook delivery) if any of these is true:
-
-- Source `<tenant>/<old-name>` does not exist in auth.db (`not_found` outcome metric).
-- Destination `<tenant>/<new-name>` already exists in auth.db (`collision_auth` outcome metric).
-- Destination storage prefix `tenants/<tenant>/repos/<new-name>/` is non-empty — the CLI does a `List(prefix, MaxKeys=1)` probe to detect leftover blobs (`collision_storage` outcome metric).
-- The `<new-name>` argument contains `/` or `\` — cross-tenant rename is not supported (`cross_tenant` outcome metric). A future "transfer" verb will support cross-tenant motion separately.
-
-Successful rename emits the `ok` outcome metric.
-
-### 14.3 Webhook ordering — at-least-once before commit
-
-The `repo.renamed` webhook is enqueued **BEFORE** the auth transaction runs. This matches the `repo.deleted` precedent: endpoints scoped to `(tenant, old-name)` are still present in `webhook_endpoints` when `Enqueue` resolves subscribers — the rename would move those rows to the new name in the same transaction, and a worker reading `webhook_endpoints` AFTER the rename would not match the old `(tenant, repo)` payload key.
-
-Consequence: if the auth transaction subsequently fails (sqlite I/O error, constraint violation that wasn't caught by pre-check), the webhook still delivers. Operators must treat `repo.renamed` as an **at-least-once** signal and reconcile by querying current state (`bucketvcs repo list` against the destination name) rather than assuming the rename committed.
-
-If enqueue itself fails, a `webhooks.enqueue_failed` audit fires and the rename proceeds fail-open — the auth transaction still runs. The rename is not blocked by webhook-subsystem health.
-
-### 14.4 Storage migration runbook
-
-After `bucketvcs repo rename <tenant>/<old> <new>` succeeds:
-
-1. Stop the gateway (or rely on the localfs single-writer lock during the auth-rename step on localfs; cloud backends require a controlled cutover).
-2. Move the storage tree: `aws s3 mv s3://bucket/tenants/<tenant>/repos/<old>/ s3://bucket/tenants/<tenant>/repos/<new>/ --recursive` (or backend-equivalent).
-3. Rewrite absolute path references in the manifest body — every `pack_key`, `idx_key`, and `indexes.*.key` field currently embeds the old prefix. The simplest operator-side approach is to download `tenants/<tenant>/repos/<new>/manifest/root.json`, sed-replace `tenants/<tenant>/repos/<old>/` to `tenants/<tenant>/repos/<new>/`, and PUT it back atomically.
-4. Restart the gateway. Push/clone against the new name should now succeed. The old name now redirects (see §14.6 *Repo rename redirects*).
-
-A future release may automate this storage step via a `bucketvcs storage rename` helper that respects the manifest indirection. For now it is an operator runbook.
-
-### 14.5 Limits
-
-- Same-tenant only. Cross-tenant motion requires a separate verb.
-- No undo. The rename is committed when the sqlite transaction commits; reverse direction must be done with a second `repo rename` call.
-- LFS quotas are per-tenant (`quotas(tenant)` from migration 0004 has no `repo` column), so a same-tenant rename leaves the tenant-wide byte counter unaffected. If you complete an out-of-band storage migration afterwards, run `bucketvcs quota reconcile --tenant=<tenant>` to correct for any tenant-level drift that accumulated during the cutover.
-- The `webhook_endpoints` row for the old name is migrated to the new name; subscribers continue to receive events under their existing endpoint ID. The endpoint secret is NOT rotated. If you want the new name to surface as a different endpoint, `webhook endpoint rotate-secret --id=<N>` after the rename.
-
-### 14.6 Repo rename redirects
-
-Renaming a repo (`bucketvcs repo rename <tenant>/<old> <new>`, or the web UI
-Settings → Rename form) now leaves the **old name working**:
-
-- **Web UI:** requests to `/{tenant}/{old}/…` return **302** to `/{tenant}/{new}/…`
-  (sub-path and query preserved).
-- **Git (HTTPS + SSH) and LFS:** clone/fetch/push against the old name resolve
-  transparently to the renamed repo. SSH additionally prints
-  `bucketvcs: repository renamed to <tenant>/<new>; update your remote`.
-
-The redirect is backed by a `repo_aliases` row created at rename time. It
-**stops** as soon as the old name is reused: registering a new repo with the old
-name removes the alias (a live repo always shadows an alias). Chained renames
-(`a→b→c`) keep the oldest alias resolving to the current name.
-
-Authorization is unchanged: an alias resolves the *name* but auth is still
-enforced on the canonical repo — a private target stays private.
-
-Manage aliases:
-
-```bash
-bucketvcs repo alias list   --auth-db=<path> <tenant>/<name>     # aliases resolving to this repo
-bucketvcs repo alias remove --auth-db=<path> <tenant>/<old-name> # drop a redirect early
-```
-
-Observe old-name traffic via the `repo_alias_resolved_total{transport}` metric
-(`transport` ∈ `ui|https|ssh`; LFS shares the `https` label).
-
-**Storage is still moved out of band** — aliasing resolves *names*, not bytes.
-The existing requirement to relocate `tenants/<tenant>/repos/<old>/…` to
-`…/<new>/…` after a rename is unchanged.

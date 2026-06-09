@@ -588,14 +588,14 @@ aws s3 mv s3://<bucket>/tenants/<tenant>/repos/<old>/ \
 also carries absolute key references (`pack_key`, `idx_key`, index keys) that
 contain the old prefix; rewrite them as part of the migration. If LFS quotas
 drifted during the cutover, run `bucketvcs quota reconcile --tenant=<tenant>`.
-See the `repo rename` CLI guide for the full out-of-band procedure.
+See the [Repositories operator guide §3](repositories.md#3-rename-auth-only-semantics) for the full out-of-band procedure.
 
 After a successful rename the **old name keeps working**: the web UI returns a
 302 redirect to the new name (sub-path and query preserved); HTTPS/SSH git and
 LFS transparently resolve to the renamed repo. The redirect is removed
 automatically if the old name is later registered as a new repo. Manage aliases
-with `bucketvcs repo alias list / remove`; see webhooks guide §14.6 for full
-details.
+with `bucketvcs repo alias list / remove`; see
+[repositories §4](repositories.md#4-rename-redirects--aliases) for full details.
 
 ### 8.4 Form mechanics
 
