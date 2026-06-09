@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 )
@@ -86,6 +87,8 @@ func (s *Store) RenameRepo(ctx context.Context, tenant, oldName, newName string)
 		{"webhook_endpoints", `UPDATE webhook_endpoints SET repo=? WHERE tenant=? AND repo=?`},
 		{"protected_paths", `UPDATE protected_paths SET repo=? WHERE tenant=? AND repo=?`},
 		{"hooks", `UPDATE hooks SET repo=? WHERE tenant=? AND repo=?`},
+		{"oidc_trust_rules", `UPDATE oidc_trust_rules SET repo=? WHERE tenant=? AND repo=?`},
+		{"build_triggers", `UPDATE build_triggers SET repo=? WHERE tenant=? AND repo=?`},
 	} {
 		if _, err := tx.ExecContext(ctx, st.q, newName, tenant, oldName); err != nil {
 			return fmt.Errorf("sqlitestore.RenameRepo: update %s: %w", st.table, err)
@@ -116,6 +119,28 @@ func (s *Store) RenameRepo(ctx context.Context, tenant, oldName, newName string)
 		// The source row vanished between the guard and this UPDATE
 		// (concurrent rename/delete). Roll back the child updates.
 		return auth.ErrNoSuchRepo
+	}
+
+	// Alias bookkeeping (A=oldName, B=newName), in order:
+	// 1. drop any alias whose old_name == B (B is now a live repo).
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM repo_aliases WHERE tenant=? AND old_name=?`, tenant, newName); err != nil {
+		return fmt.Errorf("sqlitestore.RenameRepo: drop shadow alias: %w", err)
+	}
+	// 2. flatten chains: aliases pointing at A now point at B.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE repo_aliases SET target_name=? WHERE tenant=? AND target_name=?`,
+		newName, tenant, oldName); err != nil {
+		return fmt.Errorf("sqlitestore.RenameRepo: flatten aliases: %w", err)
+	}
+	// 3. insert/refresh the A->B alias (ON CONFLICT covers rename-back).
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO repo_aliases (tenant, old_name, target_name, created_at)
+		 VALUES (?, ?, ?, ?)
+		 ON CONFLICT(tenant, old_name) DO UPDATE SET
+		   target_name=excluded.target_name, created_at=excluded.created_at`,
+		tenant, oldName, newName, time.Now().Unix()); err != nil {
+		return fmt.Errorf("sqlitestore.RenameRepo: insert alias: %w", err)
 	}
 
 	// defer_foreign_keys auto-resets to FALSE at the end of the transaction;

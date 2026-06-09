@@ -8,6 +8,94 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 )
 
+func TestRenameRepo_CreatesAliasAndFlattensChain(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	if err := s.RegisterRepo(ctx, "acme", "a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RenameRepo(ctx, "acme", "a", "b"); err != nil {
+		t.Fatalf("rename a->b: %v", err)
+	}
+	if tgt, ok, _ := s.ResolveAlias(ctx, "acme", "a"); !ok || tgt != "b" {
+		t.Fatalf("alias a should target b, got %q ok=%v", tgt, ok)
+	}
+	if err := s.RenameRepo(ctx, "acme", "b", "c"); err != nil {
+		t.Fatalf("rename b->c: %v", err)
+	}
+	if tgt, ok, _ := s.ResolveAlias(ctx, "acme", "a"); !ok || tgt != "c" {
+		t.Fatalf("alias a should flatten to c, got %q ok=%v", tgt, ok)
+	}
+	if tgt, ok, _ := s.ResolveAlias(ctx, "acme", "b"); !ok || tgt != "c" {
+		t.Fatalf("alias b should target c, got %q ok=%v", tgt, ok)
+	}
+}
+
+func TestRenameRepo_RenameBackDropsShadow(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	_ = s.RegisterRepo(ctx, "acme", "a")
+	_ = s.RenameRepo(ctx, "acme", "a", "b")
+	if err := s.RenameRepo(ctx, "acme", "b", "a"); err != nil {
+		t.Fatalf("rename b->a: %v", err)
+	}
+	if _, ok, _ := s.ResolveAlias(ctx, "acme", "a"); ok {
+		t.Fatal("alias 'a' must be dropped when 'a' becomes a live repo again")
+	}
+	if tgt, ok, _ := s.ResolveAlias(ctx, "acme", "b"); !ok || tgt != "a" {
+		t.Fatalf("alias b should target a, got %q ok=%v", tgt, ok)
+	}
+	assertNoAliasShadowsRepo(t, s, "acme")
+}
+
+func assertNoAliasShadowsRepo(t *testing.T, s *Store, tenant string) {
+	t.Helper()
+	rows, err := s.db.QueryContext(context.Background(),
+		`SELECT a.old_name FROM repo_aliases a JOIN repos r
+		   ON a.tenant=r.tenant AND a.old_name=r.name WHERE a.tenant=?`, tenant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var n string
+		_ = rows.Scan(&n)
+		t.Errorf("invariant violated: alias old_name=%q is also a live repo", n)
+	}
+}
+
+func TestRenameRepo_CarriesOidcAndBuildTriggers(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	_ = s.RegisterRepo(ctx, "acme", "a")
+	// oidc_trust_rules requires an oidc_issuers row for the FK on issuer_alias.
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO oidc_issuers (alias, issuer_url, created_at)
+		 VALUES ('test-issuer','https://issuer.example.test', strftime('%s','now'))`); err != nil {
+		t.Fatalf("seed oidc_issuers: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO oidc_trust_rules (id, issuer_alias, audience, tenant, repo, scopes, ttl_seconds, created_at)
+		 VALUES ('r1','test-issuer','aud','acme','a',0,900, strftime('%s','now'))`); err != nil {
+		t.Fatalf("seed oidc rule: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO build_triggers (id, tenant, repo, name, kind, config_json, ref_include, ref_exclude,
+		    token_mode, token_scopes, token_ttl_seconds, active, created_at)
+		 VALUES ('bt1','acme','a','n','generic','{}','[]','[]','none',0,900,1, strftime('%s','now'))`); err != nil {
+		t.Fatalf("seed build trigger: %v", err)
+	}
+	if err := s.RenameRepo(ctx, "acme", "a", "b"); err != nil {
+		t.Fatal(err)
+	}
+	var oidc, bt int
+	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM oidc_trust_rules WHERE tenant='acme' AND repo='b'`).Scan(&oidc)
+	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM build_triggers WHERE tenant='acme' AND repo='b'`).Scan(&bt)
+	if oidc != 1 || bt != 1 {
+		t.Fatalf("rename must carry oidc_trust_rules (%d) and build_triggers (%d) to new name", oidc, bt)
+	}
+}
+
 func TestRenameRepo_BasicRoundTrip(t *testing.T) {
 	s := mustOpen(t)
 	defer s.Close()
