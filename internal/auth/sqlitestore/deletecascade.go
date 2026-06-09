@@ -31,6 +31,8 @@ var cascadeStmts = []struct {
 	{"repo_permissions", `DELETE FROM repo_permissions WHERE tenant=? AND repo=?`},
 	{"ssh_keys (deploy-scope)", `DELETE FROM ssh_keys WHERE scope_tenant=? AND scope_repo=?`},
 	{"lfs_locks", `DELETE FROM lfs_locks WHERE tenant=? AND repo=?`},
+	{"repo_aliases (old_name)", `DELETE FROM repo_aliases WHERE tenant=? AND old_name=?`},
+	{"repo_aliases (target)", `DELETE FROM repo_aliases WHERE tenant=? AND target_name=?`},
 	{"repos", `DELETE FROM repos WHERE tenant=? AND name=?`},
 }
 

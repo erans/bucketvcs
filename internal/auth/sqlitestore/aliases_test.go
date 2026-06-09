@@ -38,3 +38,46 @@ func TestListAliases(t *testing.T) {
 		t.Fatalf("want 2 aliases targeting app, got %d: %+v", len(got), got)
 	}
 }
+
+func TestRegisterRepo_ShadowsAlias(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	_ = s.RegisterRepo(ctx, "acme", "a")
+	_ = s.RenameRepo(ctx, "acme", "a", "b") // alias a->b
+	if err := s.RegisterRepo(ctx, "acme", "a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := s.ResolveAlias(ctx, "acme", "a"); ok {
+		t.Fatal("registering a real repo named 'a' must drop the 'a' alias")
+	}
+}
+
+func TestRegisterRepoIfNew_ShadowsAlias(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	_ = s.RegisterRepo(ctx, "acme", "a")
+	_ = s.RenameRepo(ctx, "acme", "a", "b") // alias a->b
+	inserted, err := s.RegisterRepoIfNew(ctx, "acme", "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !inserted {
+		t.Fatal("expected inserted=true for re-created name")
+	}
+	if _, ok, _ := s.ResolveAlias(ctx, "acme", "a"); ok {
+		t.Fatal("RegisterRepoIfNew must also drop the alias")
+	}
+}
+
+func TestDeleteRepoCascade_CleansAliases(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	_ = s.RegisterRepo(ctx, "acme", "a")
+	_ = s.RenameRepo(ctx, "acme", "a", "b") // alias a->b, live repo b
+	if err := s.DeleteRepoCascade(ctx, "acme", "b"); err != nil {
+		t.Fatalf("delete b: %v", err)
+	}
+	if _, ok, _ := s.ResolveAlias(ctx, "acme", "a"); ok {
+		t.Fatal("deleting target repo must remove aliases pointing at it")
+	}
+}
