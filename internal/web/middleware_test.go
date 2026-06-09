@@ -21,6 +21,7 @@ type fakeStore struct {
 	linkIdentity      func(userID, issuer, subject, email string) error
 	perm              auth.Perm // returned by LookupRepoPerm
 	permErr           error     // when non-nil, LookupRepoPerm returns it
+	getVisibleRepo    func(ctx context.Context, actor *auth.Actor, tenant, name string) (*Repo, error)
 	getRepoFlags      func(ctx context.Context, tenant, repo string) (auth.RepoFlags, error)
 	setRepoPublic     func(ctx context.Context, tenant, repo string, public bool) error
 	renameRepo        func(ctx context.Context, tenant, oldName, newName string) error
@@ -54,6 +55,9 @@ type fakeStore struct {
 	setUserDisabled func(ctx context.Context, name string, disabled bool) error
 	deleteUser      func(ctx context.Context, name string) error
 	setEmail        func(ctx context.Context, userName, email string) error
+
+	// optional alias resolver (implements auth.RepoAliasResolver when non-nil)
+	resolveAlias func(ctx context.Context, tenant, name string) (string, bool, error)
 }
 
 func newFakeStore() *fakeStore { return &fakeStore{sessions: map[string]*auth.Session{}} }
@@ -100,6 +104,9 @@ func (f *fakeStore) ListAccessibleRepos(ctx context.Context, actor *auth.Actor) 
 	return f.repos(actor), nil
 }
 func (f *fakeStore) GetVisibleRepo(ctx context.Context, actor *auth.Actor, tenant, name string) (*Repo, error) {
+	if f.getVisibleRepo != nil {
+		return f.getVisibleRepo(ctx, actor, tenant, name)
+	}
 	return nil, nil
 }
 func (f *fakeStore) LookupRepoPerm(ctx context.Context, actor *auth.Actor, tenant, repo string) (auth.Perm, error) {
@@ -275,6 +282,16 @@ func (f *fakeStore) SetEmail(ctx context.Context, userName, email string) error 
 		return f.setEmail(ctx, userName, email)
 	}
 	return nil
+}
+
+// ResolveAlias implements auth.RepoAliasResolver when f.resolveAlias is set.
+// The type-assertion in aliasRedirect will succeed only when this method is
+// present, giving fine-grained control per test.
+func (f *fakeStore) ResolveAlias(ctx context.Context, tenant, name string) (string, bool, error) {
+	if f.resolveAlias != nil {
+		return f.resolveAlias(ctx, tenant, name)
+	}
+	return "", false, nil
 }
 
 func TestSessionMiddleware_LoadsAndAnon(t *testing.T) {

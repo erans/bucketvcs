@@ -69,6 +69,9 @@ func (s *server) handleRepoSettings(w http.ResponseWriter, r *http.Request, sr s
 			s.renderError(w, r, http.StatusInternalServerError, "internal error")
 			return
 		}
+		if s.aliasRedirect(w, r, sr.tenant, sr.repo) {
+			return
+		}
 		s.renderError(w, r, http.StatusNotFound, "not found")
 		return
 	}
