@@ -148,6 +148,10 @@ type fakeContent struct {
 	more     bool
 	commit   browsemodel.CommitDetail
 	activity map[string]browsemodel.CommitMeta
+
+	logPath       []browsemodel.CommitMeta
+	logPathMore   bool
+	logPathCalled bool
 }
 
 func (f *fakeContent) ListRefs(ctx context.Context, t, r string) (browsemodel.Refs, error) {
@@ -187,7 +191,11 @@ func (f *fakeContent) Compare(ctx context.Context, t, r, baseOID, headOID string
 	return browsemodel.Comparison{}, nil
 }
 func (f *fakeContent) LogPath(ctx context.Context, t, r, oid, p string, off, lim int) ([]browsemodel.CommitMeta, bool, error) {
-	return nil, false, nil
+	f.logPathCalled = true
+	if f.warm {
+		return nil, false, browsemodel.ErrWarming
+	}
+	return f.logPath, f.logPathMore, nil
 }
 
 func newBrowseServer(content ContentStore, visible map[string]bool) http.Handler {
@@ -373,6 +381,64 @@ func TestCommits_ListAndPaging(t *testing.T) {
 	}
 }
 
+func TestCommits_PerFileHistory(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+		logPath: []browsemodel.CommitMeta{
+			{OID: "c2", ShortOID: "c2", Summary: "edit a", AuthorName: "Ann"},
+			{OID: "c1", ShortOID: "c1", Summary: "add a", AuthorName: "Ann"},
+		},
+		logPathMore: true,
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/commits/main/src/a.go", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if rec.Code != 200 {
+		t.Fatalf("status %d body=%s", rec.Code, body)
+	}
+	if !content.logPathCalled {
+		t.Fatal("LogPath was not called for a path-scoped commits URL")
+	}
+	if !strings.Contains(body, "history: src/a.go") {
+		t.Fatalf("missing history heading: %s", body)
+	}
+	if !strings.Contains(body, "/acme/demo/commits/main/src/a.go?page=1") {
+		t.Fatalf("pager link missing path: %s", body)
+	}
+}
+
+func TestBlob_HasHistoryLink(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+		blob: browsemodel.Blob{Path: "src/a.go", Size: 12, Bytes: []byte("package main")},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/blob/main/src/a.go", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, "/acme/demo/commits/main/src/a.go") {
+		t.Fatalf("blob missing history link: %s", body)
+	}
+}
+
+func TestTree_HasHistoryLink(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+		tree: []browsemodel.TreeEntry{{Name: "a.go", Path: "a.go", Type: "blob", OID: "y"}},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/tree/main", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, "/acme/demo/commits/main") {
+		t.Fatalf("tree missing history link: %s", body)
+	}
+}
+
 func TestCommit_RendersDiff(t *testing.T) {
 	content := &fakeContent{
 		commit: browsemodel.CommitDetail{
@@ -494,19 +560,6 @@ func TestChromaCSSRoute(t *testing.T) {
 	}
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/css") {
 		t.Fatalf("content-type = %q", ct)
-	}
-}
-
-func TestCommits_PathFilteredIs404(t *testing.T) {
-	content := &fakeContent{
-		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
-	}
-	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
-	req := httptest.NewRequest("GET", "/acme/demo/commits/main/sub", nil)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("path-filtered commits should 404 (deferred feature), got %d", rec.Code)
 	}
 }
 

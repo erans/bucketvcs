@@ -333,15 +333,15 @@ func (s *server) handleCommits(w http.ResponseWriter, r *http.Request, br browse
 		s.browseError(w, r, err)
 		return
 	}
-	if res.Path != "" {
-		// Path-filtered log is a deferred feature; generated links never carry
-		// a path here. 404 rather than silently returning unfiltered history.
-		s.renderError(w, r, http.StatusNotFound, "not found")
-		return
-	}
 	const pageSize = 50
 	page := queryPage(r)
-	commits, more, err := s.content.Log(r.Context(), br.tenant, br.repo, res.OID, page*pageSize, pageSize)
+	var commits []browsemodel.CommitMeta
+	var more bool
+	if res.Path != "" {
+		commits, more, err = s.content.LogPath(r.Context(), br.tenant, br.repo, res.OID, res.Path, page*pageSize, pageSize)
+	} else {
+		commits, more, err = s.content.Log(r.Context(), br.tenant, br.repo, res.OID, page*pageSize, pageSize)
+	}
 	if err != nil {
 		s.browseError(w, r, err)
 		return
@@ -351,6 +351,7 @@ func (s *server) handleCommits(w http.ResponseWriter, r *http.Request, br browse
 		Commits:      commits,
 		Page:         page,
 		HasMore:      more,
+		Path:         res.Path,
 	})
 }
 

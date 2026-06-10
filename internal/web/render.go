@@ -90,6 +90,7 @@ type commitsData struct {
 	Commits []browsemodel.CommitMeta
 	Page    int
 	HasMore bool
+	Path    string // path-scoped history when non-empty ("" => whole-repo log)
 }
 
 type commitData struct {
