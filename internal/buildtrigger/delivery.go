@@ -61,6 +61,48 @@ func (s *Service) ListDeliveries(ctx context.Context, triggerID, status string, 
 	return out, rows.Err()
 }
 
+// ListDeliveriesPage returns deliveries for one trigger, newest first, using
+// keyset pagination. When before is non-zero, only rows strictly older than it
+// (created_at < before) are returned. status narrows when non-empty; limit caps
+// the row count (defaults to 20 when <= 0). Stable under concurrent inserts.
+// Pagination uses created_at only (no id tie-break): rows sharing the exact
+// boundary second may be skipped across page boundaries — acceptable at the
+// UI's 20/page over second-granularity timestamps.
+func (s *Service) ListDeliveriesPage(ctx context.Context, triggerID, status string, before time.Time, limit int) ([]Delivery, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	q := `SELECT id, trigger_id, status, attempts, next_attempt_at,
+	             last_attempt_at, last_status_code, last_error, created_at, delivered_at
+	      FROM build_trigger_deliveries
+	      WHERE trigger_id=?`
+	args := []any{triggerID}
+	if status != "" {
+		q += " AND status=?"
+		args = append(args, status)
+	}
+	if !before.IsZero() {
+		q += " AND created_at < ?"
+		args = append(args, before.Unix())
+	}
+	q += " ORDER BY created_at DESC, id DESC LIMIT ?"
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("buildtrigger: list deliveries page: %w", err)
+	}
+	defer rows.Close()
+	var out []Delivery
+	for rows.Next() {
+		d, err := scanDelivery(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
 // GetDelivery returns one delivery by id. Returns ErrNotFound if absent.
 func (s *Service) GetDelivery(ctx context.Context, id string) (Delivery, error) {
 	row := s.db.QueryRowContext(ctx,
