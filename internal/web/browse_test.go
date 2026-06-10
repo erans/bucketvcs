@@ -409,6 +409,24 @@ func TestCommits_PerFileHistory(t *testing.T) {
 	}
 }
 
+func TestCommits_PerFileHistory_EmptyState(t *testing.T) {
+	content := &fakeContent{
+		refs:    browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+		logPath: nil, // no history for this path (e.g. a stale/past-end page or missing file)
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/commits/main/src/missing.go", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if rec.Code != 200 {
+		t.Fatalf("status %d body=%s", rec.Code, body)
+	}
+	if !strings.Contains(body, "no history for this path.") {
+		t.Fatalf("missing path-scoped empty-state message: %s", body)
+	}
+}
+
 func TestBlob_HasHistoryLink(t *testing.T) {
 	content := &fakeContent{
 		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
@@ -436,6 +454,24 @@ func TestTree_HasHistoryLink(t *testing.T) {
 	body := rec.Body.String()
 	if !strings.Contains(body, "/acme/demo/commits/main") {
 		t.Fatalf("tree missing history link: %s", body)
+	}
+}
+
+func TestTree_HasHistoryLink_SubPath(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+		tree: []browsemodel.TreeEntry{{Name: "a.go", Path: "src/a.go", Type: "blob", OID: "y"}},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/tree/main/src", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if rec.Code != 200 {
+		t.Fatalf("status %d body=%s", rec.Code, body)
+	}
+	if !strings.Contains(body, "/commits/main/src") {
+		t.Fatalf("subdir tree missing path-suffixed history link: %s", body)
 	}
 }
 

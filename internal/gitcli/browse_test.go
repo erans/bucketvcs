@@ -428,6 +428,62 @@ func TestLogRawPath_InvalidPath(t *testing.T) {
 	}
 }
 
+// TestLogRawPath_LiteralPathspec guards the --literal-pathspecs flag: a file
+// literally named "a?.txt" must be matched as a literal path, not as a glob
+// that would also catch "ab.txt". validRevPath permits glob metachars in
+// filenames, so without --literal-pathspecs git would treat "a?.txt" as a
+// pathspec pattern.
+func TestLogRawPath_LiteralPathspec(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	skipIfNoGit(t)
+	work := t.TempDir()
+
+	// Creating a file whose name contains '?' fails on filesystems that reject
+	// the character (e.g. some network mounts); skip the assertion there rather
+	// than fail. The --literal-pathspecs flag is exercised by the live git run.
+	glob := filepath.Join(work, "a?.txt")
+	if err := os.WriteFile(glob, []byte("g\n"), 0o644); err != nil {
+		t.Skipf("cannot create file named a?.txt on this filesystem: %v", err)
+	}
+
+	mustRun := func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = work
+		c.Env = append(scrubGitRepoEnv(os.Environ()),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+		)
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	mustRun("init", "-q", "-b", "main")
+	mustRun("config", "commit.gpgsign", "false")
+
+	// c1: add literal "a?.txt" only.
+	mustRun("add", "--", "a?.txt")
+	mustRun("commit", "-q", "-m", "c1 add a?.txt")
+
+	// c2: add "ab.txt" (would be caught by the glob a?.txt without --literal-pathspecs).
+	if err := os.WriteFile(filepath.Join(work, "ab.txt"), []byte("b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun("add", "ab.txt")
+	mustRun("commit", "-q", "-m", "c2 add ab.txt")
+
+	raw, err := LogRawPath(context.Background(), work, "HEAD", "a?.txt", false, 0, 10)
+	if err != nil {
+		t.Fatalf("LogRawPath a?.txt: %v", err)
+	}
+	if got := strings.Count(string(raw), "\x1e"); got != 1 {
+		t.Fatalf("want exactly 1 record for literal a?.txt (not the ab.txt glob match), got %d: %q", got, raw)
+	}
+}
+
 func TestPathKind(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires git binary")

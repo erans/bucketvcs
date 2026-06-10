@@ -1238,7 +1238,7 @@ func LogRawPath(ctx context.Context, dir, rev, path string, follow bool, skip, m
 		return nil, fmt.Errorf("gitcli: LogRawPath: bad skip/max %d/%d", skip, max)
 	}
 	const format = "--pretty=format:%H%x1f%an%x1f%ae%x1f%at%x1f%s%x1e"
-	args := []string{"-c", "core.quotePath=false", "--no-replace-objects", "log", rev,
+	args := []string{"-c", "core.quotePath=false", "--no-replace-objects", "--literal-pathspecs", "log", rev,
 		fmt.Sprintf("--skip=%d", skip), fmt.Sprintf("--max-count=%d", max), "--no-color", format}
 	if follow {
 		args = append(args, "--follow")

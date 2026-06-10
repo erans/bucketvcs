@@ -14,13 +14,13 @@
     </tr>
     {{end}}
   </table>
+  {{else}}
+  <p class="empty">{{if .Path}}no history for this path.{{else}}no commits.{{end}}</p>
+  {{end}}
   <div class="pager">
     {{if gt .Page 0}}<a href="/{{.Tenant}}/{{.Repo}}/commits/{{urlpath .RefOrOID}}{{if .Path}}/{{urlpath .Path}}{{end}}?page={{minus1 .Page}}">prev</a>{{end}}
     {{if .HasMore}}<a href="/{{.Tenant}}/{{.Repo}}/commits/{{urlpath .RefOrOID}}{{if .Path}}/{{urlpath .Path}}{{end}}?page={{plus1 .Page}}">next</a>{{end}}
   </div>
-  {{else}}
-  <p class="empty">{{if .Path}}no history for this path.{{else}}no commits.{{end}}</p>
-  {{end}}
 </div>
 {{end}}
 {{template "base" .}}
