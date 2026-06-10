@@ -1260,6 +1260,22 @@ func DiffTreePatch(ctx context.Context, dir, oid, parent string) ([]byte, error)
 		"--root", "--no-color", oid)
 }
 
+// DiffRefsPatch returns the two-dot unified patch from base to head
+// (git diff-tree -p -M base head): additions in head are '+', removals '-'.
+// Both must be valid refs/OIDs. Filenames are emitted verbatim (quotePath off).
+// Output is capped at maxDiffPatchBytes; overflow returns the captured prefix
+// and ErrOutputCapped (callers parse the prefix and mark the result truncated).
+func DiffRefsPatch(ctx context.Context, dir, base, head string) ([]byte, error) {
+	if !validRefOrOID(base) {
+		return nil, fmt.Errorf("gitcli: DiffRefsPatch: invalid base %q", base)
+	}
+	if !validRefOrOID(head) {
+		return nil, fmt.Errorf("gitcli: DiffRefsPatch: invalid head %q", head)
+	}
+	return runCapped(ctx, dir, maxDiffPatchBytes, "-c", "core.quotePath=false", "--no-replace-objects",
+		"diff-tree", "-p", "-M", "--no-color", base, head)
+}
+
 // maxLogNameStatusBytes caps the bounded attribution walk used by the web
 // tree view's last-commit column.
 const maxLogNameStatusBytes = 8 << 20 // 8 MiB

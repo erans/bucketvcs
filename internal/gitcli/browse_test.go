@@ -257,3 +257,84 @@ func TestLogNameStatus_RejectsBadArgs(t *testing.T) {
 		t.Fatal("flag-like scope path accepted")
 	}
 }
+
+// TestDiffRefsPatch_TwoDot creates two commits (c1: a.txt="one\n", c2:
+// a.txt="two\n") and verifies that DiffRefsPatch returns a unified patch
+// containing a/a.txt, a removal of "one", and an addition of "two".
+func TestDiffRefsPatch_TwoDot(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	tmp := t.TempDir()
+	bare := filepath.Join(tmp, "r.git")
+	work := filepath.Join(tmp, "work")
+
+	mustRun := func(dir string, args ...string) {
+		c := exec.Command("git", args...)
+		c.Dir = dir
+		c.Env = append(scrubGitRepoEnv(os.Environ()),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+		)
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	capture := func(dir string, args ...string) string {
+		c := exec.Command("git", args...)
+		c.Dir = dir
+		c.Env = scrubGitRepoEnv(os.Environ())
+		out, err := c.Output()
+		if err != nil {
+			t.Fatalf("git %s: %v", strings.Join(args, " "), err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+
+	mustRun("", "init", "-q", "-b", "main", work)
+	mustRun(work, "config", "commit.gpgsign", "false")
+
+	// c1: add a.txt="one\n"
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(work, "add", ".")
+	mustRun(work, "commit", "-q", "-m", "c1")
+	c1 := capture(work, "rev-parse", "HEAD")
+
+	// c2: modify a.txt="two\n"
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(work, "add", ".")
+	mustRun(work, "commit", "-q", "-m", "c2")
+	c2 := capture(work, "rev-parse", "HEAD")
+
+	// Clone to bare.
+	mustRun("", "clone", "-q", "--bare", work, bare)
+
+	ctx := context.Background()
+	patch, err := DiffRefsPatch(ctx, bare, c1, c2)
+	if err != nil {
+		t.Fatalf("DiffRefsPatch: %v", err)
+	}
+	s := string(patch)
+	if !strings.Contains(s, "a/a.txt") {
+		t.Errorf("patch missing a/a.txt: %q", s)
+	}
+	if !strings.Contains(s, "-one") {
+		t.Errorf("patch missing -one: %q", s)
+	}
+	if !strings.Contains(s, "+two") {
+		t.Errorf("patch missing +two: %q", s)
+	}
+}
+
+// TestDiffRefsPatch_InvalidRef asserts that a leading-dash base is rejected
+// before git is invoked.
+func TestDiffRefsPatch_InvalidRef(t *testing.T) {
+	tmp := t.TempDir()
+	if _, err := DiffRefsPatch(context.Background(), tmp, "-x", "main"); err == nil {
+		t.Fatal("expected error for leading-dash base ref")
+	}
+}
