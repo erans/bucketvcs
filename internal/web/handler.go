@@ -47,6 +47,8 @@ type Deps struct {
 	QuotaReconcile QuotaReconciler
 	RepoInit       RepoInitializer
 	RenameCheck    RepoRenameCheck
+	Triggers       TriggerAdmin   // nil => triggers tab renders "not enabled"
+	Connectors     ConnectorNames // configured connector names (no secrets)
 }
 
 type server struct {
@@ -70,6 +72,8 @@ type server struct {
 	quotaReconcile QuotaReconciler
 	repoInit       RepoInitializer
 	renameCheck    RepoRenameCheck
+	triggers       TriggerAdmin
+	connectors     ConnectorNames
 }
 
 // NewHandler builds the web UI http.Handler. Panics only on an unrecoverable
@@ -101,6 +105,8 @@ func NewHandler(d Deps) http.Handler {
 		quotaReconcile: d.QuotaReconcile,
 		repoInit:       d.RepoInit,
 		renameCheck:    d.RenameCheck,
+		triggers:       d.Triggers,
+		connectors:     d.Connectors,
 	}
 	if d.OIDC != nil {
 		if len(d.OIDC.HMACKey) < 16 {

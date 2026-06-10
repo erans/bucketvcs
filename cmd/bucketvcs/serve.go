@@ -918,6 +918,11 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 				Webhooks:   webhookSvc,
 				Policy:     policySvc,
 				Hooks:      hooksStore,
+				Triggers:   buildSvc, // nil when build triggers disabled
+				Connectors: func() web.ConnectorNames {
+					aws, azure := buildtrigger.SortedConnectorNames(buildConnectors, buildAzureConnectors)
+					return web.ConnectorNames{AWS: aws, Azure: azure}
+				}(),
 				RepoInit: func(ctx context.Context, tenant, repoName, actor string) error {
 					// Mirrors `bucketvcs init` defaults (cmd/bucketvcs/init.go).
 					_, err := repo.Create(ctx, store, tenant, repoName, repo.CreateOptions{

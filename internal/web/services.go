@@ -5,6 +5,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/bucketvcs/bucketvcs/internal/buildtrigger"
 	"github.com/bucketvcs/bucketvcs/internal/hooks"
 	"github.com/bucketvcs/bucketvcs/internal/lfs/quota"
 	"github.com/bucketvcs/bucketvcs/internal/policy"
@@ -23,6 +24,29 @@ type WebhookAdmin interface {
 	ShowDelivery(ctx context.Context, id string) (webhooks.Delivery, error)
 	ReplayDelivery(ctx context.Context, id string) error
 	Enqueue(ctx context.Context, event webhooks.Event, tenant, repo, actor string, payload any) error
+}
+
+// TriggerAdmin is the slice of *buildtrigger.Service the settings UI needs.
+type TriggerAdmin interface {
+	Create(ctx context.Context, in buildtrigger.TriggerInput) (buildtrigger.Trigger, error)
+	List(ctx context.Context, tenant, repo string) ([]buildtrigger.Trigger, error)
+	Get(ctx context.Context, id string) (buildtrigger.Trigger, error)
+	Edit(ctx context.Context, id string, in buildtrigger.EditInput) (buildtrigger.Trigger, error)
+	RotateSecret(ctx context.Context, id string) (string, error)
+	Enable(ctx context.Context, id string) error
+	Disable(ctx context.Context, id string) error
+	Remove(ctx context.Context, id string) error
+	ListDeliveriesPage(ctx context.Context, triggerID, status string, before time.Time, limit int) ([]buildtrigger.Delivery, error)
+	RecentDeliveryIDs(ctx context.Context, triggerID string, n int) ([]string, error)
+	GetDelivery(ctx context.Context, id string) (buildtrigger.Delivery, error)
+	ReplayDelivery(ctx context.Context, id string) error
+}
+
+// ConnectorNames are the configured connector names (no secrets) surfaced in the
+// trigger create/edit form's connector dropdowns. Empty when no --build-config.
+type ConnectorNames struct {
+	AWS   []string
+	Azure []string
 }
 
 // PolicyAdmin is the slice of *policy.Service the settings UI needs (refs + paths).
