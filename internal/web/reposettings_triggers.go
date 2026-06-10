@@ -330,21 +330,175 @@ func (s *server) triggersAdd(w http.ResponseWriter, r *http.Request, sr settings
 	}
 	s.redirectFlash(w, r, sr.triggersBase(), "trigger created")
 }
+
+// triggersEdit processes POST .../settings/triggers/edit. Kind and Config are
+// immutable on edit (change kind via delete+recreate).
 func (s *server) triggersEdit(w http.ResponseWriter, r *http.Request, sr settingsRoute) {
-	s.renderError(w, r, http.StatusNotFound, "not found")
+	if s.triggers == nil {
+		s.renderError(w, r, http.StatusNotFound, "not found")
+		return
+	}
+	if !s.postGuard(w, r) {
+		return
+	}
+	tr, ok := s.ownTriggerOr404(w, r, sr, r.PostFormValue("id"))
+	if !ok {
+		return
+	}
+	in := buildtrigger.EditInput{
+		Name:       r.PostFormValue("name"),
+		RefInclude: splitCSVField(r.PostFormValue("ref_include")),
+		RefExclude: splitCSVField(r.PostFormValue("ref_exclude")),
+		TokenMode:  buildtrigger.TokenMode(r.PostFormValue("token_mode")),
+		Active:     r.PostFormValue("active") == "on",
+	}
+	if raw := strings.TrimSpace(r.PostFormValue("token_scopes")); raw != "" {
+		sc, err := auth.ParseScopes(raw)
+		if err != nil {
+			EmitAdminActionMetric(r.Context(), s.logger, "trigger", "edit", "invalid")
+			s.redirectFlash(w, r, sr.triggersBase(), "invalid token scopes: "+err.Error())
+			return
+		}
+		in.TokenScopes = sc
+	}
+	if raw := strings.TrimSpace(r.PostFormValue("token_ttl")); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			EmitAdminActionMetric(r.Context(), s.logger, "trigger", "edit", "invalid")
+			s.redirectFlash(w, r, sr.triggersBase(), "invalid token ttl: "+err.Error())
+			return
+		}
+		in.TokenTTL = d
+	}
+	if _, err := s.triggers.Edit(r.Context(), tr.ID, in); err != nil {
+		if errors.Is(err, buildtrigger.ErrConflict) {
+			EmitAdminActionMetric(r.Context(), s.logger, "trigger", "edit", "invalid")
+			s.redirectFlash(w, r, sr.triggersBase(), "a trigger with that name already exists")
+			return
+		}
+		if errors.Is(err, buildtrigger.ErrInvalidInput) {
+			EmitAdminActionMetric(r.Context(), s.logger, "trigger", "edit", "invalid")
+			s.redirectFlash(w, r, sr.triggersBase(), "invalid trigger: "+strings.TrimPrefix(err.Error(), "buildtrigger: "))
+			return
+		}
+		s.logger.Error("triggers: edit", "tenant", sr.tenant, "repo", sr.repo, "trigger_id", tr.ID, "err", err)
+		EmitAdminActionMetric(r.Context(), s.logger, "trigger", "edit", "error")
+		s.renderError(w, r, http.StatusInternalServerError, "internal error")
+		return
+	}
+	s.emitAdmin(r.Context(), "buildtrigger.edited",
+		slog.String("tenant", sr.tenant), slog.String("repo", sr.repo),
+		slog.String("trigger_id", tr.ID))
+	EmitAdminActionMetric(r.Context(), s.logger, "trigger", "edit", "ok")
+	s.redirectFlash(w, r, sr.triggersBase(), "trigger updated")
 }
+
+// triggersSetActive processes POST .../settings/triggers/{enable,disable}.
 func (s *server) triggersSetActive(w http.ResponseWriter, r *http.Request, sr settingsRoute, active bool) {
-	s.renderError(w, r, http.StatusNotFound, "not found")
+	if s.triggers == nil {
+		s.renderError(w, r, http.StatusNotFound, "not found")
+		return
+	}
+	if !s.postGuard(w, r) {
+		return
+	}
+	tr, ok := s.ownTriggerOr404(w, r, sr, r.PostFormValue("id"))
+	if !ok {
+		return
+	}
+	action := "disable"
+	verb := s.triggers.Disable
+	if active {
+		action = "enable"
+		verb = s.triggers.Enable
+	}
+	if err := verb(r.Context(), tr.ID); err != nil {
+		if errors.Is(err, buildtrigger.ErrNotFound) {
+			s.renderError(w, r, http.StatusNotFound, "not found")
+			return
+		}
+		s.logger.Error("triggers: "+action, "tenant", sr.tenant, "repo", sr.repo, "trigger_id", tr.ID, "err", err)
+		EmitAdminActionMetric(r.Context(), s.logger, "trigger", action, "error")
+		s.renderError(w, r, http.StatusInternalServerError, "internal error")
+		return
+	}
+	s.emitAdmin(r.Context(), "buildtrigger."+action+"d",
+		slog.String("tenant", sr.tenant), slog.String("repo", sr.repo),
+		slog.String("trigger_id", tr.ID))
+	EmitAdminActionMetric(r.Context(), s.logger, "trigger", action, "ok")
+	s.redirectFlash(w, r, sr.triggersBase(), "trigger "+action+"d")
 }
+
+// triggersRemove processes POST .../settings/triggers/remove.
 func (s *server) triggersRemove(w http.ResponseWriter, r *http.Request, sr settingsRoute) {
-	s.renderError(w, r, http.StatusNotFound, "not found")
+	if s.triggers == nil {
+		s.renderError(w, r, http.StatusNotFound, "not found")
+		return
+	}
+	if !s.postGuard(w, r) {
+		return
+	}
+	tr, ok := s.ownTriggerOr404(w, r, sr, r.PostFormValue("id"))
+	if !ok {
+		return
+	}
+	if err := s.triggers.Remove(r.Context(), tr.ID); err != nil {
+		if errors.Is(err, buildtrigger.ErrNotFound) {
+			s.renderError(w, r, http.StatusNotFound, "not found")
+			return
+		}
+		s.logger.Error("triggers: remove", "tenant", sr.tenant, "repo", sr.repo, "trigger_id", tr.ID, "err", err)
+		EmitAdminActionMetric(r.Context(), s.logger, "trigger", "remove", "error")
+		s.renderError(w, r, http.StatusInternalServerError, "internal error")
+		return
+	}
+	s.emitAdmin(r.Context(), "buildtrigger.removed",
+		slog.String("tenant", sr.tenant), slog.String("repo", sr.repo),
+		slog.String("trigger_id", tr.ID))
+	EmitAdminActionMetric(r.Context(), s.logger, "trigger", "remove", "ok")
+	s.redirectFlash(w, r, sr.triggersBase(), "trigger removed")
 }
+
+// triggersRotateSecret processes POST .../settings/triggers/rotate-secret.
 func (s *server) triggersRotateSecret(w http.ResponseWriter, r *http.Request, sr settingsRoute) {
-	s.renderError(w, r, http.StatusNotFound, "not found")
+	if s.triggers == nil {
+		s.renderError(w, r, http.StatusNotFound, "not found")
+		return
+	}
+	if !s.postGuard(w, r) {
+		return
+	}
+	tr, ok := s.ownTriggerOr404(w, r, sr, r.PostFormValue("id"))
+	if !ok {
+		return
+	}
+	secret, err := s.triggers.RotateSecret(r.Context(), tr.ID)
+	if err != nil {
+		if errors.Is(err, buildtrigger.ErrInvalidInput) {
+			EmitAdminActionMetric(r.Context(), s.logger, "trigger", "rotate_secret", "invalid")
+			s.redirectFlash(w, r, sr.triggersBase(), "this trigger kind has no rotatable secret")
+			return
+		}
+		if errors.Is(err, buildtrigger.ErrNotFound) {
+			s.renderError(w, r, http.StatusNotFound, "not found")
+			return
+		}
+		s.logger.Error("triggers: rotate secret", "tenant", sr.tenant, "repo", sr.repo, "trigger_id", tr.ID, "err", err)
+		EmitAdminActionMetric(r.Context(), s.logger, "trigger", "rotate_secret", "error")
+		s.renderError(w, r, http.StatusInternalServerError, "internal error")
+		return
+	}
+	s.emitAdmin(r.Context(), "buildtrigger.secret_rotated",
+		slog.String("tenant", sr.tenant), slog.String("repo", sr.repo),
+		slog.String("trigger_id", tr.ID))
+	EmitAdminActionMetric(r.Context(), s.logger, "trigger", "rotate_secret", "ok")
+	s.renderSecretOnce(w, r, "build trigger secret rotated", secret, sr.triggersBase())
 }
+
 func (s *server) triggersDeliveries(w http.ResponseWriter, r *http.Request, sr settingsRoute) {
 	s.renderError(w, r, http.StatusNotFound, "not found")
 }
+
 func (s *server) triggersReplay(w http.ResponseWriter, r *http.Request, sr settingsRoute) {
 	s.renderError(w, r, http.StatusNotFound, "not found")
 }

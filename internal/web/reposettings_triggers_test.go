@@ -319,6 +319,150 @@ func TestTriggersPage_ListsTriggers(t *testing.T) {
 	}
 }
 
+// TestTriggersEdit_KindImmutable covers POST .../triggers/edit: the form posts
+// a new name and immutable kind, the handler calls Edit with the parsed input
+// and redirects with a flash.
+func TestTriggersEdit_KindImmutable(t *testing.T) {
+	store := triggersStore()
+	var gotInput buildtrigger.EditInput
+	tr := &fakeTriggers{
+		getFn: func(ctx context.Context, id string) (buildtrigger.Trigger, error) {
+			return buildtrigger.Trigger{ID: id, Tenant: "acme", Repo: "demo", Name: "ci", Kind: buildtrigger.KindGeneric}, nil
+		},
+		editFn: func(ctx context.Context, id string, in buildtrigger.EditInput) (buildtrigger.Trigger, error) {
+			gotInput = in
+			return buildtrigger.Trigger{ID: id, Tenant: "acme", Repo: "demo", Name: in.Name, Kind: buildtrigger.KindGeneric}, nil
+		},
+	}
+	h := newTestHandlerWith(store, func(d *Deps) { d.Triggers = tr })
+	req := csrfPost(t, "/acme/demo/settings/triggers/edit", url.Values{
+		"id":         {"bvbt_1"},
+		"name":       {"ci2"},
+		"token_mode": {"none"},
+		"active":     {"on"},
+	})
+	addSessionCookie(t, req, store, userSession())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status %d, want 303; body=%s", rec.Code, rec.Body.String())
+	}
+	if gotInput.Name != "ci2" {
+		t.Fatalf("Edit input name=%q, want ci2", gotInput.Name)
+	}
+	if !gotInput.Active {
+		t.Fatalf("Edit input Active=false, want true (active=on)")
+	}
+}
+
+// TestTriggersEnable_Toggles covers POST .../triggers/enable: ownership check
+// passes, Enable is called, and the handler redirects.
+func TestTriggersEnable_Toggles(t *testing.T) {
+	store := triggersStore()
+	enabled := false
+	tr := &fakeTriggers{
+		getFn: func(ctx context.Context, id string) (buildtrigger.Trigger, error) {
+			return buildtrigger.Trigger{ID: id, Tenant: "acme", Repo: "demo", Name: "ci", Kind: buildtrigger.KindGeneric}, nil
+		},
+		enableFn: func(ctx context.Context, id string) error {
+			enabled = true
+			return nil
+		},
+	}
+	h := newTestHandlerWith(store, func(d *Deps) { d.Triggers = tr })
+	req := csrfPost(t, "/acme/demo/settings/triggers/enable", url.Values{"id": {"bvbt_1"}})
+	addSessionCookie(t, req, store, userSession())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status %d, want 303; body=%s", rec.Code, rec.Body.String())
+	}
+	if !enabled {
+		t.Fatal("Enable was not called")
+	}
+}
+
+// TestTriggersRemove_OwnershipEnforced verifies a repo admin cannot remove a
+// trigger that belongs to a DIFFERENT repo: ownTriggerOr404 returns a uniform
+// 404 and Remove is never called.
+func TestTriggersRemove_OwnershipEnforced(t *testing.T) {
+	store := triggersStore()
+	removed := false
+	tr := &fakeTriggers{
+		getFn: func(ctx context.Context, id string) (buildtrigger.Trigger, error) {
+			return buildtrigger.Trigger{ID: id, Tenant: "other", Repo: "repo", Name: "ci", Kind: buildtrigger.KindGeneric}, nil
+		},
+		removeFn: func(ctx context.Context, id string) error {
+			removed = true
+			return nil
+		},
+	}
+	h := newTestHandlerWith(store, func(d *Deps) { d.Triggers = tr })
+	req := csrfPost(t, "/acme/demo/settings/triggers/remove", url.Values{"id": {"bvbt_1"}})
+	addSessionCookie(t, req, store, userSession())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status %d, want 404 (foreign trigger); body=%s", rec.Code, rec.Body.String())
+	}
+	if removed {
+		t.Fatal("Remove was called on a foreign trigger (ownership boundary breached)")
+	}
+}
+
+// TestTriggersDisable_Toggles covers POST .../triggers/disable: ownership check
+// passes, Disable is called, and the handler redirects.
+func TestTriggersDisable_Toggles(t *testing.T) {
+	store := triggersStore()
+	disabled := false
+	tr := &fakeTriggers{
+		getFn: func(ctx context.Context, id string) (buildtrigger.Trigger, error) {
+			return buildtrigger.Trigger{ID: id, Tenant: "acme", Repo: "demo", Name: "ci", Kind: buildtrigger.KindGeneric}, nil
+		},
+		disableFn: func(ctx context.Context, id string) error {
+			disabled = true
+			return nil
+		},
+	}
+	h := newTestHandlerWith(store, func(d *Deps) { d.Triggers = tr })
+	req := csrfPost(t, "/acme/demo/settings/triggers/disable", url.Values{"id": {"bvbt_1"}})
+	addSessionCookie(t, req, store, userSession())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status %d, want 303; body=%s", rec.Code, rec.Body.String())
+	}
+	if !disabled {
+		t.Fatal("Disable was not called")
+	}
+}
+
+// TestTriggersRotateSecret_ShownOnce covers POST .../triggers/rotate-secret:
+// the rotated secret is rendered exactly once on the secret-once page.
+func TestTriggersRotateSecret_ShownOnce(t *testing.T) {
+	store := triggersStore()
+	tr := &fakeTriggers{
+		getFn: func(ctx context.Context, id string) (buildtrigger.Trigger, error) {
+			return buildtrigger.Trigger{ID: id, Tenant: "acme", Repo: "demo", Name: "ci", Kind: buildtrigger.KindCloudBuild}, nil
+		},
+		rotateSecretFn: func(ctx context.Context, id string) (string, error) {
+			return "rotatedvalue", nil
+		},
+	}
+	h := newTestHandlerWith(store, func(d *Deps) { d.Triggers = tr })
+	req := csrfPost(t, "/acme/demo/settings/triggers/rotate-secret", url.Values{"id": {"bvbt_1"}})
+	addSessionCookie(t, req, store, userSession())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200 (secret-once page); body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if count := strings.Count(body, "rotatedvalue"); count != 1 {
+		t.Fatalf("rotated secret appears %d times, want exactly 1; body=%s", count, body)
+	}
+}
+
 // TestTriggersPage_NotEnabled covers the nil-Triggers case (dep not wired).
 func TestTriggersPage_NotEnabled(t *testing.T) {
 	store := triggersStore()
