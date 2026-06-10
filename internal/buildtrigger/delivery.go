@@ -156,6 +156,31 @@ func (s *Service) ReplayDelivery(ctx context.Context, id string) error {
 	return nil
 }
 
+// RecentDeliveryIDs returns up to n most-recent delivery ids for a trigger,
+// newest first. Used by the UI to bound which deliveries may be replayed.
+func (s *Service) RecentDeliveryIDs(ctx context.Context, triggerID string, n int) ([]string, error) {
+	if n <= 0 {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id FROM build_trigger_deliveries
+		 WHERE trigger_id=?
+		 ORDER BY created_at DESC, id DESC LIMIT ?`, triggerID, n)
+	if err != nil {
+		return nil, fmt.Errorf("buildtrigger: recent delivery ids: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 // scanDelivery decodes one row into a Delivery. Satisfied by both *sql.Row and
 // *sql.Rows via the shared rowScanner interface.
 func scanDelivery(sc rowScanner) (Delivery, error) {
