@@ -44,6 +44,8 @@
     <p><label>token scopes (optional) <input type="text" name="token_scopes" value="{{if and .Editing .Trigger.TokenScopes}}{{scopestr .Trigger.TokenScopes}}{{end}}" placeholder="repo:read,lfs:read"></label></p>
     <p><label>token ttl (optional) <input type="text" name="token_ttl" value="{{if .Trigger.TokenTTL}}{{.Trigger.TokenTTL}}{{end}}" placeholder="15m"></label></p>
 
+    <p><label><input type="checkbox" name="active" {{if or (not .Editing) .Trigger.Active}}checked{{end}}> active</label></p>
+
     <p><button type="submit">{{if .Editing}}save{{else}}create trigger{{end}}</button>
        <a href="/{{.Tenant}}/{{.Repo}}/settings/triggers">cancel</a></p>
   </form>

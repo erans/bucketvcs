@@ -644,3 +644,92 @@ func TestTriggersPage_NotEnabled(t *testing.T) {
 		t.Fatalf("expected 'not enabled' notice; body=%s", rec.Body.String())
 	}
 }
+
+// activeInputTag extracts the <input ...> tag that carries name="active" from
+// the rendered form body, so the regression test can assert on that exact tag
+// (presence + whether it is `checked`) without matching `checked` attributes
+// elsewhere on the page.
+func activeInputTag(t *testing.T, body string) string {
+	t.Helper()
+	idx := strings.Index(body, `name="active"`)
+	if idx < 0 {
+		t.Fatalf(`form body missing name="active"; body=%s`, body)
+	}
+	open := strings.LastIndex(body[:idx], "<")
+	if open < 0 {
+		t.Fatalf("could not find opening < for active input; body=%s", body)
+	}
+	end := strings.Index(body[open:], ">")
+	if end < 0 {
+		t.Fatalf("could not find closing > for active input; body=%s", body)
+	}
+	return body[open : open+end+1]
+}
+
+// TestTriggersEditForm_HasActiveCheckbox locks the final-review fix: the edit
+// form MUST render an `active` checkbox reflecting the trigger's current state.
+// Without it, a browser edit submits no `active` field and triggersEdit
+// (Active = active=="on") silently DISABLES the trigger on every save.
+func TestTriggersEditForm_HasActiveCheckbox(t *testing.T) {
+	getActive := func(active bool) func(ctx context.Context, id string) (buildtrigger.Trigger, error) {
+		return func(ctx context.Context, id string) (buildtrigger.Trigger, error) {
+			return buildtrigger.Trigger{
+				ID: id, Tenant: "acme", Repo: "demo", Name: "ci",
+				Kind: buildtrigger.KindGeneric, Active: active,
+			}, nil
+		}
+	}
+
+	t.Run("active trigger → checkbox checked", func(t *testing.T) {
+		store := triggersStore()
+		h := newTestHandlerWith(store, func(d *Deps) {
+			d.Triggers = &fakeTriggers{getFn: getActive(true)}
+		})
+		req := httptest.NewRequest(http.MethodGet, "/acme/demo/settings/triggers/new?id=bvbt_1", nil)
+		addSessionCookie(t, req, store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		tag := activeInputTag(t, rec.Body.String())
+		if !strings.Contains(tag, "checked") {
+			t.Fatalf("active trigger: active input not checked; tag=%q", tag)
+		}
+	})
+
+	t.Run("inactive trigger → checkbox present but not checked", func(t *testing.T) {
+		store := triggersStore()
+		h := newTestHandlerWith(store, func(d *Deps) {
+			d.Triggers = &fakeTriggers{getFn: getActive(false)}
+		})
+		req := httptest.NewRequest(http.MethodGet, "/acme/demo/settings/triggers/new?id=bvbt_1", nil)
+		addSessionCookie(t, req, store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		tag := activeInputTag(t, rec.Body.String()) // also asserts name="active" present
+		if strings.Contains(tag, "checked") {
+			t.Fatalf("inactive trigger: active input must NOT be checked; tag=%q", tag)
+		}
+	})
+}
+
+// TestTriggersRemove_FormSecurity runs the shared form-handler security matrix
+// against a representative trigger mutation route (.../triggers/remove):
+// anon → login redirect, missing-CSRF → 403, authorized-but-absent → 404. The
+// non-nil Triggers dep (default Get returns a zero Trigger whose tenant/repo do
+// not match acme/demo) makes the route reach ownTriggerOr404 and 404 via the
+// ownership boundary, mirroring the webhooks security test.
+func TestTriggersRemove_FormSecurity(t *testing.T) {
+	store := triggersStore()
+	h := newTestHandlerWith(store, func(d *Deps) { d.Triggers = &fakeTriggers{} })
+	assertFormSecurity(t, h, secOpts{
+		store:     store,
+		path:      "/acme/demo/settings/triggers/remove",
+		form:      url.Values{"id": {"bvbt_1"}},
+		asSession: userSession(),
+	})
+}
