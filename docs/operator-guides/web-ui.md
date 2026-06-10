@@ -521,6 +521,8 @@ existing service that can also be driven from the CLI.
   /settings/webhooks              webhook endpoints (add/enable/disable/rotate-secret/remove)
                                   + per-endpoint delivery view with replay
   /settings/policy                protected-ref rules + protected-path rules (add/remove)
+  /settings/triggers              build triggers (add/edit/enable/disable/rotate-secret/remove)
+                                  + per-trigger delivery history with bounded replay (see §8.9)
   /settings/hooks                 custom hook scripts (global admin only — see §8.2)
 
 /admin                            instance admin (global admin only)
@@ -672,6 +674,95 @@ Repo deletion works on every auth-db backend (sqlite, libsql, Postgres).
 
 Existing event names from the CLI and gateway are reused; the settings screens
 add no new event names.
+
+### 8.9 Build triggers
+
+The **Triggers** tab on a repository's settings page lets repo admins manage
+build triggers — outbound calls that fire when a push updates a matching ref.
+It is the browser equivalent of the `bucketvcs trigger` CLI; for the full
+trigger model (token modes, ref globs, delivery semantics, cloud-specific
+setup) see the [build triggers operator guide](build-triggers.md).
+
+The tab is available only when build triggers are enabled at startup with
+`--build-triggers=true`. When they are disabled the tab renders a "build
+triggers are not enabled on this server" notice instead of forms (the same
+nil-service degradation described in §8.6).
+
+### Authorization
+
+The Triggers tab is **repo-admin** — global admins and users holding the
+`admin` permission on the repo, exactly like the Webhooks tab. Every mutation
+is CSRF-protected and ownership-scoped: a trigger (and a delivery) is only
+reachable through the repo it belongs to. A trigger id that names a different
+repo or tenant returns a uniform HTTP 404, indistinguishable from "not found",
+so the tab cannot be used to enumerate triggers in other repositories.
+
+### Trigger kinds and fields
+
+The create form's **kind** dropdown swaps the per-kind fields in place:
+
+| Kind | Fields | Secret |
+|---|---|---|
+| `generic` | target URL | generated, shown once |
+| `cloudbuild` | target URL (Cloud Build trigger run URL) | generated, shown once |
+| `codebuild` | connector (optional), AWS region, AWS project | none |
+| `azurewebhook` | Azure webhook URL, optional signature header | operator-supplied |
+| `azurepipelines` | connector, Azure project, pipeline id | none (PAT lives in the connector) |
+
+All kinds also accept optional ref include/exclude globs, a token mode
+(`none` / `inject`), and optional token scopes and TTL.
+
+### Connectors
+
+`codebuild` and `azurepipelines` resolve their cloud credentials through an
+operator-configured **connector** named in `--build-config` (AWS connectors hold
+a region/profile or static keys; Azure connectors hold a PAT). The form's
+connector dropdown lists only the connector names defined in that file — never
+their secrets. **If the dropdown is empty, no connectors are configured**: add
+them to `--build-config` and restart the gateway before creating a trigger of
+that kind. A `codebuild` trigger may also omit the connector to fall back to the
+gateway's ambient AWS credential chain.
+
+### Secrets
+
+`generic` and `cloudbuild` triggers sign their POST with a shared secret that
+the server **generates and displays exactly once** on a secret-once page
+(`Cache-Control: no-store, private`, same model as webhook secrets in §8.4) —
+copy it before navigating away. `azurewebhook` secrets are **operator-supplied**
+and must match the secret configured on the Azure service connection; an empty
+value sends the webhook unsigned. `codebuild` and `azurepipelines` carry no
+shared secret (they authenticate to the cloud API directly).
+
+The **rotate-secret** action appears only on `generic` and `cloudbuild` rows —
+the only kinds with a server-generated, rotatable secret. It renders a fresh
+secret on the same secret-once page. Posting a rotate-secret request for any
+other kind is rejected with a flash message.
+
+### Editing
+
+Edit changes the trigger's name, ref globs, token settings, and active state.
+The **kind and its connection config are immutable** — to change the kind,
+delete the trigger and create a new one.
+
+### Delivery history and replay
+
+Each trigger row links to its **deliveries** sub-page, a paginated record of
+fire attempts (status, attempt count, last HTTP code, last error, delivery
+time). The list shows **20 deliveries per page** with an `[older]` pager and a
+status filter. Only the **10 most recent deliveries** are replayable; a
+**replay** button appears on those rows and re-queues the delivery for another
+attempt. The 10-delivery window is enforced server-side — a hand-crafted replay
+POST for an older delivery is rejected even though no button is shown for it.
+
+### Observability
+
+Trigger mutations increment `web_admin_actions_total` with `domain=trigger`
+and `action` ∈ `add`, `edit`, `enable`, `disable`, `remove`, `rotate_secret`,
+`delivery_replay`. Audit events are emitted under the `buildtrigger.*` namespace
+(`buildtrigger.created`, `buildtrigger.edited`, `buildtrigger.enabled`,
+`buildtrigger.disabled`, `buildtrigger.removed`, `buildtrigger.secret_rotated`,
+`buildtrigger.delivery_replayed`), each carrying `source=web` and the session
+user as actor.
 
 ---
 
