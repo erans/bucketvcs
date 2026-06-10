@@ -1,0 +1,54 @@
+{{define "title"}}{{if .Editing}}edit trigger{{else}}add trigger{{end}} · {{.Tenant}}/{{.Repo}} · bucketvcs{{end}}
+{{define "content"}}
+<div class="settings trigger-form">
+  <h2>{{if .Editing}}edit trigger{{else}}add trigger{{end}}</h2>
+  <form method="post" action="/{{.Tenant}}/{{.Repo}}/settings/triggers/{{if .Editing}}edit{{else}}add{{end}}">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    {{if .Editing}}<input type="hidden" name="id" value="{{.Trigger.ID}}">{{end}}
+
+    <p><label>name <input type="text" name="name" required value="{{.Trigger.Name}}"></label></p>
+
+    {{if .Editing}}
+    <p>kind: <strong>{{.Kind}}</strong> <span class="hint">(immutable; delete and recreate to change kind)</span>
+       <input type="hidden" name="kind" value="{{.Kind}}"></p>
+    {{else}}
+    <p><label>kind
+      <select name="kind"
+              hx-get="/{{.Tenant}}/{{.Repo}}/settings/triggers/new"
+              hx-target="#kindfields" hx-swap="outerHTML" hx-select="#kindfields"
+              hx-trigger="change" hx-include="this">
+        {{$k := .Kind}}
+        <option value="generic" {{if eq $k "generic"}}selected{{end}}>generic</option>
+        <option value="cloudbuild" {{if eq $k "cloudbuild"}}selected{{end}}>cloudbuild</option>
+        <option value="codebuild" {{if eq $k "codebuild"}}selected{{end}}>codebuild</option>
+        <option value="azurewebhook" {{if eq $k "azurewebhook"}}selected{{end}}>azurewebhook</option>
+        <option value="azurepipelines" {{if eq $k "azurepipelines"}}selected{{end}}>azurepipelines</option>
+      </select>
+    </label>
+    <noscript><button type="submit" formmethod="get" formaction="/{{.Tenant}}/{{.Repo}}/settings/triggers/new">reload fields for selected kind</button></noscript>
+    {{end}}
+
+    {{template "kindfields" .}}
+
+    <p><label>ref include (optional) <input type="text" name="ref_include" value="{{range $i, $p := .Trigger.RefInclude}}{{if $i}} {{end}}{{$p}}{{end}}" placeholder="refs/heads/main refs/tags/*"></label></p>
+    <p><label>ref exclude (optional) <input type="text" name="ref_exclude" value="{{range $i, $p := .Trigger.RefExclude}}{{if $i}} {{end}}{{$p}}{{end}}"></label></p>
+
+    <p><label>token mode
+      <select name="token_mode">
+        {{$tm := .Trigger.TokenMode}}
+        <option value="" {{if eq $tm ""}}selected{{end}}>(default)</option>
+        <option value="none" {{if eq $tm "none"}}selected{{end}}>none</option>
+        <option value="inject" {{if eq $tm "inject"}}selected{{end}}>inject</option>
+      </select>
+    </label></p>
+    <p><label>token scopes (optional) <input type="text" name="token_scopes" value="{{if and .Editing .Trigger.TokenScopes}}{{scopestr .Trigger.TokenScopes}}{{end}}" placeholder="repo:read,lfs:read"></label></p>
+    <p><label>token ttl (optional) <input type="text" name="token_ttl" value="{{if .Trigger.TokenTTL}}{{.Trigger.TokenTTL}}{{end}}" placeholder="15m"></label></p>
+
+    <p><label><input type="checkbox" name="active" {{if or (not .Editing) .Trigger.Active}}checked{{end}}> active</label></p>
+
+    <p><button type="submit">{{if .Editing}}save{{else}}create trigger{{end}}</button>
+       <a href="/{{.Tenant}}/{{.Repo}}/settings/triggers">cancel</a></p>
+  </form>
+</div>
+{{end}}
+{{if .HXFragment}}{{template "content" .}}{{else}}{{template "base" .}}{{end}}

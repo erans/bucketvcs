@@ -1,0 +1,65 @@
+{{define "title"}}{{.Tenant}}/{{.Repo}} triggers · bucketvcs{{end}}
+{{define "content"}}
+<div class="settings">
+  <div class="repohdr"><span class="path"><a href="/{{.Tenant}}/{{.Repo}}">{{.Tenant}}/{{.Repo}}</a></span></div>
+  {{template "reposettingsnav" .}}
+  <h2>triggers</h2>
+  {{if not .Enabled}}
+  <p class="hint">build triggers are not enabled on this server.</p>
+  {{else}}
+  <p><a href="/{{.Tenant}}/{{.Repo}}/settings/triggers/new"
+        hx-get="/{{.Tenant}}/{{.Repo}}/settings/triggers/new"
+        hx-target="#trigger-modal" hx-swap="innerHTML">+ add trigger</a></p>
+  <div id="trigger-modal"></div>
+  {{if .Triggers}}
+  <table>
+    <thead>
+      <tr><th>active</th><th>name</th><th>kind</th><th>refs</th><th>token</th><th>last fire</th><th>actions</th></tr>
+    </thead>
+    <tbody>
+    {{range .Triggers}}
+    <tr>
+      <td>{{if .Active}}<span class="on">✓</span>{{else}}<span class="off">✗</span>{{end}}</td>
+      <td>{{.Name}}</td>
+      <td>{{.Kind}}</td>
+      <td class="mono">{{.RefSummary}}</td>
+      <td>{{.TokenMode}}</td>
+      <td>{{if .LastFireOK}}{{if (deref .LastFireOK)}}<span class="on">✓</span>{{else}}<span class="off">✗</span>{{end}} {{.LastFireRel}}{{else}}<span class="dim">never</span>{{end}}</td>
+      <td class="acts">
+        <a href="/{{$.Tenant}}/{{$.Repo}}/settings/triggers/deliveries?trigger={{.ID}}">deliveries</a>
+        {{if .Active}}
+        <form method="post" action="/{{$.Tenant}}/{{$.Repo}}/settings/triggers/disable" class="inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}"><input type="hidden" name="id" value="{{.ID}}">
+          <button type="submit">disable</button>
+        </form>
+        {{else}}
+        <form method="post" action="/{{$.Tenant}}/{{$.Repo}}/settings/triggers/enable" class="inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}"><input type="hidden" name="id" value="{{.ID}}">
+          <button type="submit">enable</button>
+        </form>
+        {{end}}
+        <a href="/{{$.Tenant}}/{{$.Repo}}/settings/triggers/new?id={{.ID}}"
+           hx-get="/{{$.Tenant}}/{{$.Repo}}/settings/triggers/new?id={{.ID}}"
+           hx-target="#trigger-modal" hx-swap="innerHTML">edit</a>
+        {{if .CanRotate}}
+        <form method="post" action="/{{$.Tenant}}/{{$.Repo}}/settings/triggers/rotate-secret" class="inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}"><input type="hidden" name="id" value="{{.ID}}">
+          <button type="submit">rotate-secret</button>
+        </form>
+        {{end}}
+        <form method="post" action="/{{$.Tenant}}/{{$.Repo}}/settings/triggers/remove" class="inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}"><input type="hidden" name="id" value="{{.ID}}">
+          <button type="submit">remove</button>
+        </form>
+      </td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="empty">no triggers configured.</p>
+  {{end}}
+  {{end}}
+</div>
+{{end}}
+{{template "base" .}}

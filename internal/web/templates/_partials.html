@@ -34,7 +34,8 @@
   <a href="/{{.Tenant}}/{{.Repo}}/settings">general</a> ·
   <a href="/{{.Tenant}}/{{.Repo}}/settings/access">access</a> ·
   <a href="/{{.Tenant}}/{{.Repo}}/settings/webhooks">webhooks</a> ·
-  <a href="/{{.Tenant}}/{{.Repo}}/settings/policy">policy</a>{{if .IsAdmin}} ·
+  <a href="/{{.Tenant}}/{{.Repo}}/settings/policy">policy</a> ·
+  <a href="/{{.Tenant}}/{{.Repo}}/settings/triggers">triggers</a>{{if .IsAdmin}} ·
   <a href="/{{.Tenant}}/{{.Repo}}/settings/hooks">hooks</a>{{end}}
 </nav>
 {{end}}
@@ -46,3 +47,40 @@
   <a href="/admin/quotas">quotas</a>
 </nav>
 {{end}}
+
+{{define "kindfields"}}<div id="kindfields">
+  {{if or (eq .Kind "generic") (eq .Kind "cloudbuild")}}
+  <p><label>target url <input type="url" name="url" required value="{{.Trigger.Config.URL}}" placeholder="https://ci.example.com/hook"></label></p>
+  <p><label>secret (optional) <input type="text" name="secret" value=""></label>
+     <span class="hint">generated &amp; shown once if left blank</span></p>
+  {{else if eq .Kind "azurewebhook"}}
+  <p><label>azure webhook url <input type="url" name="azure_webhook_url" required value="{{.Trigger.Config.AzureWebhookURL}}"></label></p>
+  <p><label>secret (optional) <input type="text" name="secret" value=""></label>
+     <span class="hint">operator-supplied HMAC shared secret</span></p>
+  <p><label>signature header (optional) <input type="text" name="azure_sig_header" value="{{.Trigger.Config.AzureSigHeader}}" placeholder="X-Hub-Signature"></label></p>
+  {{else if eq .Kind "codebuild"}}
+  {{if .Connectors.AWS}}
+  <p><label>aws connector
+    <select name="aws_connector">
+      {{range .Connectors.AWS}}<option value="{{.}}" {{if eq . $.Trigger.Config.AWSConnector}}selected{{end}}>{{.}}</option>{{end}}
+    </select>
+  </label></p>
+  {{else}}
+  <p class="hint">no connectors configured; ask your operator to add an AWS connector via --build-config.</p>
+  {{end}}
+  <p><label>aws region <input type="text" name="aws_region" value="{{.Trigger.Config.AWSRegion}}" placeholder="us-east-1"></label></p>
+  <p><label>aws project <input type="text" name="aws_project" value="{{.Trigger.Config.AWSProject}}"></label></p>
+  {{else if eq .Kind "azurepipelines"}}
+  {{if .Connectors.Azure}}
+  <p><label>azure connector
+    <select name="azure_connector">
+      {{range .Connectors.Azure}}<option value="{{.}}" {{if eq . $.Trigger.Config.AzureConnector}}selected{{end}}>{{.}}</option>{{end}}
+    </select>
+  </label></p>
+  {{else}}
+  <p class="hint">no connectors configured; ask your operator to add an Azure connector via --build-config.</p>
+  {{end}}
+  <p><label>azure project <input type="text" name="azure_project" value="{{.Trigger.Config.AzureProject}}"></label></p>
+  <p><label>azure pipeline id <input type="number" name="azure_pipeline_id" value="{{if .Trigger.Config.AzurePipelineID}}{{.Trigger.Config.AzurePipelineID}}{{end}}"></label></p>
+  {{end}}
+</div>{{end}}

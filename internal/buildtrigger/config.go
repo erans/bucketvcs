@@ -3,6 +3,7 @@ package buildtrigger
 import (
 	"fmt"
 	"os"
+	"sort"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -57,4 +58,21 @@ func ParseServeConfig(data []byte) (ServeConfig, error) {
 		cfg.Build.Defaults.TokenTTL = d
 	}
 	return cfg, nil
+}
+
+// SortedConnectorNames returns the connector names (keys) of the two connector
+// maps, each sorted ascending. Names only — never secrets. nil maps yield
+// empty, non-nil slices.
+func SortedConnectorNames(aws map[string]AWSConnector, azure map[string]AzureConnector) (awsNames, azureNames []string) {
+	awsNames = make([]string, 0, len(aws))
+	for k := range aws {
+		awsNames = append(awsNames, k)
+	}
+	azureNames = make([]string, 0, len(azure))
+	for k := range azure {
+		azureNames = append(azureNames, k)
+	}
+	sort.Strings(awsNames)
+	sort.Strings(azureNames)
+	return awsNames, azureNames
 }
