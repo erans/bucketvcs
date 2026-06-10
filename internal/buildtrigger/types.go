@@ -88,6 +88,18 @@ type TriggerInput struct {
 	TokenTTL    time.Duration
 }
 
+// EditInput is the operator-supplied data for Edit. Kind, Config (url/secret),
+// Tenant, and Repo are immutable on edit — change kind by delete+recreate.
+type EditInput struct {
+	Name        string
+	RefInclude  []string
+	RefExclude  []string
+	TokenMode   TokenMode
+	TokenScopes auth.TokenScope
+	TokenTTL    time.Duration
+	Active      bool
+}
+
 // BuildPayload is the per-matching-ref snapshot enqueued and later rendered.
 // Token injection happens at delivery time (kept out of the queue row).
 type BuildPayload struct {
