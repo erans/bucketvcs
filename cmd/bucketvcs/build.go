@@ -29,6 +29,8 @@ Objects + actions:
                   [--token-mode=<none|inject>] [--token-scopes=<csv|all|repo:*|lfs:*>]
                   [--token-ttl=<dur>]
   trigger list    --auth-db=<path> --tenant=<t> --repo=<r> [--format=text|json]
+  trigger edit          --auth-db=<path> --id=<id> --name=<n> [--ref-include=… --ref-exclude=… --token-mode=… --token-scopes=… --token-ttl=… --active=true|false]
+  trigger rotate-secret --auth-db=<path> --id=<id>
   trigger remove  --auth-db=<path> --id=<id>
   trigger enable  --auth-db=<path> --id=<id>
   trigger disable --auth-db=<path> --id=<id>
@@ -77,7 +79,7 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 
 func runBuildTrigger(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "build trigger: action required (add|list|remove|enable|disable)")
+		fmt.Fprintln(stderr, "build trigger: action required (add|list|edit|remove|enable|disable|rotate-secret)")
 		return 2
 	}
 	switch args[0] {
@@ -85,6 +87,10 @@ func runBuildTrigger(ctx context.Context, args []string, stdout, stderr io.Write
 		return runBuildTriggerAdd(ctx, args[1:], stdout, stderr)
 	case "list":
 		return runBuildTriggerList(ctx, args[1:], stdout, stderr)
+	case "edit":
+		return runBuildTriggerEdit(ctx, args[1:], stdout, stderr)
+	case "rotate-secret":
+		return runBuildTriggerRotateSecret(ctx, args[1:], stdout, stderr)
 	case "remove":
 		return runBuildTriggerRemove(ctx, args[1:], stdout, stderr)
 	case "enable":
@@ -175,12 +181,7 @@ func runBuildTriggerAdd(ctx context.Context, args []string, stdout, stderr io.Wr
 
 	tr, err := svc.Create(ctx, in)
 	if err != nil {
-		if errors.Is(err, buildtrigger.ErrInvalidInput) || errors.Is(err, buildtrigger.ErrConflict) {
-			fmt.Fprintf(stderr, "build trigger add: %v\n", err)
-			return 2
-		}
-		fmt.Fprintf(stderr, "build trigger add: %v\n", err)
-		return 1
+		return triggerMutateErrCode(err, stderr, "add")
 	}
 
 	fmt.Fprintf(stdout, "trigger_id=%s  tenant=%s  repo=%s  name=%s  kind=%s\n",
@@ -551,4 +552,79 @@ func openBuildSvc(path string) (*buildtrigger.Service, *sqlitestore.Store, error
 		return nil, nil, fmt.Errorf("open authdb: %w", err)
 	}
 	return buildtrigger.New(store.DB()), store, nil
+}
+
+// triggerMutateErrCode maps a buildtrigger service error to the documented exit
+// codes for a mutating action: ErrInvalidInput/ErrConflict → 2 (usage),
+// everything else (incl. ErrNotFound, db errors) → 1 (operational). It always
+// prints "build trigger <action>: <err>" to stderr.
+func triggerMutateErrCode(err error, stderr io.Writer, action string) int {
+	fmt.Fprintf(stderr, "build trigger %s: %v\n", action, err)
+	if errors.Is(err, buildtrigger.ErrInvalidInput) || errors.Is(err, buildtrigger.ErrConflict) {
+		return 2
+	}
+	return 1
+}
+
+func runBuildTriggerEdit(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("build trigger edit", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	authDB := fs.String("auth-db", "", "Path to authdb (required)")
+	id := fs.String("id", "", "Trigger id (required)")
+	name := fs.String("name", "", "New trigger name (required)")
+	refInclude := fs.String("ref-include", "", "Ref include globs (csv)")
+	refExclude := fs.String("ref-exclude", "", "Ref exclude globs (csv)")
+	tokenMode := fs.String("token-mode", "", "Token mode: none|inject")
+	tokenScopes := fs.String("token-scopes", "", "Token scopes (csv|all|repo:*|lfs:*)")
+	tokenTTL := fs.String("token-ttl", "", "Token TTL (Go duration)")
+	active := fs.Bool("active", true, "Whether the trigger is active")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *authDB == "" || *id == "" || *name == "" {
+		fmt.Fprintln(stderr, "build trigger edit: --auth-db, --id, --name required")
+		return 2
+	}
+	in := buildtrigger.EditInput{
+		Name:       *name,
+		RefInclude: splitCSV(*refInclude),
+		RefExclude: splitCSV(*refExclude),
+		TokenMode:  buildtrigger.TokenMode(*tokenMode),
+		Active:     *active,
+	}
+	if *tokenScopes != "" {
+		scopes, err := auth.ParseScopes(*tokenScopes)
+		if err != nil {
+			fmt.Fprintf(stderr, "build trigger edit: --token-scopes: %v\n", err)
+			return 2
+		}
+		in.TokenScopes = scopes
+	}
+	if *tokenTTL != "" {
+		d, err := time.ParseDuration(*tokenTTL)
+		if err != nil {
+			fmt.Fprintf(stderr, "build trigger edit: --token-ttl %q: %v\n", *tokenTTL, err)
+			return 2
+		}
+		in.TokenTTL = d
+	}
+	svc, store, err := openBuildSvc(*authDB)
+	if err != nil {
+		fmt.Fprintf(stderr, "build trigger edit: %v\n", err)
+		return 1
+	}
+	defer store.Close()
+	tr, err := svc.Edit(ctx, *id, in)
+	if err != nil {
+		return triggerMutateErrCode(err, stderr, "edit")
+	}
+	fmt.Fprintf(stdout, "trigger_id=%s  name=%s  active=%t\n", tr.ID, tr.Name, tr.Active)
+	buildtrigger.EmitTriggerLifecycle(ctx, slog.Default(), "build.trigger.edited", tr.ID, tr.Tenant, tr.Repo)
+	return 0
+}
+
+// runBuildTriggerRotateSecret is a temporary stub replaced in a later task.
+func runBuildTriggerRotateSecret(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fmt.Fprintln(stderr, "build trigger rotate-secret: not yet implemented")
+	return 2
 }
