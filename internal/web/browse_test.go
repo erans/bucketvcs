@@ -970,3 +970,27 @@ func TestComparePickerSubmit_Redirects(t *testing.T) {
 		t.Fatalf("bad redirect: %q", loc)
 	}
 }
+
+// TestCompare_TruncatedEmptyShowsNotice verifies that when Truncated=true and
+// Files is nil (byte cap hit before the first file completed), the page shows
+// the truncation notice and does NOT show "no differences."
+func TestCompare_TruncatedEmptyShowsNotice(t *testing.T) {
+	content := &fakeContent{
+		refs:    compareRefs(),
+		compare: browsemodel.Comparison{Files: nil, Truncated: true},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/compare/main..feature", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if rec.Code != 200 {
+		t.Fatalf("status %d body=%s", rec.Code, body)
+	}
+	if !strings.Contains(body, "diff truncated") {
+		t.Fatalf("expected truncation notice, body: %s", body)
+	}
+	if strings.Contains(body, "no differences") {
+		t.Fatalf("must not show 'no differences' when truncated, body: %s", body)
+	}
+}

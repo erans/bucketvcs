@@ -18,12 +18,12 @@
   {{if .HasResult}}
   <div class="path">{{.Base}}..{{.Head}}</div>
   {{if .Cmp.Files}}
-  <p class="hint">{{len .Cmp.Files}} file{{if ne (len .Cmp.Files) 1}}s{{end}} changed, +{{.Cmp.Additions}} −{{.Cmp.Deletions}}</p>
+  <p class="hint">{{len .Cmp.Files}} file{{if ne (len .Cmp.Files) 1}}s{{end}} changed, +{{.Cmp.Additions}} -{{.Cmp.Deletions}}</p>
   {{range .Cmp.Files}}{{template "filediff" .}}{{end}}
-  {{if .Cmp.Truncated}}<p class="empty">diff truncated (too many files)</p>{{end}}
-  {{else}}
+  {{else if not .Cmp.Truncated}}
   <p class="empty">no differences.</p>
   {{end}}
+  {{if .Cmp.Truncated}}<p class="empty">diff truncated (too many files)</p>{{end}}
   {{end}}
 </div>
 {{end}}

@@ -425,22 +425,24 @@ func (s *server) handleCompare(w http.ResponseWriter, r *http.Request, br browse
 		s.renderError(w, r, http.StatusNotFound, "not found")
 		return
 	}
-	resBase, err := browsemodel.ResolveRest(refs, baseSpec)
-	if err != nil || resBase.Path != "" {
-		if err != nil {
-			s.browseError(w, r, err)
-		} else {
-			s.renderError(w, r, http.StatusNotFound, "not found")
+	resolveSide := func(spec string) (browsemodel.Resolved, bool) {
+		res, rerr := browsemodel.ResolveRest(refs, spec)
+		if rerr != nil {
+			s.browseError(w, r, rerr)
+			return res, false
 		}
+		if res.Path != "" {
+			s.renderError(w, r, http.StatusNotFound, "not found")
+			return res, false
+		}
+		return res, true
+	}
+	resBase, ok := resolveSide(baseSpec)
+	if !ok {
 		return
 	}
-	resHead, err := browsemodel.ResolveRest(refs, headSpec)
-	if err != nil || resHead.Path != "" {
-		if err != nil {
-			s.browseError(w, r, err)
-		} else {
-			s.renderError(w, r, http.StatusNotFound, "not found")
-		}
+	resHead, ok := resolveSide(headSpec)
+	if !ok {
 		return
 	}
 	cmp, err := s.content.Compare(r.Context(), br.tenant, br.repo, resBase.OID, resHead.OID)
