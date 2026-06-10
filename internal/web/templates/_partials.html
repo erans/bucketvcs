@@ -34,7 +34,8 @@
   <a href="/{{.Tenant}}/{{.Repo}}/settings">general</a> ·
   <a href="/{{.Tenant}}/{{.Repo}}/settings/access">access</a> ·
   <a href="/{{.Tenant}}/{{.Repo}}/settings/webhooks">webhooks</a> ·
-  <a href="/{{.Tenant}}/{{.Repo}}/settings/policy">policy</a>{{if .IsAdmin}} ·
+  <a href="/{{.Tenant}}/{{.Repo}}/settings/policy">policy</a> ·
+  <a href="/{{.Tenant}}/{{.Repo}}/settings/triggers">triggers</a>{{if .IsAdmin}} ·
   <a href="/{{.Tenant}}/{{.Repo}}/settings/hooks">hooks</a>{{end}}
 </nav>
 {{end}}
