@@ -147,6 +147,7 @@ type fakeContent struct {
 	log      []browsemodel.CommitMeta
 	more     bool
 	commit   browsemodel.CommitDetail
+	compare  browsemodel.Comparison
 	activity map[string]browsemodel.CommitMeta
 
 	logPath       []browsemodel.CommitMeta
@@ -188,7 +189,10 @@ func (f *fakeContent) TreeActivity(ctx context.Context, t, r, oid, p string) (ma
 	return f.activity, nil
 }
 func (f *fakeContent) Compare(ctx context.Context, t, r, baseOID, headOID string) (browsemodel.Comparison, error) {
-	return browsemodel.Comparison{}, nil
+	if f.warm {
+		return browsemodel.Comparison{}, browsemodel.ErrWarming
+	}
+	return f.compare, nil
 }
 func (f *fakeContent) LogPath(ctx context.Context, t, r, oid, p string, off, lim int) ([]browsemodel.CommitMeta, bool, error) {
 	f.logPathCalled = true
@@ -875,5 +879,94 @@ func TestTreeSubdir_NoReadme(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if strings.Contains(rec.Body.String(), "Sub Readme") {
 		t.Fatalf("subdirectory tree should not render README: %s", rec.Body.String())
+	}
+}
+
+// compareRefs is a refs fixture for compare tests: default "main", branches
+// main/feature, tag v1, each pointing at a distinct well-formed 40-hex OID so
+// ResolveRest resolves them by name.
+func compareRefs() browsemodel.Refs {
+	return browsemodel.Refs{
+		Default: "main",
+		Branches: []browsemodel.RefInfo{
+			{Name: "main", OID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+			{Name: "feature", OID: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+		},
+		Tags: []browsemodel.RefInfo{
+			{Name: "v1", OID: "cccccccccccccccccccccccccccccccccccccccc"},
+		},
+	}
+}
+
+func compareGet(t *testing.T, path string) (string, int) {
+	t.Helper()
+	content := &fakeContent{refs: compareRefs()}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", path, nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec.Body.String(), rec.Code
+}
+
+func TestComparePicker_RendersRefs(t *testing.T) {
+	body, code := compareGet(t, "/acme/demo/compare")
+	if code != 200 {
+		t.Fatalf("status %d", code)
+	}
+	for _, want := range []string{"feature", "v1", `name="base"`, `name="head"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("picker missing %q: %s", want, body)
+		}
+	}
+}
+
+func TestCompareResult_RendersDiff(t *testing.T) {
+	content := &fakeContent{
+		refs: compareRefs(),
+		compare: browsemodel.Comparison{
+			Files:     []browsemodel.FileDiff{{Status: "A", NewPath: "c.txt", Additions: 3}},
+			Additions: 3,
+		},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/compare/main..feature", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body, code := rec.Body.String(), rec.Code
+	if code != 200 {
+		t.Fatalf("status %d", code)
+	}
+	for _, want := range []string{"main..feature", "c.txt", `class="filediff"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("compare result missing %q: %s", want, body)
+		}
+	}
+}
+
+func TestCompare_BadRef404(t *testing.T) {
+	_, code := compareGet(t, "/acme/demo/compare/main..nope")
+	if code != 404 {
+		t.Fatalf("want 404 for unknown head, got %d", code)
+	}
+}
+
+func TestCompare_MissingSeparator404(t *testing.T) {
+	_, code := compareGet(t, "/acme/demo/compare/mainfeature")
+	if code != 404 {
+		t.Fatalf("want 404 for missing '..', got %d", code)
+	}
+}
+
+func TestComparePickerSubmit_Redirects(t *testing.T) {
+	content := &fakeContent{refs: compareRefs()}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/compare?base=main&head=feature", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("want 303, got %d", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "/acme/demo/compare/main..feature" {
+		t.Fatalf("bad redirect: %q", loc)
 	}
 }

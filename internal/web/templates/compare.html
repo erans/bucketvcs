@@ -1,0 +1,30 @@
+{{define "title"}}compare · {{.Tenant}}/{{.Repo}}{{end}}
+{{define "content"}}
+<div class="browse">
+  <div class="repohdr"><span class="path">{{.Tenant}}/{{.Repo}}</span>{{if .CanAdmin}}&nbsp;<a href="/{{.Tenant}}/{{.Repo}}/settings">[settings]</a>{{end}}</div>
+  <h2>compare</h2>
+  <form class="refswitch" method="get" action="/{{.Tenant}}/{{.Repo}}/compare">
+    <select name="base">
+      {{range .Refs.Branches}}<option value="{{.Name}}"{{if eq .Name $.Base}} selected{{end}}>{{.Name}}</option>{{end}}
+      {{range .Refs.Tags}}<option value="{{.Name}}"{{if eq .Name $.Base}} selected{{end}}>{{.Name}}</option>{{end}}
+    </select>
+    <span>..</span>
+    <select name="head">
+      {{range .Refs.Branches}}<option value="{{.Name}}"{{if eq .Name $.Head}} selected{{end}}>{{.Name}}</option>{{end}}
+      {{range .Refs.Tags}}<option value="{{.Name}}"{{if eq .Name $.Head}} selected{{end}}>{{.Name}}</option>{{end}}
+    </select>
+    <button type="submit">compare</button>
+  </form>
+  {{if .HasResult}}
+  <div class="path">{{.Base}}..{{.Head}}</div>
+  {{if .Cmp.Files}}
+  <p class="hint">{{len .Cmp.Files}} file{{if ne (len .Cmp.Files) 1}}s{{end}} changed, +{{.Cmp.Additions}} −{{.Cmp.Deletions}}</p>
+  {{range .Cmp.Files}}{{template "filediff" .}}{{end}}
+  {{if .Cmp.Truncated}}<p class="empty">diff truncated (too many files)</p>{{end}}
+  {{else}}
+  <p class="empty">no differences.</p>
+  {{end}}
+  {{end}}
+</div>
+{{end}}
+{{template "base" .}}
