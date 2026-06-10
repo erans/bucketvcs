@@ -110,7 +110,7 @@ func newRenderer(dir string) (*renderer, error) {
 	r := &renderer{dir: dir}
 	if dir == "" {
 		r.cache = map[string]*template.Template{}
-		for _, page := range []string{"landing.html", "login.html", "error.html", "repo.html", "tree.html", "blob.html", "commits.html", "commit.html", "settings.html", "settings_tokens.html", "settings_keys.html", "secret.html", "reposettings.html", "reposettings_access.html", "reposettings_webhooks.html", "reposettings_deliveries.html", "reposettings_policy.html", "reposettings_hooks.html", "reposettings_triggers.html", "reposettings_triggers_form.html", "admin.html", "admin_users.html", "admin_repos.html", "admin_quotas.html"} {
+		for _, page := range []string{"landing.html", "login.html", "error.html", "repo.html", "tree.html", "blob.html", "commits.html", "commit.html", "settings.html", "settings_tokens.html", "settings_keys.html", "secret.html", "reposettings.html", "reposettings_access.html", "reposettings_webhooks.html", "reposettings_deliveries.html", "reposettings_policy.html", "reposettings_hooks.html", "reposettings_triggers.html", "reposettings_triggers_form.html", "reposettings_triggers_deliveries.html", "admin.html", "admin_users.html", "admin_repos.html", "admin_quotas.html"} {
 			t, err := parsePage(assetsFS, "templates", page)
 			if err != nil {
 				return nil, err

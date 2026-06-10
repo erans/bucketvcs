@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -460,6 +461,171 @@ func TestTriggersRotateSecret_ShownOnce(t *testing.T) {
 	body := rec.Body.String()
 	if count := strings.Count(body, "rotatedvalue"); count != 1 {
 		t.Fatalf("rotated secret appears %d times, want exactly 1; body=%s", count, body)
+	}
+}
+
+// TestTriggersDeliveries_RendersRows covers GET .../triggers/deliveries: two
+// deliveries (one delivered, one dead_letter) render, and both are replayable
+// (their ids are in the recent window) so both show a replay button.
+func TestTriggersDeliveries_RendersRows(t *testing.T) {
+	store := triggersStore()
+	tr := &fakeTriggers{
+		getFn: func(ctx context.Context, id string) (buildtrigger.Trigger, error) {
+			return buildtrigger.Trigger{ID: "bvbt_1", Tenant: "acme", Repo: "demo", Name: "ci", Kind: buildtrigger.KindGeneric}, nil
+		},
+		listDeliveriesPageFn: func(ctx context.Context, triggerID, status string, before time.Time, limit int) ([]buildtrigger.Delivery, error) {
+			now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			return []buildtrigger.Delivery{
+				{ID: "d2", TriggerID: "bvbt_1", Status: "dead_letter", Attempts: 5, LastStatusCode: 500, LastError: "boom", CreatedAt: now},
+				{ID: "d1", TriggerID: "bvbt_1", Status: "delivered", Attempts: 1, LastStatusCode: 200, CreatedAt: now, DeliveredAt: &now},
+			}, nil
+		},
+		recentDeliveryIDsFn: func(ctx context.Context, triggerID string, n int) ([]string, error) {
+			return []string{"d2", "d1"}, nil
+		},
+	}
+	h := newTestHandlerWith(store, func(d *Deps) { d.Triggers = tr })
+	req := httptest.NewRequest(http.MethodGet, "/acme/demo/settings/triggers/deliveries?trigger=bvbt_1", nil)
+	addSessionCookie(t, req, store, userSession())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "dead_letter") {
+		t.Fatalf("deliveries page missing 'dead_letter'; body=%s", body)
+	}
+	if n := strings.Count(body, ">replay</button>"); n != 2 {
+		t.Fatalf("expected 2 replay buttons (both replayable), got %d; body=%s", n, body)
+	}
+	// 2 deliveries < page size 20 → NextCursor is empty → no [older] pager link.
+	if strings.Contains(body, "&amp;before=") || strings.Contains(body, "&before=") {
+		t.Fatalf("pager link must be absent when fewer than page-size deliveries returned; body=%s", body)
+	}
+}
+
+// TestTriggersReplay_OutOfWindowRejected proves the SERVER-SIDE bounded-window
+// check: a hand-crafted POST for a delivery NOT in the recent window is rejected
+// with a flash and ReplayDelivery is never called.
+func TestTriggersReplay_OutOfWindowRejected(t *testing.T) {
+	store := triggersStore()
+	replayed := false
+	tr := &fakeTriggers{
+		getFn: func(ctx context.Context, id string) (buildtrigger.Trigger, error) {
+			return buildtrigger.Trigger{ID: "bvbt_1", Tenant: "acme", Repo: "demo", Name: "ci", Kind: buildtrigger.KindGeneric}, nil
+		},
+		getDeliveryFn: func(ctx context.Context, id string) (buildtrigger.Delivery, error) {
+			return buildtrigger.Delivery{ID: "old", TriggerID: "bvbt_1", Status: "dead_letter"}, nil
+		},
+		recentDeliveryIDsFn: func(ctx context.Context, triggerID string, n int) ([]string, error) {
+			return []string{"d2", "d1"}, nil // "old" is NOT recent
+		},
+		replayDeliveryFn: func(ctx context.Context, id string) error {
+			replayed = true
+			return nil
+		},
+	}
+	h := newTestHandlerWith(store, func(d *Deps) { d.Triggers = tr })
+	req := csrfPost(t, "/acme/demo/settings/triggers/replay", url.Values{
+		"trigger_id":  {"bvbt_1"},
+		"delivery_id": {"old"},
+	})
+	addSessionCookie(t, req, store, userSession())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status %d, want 303 (flash); body=%s", rec.Code, rec.Body.String())
+	}
+	if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
+		t.Fatal("expected flash cookie for out-of-window replay")
+	}
+	if replayed {
+		t.Fatal("ReplayDelivery was called for an out-of-window delivery (bounded-window check breached)")
+	}
+}
+
+// TestTriggersReplay_CrossTriggerRejected proves a delivery belonging to a
+// DIFFERENT trigger is indistinguishable from missing (404) and is never
+// replayed, even when the posted trigger_id is owned by this repo.
+func TestTriggersReplay_CrossTriggerRejected(t *testing.T) {
+	store := triggersStore()
+	replayed := false
+	tr := &fakeTriggers{
+		getFn: func(ctx context.Context, id string) (buildtrigger.Trigger, error) {
+			return buildtrigger.Trigger{ID: "bvbt_1", Tenant: "acme", Repo: "demo", Name: "ci", Kind: buildtrigger.KindGeneric}, nil
+		},
+		getDeliveryFn: func(ctx context.Context, id string) (buildtrigger.Delivery, error) {
+			return buildtrigger.Delivery{ID: id, TriggerID: "bvbt_OTHER", Status: "dead_letter"}, nil
+		},
+		recentDeliveryIDsFn: func(ctx context.Context, triggerID string, n int) ([]string, error) {
+			return []string{"d2"}, nil
+		},
+		replayDeliveryFn: func(ctx context.Context, id string) error {
+			replayed = true
+			return nil
+		},
+	}
+	h := newTestHandlerWith(store, func(d *Deps) { d.Triggers = tr })
+	req := csrfPost(t, "/acme/demo/settings/triggers/replay", url.Values{
+		"trigger_id":  {"bvbt_1"},
+		"delivery_id": {"d2"},
+	})
+	addSessionCookie(t, req, store, userSession())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status %d, want 404 (cross-trigger delivery); body=%s", rec.Code, rec.Body.String())
+	}
+	if replayed {
+		t.Fatal("ReplayDelivery was called for a cross-trigger delivery (ownership boundary breached)")
+	}
+}
+
+// TestTriggersReplay_Success covers the happy path: an in-window delivery owned
+// by this trigger is queued for replay.
+func TestTriggersReplay_Success(t *testing.T) {
+	store := triggersStore()
+	replayed := false
+	tr := &fakeTriggers{
+		getFn: func(ctx context.Context, id string) (buildtrigger.Trigger, error) {
+			return buildtrigger.Trigger{ID: "bvbt_1", Tenant: "acme", Repo: "demo", Name: "ci", Kind: buildtrigger.KindGeneric}, nil
+		},
+		getDeliveryFn: func(ctx context.Context, id string) (buildtrigger.Delivery, error) {
+			return buildtrigger.Delivery{ID: id, TriggerID: "bvbt_1", Status: "dead_letter"}, nil
+		},
+		recentDeliveryIDsFn: func(ctx context.Context, triggerID string, n int) ([]string, error) {
+			return []string{"d2", "d1"}, nil
+		},
+		replayDeliveryFn: func(ctx context.Context, id string) error {
+			replayed = true
+			return nil
+		},
+	}
+	logger, sink := newTestLogger()
+	h := newTestHandlerWith(store, func(d *Deps) { d.Triggers = tr; d.Logger = logger })
+	req := csrfPost(t, "/acme/demo/settings/triggers/replay", url.Values{
+		"trigger_id":  {"bvbt_1"},
+		"delivery_id": {"d2"},
+	})
+	addSessionCookie(t, req, store, userSession())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status %d, want 303 (flash); body=%s", rec.Code, rec.Body.String())
+	}
+	fc := findCookie(rec.Result().Cookies(), flashCookieName)
+	if fc == nil {
+		t.Fatal("expected flash cookie on successful replay")
+	}
+	if msg, _ := base64.RawURLEncoding.DecodeString(fc.Value); !strings.Contains(string(msg), "queued for replay") {
+		t.Fatalf("flash cookie missing 'queued for replay'; got %q", string(msg))
+	}
+	if !replayed {
+		t.Fatal("ReplayDelivery was NOT called on the success path")
+	}
+	if !sink.Has("buildtrigger.delivery_replayed", map[string]string{"tenant": "acme", "repo": "demo"}) {
+		t.Fatal("missing buildtrigger.delivery_replayed audit event")
 	}
 }
 

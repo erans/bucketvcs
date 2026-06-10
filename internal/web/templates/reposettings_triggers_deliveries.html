@@ -1,0 +1,52 @@
+{{define "title"}}{{.Tenant}}/{{.Repo}} trigger deliveries · bucketvcs{{end}}
+{{define "content"}}
+<div class="settings">
+  <div class="repohdr"><span class="path"><a href="/{{.Tenant}}/{{.Repo}}">{{.Tenant}}/{{.Repo}}</a></span></div>
+  {{template "reposettingsnav" .}}
+  <h2>{{.Trigger.Name}} — deliveries</h2>
+  <p class="hint">
+    filter:
+    <a href="/{{.Tenant}}/{{.Repo}}/settings/triggers/deliveries?trigger={{.Trigger.ID}}">all</a> ·
+    <a href="/{{.Tenant}}/{{.Repo}}/settings/triggers/deliveries?trigger={{.Trigger.ID}}&amp;status=pending">pending</a> ·
+    <a href="/{{.Tenant}}/{{.Repo}}/settings/triggers/deliveries?trigger={{.Trigger.ID}}&amp;status=in_flight">in_flight</a> ·
+    <a href="/{{.Tenant}}/{{.Repo}}/settings/triggers/deliveries?trigger={{.Trigger.ID}}&amp;status=delivered">delivered</a> ·
+    <a href="/{{.Tenant}}/{{.Repo}}/settings/triggers/deliveries?trigger={{.Trigger.ID}}&amp;status=dead_letter">dead_letter</a> ·
+    <a href="/{{.Tenant}}/{{.Repo}}/settings/triggers">← back to triggers</a>
+  </p>
+  {{if .Deliveries}}
+  <table>
+    <thead>
+      <tr><th>created</th><th>status</th><th>attempts</th><th>http</th><th>last error</th><th>delivered</th><th>actions</th></tr>
+    </thead>
+    <tbody>
+    {{range .Deliveries}}
+    <tr>
+      <td title="{{abstime .CreatedAt.Unix}}">{{.CreatedRel}}</td>
+      <td>{{.Status}}</td>
+      <td>{{.Attempts}}</td>
+      <td>{{if .LastStatusCode}}{{.LastStatusCode}}{{else}}—{{end}}</td>
+      <td>{{if .LastErrorTrunc}}<span class="mono">{{.LastErrorTrunc}}</span>{{else}}—{{end}}</td>
+      <td>{{if .DeliveredAt}}✓{{else}}—{{end}}</td>
+      <td>
+        {{if .Replayable}}
+        <form method="post" action="/{{$.Tenant}}/{{$.Repo}}/settings/triggers/replay" class="inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="hidden" name="trigger_id" value="{{$.Trigger.ID}}">
+          <input type="hidden" name="delivery_id" value="{{.ID}}">
+          <button type="submit">replay</button>
+        </form>
+        {{else}}—{{end}}
+      </td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{if .NextCursor}}
+  <p class="pager"><a href="/{{.Tenant}}/{{.Repo}}/settings/triggers/deliveries?trigger={{.Trigger.ID}}{{if .Status}}&amp;status={{.Status}}{{end}}&amp;before={{.NextCursor}}">[older]</a></p>
+  {{end}}
+  {{else}}
+  <p class="empty">no deliveries found.</p>
+  {{end}}
+</div>
+{{end}}
+{{template "base" .}}

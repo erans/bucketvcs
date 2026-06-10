@@ -142,8 +142,6 @@ func refSummary(inc, exc []string) string {
 	return strings.Join(parts, " ")
 }
 
-// --- stubs replaced in later tasks (Tasks 11-12) ---
-
 // triggersNewForm renders GET .../settings/triggers/new[?kind=X][&id=Y]. It
 // serves the full create/edit form page, OR — for an htmx kind-swap (HX-Request
 // with a kind query and no id) — only the #kindfields fragment.
@@ -495,10 +493,184 @@ func (s *server) triggersRotateSecret(w http.ResponseWriter, r *http.Request, sr
 	s.renderSecretOnce(w, r, "build trigger secret rotated", secret, sr.triggersBase())
 }
 
-func (s *server) triggersDeliveries(w http.ResponseWriter, r *http.Request, sr settingsRoute) {
-	s.renderError(w, r, http.StatusNotFound, "not found")
+const (
+	triggerDeliveriesPageSize = 20
+	triggerReplayWindow       = 10
+)
+
+// triggerDeliveryRow is the per-row view-model for the deliveries table.
+type triggerDeliveryRow struct {
+	buildtrigger.Delivery
+	CreatedRel     string
+	LastErrorTrunc string // server-side truncated to ≤80 runes
+	Replayable     bool   // id is within the recent replay window
 }
 
+// triggerDeliveriesData is the view-model for the deliveries sub-page.
+type triggerDeliveriesData struct {
+	base
+	Tenant, Repo string
+	IsAdmin      bool
+	Trigger      buildtrigger.Trigger
+	Status       string // active status filter ("" = all)
+	Deliveries   []triggerDeliveryRow
+	NextCursor   string // unix-seconds cursor for the [older] pager link ("" = no more)
+}
+
+// triggersDeliveries renders GET .../settings/triggers/deliveries?trigger=<id>[&status=][&before=].
+func (s *server) triggersDeliveries(w http.ResponseWriter, r *http.Request, sr settingsRoute) {
+	if s.triggers == nil {
+		s.renderError(w, r, http.StatusNotFound, "not found")
+		return
+	}
+	if r.Method != http.MethodGet {
+		s.renderError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	tr, ok := s.ownTriggerOr404(w, r, sr, r.URL.Query().Get("trigger"))
+	if !ok {
+		return
+	}
+	// status filter: allow only the known terminal/in-progress states; an
+	// unrecognized value falls back to "" (all) rather than 400.
+	status := r.URL.Query().Get("status")
+	switch status {
+	case "", "pending", "in_flight", "delivered", "dead_letter":
+	default:
+		status = ""
+	}
+	// before cursor: unix seconds → time; parse errors yield the zero time
+	// (which ListDeliveriesPage treats as "from the newest").
+	var before time.Time
+	if raw := r.URL.Query().Get("before"); raw != "" {
+		if sec, err := strconv.ParseInt(raw, 10, 64); err == nil {
+			before = time.Unix(sec, 0)
+		}
+	}
+	ctx := r.Context()
+	ds, err := s.triggers.ListDeliveriesPage(ctx, tr.ID, status, before, triggerDeliveriesPageSize)
+	if err != nil {
+		s.logger.Error("triggers: list deliveries", "trigger_id", tr.ID, "err", err)
+		s.renderError(w, r, http.StatusInternalServerError, "internal error")
+		return
+	}
+	recent, err := s.triggers.RecentDeliveryIDs(ctx, tr.ID, triggerReplayWindow)
+	if err != nil {
+		s.logger.Error("triggers: recent delivery ids", "trigger_id", tr.ID, "err", err)
+		s.renderError(w, r, http.StatusInternalServerError, "internal error")
+		return
+	}
+	recentSet := make(map[string]struct{}, len(recent))
+	for _, id := range recent {
+		recentSet[id] = struct{}{}
+	}
+	now := time.Now()
+	rows := make([]triggerDeliveryRow, 0, len(ds))
+	for _, d := range ds {
+		_, replayable := recentSet[d.ID]
+		rows = append(rows, triggerDeliveryRow{
+			Delivery:       d,
+			CreatedRel:     relTimeAt(now, d.CreatedAt.Unix()),
+			LastErrorTrunc: truncateRunes(d.LastError, 80),
+			Replayable:     replayable,
+		})
+	}
+	nextCursor := ""
+	if len(ds) == triggerDeliveriesPageSize {
+		nextCursor = strconv.FormatInt(ds[len(ds)-1].CreatedAt.Unix(), 10)
+	}
+	data := triggerDeliveriesData{
+		base:       base{Session: SessionFromContext(ctx), CSRF: issueCSRF(w, requestIsTLS(r, s.trustProxy)), Flash: takeFlash(w, r)},
+		Tenant:     sr.tenant,
+		Repo:       sr.repo,
+		IsAdmin:    isGlobalAdmin(r),
+		Trigger:    tr,
+		Status:     status,
+		Deliveries: rows,
+		NextCursor: nextCursor,
+	}
+	if err := s.renderBuffered(w, "reposettings_triggers_deliveries.html", data); err != nil {
+		s.renderError(w, r, http.StatusInternalServerError, "render error")
+		return
+	}
+	EmitRequestMetric(ctx, s.logger, "reposettings_triggers_deliveries", http.StatusOK)
+}
+
+// triggersReplay processes POST .../settings/triggers/replay. Replay is bounded
+// to the most-recent triggerReplayWindow deliveries, enforced SERVER-SIDE here
+// (the template merely hides the button; a hand-crafted POST for an
+// out-of-window delivery is rejected). Two ownership gates apply: the posted
+// trigger_id must belong to this (tenant, repo), and the posted delivery must
+// belong to that trigger — a foreign delivery is indistinguishable from missing.
 func (s *server) triggersReplay(w http.ResponseWriter, r *http.Request, sr settingsRoute) {
-	s.renderError(w, r, http.StatusNotFound, "not found")
+	if s.triggers == nil {
+		s.renderError(w, r, http.StatusNotFound, "not found")
+		return
+	}
+	if !s.postGuard(w, r) {
+		return
+	}
+	tr, ok := s.ownTriggerOr404(w, r, sr, r.PostFormValue("trigger_id"))
+	if !ok {
+		return
+	}
+	deliveryID := r.PostFormValue("delivery_id")
+	if deliveryID == "" {
+		s.renderError(w, r, http.StatusNotFound, "not found")
+		return
+	}
+	ctx := r.Context()
+	// Cross-trigger guard: bind the delivery to the owned trigger. A 404 here
+	// hides no-such-delivery and foreign-delivery (cross-trigger/repo/tenant)
+	// alike, so ReplayDelivery (which checks only status, not ownership) can
+	// never be reached for a delivery the actor does not own.
+	d, err := s.triggers.GetDelivery(ctx, deliveryID)
+	if err != nil || d.TriggerID != tr.ID {
+		if err != nil && !errors.Is(err, buildtrigger.ErrNotFound) {
+			s.logger.Error("triggers replay: get delivery", "delivery_id", deliveryID, "err", err)
+		}
+		s.renderError(w, r, http.StatusNotFound, "not found")
+		return
+	}
+	backURL := sr.triggerDeliveriesURL(tr.ID)
+	// Authoritative bounded-window check (server-side; the button-hiding in the
+	// template is advisory only).
+	recent, err := s.triggers.RecentDeliveryIDs(ctx, tr.ID, triggerReplayWindow)
+	if err != nil {
+		s.logger.Error("triggers replay: recent delivery ids", "trigger_id", tr.ID, "err", err)
+		s.renderError(w, r, http.StatusInternalServerError, "internal error")
+		return
+	}
+	inWindow := false
+	for _, id := range recent {
+		if id == deliveryID {
+			inWindow = true
+			break
+		}
+	}
+	if !inWindow {
+		EmitAdminActionMetric(ctx, s.logger, "trigger", "delivery_replay", "invalid")
+		s.redirectFlash(w, r, backURL, "only the 10 most recent deliveries can be replayed")
+		return
+	}
+	if err := s.triggers.ReplayDelivery(ctx, deliveryID); err != nil {
+		if errors.Is(err, buildtrigger.ErrReplayInFlight) {
+			EmitAdminActionMetric(ctx, s.logger, "trigger", "delivery_replay", "invalid")
+			s.redirectFlash(w, r, backURL, "delivery attempt in progress; try again shortly")
+			return
+		}
+		if errors.Is(err, buildtrigger.ErrNotFound) {
+			s.renderError(w, r, http.StatusNotFound, "not found")
+			return
+		}
+		s.logger.Error("triggers: replay delivery", "delivery_id", deliveryID, "err", err)
+		EmitAdminActionMetric(ctx, s.logger, "trigger", "delivery_replay", "error")
+		s.redirectFlash(w, r, backURL, "replay failed (internal error); see server log")
+		return
+	}
+	s.emitAdmin(ctx, "buildtrigger.delivery_replayed",
+		slog.String("tenant", sr.tenant), slog.String("repo", sr.repo),
+		slog.String("trigger_id", tr.ID), slog.String("delivery_id", deliveryID))
+	EmitAdminActionMetric(ctx, s.logger, "trigger", "delivery_replay", "ok")
+	s.redirectFlash(w, r, backURL, "delivery queued for replay")
 }
