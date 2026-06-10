@@ -305,6 +305,46 @@ func (s *Service) Edit(ctx context.Context, id string, in EditInput) (Trigger, e
 	return s.Get(ctx, id)
 }
 
+// RotateSecret regenerates the HMAC shared secret for a generic/cloudbuild
+// trigger and returns it once. Errors with ErrInvalidInput for kinds with no
+// server-owned secret (codebuild/azurepipelines use connector creds;
+// azurewebhook's secret is operator-supplied). Returns ErrNotFound if absent.
+func (s *Service) RotateSecret(ctx context.Context, id string) (string, error) {
+	var kind string
+	var configJSON []byte
+	err := s.db.QueryRowContext(ctx,
+		`SELECT kind, config_json FROM build_triggers WHERE id=?`, id).Scan(&kind, &configJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("buildtrigger: rotate %s read: %w", id, err)
+	}
+	if Kind(kind) != KindGeneric && Kind(kind) != KindCloudBuild {
+		return "", fmt.Errorf("%w: rotate-secret only applies to generic/cloudbuild triggers", ErrInvalidInput)
+	}
+	var cfg Config
+	if len(configJSON) > 0 {
+		if err := json.Unmarshal(configJSON, &cfg); err != nil {
+			return "", fmt.Errorf("buildtrigger: rotate %s decode config: %w", id, err)
+		}
+	}
+	secret, err := generateSecret()
+	if err != nil {
+		return "", fmt.Errorf("buildtrigger: generate secret: %w", err)
+	}
+	cfg.Secret = secret
+	newJSON, err := json.Marshal(cfg)
+	if err != nil {
+		return "", fmt.Errorf("buildtrigger: rotate %s marshal config: %w", id, err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE build_triggers SET config_json=? WHERE id=?`, newJSON, id); err != nil {
+		return "", fmt.Errorf("buildtrigger: rotate %s update: %w", id, err)
+	}
+	return secret, nil
+}
+
 // Remove deletes a trigger by id. Returns ErrNotFound if no row matched.
 func (s *Service) Remove(ctx context.Context, id string) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM build_triggers WHERE id=?`, id)
