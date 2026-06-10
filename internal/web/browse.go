@@ -47,7 +47,7 @@ func parseBrowsePath(p string) (browseRoute, bool) {
 		return browseRoute{}, false // "//"-style path: not a route
 	}
 	switch br.verb {
-	case "tree", "blob", "raw", "commits", "commit":
+	case "tree", "blob", "raw", "commits", "commit", "compare":
 	default:
 		return browseRoute{}, false
 	}
@@ -104,6 +104,8 @@ func (s *server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		s.handleCommits(w, r, br)
 	case "commit":
 		s.handleCommit(w, r, br)
+	case "compare":
+		s.handleCompare(w, r, br)
 	default:
 		s.renderError(w, r, http.StatusNotFound, "not found")
 	}
@@ -333,15 +335,15 @@ func (s *server) handleCommits(w http.ResponseWriter, r *http.Request, br browse
 		s.browseError(w, r, err)
 		return
 	}
-	if res.Path != "" {
-		// Path-filtered log is a deferred feature; generated links never carry
-		// a path here. 404 rather than silently returning unfiltered history.
-		s.renderError(w, r, http.StatusNotFound, "not found")
-		return
-	}
 	const pageSize = 50
 	page := queryPage(r)
-	commits, more, err := s.content.Log(r.Context(), br.tenant, br.repo, res.OID, page*pageSize, pageSize)
+	var commits []browsemodel.CommitMeta
+	var more bool
+	if res.Path != "" {
+		commits, more, err = s.content.LogPath(r.Context(), br.tenant, br.repo, res.OID, res.Path, page*pageSize, pageSize)
+	} else {
+		commits, more, err = s.content.Log(r.Context(), br.tenant, br.repo, res.OID, page*pageSize, pageSize)
+	}
 	if err != nil {
 		s.browseError(w, r, err)
 		return
@@ -351,6 +353,7 @@ func (s *server) handleCommits(w http.ResponseWriter, r *http.Request, br browse
 		Commits:      commits,
 		Page:         page,
 		HasMore:      more,
+		Path:         res.Path,
 	})
 }
 
@@ -368,6 +371,91 @@ func (s *server) handleCommit(w http.ResponseWriter, r *http.Request, br browseR
 	s.renderBrowse(w, r, "commit.html", commitData{
 		browseHeader: s.header(w, r, br, browsemodel.Refs{}, "", detail.Meta.OID),
 		Detail:       detail,
+	})
+}
+
+// compareData is the view-model for the Compare picker + result page.
+type compareData struct {
+	browseHeader
+	Base      string
+	Head      string
+	HasResult bool
+	Cmp       browsemodel.Comparison
+}
+
+// handleCompare serves both the picker page ("/compare", a no-JS GET form that
+// 303-redirects to the canonical URL) and the result page
+// ("/compare/<base>..<head>", which resolves both sides and renders the diff).
+func (s *server) handleCompare(w http.ResponseWriter, r *http.Request, br browseRoute) {
+	refs, err := s.content.ListRefs(r.Context(), br.tenant, br.repo)
+	if err != nil {
+		s.browseError(w, r, err)
+		return
+	}
+	rest := strings.Trim(br.rest, "/")
+
+	if rest == "" {
+		base := r.URL.Query().Get("base")
+		head := r.URL.Query().Get("head")
+		if base != "" && head != "" {
+			http.Redirect(w, r, "/"+br.tenant+"/"+br.repo+"/compare/"+base+".."+head, http.StatusSeeOther)
+			return
+		}
+		if base == "" {
+			base = refs.Default
+		}
+		if head == "" {
+			head = refs.Default
+		}
+		s.renderBrowse(w, r, "compare.html", compareData{
+			browseHeader: s.header(w, r, br, refs, refs.Default, ""),
+			Base:         base,
+			Head:         head,
+		})
+		return
+	}
+
+	i := strings.Index(rest, "..")
+	if i < 0 {
+		s.renderError(w, r, http.StatusNotFound, "not found")
+		return
+	}
+	baseSpec, headSpec := rest[:i], rest[i+2:]
+	if baseSpec == "" || headSpec == "" {
+		s.renderError(w, r, http.StatusNotFound, "not found")
+		return
+	}
+	resolveSide := func(spec string) (browsemodel.Resolved, bool) {
+		res, rerr := browsemodel.ResolveRest(refs, spec)
+		if rerr != nil {
+			s.browseError(w, r, rerr)
+			return res, false
+		}
+		if res.Path != "" {
+			s.renderError(w, r, http.StatusNotFound, "not found")
+			return res, false
+		}
+		return res, true
+	}
+	resBase, ok := resolveSide(baseSpec)
+	if !ok {
+		return
+	}
+	resHead, ok := resolveSide(headSpec)
+	if !ok {
+		return
+	}
+	cmp, err := s.content.Compare(r.Context(), br.tenant, br.repo, resBase.OID, resHead.OID)
+	if err != nil {
+		s.browseError(w, r, err)
+		return
+	}
+	s.renderBrowse(w, r, "compare.html", compareData{
+		browseHeader: s.header(w, r, br, refs, "", ""),
+		Base:         baseSpec,
+		Head:         headSpec,
+		HasResult:    true,
+		Cmp:          cmp,
 	})
 }
 

@@ -257,3 +257,266 @@ func TestLogNameStatus_RejectsBadArgs(t *testing.T) {
 		t.Fatal("flag-like scope path accepted")
 	}
 }
+
+// TestDiffRefsPatch_TwoDot creates two commits (c1: a.txt="one\n", c2:
+// a.txt="two\n") and verifies that DiffRefsPatch returns a unified patch
+// containing a/a.txt, a removal of "one", and an addition of "two".
+func TestDiffRefsPatch_TwoDot(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	tmp := t.TempDir()
+	bare := filepath.Join(tmp, "r.git")
+	work := filepath.Join(tmp, "work")
+
+	mustRun := func(dir string, args ...string) {
+		c := exec.Command("git", args...)
+		c.Dir = dir
+		c.Env = append(scrubGitRepoEnv(os.Environ()),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+		)
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	capture := func(dir string, args ...string) string {
+		c := exec.Command("git", args...)
+		c.Dir = dir
+		c.Env = scrubGitRepoEnv(os.Environ())
+		out, err := c.Output()
+		if err != nil {
+			t.Fatalf("git %s: %v", strings.Join(args, " "), err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+
+	mustRun("", "init", "-q", "-b", "main", work)
+	mustRun(work, "config", "commit.gpgsign", "false")
+
+	// c1: add a.txt="one\n"
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(work, "add", ".")
+	mustRun(work, "commit", "-q", "-m", "c1")
+	c1 := capture(work, "rev-parse", "HEAD")
+
+	// c2: modify a.txt="two\n"
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(work, "add", ".")
+	mustRun(work, "commit", "-q", "-m", "c2")
+	c2 := capture(work, "rev-parse", "HEAD")
+
+	// Clone to bare.
+	mustRun("", "clone", "-q", "--bare", work, bare)
+
+	ctx := context.Background()
+	patch, err := DiffRefsPatch(ctx, bare, c1, c2)
+	if err != nil {
+		t.Fatalf("DiffRefsPatch: %v", err)
+	}
+	s := string(patch)
+	if !strings.Contains(s, "a/a.txt") {
+		t.Errorf("patch missing a/a.txt: %q", s)
+	}
+	if !strings.Contains(s, "-one") {
+		t.Errorf("patch missing -one: %q", s)
+	}
+	if !strings.Contains(s, "+two") {
+		t.Errorf("patch missing +two: %q", s)
+	}
+}
+
+// TestDiffRefsPatch_InvalidRef asserts that a leading-dash base is rejected
+// before git is invoked.
+func TestDiffRefsPatch_InvalidRef(t *testing.T) {
+	tmp := t.TempDir()
+	if _, err := DiffRefsPatch(context.Background(), tmp, "-x", "main"); err == nil {
+		t.Fatal("expected error for leading-dash base ref")
+	}
+}
+
+// makeHistoryRepo builds a non-bare working repo with two commits:
+//   - c1 adds a.txt="1\n" and b.txt="x\n"
+//   - c2 modifies a.txt="2\n" (b.txt unchanged)
+//
+// Returns (workDir, c1OID, c2OID). The repo is a plain working tree so
+// callers can stage/modify files across commits.
+func makeHistoryRepo(t *testing.T) (dir, c1, c2 string) {
+	t.Helper()
+	skipIfNoGit(t)
+	work := t.TempDir()
+
+	mustRun := func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = work
+		c.Env = append(scrubGitRepoEnv(os.Environ()),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+		)
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	capture := func(args ...string) string {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = work
+		c.Env = scrubGitRepoEnv(os.Environ())
+		out, err := c.Output()
+		if err != nil {
+			t.Fatalf("git %s: %v", strings.Join(args, " "), err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+
+	mustRun("init", "-q", "-b", "main")
+	mustRun("config", "commit.gpgsign", "false")
+
+	// c1: add a.txt + b.txt
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "b.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun("add", ".")
+	mustRun("commit", "-q", "-m", "c1")
+	c1 = capture("rev-parse", "HEAD")
+
+	// c2: modify a.txt only
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun("add", "a.txt")
+	mustRun("commit", "-q", "-m", "c2")
+	c2 = capture("rev-parse", "HEAD")
+
+	return work, c1, c2
+}
+
+func TestLogRawPath_ScopesToPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir, _, _ := makeHistoryRepo(t)
+
+	raw, err := LogRawPath(context.Background(), dir, "HEAD", "a.txt", false, 0, 10)
+	if err != nil {
+		t.Fatalf("LogRawPath a.txt: %v", err)
+	}
+	if got := strings.Count(string(raw), "\x1e"); got != 2 {
+		t.Fatalf("want 2 records for a.txt, got %d: %q", got, raw)
+	}
+
+	rawB, err := LogRawPath(context.Background(), dir, "HEAD", "b.txt", false, 0, 10)
+	if err != nil {
+		t.Fatalf("LogRawPath b.txt: %v", err)
+	}
+	if got := strings.Count(string(rawB), "\x1e"); got != 1 {
+		t.Fatalf("want 1 record for b.txt, got %d", got)
+	}
+}
+
+func TestLogRawPath_InvalidPath(t *testing.T) {
+	if _, err := LogRawPath(context.Background(), t.TempDir(), "HEAD", "-flag", false, 0, 10); err == nil {
+		t.Fatal("want error for leading-dash path")
+	}
+}
+
+// TestLogRawPath_LiteralPathspec guards the --literal-pathspecs flag: a file
+// literally named "a?.txt" must be matched as a literal path, not as a glob
+// that would also catch "ab.txt". validRevPath permits glob metachars in
+// filenames, so without --literal-pathspecs git would treat "a?.txt" as a
+// pathspec pattern.
+func TestLogRawPath_LiteralPathspec(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	skipIfNoGit(t)
+	work := t.TempDir()
+
+	// Creating a file whose name contains '?' fails on filesystems that reject
+	// the character (e.g. some network mounts); skip the assertion there rather
+	// than fail. The --literal-pathspecs flag is exercised by the live git run.
+	glob := filepath.Join(work, "a?.txt")
+	if err := os.WriteFile(glob, []byte("g\n"), 0o644); err != nil {
+		t.Skipf("cannot create file named a?.txt on this filesystem: %v", err)
+	}
+
+	mustRun := func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = work
+		c.Env = append(scrubGitRepoEnv(os.Environ()),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+		)
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	mustRun("init", "-q", "-b", "main")
+	mustRun("config", "commit.gpgsign", "false")
+
+	// c1: add literal "a?.txt" only.
+	mustRun("add", "--", "a?.txt")
+	mustRun("commit", "-q", "-m", "c1 add a?.txt")
+
+	// c2: add "ab.txt" (would be caught by the glob a?.txt without --literal-pathspecs).
+	if err := os.WriteFile(filepath.Join(work, "ab.txt"), []byte("b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun("add", "ab.txt")
+	mustRun("commit", "-q", "-m", "c2 add ab.txt")
+
+	raw, err := LogRawPath(context.Background(), work, "HEAD", "a?.txt", false, 0, 10)
+	if err != nil {
+		t.Fatalf("LogRawPath a?.txt: %v", err)
+	}
+	if got := strings.Count(string(raw), "\x1e"); got != 1 {
+		t.Fatalf("want exactly 1 record for literal a?.txt (not the ab.txt glob match), got %d: %q", got, raw)
+	}
+}
+
+func TestPathKind(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	// Build a working repo with a commit that has dir/a.txt.
+	work := t.TempDir()
+	mustRun := func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = work
+		c.Env = append(scrubGitRepoEnv(os.Environ()),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+		)
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	mustRun("init", "-q", "-b", "main")
+	mustRun("config", "commit.gpgsign", "false")
+	if err := os.MkdirAll(filepath.Join(work, "dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "dir", "a.txt"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun("add", ".")
+	mustRun("commit", "-q", "-m", "init")
+
+	if k, err := PathKind(context.Background(), work, "HEAD", "dir/a.txt"); err != nil || k != "blob" {
+		t.Fatalf("file kind = %q, %v; want blob", k, err)
+	}
+	if k, err := PathKind(context.Background(), work, "HEAD", "dir"); err != nil || k != "tree" {
+		t.Fatalf("dir kind = %q, %v; want tree", k, err)
+	}
+}

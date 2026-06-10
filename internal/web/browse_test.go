@@ -147,7 +147,12 @@ type fakeContent struct {
 	log      []browsemodel.CommitMeta
 	more     bool
 	commit   browsemodel.CommitDetail
+	compare  browsemodel.Comparison
 	activity map[string]browsemodel.CommitMeta
+
+	logPath       []browsemodel.CommitMeta
+	logPathMore   bool
+	logPathCalled bool
 }
 
 func (f *fakeContent) ListRefs(ctx context.Context, t, r string) (browsemodel.Refs, error) {
@@ -182,6 +187,19 @@ func (f *fakeContent) Commit(ctx context.Context, t, r, oid string) (browsemodel
 }
 func (f *fakeContent) TreeActivity(ctx context.Context, t, r, oid, p string) (map[string]browsemodel.CommitMeta, error) {
 	return f.activity, nil
+}
+func (f *fakeContent) Compare(ctx context.Context, t, r, baseOID, headOID string) (browsemodel.Comparison, error) {
+	if f.warm {
+		return browsemodel.Comparison{}, browsemodel.ErrWarming
+	}
+	return f.compare, nil
+}
+func (f *fakeContent) LogPath(ctx context.Context, t, r, oid, p string, off, lim int) ([]browsemodel.CommitMeta, bool, error) {
+	f.logPathCalled = true
+	if f.warm {
+		return nil, false, browsemodel.ErrWarming
+	}
+	return f.logPath, f.logPathMore, nil
 }
 
 func newBrowseServer(content ContentStore, visible map[string]bool) http.Handler {
@@ -367,6 +385,100 @@ func TestCommits_ListAndPaging(t *testing.T) {
 	}
 }
 
+func TestCommits_PerFileHistory(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+		logPath: []browsemodel.CommitMeta{
+			{OID: "c2", ShortOID: "c2", Summary: "edit a", AuthorName: "Ann"},
+			{OID: "c1", ShortOID: "c1", Summary: "add a", AuthorName: "Ann"},
+		},
+		logPathMore: true,
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/commits/main/src/a.go", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if rec.Code != 200 {
+		t.Fatalf("status %d body=%s", rec.Code, body)
+	}
+	if !content.logPathCalled {
+		t.Fatal("LogPath was not called for a path-scoped commits URL")
+	}
+	if !strings.Contains(body, "history: src/a.go") {
+		t.Fatalf("missing history heading: %s", body)
+	}
+	if !strings.Contains(body, "/acme/demo/commits/main/src/a.go?page=1") {
+		t.Fatalf("pager link missing path: %s", body)
+	}
+}
+
+func TestCommits_PerFileHistory_EmptyState(t *testing.T) {
+	content := &fakeContent{
+		refs:    browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+		logPath: nil, // no history for this path (e.g. a stale/past-end page or missing file)
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/commits/main/src/missing.go", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if rec.Code != 200 {
+		t.Fatalf("status %d body=%s", rec.Code, body)
+	}
+	if !strings.Contains(body, "no history for this path.") {
+		t.Fatalf("missing path-scoped empty-state message: %s", body)
+	}
+}
+
+func TestBlob_HasHistoryLink(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+		blob: browsemodel.Blob{Path: "src/a.go", Size: 12, Bytes: []byte("package main")},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/blob/main/src/a.go", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, "/acme/demo/commits/main/src/a.go") {
+		t.Fatalf("blob missing history link: %s", body)
+	}
+}
+
+func TestTree_HasHistoryLink(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+		tree: []browsemodel.TreeEntry{{Name: "a.go", Path: "a.go", Type: "blob", OID: "y"}},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/tree/main", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, "/acme/demo/commits/main") {
+		t.Fatalf("tree missing history link: %s", body)
+	}
+}
+
+func TestTree_HasHistoryLink_SubPath(t *testing.T) {
+	content := &fakeContent{
+		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
+		tree: []browsemodel.TreeEntry{{Name: "a.go", Path: "src/a.go", Type: "blob", OID: "y"}},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/tree/main/src", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if rec.Code != 200 {
+		t.Fatalf("status %d body=%s", rec.Code, body)
+	}
+	if !strings.Contains(body, "/commits/main/src") {
+		t.Fatalf("subdir tree missing path-suffixed history link: %s", body)
+	}
+}
+
 func TestCommit_RendersDiff(t *testing.T) {
 	content := &fakeContent{
 		commit: browsemodel.CommitDetail{
@@ -488,19 +600,6 @@ func TestChromaCSSRoute(t *testing.T) {
 	}
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/css") {
 		t.Fatalf("content-type = %q", ct)
-	}
-}
-
-func TestCommits_PathFilteredIs404(t *testing.T) {
-	content := &fakeContent{
-		refs: browsemodel.Refs{Default: "main", Branches: []browsemodel.RefInfo{{Name: "main", OID: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}}},
-	}
-	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
-	req := httptest.NewRequest("GET", "/acme/demo/commits/main/sub", nil)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("path-filtered commits should 404 (deferred feature), got %d", rec.Code)
 	}
 }
 
@@ -780,5 +879,118 @@ func TestTreeSubdir_NoReadme(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if strings.Contains(rec.Body.String(), "Sub Readme") {
 		t.Fatalf("subdirectory tree should not render README: %s", rec.Body.String())
+	}
+}
+
+// compareRefs is a refs fixture for compare tests: default "main", branches
+// main/feature, tag v1, each pointing at a distinct well-formed 40-hex OID so
+// ResolveRest resolves them by name.
+func compareRefs() browsemodel.Refs {
+	return browsemodel.Refs{
+		Default: "main",
+		Branches: []browsemodel.RefInfo{
+			{Name: "main", OID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+			{Name: "feature", OID: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+		},
+		Tags: []browsemodel.RefInfo{
+			{Name: "v1", OID: "cccccccccccccccccccccccccccccccccccccccc"},
+		},
+	}
+}
+
+func compareGet(t *testing.T, path string) (string, int) {
+	t.Helper()
+	content := &fakeContent{refs: compareRefs()}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", path, nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec.Body.String(), rec.Code
+}
+
+func TestComparePicker_RendersRefs(t *testing.T) {
+	body, code := compareGet(t, "/acme/demo/compare")
+	if code != 200 {
+		t.Fatalf("status %d", code)
+	}
+	for _, want := range []string{"feature", "v1", `name="base"`, `name="head"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("picker missing %q: %s", want, body)
+		}
+	}
+}
+
+func TestCompareResult_RendersDiff(t *testing.T) {
+	content := &fakeContent{
+		refs: compareRefs(),
+		compare: browsemodel.Comparison{
+			Files:     []browsemodel.FileDiff{{Status: "A", NewPath: "c.txt", Additions: 3}},
+			Additions: 3,
+		},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/compare/main..feature", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body, code := rec.Body.String(), rec.Code
+	if code != 200 {
+		t.Fatalf("status %d", code)
+	}
+	for _, want := range []string{"main..feature", "c.txt", `class="filediff"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("compare result missing %q: %s", want, body)
+		}
+	}
+}
+
+func TestCompare_BadRef404(t *testing.T) {
+	_, code := compareGet(t, "/acme/demo/compare/main..nope")
+	if code != 404 {
+		t.Fatalf("want 404 for unknown head, got %d", code)
+	}
+}
+
+func TestCompare_MissingSeparator404(t *testing.T) {
+	_, code := compareGet(t, "/acme/demo/compare/mainfeature")
+	if code != 404 {
+		t.Fatalf("want 404 for missing '..', got %d", code)
+	}
+}
+
+func TestComparePickerSubmit_Redirects(t *testing.T) {
+	content := &fakeContent{refs: compareRefs()}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/compare?base=main&head=feature", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("want 303, got %d", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "/acme/demo/compare/main..feature" {
+		t.Fatalf("bad redirect: %q", loc)
+	}
+}
+
+// TestCompare_TruncatedEmptyShowsNotice verifies that when Truncated=true and
+// Files is nil (byte cap hit before the first file completed), the page shows
+// the truncation notice and does NOT show "no differences."
+func TestCompare_TruncatedEmptyShowsNotice(t *testing.T) {
+	content := &fakeContent{
+		refs:    compareRefs(),
+		compare: browsemodel.Comparison{Files: nil, Truncated: true},
+	}
+	h := newBrowseServer(content, map[string]bool{"acme/demo": true})
+	req := httptest.NewRequest("GET", "/acme/demo/compare/main..feature", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if rec.Code != 200 {
+		t.Fatalf("status %d body=%s", rec.Code, body)
+	}
+	if !strings.Contains(body, "diff truncated") {
+		t.Fatalf("expected truncation notice, body: %s", body)
+	}
+	if strings.Contains(body, "no differences") {
+		t.Fatalf("must not show 'no differences' when truncated, body: %s", body)
 	}
 }

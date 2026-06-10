@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
+	"github.com/bucketvcs/bucketvcs/internal/browsemodel"
 )
 
 func TestRenderLanding_Embedded(t *testing.T) {
@@ -93,5 +94,48 @@ func TestRenderLanding_DiskOverride(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "HOTRELOAD-MARKER") {
 		t.Fatalf("disk override did not hot-reload:\n%s", buf.String())
+	}
+}
+
+func TestCommitHTML_RendersFileDiff(t *testing.T) {
+	r, err := newRenderer("")
+	if err != nil {
+		t.Fatalf("newRenderer: %v", err)
+	}
+	d := commitData{
+		browseHeader: browseHeader{Tenant: "acme", Repo: "demo"},
+		Detail: browsemodel.CommitDetail{
+			Meta: browsemodel.CommitMeta{
+				Summary:     "s",
+				ShortOID:    "abc123",
+				AuthorName:  "a",
+				AuthorEmail: "e",
+				AuthorTime:  1700000000,
+			},
+			Message: "m",
+			Files: []browsemodel.FileDiff{{
+				Status:    "M",
+				NewPath:   "a.txt",
+				Additions: 1,
+				Deletions: 1,
+				Hunks: []browsemodel.Hunk{{
+					Header: "@@ -1 +1 @@",
+					Lines: []browsemodel.DiffLine{
+						{Kind: '-', Text: "old"},
+						{Kind: '+', Text: "new"},
+					},
+				}},
+			}},
+		},
+	}
+	var buf bytes.Buffer
+	if err := r.render(&buf, "commit.html", d); err != nil {
+		t.Fatalf("render commit.html: %v", err)
+	}
+	body := buf.String()
+	for _, want := range []string{`class="filediff"`, "M a.txt (+1 -1)", `class="hunk"`, "@@ -1", "-old", "&#43;new"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("commit.html missing %q:\n%s", want, body)
+		}
 	}
 }

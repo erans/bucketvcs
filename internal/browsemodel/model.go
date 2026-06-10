@@ -107,6 +107,15 @@ type CommitDetail struct {
 	Truncated bool // diff exceeded the file cap; Files is partial
 }
 
+// Comparison is a two-dot diff (base..head) between two commits. Files reuses
+// the per-commit FileDiff shape; Additions/Deletions are repo-wide totals.
+type Comparison struct {
+	Files     []FileDiff
+	Additions int
+	Deletions int
+	Truncated bool // diff exceeded the byte cap; Files is partial
+}
+
 // IsHex40 reports whether s is exactly 40 hex characters (a full git OID).
 func IsHex40(s string) bool {
 	if len(s) != 40 {

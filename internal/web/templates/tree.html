@@ -6,7 +6,7 @@
     {{if .Refs.Branches}}branches: {{range .Refs.Branches}}<a href="/{{$.Tenant}}/{{$.Repo}}/tree/{{urlpath .Name}}">{{.Name}}</a> {{end}}{{end}}
     {{if .Refs.Tags}}&nbsp;&middot;&nbsp;tags: {{range .Refs.Tags}}<a href="/{{$.Tenant}}/{{$.Repo}}/tree/{{urlpath .Name}}">{{.Name}}</a> {{end}}{{end}}
   </div>
-  <div class="path"><a href="/{{.Tenant}}/{{.Repo}}/tree/{{urlpath .RefOrOID}}/">/</a>{{if .Path}}{{.Path}}{{end}}</div>
+  <div class="path"><a href="/{{.Tenant}}/{{.Repo}}/tree/{{urlpath .RefOrOID}}/">/</a>{{if .Path}}{{.Path}}{{end}} &nbsp;<a href="/{{.Tenant}}/{{.Repo}}/commits/{{urlpath .RefOrOID}}{{if .Path}}/{{urlpath .Path}}{{end}}">[history]</a></div>
   {{template "treeRows" .}}
 </div>
 {{end}}
