@@ -47,6 +47,46 @@ func (s *Service) Log(ctx context.Context, tenant, repoID, oid string, offset, l
 	return metas, more, nil
 }
 
+// LogPath returns one page of commits touching path, reachable from oid. It
+// mirrors Log's pagination. Rename-following (git --follow) is enabled only
+// when path resolves to a single blob; for directories or an undeterminable
+// kind it is omitted (git --follow is single-file only).
+func (s *Service) LogPath(ctx context.Context, tenant, repoID, oid, path string, offset, limit int) ([]browsemodel.CommitMeta, bool, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > MaxLogLimit {
+		limit = MaxLogLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	m, release, err := s.openMirror(ctx, tenant, repoID)
+	if err != nil {
+		return nil, false, err
+	}
+	defer release()
+
+	follow := false
+	if kind, kerr := gitcli.PathKind(ctx, m.BareDir(), oid, path); kerr == nil && kind == "blob" {
+		follow = true
+	}
+	raw, err := gitcli.LogRawPath(ctx, m.BareDir(), oid, path, follow, offset, limit+1)
+	if err != nil {
+		return nil, false, err
+	}
+	metas, err := parseLog(raw)
+	if err != nil {
+		return nil, false, err
+	}
+	more := false
+	if len(metas) > limit {
+		more = true
+		metas = metas[:limit]
+	}
+	return metas, more, nil
+}
+
 // parseLog parses the 0x1e-record / 0x1f-field format emitted by gitcli.LogRaw.
 func parseLog(raw []byte) ([]browsemodel.CommitMeta, error) {
 	var out []browsemodel.CommitMeta
