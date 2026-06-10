@@ -249,6 +249,46 @@ func TestTriggerEdit_NotFoundExit1(t *testing.T) {
 	}
 }
 
+func TestTriggerRotateSecret(t *testing.T) {
+	authDB := setupAuthDBForBuild(t, "acme", "app")
+	var addOut, addErr bytes.Buffer
+	if code := runBuild(context.Background(), []string{
+		"trigger", "add", "--auth-db=" + authDB, "--tenant=acme", "--repo=app",
+		"--name=ci", "--kind=generic", "--url=https://example.com/h",
+	}, &addOut, &addErr); code != 0 {
+		t.Fatalf("add: code=%d err=%s", code, addErr.String())
+	}
+	id := extractKV(t, addOut.String(), "trigger_id=")
+	var out, errb bytes.Buffer
+	if code := runBuild(context.Background(), []string{
+		"trigger", "rotate-secret", "--auth-db=" + authDB, "--id=" + id,
+	}, &out, &errb); code != 0 {
+		t.Fatalf("rotate: code=%d err=%s", code, errb.String())
+	}
+	if !strings.Contains(out.String(), "secret=") {
+		t.Errorf("rotate output missing secret=: %s", out.String())
+	}
+}
+
+func TestTriggerRotateSecret_CodeBuildExit2(t *testing.T) {
+	authDB := setupAuthDBForBuild(t, "acme", "app")
+	var addOut, addErr bytes.Buffer
+	if code := runBuild(context.Background(), []string{
+		"trigger", "add", "--auth-db=" + authDB, "--tenant=acme", "--repo=app",
+		"--name=cb", "--kind=codebuild", "--aws-region=us-east-1", "--aws-project=p",
+	}, &addOut, &addErr); code != 0 {
+		t.Fatalf("add codebuild: code=%d err=%s", code, addErr.String())
+	}
+	id := extractKV(t, addOut.String(), "trigger_id=")
+	var out, errb bytes.Buffer
+	code := runBuild(context.Background(), []string{
+		"trigger", "rotate-secret", "--auth-db=" + authDB, "--id=" + id,
+	}, &out, &errb)
+	if code != 2 { // ErrInvalidInput → exit 2
+		t.Fatalf("want exit 2 for codebuild rotate, got %d (err=%s)", code, errb.String())
+	}
+}
+
 // extractKV pulls the whitespace-delimited value following key (e.g. "id=") out
 // of the first line that contains it.
 func extractKV(t *testing.T, out, key string) string {

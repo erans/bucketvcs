@@ -623,8 +623,34 @@ func runBuildTriggerEdit(ctx context.Context, args []string, stdout, stderr io.W
 	return 0
 }
 
-// runBuildTriggerRotateSecret is a temporary stub replaced in a later task.
 func runBuildTriggerRotateSecret(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	fmt.Fprintln(stderr, "build trigger rotate-secret: not yet implemented")
-	return 2
+	fs := flag.NewFlagSet("build trigger rotate-secret", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	authDB := fs.String("auth-db", "", "Path to authdb (required)")
+	id := fs.String("id", "", "Trigger id (required)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *authDB == "" || *id == "" {
+		fmt.Fprintln(stderr, "build trigger rotate-secret: --auth-db, --id required")
+		return 2
+	}
+	svc, store, err := openBuildSvc(*authDB)
+	if err != nil {
+		fmt.Fprintf(stderr, "build trigger rotate-secret: %v\n", err)
+		return 1
+	}
+	defer store.Close()
+	// Fetch trigger metadata so the lifecycle audit carries tenant/repo.
+	var tenant, repo string
+	if tr, gerr := svc.Get(ctx, *id); gerr == nil {
+		tenant, repo = tr.Tenant, tr.Repo
+	}
+	secret, err := svc.RotateSecret(ctx, *id)
+	if err != nil {
+		return triggerMutateErrCode(err, stderr, "rotate-secret")
+	}
+	fmt.Fprintf(stdout, "trigger_id=%s secret=%s\n", *id, secret)
+	buildtrigger.EmitTriggerLifecycle(ctx, slog.Default(), "build.trigger.secret_rotated", *id, tenant, repo)
+	return 0
 }
