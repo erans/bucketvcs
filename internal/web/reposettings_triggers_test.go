@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -111,6 +112,175 @@ func (t *fakeTriggers) ReplayDelivery(ctx context.Context, id string) error {
 		return t.replayDeliveryFn(ctx, id)
 	}
 	return nil
+}
+
+// TestTriggersNewForm_DefaultAndKindSwap covers GET .../triggers/new: the
+// default (generic) form, and the htmx-less ?kind=codebuild variant that must
+// list the configured AWS connector names in the connector <select>.
+func TestTriggersNewForm_DefaultAndKindSwap(t *testing.T) {
+	store := triggersStore()
+	h := newTestHandlerWith(store, func(d *Deps) {
+		d.Triggers = &fakeTriggers{}
+		d.Connectors = ConnectorNames{AWS: []string{"prod"}}
+	})
+
+	t.Run("default generic form", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/acme/demo/settings/triggers/new", nil)
+		addSessionCookie(t, req, store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		body := rec.Body.String()
+		if !strings.Contains(body, "add trigger") {
+			t.Fatalf("form missing 'add trigger'; body=%s", body)
+		}
+	})
+
+	t.Run("codebuild kind shows connector option", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/acme/demo/settings/triggers/new?kind=codebuild", nil)
+		addSessionCookie(t, req, store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "prod") {
+			t.Fatalf("codebuild form missing connector option 'prod'; body=%s", rec.Body.String())
+		}
+	})
+}
+
+// TestTriggersNewForm_HXModalReturnsFormNotEmpty guards the htmx modal-open
+// path: an HX-Request GET with no kind query (and no id) must render the form
+// CONTENT fragment — non-empty, the form markup, but WITHOUT the full-page
+// chrome that base.html emits. Regression for the empty-modal bug where the
+// template emitted nothing when HXFragment was true.
+func TestTriggersNewForm_HXModalReturnsFormNotEmpty(t *testing.T) {
+	store := triggersStore()
+	h := newTestHandlerWith(store, func(d *Deps) {
+		d.Triggers = &fakeTriggers{}
+		d.Connectors = ConnectorNames{AWS: []string{"prod"}}
+	})
+
+	t.Run("modal open returns form content without chrome", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/acme/demo/settings/triggers/new", nil)
+		req.Header.Set("HX-Request", "true")
+		addSessionCookie(t, req, store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		body := rec.Body.String()
+		if strings.TrimSpace(body) == "" {
+			t.Fatal("htmx modal form rendered an EMPTY body")
+		}
+		// Form content must be present.
+		if !strings.Contains(body, `name="name"`) {
+			t.Fatalf("htmx modal missing form field name=\"name\"; body=%s", body)
+		}
+		if !strings.Contains(body, "add trigger") {
+			t.Fatalf("htmx modal missing 'add trigger'; body=%s", body)
+		}
+		// Full-page chrome from base.html must NOT be present — this is a
+		// fragment for swap into #trigger-modal.
+		for _, chrome := range []string{"<!doctype", "<html", "┌─ bucketvcs ─┐"} {
+			if strings.Contains(body, chrome) {
+				t.Fatalf("htmx modal leaked page chrome %q; body=%s", chrome, body)
+			}
+		}
+	})
+
+	t.Run("kind swap still returns connector option", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/acme/demo/settings/triggers/new?kind=codebuild", nil)
+		req.Header.Set("HX-Request", "true")
+		addSessionCookie(t, req, store, userSession())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "prod") {
+			t.Fatalf("htmx kind swap missing connector option 'prod'; body=%s", rec.Body.String())
+		}
+	})
+}
+
+// TestTriggersAdd_GenericShowsSecretOnce covers the happy path: a generic
+// trigger whose Create auto-generates a secret renders the secret-once page.
+func TestTriggersAdd_GenericShowsSecretOnce(t *testing.T) {
+	store := triggersStore()
+	var gotInput buildtrigger.TriggerInput
+	tr := &fakeTriggers{
+		createFn: func(ctx context.Context, in buildtrigger.TriggerInput) (buildtrigger.Trigger, error) {
+			gotInput = in
+			return buildtrigger.Trigger{
+				ID:     "bvbt_9",
+				Tenant: "acme",
+				Repo:   "demo",
+				Name:   in.Name,
+				Kind:   buildtrigger.KindGeneric,
+				Secret: "supersecretvalue",
+			}, nil
+		},
+	}
+	logger, sink := newTestLogger()
+	h := newTestHandlerWith(store, func(d *Deps) { d.Triggers = tr; d.Logger = logger })
+	req := csrfPost(t, "/acme/demo/settings/triggers/add", url.Values{
+		"name": {"ci"},
+		"kind": {"generic"},
+		"url":  {"https://ci.example.com/hook"},
+	})
+	addSessionCookie(t, req, store, userSession())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200 (secret-once page); body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if count := strings.Count(body, "supersecretvalue"); count != 1 {
+		t.Fatalf("secret appears %d times, want exactly 1; body=%s", count, body)
+	}
+	if !strings.Contains(rec.Header().Get("Cache-Control"), "no-store") {
+		t.Fatalf("Cache-Control must contain no-store; got %q", rec.Header().Get("Cache-Control"))
+	}
+	if gotInput.Tenant != "acme" || gotInput.Repo != "demo" || gotInput.Name != "ci" {
+		t.Fatalf("Create input tenant=%q repo=%q name=%q, want acme/demo/ci", gotInput.Tenant, gotInput.Repo, gotInput.Name)
+	}
+	if gotInput.Kind != buildtrigger.KindGeneric || gotInput.Config.URL != "https://ci.example.com/hook" {
+		t.Fatalf("Create input kind=%q url=%q", gotInput.Kind, gotInput.Config.URL)
+	}
+	if !sink.Has("buildtrigger.created", map[string]string{"tenant": "acme", "repo": "demo"}) {
+		t.Fatal("missing buildtrigger.created audit event")
+	}
+}
+
+// TestTriggersAdd_InvalidFlash covers the ErrInvalidInput → redirectFlash path.
+func TestTriggersAdd_InvalidFlash(t *testing.T) {
+	store := triggersStore()
+	tr := &fakeTriggers{
+		createFn: func(ctx context.Context, in buildtrigger.TriggerInput) (buildtrigger.Trigger, error) {
+			return buildtrigger.Trigger{}, buildtrigger.ErrInvalidInput
+		},
+	}
+	h := newTestHandlerWith(store, func(d *Deps) { d.Triggers = tr })
+	req := csrfPost(t, "/acme/demo/settings/triggers/add", url.Values{
+		"name": {"ci"},
+		"kind": {"generic"},
+		"url":  {"https://ci.example.com/hook"},
+	})
+	addSessionCookie(t, req, store, userSession())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status %d, want 303; body=%s", rec.Code, rec.Body.String())
+	}
+	if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
+		t.Fatal("expected flash cookie for ErrInvalidInput")
+	}
 }
 
 // TestTriggersPage_ListsTriggers covers GET /{t}/{r}/settings/triggers with one
