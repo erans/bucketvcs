@@ -183,6 +183,12 @@ func (f *fakeContent) Commit(ctx context.Context, t, r, oid string) (browsemodel
 func (f *fakeContent) TreeActivity(ctx context.Context, t, r, oid, p string) (map[string]browsemodel.CommitMeta, error) {
 	return f.activity, nil
 }
+func (f *fakeContent) Compare(ctx context.Context, t, r, baseOID, headOID string) (browsemodel.Comparison, error) {
+	return browsemodel.Comparison{}, nil
+}
+func (f *fakeContent) LogPath(ctx context.Context, t, r, oid, p string, off, lim int) ([]browsemodel.CommitMeta, bool, error) {
+	return nil, false, nil
+}
 
 func newBrowseServer(content ContentStore, visible map[string]bool) http.Handler {
 	return NewHandler(Deps{

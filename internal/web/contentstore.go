@@ -17,4 +17,6 @@ type ContentStore interface {
 	Log(ctx context.Context, tenant, repo, oid string, offset, limit int) ([]browsemodel.CommitMeta, bool, error)
 	Commit(ctx context.Context, tenant, repo, oid string) (browsemodel.CommitDetail, error)
 	TreeActivity(ctx context.Context, tenant, repo, oid, path string) (map[string]browsemodel.CommitMeta, error)
+	Compare(ctx context.Context, tenant, repo, baseOID, headOID string) (browsemodel.Comparison, error)
+	LogPath(ctx context.Context, tenant, repo, oid, path string, offset, limit int) ([]browsemodel.CommitMeta, bool, error)
 }
