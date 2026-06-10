@@ -338,3 +338,129 @@ func TestDiffRefsPatch_InvalidRef(t *testing.T) {
 		t.Fatal("expected error for leading-dash base ref")
 	}
 }
+
+// makeHistoryRepo builds a non-bare working repo with two commits:
+//   - c1 adds a.txt="1\n" and b.txt="x\n"
+//   - c2 modifies a.txt="2\n" (b.txt unchanged)
+//
+// Returns (workDir, c1OID, c2OID). The repo is a plain working tree so
+// callers can stage/modify files across commits.
+func makeHistoryRepo(t *testing.T) (dir, c1, c2 string) {
+	t.Helper()
+	skipIfNoGit(t)
+	work := t.TempDir()
+
+	mustRun := func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = work
+		c.Env = append(scrubGitRepoEnv(os.Environ()),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+		)
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	capture := func(args ...string) string {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = work
+		c.Env = scrubGitRepoEnv(os.Environ())
+		out, err := c.Output()
+		if err != nil {
+			t.Fatalf("git %s: %v", strings.Join(args, " "), err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+
+	mustRun("init", "-q", "-b", "main")
+	mustRun("config", "commit.gpgsign", "false")
+
+	// c1: add a.txt + b.txt
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "b.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun("add", ".")
+	mustRun("commit", "-q", "-m", "c1")
+	c1 = capture("rev-parse", "HEAD")
+
+	// c2: modify a.txt only
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun("add", "a.txt")
+	mustRun("commit", "-q", "-m", "c2")
+	c2 = capture("rev-parse", "HEAD")
+
+	return work, c1, c2
+}
+
+func TestLogRawPath_ScopesToPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	dir, _, _ := makeHistoryRepo(t)
+
+	raw, err := LogRawPath(context.Background(), dir, "HEAD", "a.txt", false, 0, 10)
+	if err != nil {
+		t.Fatalf("LogRawPath a.txt: %v", err)
+	}
+	if got := strings.Count(string(raw), "\x1e"); got != 2 {
+		t.Fatalf("want 2 records for a.txt, got %d: %q", got, raw)
+	}
+
+	rawB, err := LogRawPath(context.Background(), dir, "HEAD", "b.txt", false, 0, 10)
+	if err != nil {
+		t.Fatalf("LogRawPath b.txt: %v", err)
+	}
+	if got := strings.Count(string(rawB), "\x1e"); got != 1 {
+		t.Fatalf("want 1 record for b.txt, got %d", got)
+	}
+}
+
+func TestLogRawPath_InvalidPath(t *testing.T) {
+	if _, err := LogRawPath(context.Background(), t.TempDir(), "HEAD", "-flag", false, 0, 10); err == nil {
+		t.Fatal("want error for leading-dash path")
+	}
+}
+
+func TestPathKind(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires git binary")
+	}
+	// Build a working repo with a commit that has dir/a.txt.
+	work := t.TempDir()
+	mustRun := func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = work
+		c.Env = append(scrubGitRepoEnv(os.Environ()),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+		)
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	mustRun("init", "-q", "-b", "main")
+	mustRun("config", "commit.gpgsign", "false")
+	if err := os.MkdirAll(filepath.Join(work, "dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "dir", "a.txt"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun("add", ".")
+	mustRun("commit", "-q", "-m", "init")
+
+	if k, err := PathKind(context.Background(), work, "HEAD", "dir/a.txt"); err != nil || k != "blob" {
+		t.Fatalf("file kind = %q, %v; want blob", k, err)
+	}
+	if k, err := PathKind(context.Background(), work, "HEAD", "dir"); err != nil || k != "tree" {
+		t.Fatalf("dir kind = %q, %v; want tree", k, err)
+	}
+}

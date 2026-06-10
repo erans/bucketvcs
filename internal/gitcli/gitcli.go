@@ -1222,6 +1222,47 @@ func LogRaw(ctx context.Context, dir, rev string, skip, max int) ([]byte, error)
 		"--no-color", format)
 }
 
+// LogRawPath is LogRaw scoped to a single pathspec (git log [--follow] <rev> -- <path>).
+// Same record format as LogRaw. follow tracks renames and is valid only for a
+// single file (git rejects --follow with a directory); callers must pass
+// follow=false for directories. path is validated as a rev-path (rejects a
+// leading '-' and NUL/CR/LF; spaces allowed).
+func LogRawPath(ctx context.Context, dir, rev, path string, follow bool, skip, max int) ([]byte, error) {
+	if !validRefOrOID(rev) {
+		return nil, fmt.Errorf("gitcli: LogRawPath: invalid rev %q", rev)
+	}
+	if !validRevPath(path) {
+		return nil, fmt.Errorf("gitcli: LogRawPath: invalid path %q", path)
+	}
+	if skip < 0 || max <= 0 {
+		return nil, fmt.Errorf("gitcli: LogRawPath: bad skip/max %d/%d", skip, max)
+	}
+	const format = "--pretty=format:%H%x1f%an%x1f%ae%x1f%at%x1f%s%x1e"
+	args := []string{"-c", "core.quotePath=false", "--no-replace-objects", "log", rev,
+		fmt.Sprintf("--skip=%d", skip), fmt.Sprintf("--max-count=%d", max), "--no-color", format}
+	if follow {
+		args = append(args, "--follow")
+	}
+	args = append(args, "--", path)
+	return run(ctx, dir, args...)
+}
+
+// PathKind reports the object kind ("blob"|"tree") of path at rev via
+// `git cat-file -t <rev>:<path>`. A lookup failure (path absent at rev, etc.)
+// returns "" plus the error; callers that only need it to choose --follow
+// should treat any error as "not a blob" and proceed without following.
+func PathKind(ctx context.Context, dir, rev, path string) (string, error) {
+	spec := rev + ":" + path
+	if !validRevPath(spec) {
+		return "", fmt.Errorf("gitcli: PathKind: invalid spec %q", spec)
+	}
+	out, err := run(ctx, dir, "--no-replace-objects", "cat-file", "-t", spec)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 // CatFileCommit returns the raw commit object bytes, matching
 // `git cat-file commit <oid>` (headers: tree/parent/author/committer, blank line,
 // then the message). Output is capped at maxCommitObjBytes; overflow returns the
