@@ -49,6 +49,7 @@ type Deps struct {
 	RenameCheck    RepoRenameCheck
 	Triggers       TriggerAdmin   // nil => triggers tab renders "not enabled"
 	Connectors     ConnectorNames // configured connector names (no secrets)
+	Audit          AuditReader    // nil => audit pages render "not enabled"
 }
 
 type server struct {
@@ -74,6 +75,7 @@ type server struct {
 	renameCheck    RepoRenameCheck
 	triggers       TriggerAdmin
 	connectors     ConnectorNames
+	audit          AuditReader
 }
 
 // NewHandler builds the web UI http.Handler. Panics only on an unrecoverable
@@ -107,6 +109,7 @@ func NewHandler(d Deps) http.Handler {
 		renameCheck:    d.RenameCheck,
 		triggers:       d.Triggers,
 		connectors:     d.Connectors,
+		audit:          d.Audit,
 	}
 	if d.OIDC != nil {
 		if len(d.OIDC.HMACKey) < 16 {
@@ -137,6 +140,9 @@ func NewHandler(d Deps) http.Handler {
 	s.mux.HandleFunc("/settings/keys", s.handleKeysPage)
 	s.mux.HandleFunc("/settings/keys/add", s.handleKeyAdd)
 	s.mux.HandleFunc("/settings/keys/revoke", s.handleKeyRevoke)
+	s.mux.HandleFunc("/settings/sessions", s.handleSessionsPage)
+	s.mux.HandleFunc("/settings/sessions/revoke", s.handleSessionRevoke)
+	s.mux.HandleFunc("/settings/sessions/revoke-all", s.handleSessionRevokeAll)
 	s.mux.HandleFunc("/admin", s.handleAdminIndex)
 	s.mux.HandleFunc("/admin/users", s.handleAdminUsers)
 	s.mux.HandleFunc("/admin/users/create", s.handleAdminUserCreate)
@@ -150,6 +156,9 @@ func NewHandler(d Deps) http.Handler {
 	s.mux.HandleFunc("/admin/quotas/set", s.handleAdminQuotaSet)
 	s.mux.HandleFunc("/admin/quotas/clear", s.handleAdminQuotaClear)
 	s.mux.HandleFunc("/admin/quotas/reconcile", s.handleAdminQuotaReconcile)
+	s.mux.HandleFunc("/admin/audit", s.handleAdminAudit)
+	s.mux.HandleFunc("/admin/sessions", s.handleAdminSessions)
+	s.mux.HandleFunc("/admin/sessions/revoke", s.handleAdminSessionRevoke)
 	s.mux.HandleFunc("/", s.handleLanding)
 
 	return sessionMiddleware(s.store, s.ttl)(cspMiddleware(s.mux))

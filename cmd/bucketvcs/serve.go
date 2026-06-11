@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bucketvcs/bucketvcs/internal/auditlog"
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/auth/ratelimit"
 	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
@@ -922,6 +923,21 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 				Connectors: func() web.ConnectorNames {
 					aws, azure := buildtrigger.SortedConnectorNames(buildConnectors, buildAzureConnectors)
 					return web.ConnectorNames{AWS: aws, Azure: azure}
+				}(),
+				Audit: func() web.AuditReader {
+					// Constructed unconditionally (not gated on --log-shipping):
+					// the viewer reads previously-shipped objects even when
+					// shipping is currently off. serve never sets a custom
+					// shiplog.Config.Prefix, so the engine ships under
+					// shiplog.DefaultPrefix — read from the SAME prefix here.
+					if store == nil {
+						return nil
+					}
+					rd := auditlog.NewReader(store, shiplog.DefaultPrefix)
+					// base handler, not the tap: reader diagnostics must never
+					// feed back into the shipped audit stream.
+					rd.Logger = slog.New(base)
+					return rd
 				}(),
 				RepoInit: func(ctx context.Context, tenant, repoName, actor string) error {
 					// Mirrors `bucketvcs init` defaults (cmd/bucketvcs/init.go).

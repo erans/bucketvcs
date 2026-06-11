@@ -40,6 +40,21 @@ func (a *webAdapter) DeleteSession(ctx context.Context, raw string) error {
 func (a *webAdapter) DeleteSessionsForUser(ctx context.Context, userID, exceptRawID string) (int64, error) {
 	return a.s.DeleteSessionsForUser(ctx, userID, exceptRawID)
 }
+func (a *webAdapter) ListSessionsForUser(ctx context.Context, userID, currentRawID string) ([]auth.SessionInfo, error) {
+	return a.s.ListSessionsForUser(ctx, userID, currentRawID)
+}
+func (a *webAdapter) DeleteSessionByHashForUser(ctx context.Context, userID, idHash string) (int64, error) {
+	return a.s.DeleteSessionByHashForUser(ctx, userID, idHash)
+}
+func (a *webAdapter) ListAllSessions(ctx context.Context, limit int) ([]auth.AdminSessionInfo, int, error) {
+	return a.s.ListAllSessions(ctx, limit)
+}
+func (a *webAdapter) SessionOwnerByHash(ctx context.Context, idHash string) (string, string, error) {
+	return a.s.SessionOwnerByHash(ctx, idHash)
+}
+func (a *webAdapter) DeleteSessionByHash(ctx context.Context, idHash string) (int64, error) {
+	return a.s.DeleteSessionByHash(ctx, idHash)
+}
 func (a *webAdapter) ListAccessibleRepos(ctx context.Context, actor *auth.Actor) ([]web.Repo, error) {
 	rs, err := a.s.ListAccessibleRepos(ctx, actor)
 	if err != nil {

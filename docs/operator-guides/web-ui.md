@@ -19,7 +19,8 @@ the settings and admin screens, and the repo-visibility rules.
 | OIDC browser login | ✅ shipped | see §6 |
 | Code browse (tree, blob, diff, log) | ✅ shipped | see §7 |
 | Repo settings / admin screens | ✅ shipped | see §8 |
-| Per-session audit trail | ❌ deferred | see §10 |
+| Session management UI (list / revoke) | ✅ shipped | see §10 |
+| Audit-log viewer (global + per-repo) | ✅ shipped | see §10 |
 
 Schema migration `0013_sessions.sql` is forward-only and applied by the existing
 `RunMigrations` on first startup.
@@ -785,9 +786,14 @@ user as actor.
 |---|---|
 | `auth.session.created` | Session cookie issued after successful password check |
 | `auth.session.destroyed` | Session deleted via `/logout` |
+| `auth.session.revoked` | A single session revoked from the session manager (self-service) |
+| `auth.session.revoked_all` | A user signed out all their other sessions |
+| `auth.session.admin_revoked` | An admin revoked a session from `/admin/sessions` |
 | `auth.password.set` | Password hash updated via `user set-password` |
 
 OIDC login and settings-form actions emit additional events; see §6.4 and §8.8.
+The session manager and audit viewer that surface these events are documented in
+§10.
 
 > These web-login audit events are emitted inside `bucketvcs serve`, so they are
 > **shipped durably** to `sys/logs/activity/` by default — see
@@ -796,7 +802,135 @@ OIDC login and settings-form actions emit additional events; see §6.4 and §8.8
 
 ---
 
-## 10. Deferred work
+## 10. Session management and audit viewer
+
+Two operator-facing observability surfaces ship in the UI: a session manager (a
+user sees and revokes their own browser sessions; an admin sees every session)
+and an audit-log viewer (a global view for admins and a repo-scoped tab for repo
+admins). Both are read-mostly views over data the gateway already produces — the
+session manager reads the sqlite session table directly, and the audit viewer
+reads the activity log objects that log shipping has already written to object
+storage.
+
+### 10.1 Session management
+
+**Self-service — `/settings/sessions`.** Any logged-in user sees a table of their
+own active browser sessions: the login provider (`password` or `oidc`), when each
+was created, when it was last seen, and when it expires. The session backing the
+current browser is badged **current** and cannot be individually revoked — use
+**log out** to end it.
+
+| Action | Route | Effect |
+|---|---|---|
+| List own sessions | `GET /settings/sessions` | The current session is badged `current`; all others show a **revoke** button. |
+| Revoke one session | `POST /settings/sessions/revoke` | Signs out a single other session by its id hash. A revoked session's cookie is immediately invalid — the next request from that browser bounces to `/login`. |
+| Revoke all others | `POST /settings/sessions/revoke-all` | Signs out every session except the current one. Use this after losing a device or suspecting a leaked cookie. |
+
+Revocation is user-scoped at the store: a session id hash belonging to another
+user cannot be revoked even if guessed, and the current session is protected
+against a hand-crafted revoke POST (the handler refuses to revoke the cookie it
+arrived on).
+
+Note: a successful **password change** at `/settings/password` already revokes
+the user's *other* sessions automatically (see §8.4). The session manager is the
+manual equivalent, and additionally surfaces what is currently active.
+
+**Admin — `/admin/sessions`.** A global admin sees **all** sessions across all
+users, each row labelled with the owning user's name, provider, and timestamps,
+and a **revoke** button. This is the operator tool for forcibly signing out a
+specific user's session (for example during an incident). The page renders the
+first 500 sessions; on a larger deployment, query the auth DB directly for the
+full list (`SELECT s.*, u.name FROM sessions s LEFT JOIN users u ON u.id =
+s.user_id` — there is no sessions CLI yet). Admin
+revocation removes the session regardless of which user owns it.
+
+Every session revocation emits a tagged audit event (`auth.session.revoked`,
+`auth.session.revoked_all`, or `auth.session.admin_revoked`) carrying the acting
+user; admin revocations additionally record the target user (resolved
+server-side before the delete). These join `auth.session.created`, `auth.session.destroyed`, and
+`auth.oidc.login` as part of the shipped activity stream, so the full session
+lifecycle — login through revocation — is visible in the audit viewer below.
+
+Note: other web-originated admin actions (build-trigger, webhook, policy, and
+repo changes made through the UI) are written to the server's process log with
+`source=web`, but are **not** currently part of the shipped activity stream the
+viewer renders. Surfacing those in the viewer is a documented follow-up (§11); for
+now, audit them via the process log.
+
+### 10.2 Audit-log viewer
+
+The audit viewer renders the durable activity log — the stream of audit events
+(logins, repo changes, policy rejections, webhook and LFS activity, …) that
+`bucketvcs serve` ships to `sys/logs/activity/` in your object store. There are
+two entry points:
+
+- **Global — `/admin/audit`** (global admin only): every audit event across all
+  tenants and repos, with filter controls.
+- **Per-repo — `/{tenant}/{repo}/settings/audit`** (repo-admin or global admin):
+  the same viewer hard-scoped to a single repository.
+
+#### Shipping-lag semantics
+
+This is the most important operational fact about the viewer: **audit events
+appear only after the next ship.** The gateway buffers audit records in a local
+spool and ships them to object storage in batches; the viewer reads the shipped
+objects, never the live spool. As a result:
+
+- **Log shipping must be enabled** (`--log-shipping=on`, the default). With
+  shipping off, the gateway emits no activity objects and the viewer shows the
+  empty state — it is not a live tail.
+- **The most recent activity lags.** An event you just triggered does not appear
+  until the spool rotates and ships, which happens after `--log-ship-interval`
+  (default 15m), after `--log-ship-max-events` accumulate, or on a graceful
+  shutdown (which flushes the spool before exit). Both audit pages carry a banner
+  to this effect: *"audit events are shipped to object storage on a delay; the
+  most recent activity may not appear yet."*
+- For a tighter feedback loop in a staging environment, lower
+  `--log-ship-interval` (e.g. `5s`) so events surface within seconds. In
+  production the default interval keeps object-write volume reasonable; the
+  viewer is an after-the-fact audit trail, not a real-time monitor.
+
+See the [log shipping operator guide](log-shipping.md) for the full shipping
+model, spool sizing, and crash-recovery behaviour.
+
+#### Filter controls
+
+Both pages offer a filter form whose fields narrow the result set:
+
+| Field | Matches |
+|---|---|
+| **event** | Event-name **prefix** — e.g. `policy.` matches every `policy.*` event; `auth.session.` matches session events. |
+| **actor** | Exact actor (the acting user). |
+| **since** / **until** | Date bounds (`YYYY-MM-DD`); `until` is inclusive of the named day. Unparseable dates are ignored. |
+| **tenant** / **repo** | *Global page only* — exact tenant/repo. The per-repo tab omits these (the repo is forced). |
+
+Results are paginated with an `[older]` link that carries the active filters
+forward. Filtering happens over the shipped objects, so the same lag applies to
+filtered views.
+
+#### Per-repo scoping boundary
+
+The per-repo tab at `/{tenant}/{repo}/settings/audit` is **strictly scoped to
+that one repository**. The handler force-sets the tenant/repo filter to the repo
+in scope and ignores any `?tenant=`/`?repo=` query override, so a repo admin can
+never read another tenant's or repo's events through it. Two consequences worth
+calling out:
+
+- **Cross-repo events never leak.** An event belonging to `acme/other` will not
+  appear on `acme/demo`'s audit tab, even for a global admin viewing it through
+  the per-repo route.
+- **Account- and auth-level events are not repo-scoped and do not appear here.**
+  Logins, token rotation, user create/disable, session revocation, and similar
+  identity events carry no tenant/repo, so they show up only on the global
+  `/admin/audit` page — never on a per-repo tab. The per-repo banner states this
+  explicitly. Use the global viewer for the full identity audit trail.
+
+When no audit storage is configured the viewer renders an "audit log viewing is
+not available" notice rather than an error.
+
+---
+
+## 11. Deferred work
 
 Features not yet implemented:
 
@@ -815,10 +949,14 @@ Features not yet implemented:
 
 **Settings and admin:**
 
-- Per-session audit trail UI; session list/revocation UI.
+- Surfacing web-originated admin actions (build-trigger, webhook, policy, and repo
+  changes made through the UI) in the shipped activity stream. They are logged to
+  the process log with `source=web` today but are not yet rendered by the audit
+  viewer (see §10.1).
+- Per-user login-history view (the audit viewer surfaces session events, but a
+  dedicated per-user login timeline is not yet built).
+- Session TTL/expiry controls per user (TTL is instance-wide via
+  `--ui-session-ttl`).
 - Repo transfer between tenants.
 - Storage purge from the UI (`--purge-storage` remains CLI-only).
 - Repo delete on Postgres auth-databases (`ErrCascadeUnsupportedBackend`; see §8.7).
-
-**Per-session audit trail**: expose session list and per-user login history to
-admins.

@@ -15,21 +15,29 @@ type fakeStore struct {
 	verify            func(ctx context.Context, u, p string) (*auth.Actor, error)
 	sessions          map[string]*auth.Session // keyed by raw id
 	deleteSessionsFor func(ctx context.Context, userID, exceptRawID string) (int64, error)
-	repos             func(actor *auth.Actor) []Repo
-	findByEmail       func(email string) (*auth.Actor, error)
-	findIdentity      func(issuer, subject string) (*auth.Actor, error)
-	linkIdentity      func(userID, issuer, subject, email string) error
-	perm              auth.Perm // returned by LookupRepoPerm
-	permErr           error     // when non-nil, LookupRepoPerm returns it
-	getVisibleRepo    func(ctx context.Context, actor *auth.Actor, tenant, name string) (*Repo, error)
-	getRepoFlags      func(ctx context.Context, tenant, repo string) (auth.RepoFlags, error)
-	setRepoPublic     func(ctx context.Context, tenant, repo string, public bool) error
-	renameRepo        func(ctx context.Context, tenant, oldName, newName string) error
-	deleteRepo        func(ctx context.Context, tenant, repo string) error
-	registerRepoIfNew func(ctx context.Context, tenant, name string) (bool, error)
-	getUserByName     func(ctx context.Context, name string) (*auth.User, error)
-	setPassword       func(ctx context.Context, userName, plaintext string) error
-	hasPassword       func(ctx context.Context, userName string) (bool, error)
+
+	// session list/revoke (self-service + admin)
+	sessionsForUser     []auth.SessionInfo
+	allSessions         []auth.AdminSessionInfo
+	revokeCount         int64  // returned by DeleteSessionByHash* (0 => default 1; -1 => 0 "already gone")
+	lastRevokeUserID    string // recorded by DeleteSessionByHashForUser
+	lastRevokeHash      string // recorded by both revoke-by-hash methods
+	lastRevokeAllUserID string // recorded by DeleteSessionsForUser
+	repos               func(actor *auth.Actor) []Repo
+	findByEmail         func(email string) (*auth.Actor, error)
+	findIdentity        func(issuer, subject string) (*auth.Actor, error)
+	linkIdentity        func(userID, issuer, subject, email string) error
+	perm                auth.Perm // returned by LookupRepoPerm
+	permErr             error     // when non-nil, LookupRepoPerm returns it
+	getVisibleRepo      func(ctx context.Context, actor *auth.Actor, tenant, name string) (*Repo, error)
+	getRepoFlags        func(ctx context.Context, tenant, repo string) (auth.RepoFlags, error)
+	setRepoPublic       func(ctx context.Context, tenant, repo string, public bool) error
+	renameRepo          func(ctx context.Context, tenant, oldName, newName string) error
+	deleteRepo          func(ctx context.Context, tenant, repo string) error
+	registerRepoIfNew   func(ctx context.Context, tenant, name string) (bool, error)
+	getUserByName       func(ctx context.Context, name string) (*auth.User, error)
+	setPassword         func(ctx context.Context, userName, plaintext string) error
+	hasPassword         func(ctx context.Context, userName string) (bool, error)
 
 	// token methods
 	listTokensForUser func(ctx context.Context, name string) ([]TokenInfo, error)
@@ -85,6 +93,7 @@ func (f *fakeStore) DeleteSession(ctx context.Context, raw string) error {
 	return nil
 }
 func (f *fakeStore) DeleteSessionsForUser(ctx context.Context, userID, exceptRawID string) (int64, error) {
+	f.lastRevokeAllUserID = userID
 	if f.deleteSessionsFor != nil {
 		return f.deleteSessionsFor(ctx, userID, exceptRawID)
 	}
@@ -96,6 +105,47 @@ func (f *fakeStore) DeleteSessionsForUser(ctx context.Context, userID, exceptRaw
 		}
 	}
 	return n, nil
+}
+
+func (f *fakeStore) ListSessionsForUser(ctx context.Context, userID, currentRawID string) ([]auth.SessionInfo, error) {
+	return f.sessionsForUser, nil
+}
+func (f *fakeStore) DeleteSessionByHashForUser(ctx context.Context, userID, idHash string) (int64, error) {
+	f.lastRevokeUserID = userID
+	f.lastRevokeHash = idHash
+	if f.revokeCount < 0 {
+		return 0, nil
+	}
+	if f.revokeCount != 0 {
+		return f.revokeCount, nil
+	}
+	return 1, nil
+}
+func (f *fakeStore) ListAllSessions(ctx context.Context, limit int) ([]auth.AdminSessionInfo, int, error) {
+	total := len(f.allSessions)
+	list := f.allSessions
+	if limit > 0 && len(list) > limit {
+		list = list[:limit]
+	}
+	return list, total, nil
+}
+func (f *fakeStore) SessionOwnerByHash(ctx context.Context, idHash string) (string, string, error) {
+	for _, s := range f.allSessions {
+		if s.IDHash == idHash {
+			return s.UserID, s.UserName, nil
+		}
+	}
+	return "", "", auth.ErrNoSession
+}
+func (f *fakeStore) DeleteSessionByHash(ctx context.Context, idHash string) (int64, error) {
+	f.lastRevokeHash = idHash
+	if f.revokeCount < 0 {
+		return 0, nil
+	}
+	if f.revokeCount != 0 {
+		return f.revokeCount, nil
+	}
+	return 1, nil
 }
 func (f *fakeStore) ListAccessibleRepos(ctx context.Context, actor *auth.Actor) ([]Repo, error) {
 	if f.repos == nil {

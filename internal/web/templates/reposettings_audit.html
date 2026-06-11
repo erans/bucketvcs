@@ -1,0 +1,42 @@
+{{define "title"}}{{.Tenant}}/{{.Repo}} audit · bucketvcs{{end}}
+{{define "content"}}
+<div class="settings">
+  <div class="repohdr"><span class="path"><a href="/{{.Tenant}}/{{.Repo}}">{{.Tenant}}/{{.Repo}}</a></span></div>
+  {{template "reposettingsnav" .}}
+  <h2>audit log</h2>
+  {{if .Enabled}}
+  <form method="get" action="/{{.Tenant}}/{{.Repo}}/settings/audit" class="filter">
+    <label>event <input type="text" name="event" value="{{.FEvent}}" placeholder="policy."></label>
+    <label>actor <input type="text" name="actor" value="{{.FActor}}"></label>
+    <label>since <input type="date" name="since" value="{{.FSince}}"></label>
+    <label>until <input type="date" name="until" value="{{.FUntil}}"></label>
+    <button type="submit">filter</button>
+  </form>
+  <p class="hint">this view is scoped to {{.Tenant}}/{{.Repo}} only. account- and auth-level events (logins, token rotation, user changes) are not repo-scoped and do not appear here. audit events are shipped to object storage on a delay; the most recent activity may not appear yet.</p>
+  {{if .Rows}}
+  <table>
+    <thead>
+      <tr><th>time (utc)</th><th>event</th><th>actor</th></tr>
+    </thead>
+    <tbody>
+    {{range .Rows}}
+    <tr>
+      <td class="mono">{{.TimeStr}}</td>
+      <td class="mono">{{.Event.Event}}</td>
+      <td>{{.Actor}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="empty">no audit events match.</p>
+  {{end}}
+  {{if .NextCursor}}
+  <p class="pager"><a href="/{{.Tenant}}/{{.Repo}}/settings/audit?event={{urlquery .FEvent}}&amp;actor={{urlquery .FActor}}&amp;since={{urlquery .FSince}}&amp;until={{urlquery .FUntil}}&amp;cursor={{urlquery .NextCursor}}">[older]</a></p>
+  {{end}}
+  {{else}}
+  <p class="empty">audit log viewing is not available (no audit storage configured).</p>
+  {{end}}
+</div>
+{{end}}
+{{template "base" .}}
