@@ -29,31 +29,27 @@ type Reader struct {
 	// ObjectsPerPage caps how many activity objects one Page() call reads.
 	ObjectsPerPage int
 
-	// MaxDecompressedBytes is a soft guard on the total bytes read per page.
+	// MaxBytesPerPage soft-caps a page by cumulative compressed object size;
+	// the hard per-object decompressed guard lives in DecodeGz.
 	//
-	// NOTE: it is accumulated from each object's COMPRESSED size
-	// (obj.Metadata.Size), so it is a coarse, compressed-size soft cap on a
-	// page — not an exact decompressed-byte budget. The real protection
-	// against a single oversized object is the per-object decompressed cap
-	// enforced inside DecodeGz (maxObjectDecompressed). Zero disables the
-	// page-level guard.
-	MaxDecompressedBytes int64
+	// Zero disables the page-level guard.
+	MaxBytesPerPage int64
 }
 
 // NewReader builds a Reader over store. logPrefix is the operator-configured
 // log root (e.g. "sys/logs"); empty defaults to "sys/logs". The activity
 // objects live under "<logPrefix>/activity/". Trailing slashes on logPrefix
-// are trimmed. Defaults: ObjectsPerPage=20, MaxDecompressedBytes=32 MiB.
+// are trimmed. Defaults: ObjectsPerPage=20, MaxBytesPerPage=32 MiB.
 func NewReader(store ObjectStore, logPrefix string) *Reader {
 	if logPrefix == "" {
 		logPrefix = "sys/logs"
 	}
 	logPrefix = strings.TrimRight(logPrefix, "/")
 	return &Reader{
-		store:                store,
-		prefix:               logPrefix + "/activity/",
-		ObjectsPerPage:       20,
-		MaxDecompressedBytes: 32 << 20,
+		store:           store,
+		prefix:          logPrefix + "/activity/",
+		ObjectsPerPage:  20,
+		MaxBytesPerPage: 32 << 20,
 	}
 }
 
@@ -138,7 +134,7 @@ func (r *Reader) Page(ctx context.Context, f Filter, cursor string) ([]Event, st
 		bytesUsed += size
 		oldestIdx = i
 		consumed++
-		if r.MaxDecompressedBytes > 0 && bytesUsed >= r.MaxDecompressedBytes {
+		if r.MaxBytesPerPage > 0 && bytesUsed >= r.MaxBytesPerPage {
 			break
 		}
 	}

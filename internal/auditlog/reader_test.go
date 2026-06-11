@@ -58,12 +58,6 @@ func (s *fakeStore) Get(ctx context.Context, key string, opts *storage.GetOption
 	}, nil
 }
 
-func sortStrings(ss []string) []string {
-	out := append([]string(nil), ss...)
-	sort.Strings(out)
-	return out
-}
-
 func eventNames(events []auditlog.Event) []string {
 	var names []string
 	for _, e := range events {
@@ -144,5 +138,75 @@ func TestReaderPage_EmptyStore(t *testing.T) {
 	if next != "" {
 		t.Fatalf("expected empty cursor, got %q", next)
 	}
-	_ = sortStrings // keep helper referenced
+}
+
+// TestReaderPage_ByteCapBreaksPage verifies that MaxBytesPerPage causes the
+// page loop to break after consuming one object and that the cursor advances
+// correctly so all objects are reachable across successive pages with no
+// events lost or duplicated.
+//
+// MaxBytesPerPage=1 guarantees a break after the first object on every page
+// (gzip output is always >= 1 byte), isolating the byte-cap path from the
+// ObjectsPerPage path.
+func TestReaderPage_ByteCapBreaksPage(t *testing.T) {
+	store := newFakeStore()
+	// Three objects with distinct keys (ascending = oldest..newest).
+	store.put("sys/logs/activity/120000", gzLines(
+		`{"ts":"2026-05-22T12:00:00Z","event":"ev-a","tenant":"acme","repo":"app"}`,
+	))
+	store.put("sys/logs/activity/130000", gzLines(
+		`{"ts":"2026-05-22T13:00:00Z","event":"ev-b","tenant":"acme","repo":"app"}`,
+	))
+	store.put("sys/logs/activity/140000", gzLines(
+		`{"ts":"2026-05-22T14:00:00Z","event":"ev-c","tenant":"acme","repo":"app"}`,
+	))
+
+	r := auditlog.NewReader(store, "")
+	r.ObjectsPerPage = 10 // high — object cap must not trigger
+	r.MaxBytesPerPage = 1 // byte cap triggers after every single object
+
+	// Page 1: newest object (140000) → event ev-c; cursor non-empty.
+	evs1, next1, err := r.Page(context.Background(), auditlog.Filter{}, "")
+	if err != nil {
+		t.Fatalf("page1: unexpected error: %v", err)
+	}
+	if got := eventNames(evs1); len(got) != 1 || got[0] != "ev-c" {
+		t.Fatalf("page1 events: got %v, want [ev-c]", got)
+	}
+	if next1 == "" {
+		t.Fatalf("page1: expected non-empty next cursor (byte cap should have broken early)")
+	}
+
+	// Page 2: next object (130000) → event ev-b; cursor non-empty.
+	evs2, next2, err := r.Page(context.Background(), auditlog.Filter{}, next1)
+	if err != nil {
+		t.Fatalf("page2: unexpected error: %v", err)
+	}
+	if got := eventNames(evs2); len(got) != 1 || got[0] != "ev-b" {
+		t.Fatalf("page2 events: got %v, want [ev-b]", got)
+	}
+	if next2 == "" {
+		t.Fatalf("page2: expected non-empty next cursor")
+	}
+
+	// Page 3: oldest object (120000) → event ev-a; cursor empty (no older objects).
+	evs3, next3, err := r.Page(context.Background(), auditlog.Filter{}, next2)
+	if err != nil {
+		t.Fatalf("page3: unexpected error: %v", err)
+	}
+	if got := eventNames(evs3); len(got) != 1 || got[0] != "ev-a" {
+		t.Fatalf("page3 events: got %v, want [ev-a]", got)
+	}
+	if next3 != "" {
+		t.Fatalf("page3: expected empty next cursor, got %q", next3)
+	}
+
+	// Confirm total coverage: ev-c, ev-b, ev-a — no duplicates, no losses.
+	var all []string
+	all = append(all, eventNames(evs1)...)
+	all = append(all, eventNames(evs2)...)
+	all = append(all, eventNames(evs3)...)
+	if len(all) != 3 || all[0] != "ev-c" || all[1] != "ev-b" || all[2] != "ev-a" {
+		t.Fatalf("full walk: got %v, want [ev-c ev-b ev-a]", all)
+	}
 }
