@@ -42,6 +42,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return runServe(ctx, rest, stdout, stderr)
 	case "user":
 		return runUser(ctx, rest, stdout, stderr)
+	case "session":
+		return runSession(ctx, rest, stdout, stderr)
 	case "token":
 		return runToken(ctx, rest, stdout, stderr)
 	case "repo":
@@ -95,6 +97,7 @@ Subcommands:
   ssh                SSH subcommands (fingerprint)
   user               Manage users (add/list/disable/enable/delete/set-password/set-email/key)
   token              Manage tokens (create/list/revoke/rotate)
+  session            Manage web sessions (list/revoke)
   repo               Manage repository registry and permissions (register/grant/public/rename/delete)
   gc                 Garbage-collect orphan and unreachable storage
   doctor             Read-only health checks: storage, auth-db, config coherence, host deps
