@@ -3,6 +3,7 @@ package web
 import (
 	"testing"
 
+	"github.com/bucketvcs/bucketvcs/internal/auditlog"
 	"github.com/bucketvcs/bucketvcs/internal/buildtrigger"
 	"github.com/bucketvcs/bucketvcs/internal/hooks"
 	"github.com/bucketvcs/bucketvcs/internal/lfs/quota"
@@ -24,4 +25,8 @@ func TestServiceInterfacesCompile(t *testing.T) {} // anchor so the file isn't e
 
 func TestTriggerServiceSatisfiesTriggerAdmin(t *testing.T) {
 	var _ TriggerAdmin = (*buildtrigger.Service)(nil)
+}
+
+func TestAuditReaderSatisfiedByReader(t *testing.T) {
+	var _ AuditReader = (*auditlog.Reader)(nil)
 }

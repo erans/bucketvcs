@@ -49,6 +49,7 @@ type Deps struct {
 	RenameCheck    RepoRenameCheck
 	Triggers       TriggerAdmin   // nil => triggers tab renders "not enabled"
 	Connectors     ConnectorNames // configured connector names (no secrets)
+	Audit          AuditReader    // nil => audit pages render "not enabled"
 }
 
 type server struct {
@@ -74,6 +75,7 @@ type server struct {
 	renameCheck    RepoRenameCheck
 	triggers       TriggerAdmin
 	connectors     ConnectorNames
+	audit          AuditReader
 }
 
 // NewHandler builds the web UI http.Handler. Panics only on an unrecoverable
@@ -107,6 +109,7 @@ func NewHandler(d Deps) http.Handler {
 		renameCheck:    d.RenameCheck,
 		triggers:       d.Triggers,
 		connectors:     d.Connectors,
+		audit:          d.Audit,
 	}
 	if d.OIDC != nil {
 		if len(d.OIDC.HMACKey) < 16 {

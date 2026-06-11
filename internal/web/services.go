@@ -5,6 +5,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/bucketvcs/bucketvcs/internal/auditlog"
 	"github.com/bucketvcs/bucketvcs/internal/buildtrigger"
 	"github.com/bucketvcs/bucketvcs/internal/hooks"
 	"github.com/bucketvcs/bucketvcs/internal/lfs/quota"
@@ -93,3 +94,9 @@ type RepoInitializer func(ctx context.Context, tenant, repoName, actor string) e
 // error when it is non-empty OR the probe itself fails (fail-closed). Wired in
 // serve.go as a closure over the ObjectStore.
 type RepoRenameCheck func(ctx context.Context, tenant, newName string) error
+
+// AuditReader is the read surface the audit viewer needs (satisfied by
+// *auditlog.Reader). A nil dep disables the audit pages.
+type AuditReader interface {
+	Page(ctx context.Context, f auditlog.Filter, cursor string) ([]auditlog.Event, string, error)
+}
