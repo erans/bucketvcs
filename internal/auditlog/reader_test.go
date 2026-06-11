@@ -72,13 +72,13 @@ func eventNames(events []auditlog.Event) []string {
 func TestReaderPage_NewestFirstAndCursor(t *testing.T) {
 	store := newFakeStore()
 	// Three objects, keyed so ascending sort = oldest..newest.
-	store.put("sys/logs/activity/120000", gzLines(
+	store.put("sys/logs/activity/2026/05/22/120000-aa-000001.ndjson.gz", gzLines(
 		`{"ts":"2026-05-22T12:00:00Z","event":"a","tenant":"acme","repo":"app"}`,
 	))
-	store.put("sys/logs/activity/130000", gzLines(
+	store.put("sys/logs/activity/2026/05/22/130000-aa-000002.ndjson.gz", gzLines(
 		`{"ts":"2026-05-22T13:00:00Z","event":"b","tenant":"acme","repo":"app"}`,
 	))
-	store.put("sys/logs/activity/140000", gzLines(
+	store.put("sys/logs/activity/2026/05/22/140000-aa-000003.ndjson.gz", gzLines(
 		`{"ts":"2026-05-22T14:00:00Z","event":"c","tenant":"acme","repo":"app"}`,
 	))
 
@@ -113,7 +113,7 @@ func TestReaderPage_NewestFirstAndCursor(t *testing.T) {
 func TestReaderPage_CrossTenantFilterExcludes(t *testing.T) {
 	store := newFakeStore()
 	// One object with two lines: tenant acme + tenant other.
-	store.put("sys/logs/activity/120000", gzLines(
+	store.put("sys/logs/activity/2026/05/22/120000-aa-000001.ndjson.gz", gzLines(
 		`{"ts":"2026-05-22T12:00:00Z","event":"acme-evt","tenant":"acme","repo":"app"}`,
 		`{"ts":"2026-05-22T12:00:01Z","event":"other-evt","tenant":"other","repo":"app"}`,
 	))
@@ -154,13 +154,13 @@ func TestReaderPage_EmptyStore(t *testing.T) {
 func TestReaderPage_ByteCapBreaksPage(t *testing.T) {
 	store := newFakeStore()
 	// Three objects with distinct keys (ascending = oldest..newest).
-	store.put("sys/logs/activity/120000", gzLines(
+	store.put("sys/logs/activity/2026/05/22/120000-aa-000001.ndjson.gz", gzLines(
 		`{"ts":"2026-05-22T12:00:00Z","event":"ev-a","tenant":"acme","repo":"app"}`,
 	))
-	store.put("sys/logs/activity/130000", gzLines(
+	store.put("sys/logs/activity/2026/05/22/130000-aa-000002.ndjson.gz", gzLines(
 		`{"ts":"2026-05-22T13:00:00Z","event":"ev-b","tenant":"acme","repo":"app"}`,
 	))
-	store.put("sys/logs/activity/140000", gzLines(
+	store.put("sys/logs/activity/2026/05/22/140000-aa-000003.ndjson.gz", gzLines(
 		`{"ts":"2026-05-22T14:00:00Z","event":"ev-c","tenant":"acme","repo":"app"}`,
 	))
 
@@ -216,10 +216,10 @@ func TestReaderPage_ByteCapBreaksPage(t *testing.T) {
 
 func TestReaderPage_DeletedCursorResumesAtPosition(t *testing.T) {
 	store := newFakeStore()
-	store.put("sys/logs/activity/120000", gzLines(
+	store.put("sys/logs/activity/2026/05/22/120000-aa-000001.ndjson.gz", gzLines(
 		`{"ts":"2026-05-22T12:00:00Z","event":"a","tenant":"acme","repo":"app"}`,
 	))
-	store.put("sys/logs/activity/140000", gzLines(
+	store.put("sys/logs/activity/2026/05/22/140000-aa-000003.ndjson.gz", gzLines(
 		`{"ts":"2026-05-22T14:00:00Z","event":"c","tenant":"acme","repo":"app"}`,
 	))
 
@@ -227,7 +227,7 @@ func TestReaderPage_DeletedCursorResumesAtPosition(t *testing.T) {
 	// between page views). Pagination must resume with the keys strictly older
 	// than the cursor, not dead-end.
 	r := auditlog.NewReader(store, "")
-	events, next, err := r.Page(context.Background(), auditlog.Filter{}, "sys/logs/activity/130000")
+	events, next, err := r.Page(context.Background(), auditlog.Filter{}, "sys/logs/activity/2026/05/22/130000-aa-000002.ndjson.gz")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -255,13 +255,13 @@ func (s *brokenGetStore) Get(ctx context.Context, key string, opts *storage.GetO
 
 func TestReaderPage_SkippedObjectIsLogged(t *testing.T) {
 	inner := newFakeStore()
-	inner.put("sys/logs/activity/120000", gzLines(
+	inner.put("sys/logs/activity/2026/05/22/120000-aa-000001.ndjson.gz", gzLines(
 		`{"ts":"2026-05-22T12:00:00Z","event":"a","tenant":"acme","repo":"app"}`,
 	))
-	inner.put("sys/logs/activity/130000", gzLines(
+	inner.put("sys/logs/activity/2026/05/22/130000-aa-000002.ndjson.gz", gzLines(
 		`{"ts":"2026-05-22T13:00:00Z","event":"b","tenant":"acme","repo":"app"}`,
 	))
-	store := &brokenGetStore{fakeStore: inner, failKey: "sys/logs/activity/130000"}
+	store := &brokenGetStore{fakeStore: inner, failKey: "sys/logs/activity/2026/05/22/130000-aa-000002.ndjson.gz"}
 
 	var buf bytes.Buffer
 	r := auditlog.NewReader(store, "")
@@ -275,14 +275,14 @@ func TestReaderPage_SkippedObjectIsLogged(t *testing.T) {
 		t.Fatalf("events: got %v want [a] (broken object skipped)", got)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "sys/logs/activity/130000") || !strings.Contains(out, "simulated get failure") {
+	if !strings.Contains(out, "sys/logs/activity/2026/05/22/130000-aa-000002.ndjson.gz") || !strings.Contains(out, "simulated get failure") {
 		t.Fatalf("skipped object not logged with key+error; log:\n%s", out)
 	}
 }
 
 func TestReaderPage_ZeroObjectsPerPageDefaults(t *testing.T) {
 	store := newFakeStore()
-	store.put("sys/logs/activity/120000", gzLines(
+	store.put("sys/logs/activity/2026/05/22/120000-aa-000001.ndjson.gz", gzLines(
 		`{"ts":"2026-05-22T12:00:00Z","event":"a","tenant":"acme","repo":"app"}`,
 	))
 
@@ -306,10 +306,10 @@ func TestReaderPage_ZeroObjectsPerPageDefaults(t *testing.T) {
 // advances so all events remain reachable across successive pages.
 func TestReaderPage_EventCapBreaksPage(t *testing.T) {
 	store := newFakeStore()
-	store.put("sys/logs/activity/120000", gzLines(
+	store.put("sys/logs/activity/2026/05/22/120000-aa-000001.ndjson.gz", gzLines(
 		`{"ts":"2026-05-22T12:00:00Z","event":"ev-a","tenant":"acme","repo":"app"}`,
 	))
-	store.put("sys/logs/activity/130000", gzLines(
+	store.put("sys/logs/activity/2026/05/22/130000-aa-000002.ndjson.gz", gzLines(
 		`{"ts":"2026-05-22T13:00:00Z","event":"ev-b","tenant":"acme","repo":"app"}`,
 	))
 
@@ -343,7 +343,7 @@ func TestReaderPage_EventCapBreaksPage(t *testing.T) {
 // malformed lines must produce an operator signal, same as whole-object skips.
 func TestReaderPage_PartialCorruptionLogged(t *testing.T) {
 	store := newFakeStore()
-	store.put("sys/logs/activity/120000", gzLines(
+	store.put("sys/logs/activity/2026/05/22/120000-aa-000001.ndjson.gz", gzLines(
 		`{"ts":"2026-05-22T12:00:00Z","event":"good","tenant":"acme","repo":"app"}`,
 		`not-valid-json{{`,
 	))
@@ -360,7 +360,7 @@ func TestReaderPage_PartialCorruptionLogged(t *testing.T) {
 		t.Fatalf("events: got %v want [good]", got)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "sys/logs/activity/120000") || !strings.Contains(out, "skipped_lines=1") {
+	if !strings.Contains(out, "sys/logs/activity/2026/05/22/120000-aa-000001.ndjson.gz") || !strings.Contains(out, "skipped_lines=1") {
 		t.Fatalf("partial corruption not logged with key+count; log:\n%s", out)
 	}
 }
