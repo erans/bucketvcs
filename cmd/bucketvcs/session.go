@@ -18,9 +18,14 @@ import (
 // commands are diagnostics; silently creating an empty DB on a typo'd path
 // would read as "no sessions". Returns a non-zero exit code on failure.
 func openExistingAuthDB(path string, stderr io.Writer) (*sqlitestore.Store, int) {
-	if _, err := os.Stat(path); err != nil {
-		fmt.Fprintf(stderr, "auth-db: %v\n", err)
-		return nil, 1
+	// The no-create existence check only applies to the embedded sqlite
+	// file backend; postgres://-style DSNs are passed through (their
+	// backends don't create-on-open from a typo).
+	if !sqlitestore.IsNonSQLiteValue(path) {
+		if _, err := os.Stat(path); err != nil {
+			fmt.Fprintf(stderr, "auth-db: %v\n", err)
+			return nil, 1
+		}
 	}
 	s, _, err := openAuthDB(path)
 	if err != nil {
@@ -58,11 +63,16 @@ func sessionList(ctx context.Context, args []string, stdout, stderr io.Writer) i
 	if err := fs.Parse(reorderFlagsFirst(args, nil)); err != nil {
 		return 2
 	}
-	if fs.NArg() != 0 || *authDB == "" {
-		fmt.Fprintln(stderr, "usage: bucketvcs session list --auth-db=<path> [--user=<name>]")
+	if fs.NArg() != 0 {
+		fmt.Fprintln(stderr, "usage: bucketvcs session list [--auth-db=<path>] [--user=<name>]")
 		return 2
 	}
-	s, code := openExistingAuthDB(*authDB, stderr)
+	path, err := resolveAuthDB(*authDB, realEnv())
+	if err != nil {
+		fmt.Fprintf(stderr, "auth-db: %v\n", err)
+		return 1
+	}
+	s, code := openExistingAuthDB(path, stderr)
 	if code != 0 {
 		return code
 	}
@@ -106,11 +116,16 @@ func sessionRevoke(ctx context.Context, args []string, stdout, stderr io.Writer)
 	if err := fs.Parse(reorderFlagsFirst(args, nil)); err != nil {
 		return 2
 	}
-	if fs.NArg() != 0 || *authDB == "" || (*idHash == "") == (*user == "") {
-		fmt.Fprintln(stderr, "usage: bucketvcs session revoke --auth-db=<path> (--id-hash=<hex> | --user=<name>)")
+	if fs.NArg() != 0 || (*idHash == "") == (*user == "") {
+		fmt.Fprintln(stderr, "usage: bucketvcs session revoke [--auth-db=<path>] (--id-hash=<hex> | --user=<name>)")
 		return 2
 	}
-	s, code := openExistingAuthDB(*authDB, stderr)
+	path, rerr := resolveAuthDB(*authDB, realEnv())
+	if rerr != nil {
+		fmt.Fprintf(stderr, "auth-db: %v\n", rerr)
+		return 1
+	}
+	s, code := openExistingAuthDB(path, stderr)
 	if code != 0 {
 		return code
 	}

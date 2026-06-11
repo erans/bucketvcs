@@ -94,11 +94,35 @@ func TestSessionList_UsageErrors(t *testing.T) {
 	if code := runSession(context.Background(), nil, &out, &errb); code != 2 {
 		t.Fatalf("no subcommand: exit %d, want 2", code)
 	}
-	if code := runSession(context.Background(), []string{"list"}, &out, &errb); code != 2 {
-		t.Fatalf("missing --auth-db: exit %d, want 2", code)
-	}
 	if code := runSession(context.Background(), []string{"bogus"}, &out, &errb); code != 2 {
 		t.Fatalf("unknown subcommand: exit %d, want 2", code)
+	}
+}
+
+func TestSessionList_AuthDBResolvedFromEnv(t *testing.T) {
+	// No --auth-db is no longer a usage error: the path resolves like the
+	// other auth-DB commands (flag → BUCKETVCS_AUTH_DB → XDG default). An
+	// env-resolved missing path still fails the no-create stat check.
+	t.Setenv("BUCKETVCS_AUTH_DB", filepath.Join(t.TempDir(), "nope", "auth.db"))
+	var out, errb bytes.Buffer
+	if code := runSession(context.Background(), []string{"list"}, &out, &errb); code != 1 {
+		t.Fatalf("env-resolved missing db: exit %d, want 1; stderr: %s", code, errb.String())
+	}
+	if !strings.Contains(errb.String(), "no such file") {
+		t.Fatalf("want stat failure on env-resolved path, stderr: %s", errb.String())
+	}
+}
+
+func TestSessionList_DSNAuthDBSkipsStat(t *testing.T) {
+	// postgres:// DSNs are not filesystem paths; they must reach the
+	// backend (and fail at connect) rather than dying on os.Stat.
+	var out, errb bytes.Buffer
+	code := runSession(context.Background(), []string{"list", "--auth-db", "postgres://user@host/db"}, &out, &errb)
+	if code != 1 {
+		t.Fatalf("dsn auth-db: exit %d, want 1 (connect failure); stderr: %s", code, errb.String())
+	}
+	if strings.Contains(errb.String(), "no such file or directory") {
+		t.Fatalf("dsn auth-db must not be stat-checked, stderr: %s", errb.String())
 	}
 }
 

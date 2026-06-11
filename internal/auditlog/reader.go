@@ -124,10 +124,14 @@ func (r *Reader) oldestDay(ctx context.Context) (string, error) {
 	// prefix itself or an intermediate <prefix>2026/06/ entry) sort before
 	// real partitions and are benign — skip them. A real shiplog key never
 	// ends in "/". The loud-error contract applies to the first NON-marker
-	// key only.
+	// key only. The 1000-key probe page covers ~2.5 years of fully
+	// marker-polluted partitions (one marker per day) in one round-trip;
+	// pathological prefixes beyond that still page — bounded by total
+	// marker count, not deployment age, since the first REAL key
+	// terminates the scan.
 	token := ""
 	for {
-		page, err := r.store.List(ctx, r.prefix, &storage.ListOptions{MaxKeys: 16, ContinuationToken: token})
+		page, err := r.store.List(ctx, r.prefix, &storage.ListOptions{MaxKeys: 1000, ContinuationToken: token})
 		if err != nil {
 			return "", err
 		}
