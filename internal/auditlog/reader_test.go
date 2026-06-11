@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/auditlog"
 	"github.com/bucketvcs/bucketvcs/internal/storage"
@@ -362,5 +364,199 @@ func TestReaderPage_PartialCorruptionLogged(t *testing.T) {
 	out := buf.String()
 	if !strings.Contains(out, "sys/logs/activity/2026/05/22/120000-aa-000001.ndjson.gz") || !strings.Contains(out, "skipped_lines=1") {
 		t.Fatalf("partial corruption not logged with key+count; log:\n%s", out)
+	}
+}
+
+// countingListStore counts List calls (and records prefixes) to prove the
+// day-walk lists only the partitions it needs.
+type countingListStore struct {
+	*fakeStore
+	listCalls    int
+	listPrefixes []string
+}
+
+func (s *countingListStore) List(ctx context.Context, prefix string, opts *storage.ListOptions) (*storage.ListPage, error) {
+	s.listCalls++
+	s.listPrefixes = append(s.listPrefixes, prefix)
+	return s.fakeStore.List(ctx, prefix, opts)
+}
+
+func dayKey(day, hhmmss string, seq int) string {
+	return fmt.Sprintf("sys/logs/activity/%s/%s-aa-%06d.ndjson.gz", day, hhmmss, seq)
+}
+
+func TestReaderPage_WalksDaysNewestFirst(t *testing.T) {
+	inner := newFakeStore()
+	inner.put(dayKey("2026/06/01", "120000", 1), gzLines(
+		`{"ts":"2026-06-01T12:00:00Z","event":"a","tenant":"acme","repo":"app"}`,
+	))
+	inner.put(dayKey("2026/06/03", "120000", 2), gzLines(
+		`{"ts":"2026-06-03T12:00:00Z","event":"b","tenant":"acme","repo":"app"}`,
+	))
+	inner.put(dayKey("2026/06/05", "120000", 3), gzLines(
+		`{"ts":"2026-06-05T12:00:00Z","event":"c","tenant":"acme","repo":"app"}`,
+	))
+	store := &countingListStore{fakeStore: inner}
+
+	r := auditlog.NewReader(store, "")
+	// Page 1 capped at 2 objects -> c, b; cursor points at b's object.
+	r.ObjectsPerPage = 2
+	evs, next, err := r.Page(context.Background(), auditlog.Filter{}, "")
+	if err != nil {
+		t.Fatalf("page1: %v", err)
+	}
+	if got := eventNames(evs); len(got) != 2 || got[0] != "c" || got[1] != "b" {
+		t.Fatalf("page1: got %v want [c b]", got)
+	}
+	if next == "" {
+		t.Fatal("page1: want non-empty cursor")
+	}
+
+	// Page 2 resumes across the day gap to a; floor reached -> empty cursor.
+	evs2, next2, err := r.Page(context.Background(), auditlog.Filter{}, next)
+	if err != nil {
+		t.Fatalf("page2: %v", err)
+	}
+	if got := eventNames(evs2); len(got) != 1 || got[0] != "a" {
+		t.Fatalf("page2: got %v want [a]", got)
+	}
+	if next2 != "" {
+		t.Fatalf("page2: want empty cursor, got %q", next2)
+	}
+}
+
+func TestReaderPage_DoesNotListFullPrefix(t *testing.T) {
+	inner := newFakeStore()
+	// Objects on 3 days spread over a year; page size 1 must NOT touch
+	// every day between them.
+	inner.put(dayKey("2025/07/01", "120000", 1), gzLines(
+		`{"ts":"2025-07-01T12:00:00Z","event":"old","tenant":"acme","repo":"app"}`,
+	))
+	inner.put(dayKey("2026/06/04", "120000", 2), gzLines(
+		`{"ts":"2026-06-04T12:00:00Z","event":"mid","tenant":"acme","repo":"app"}`,
+	))
+	inner.put(dayKey("2026/06/05", "120000", 3), gzLines(
+		`{"ts":"2026-06-05T12:00:00Z","event":"new","tenant":"acme","repo":"app"}`,
+	))
+	store := &countingListStore{fakeStore: inner}
+
+	r := auditlog.NewReader(store, "")
+	r.ObjectsPerPage = 1
+	// Cursor at the newest object's key: page 2 starts on 2026/06/05.
+	evs, next, err := r.Page(context.Background(), auditlog.Filter{}, "")
+	if err != nil || len(evs) != 1 || evs[0].Event != "new" {
+		t.Fatalf("page1: evs=%v err=%v", eventNames(evs), err)
+	}
+	calls := store.listCalls
+	evs2, _, err := r.Page(context.Background(), auditlog.Filter{}, next)
+	if err != nil || len(evs2) != 1 || evs2[0].Event != "mid" {
+		t.Fatalf("page2: evs=%v err=%v", eventNames(evs2), err)
+	}
+	// Page 2: 1 floor probe + day lists for 06/05 (cursor day, filtered
+	// empty) + 06/04. It must NOT walk the ~340 empty days down to the
+	// floor once the page is full.
+	if got := store.listCalls - calls; got > 4 {
+		t.Fatalf("page2 used %d List calls, want <= 4 (no full-prefix walk)", got)
+	}
+}
+
+func TestReaderPage_SinceUntilNarrowWalkRange(t *testing.T) {
+	inner := newFakeStore()
+	inner.put(dayKey("2026/06/01", "120000", 1), gzLines(
+		`{"ts":"2026-06-01T12:00:00Z","event":"a","tenant":"acme","repo":"app"}`,
+	))
+	inner.put(dayKey("2026/06/03", "120000", 2), gzLines(
+		`{"ts":"2026-06-03T12:00:00Z","event":"b","tenant":"acme","repo":"app"}`,
+	))
+	inner.put(dayKey("2026/06/05", "120000", 3), gzLines(
+		`{"ts":"2026-06-05T12:00:00Z","event":"c","tenant":"acme","repo":"app"}`,
+	))
+	store := &countingListStore{fakeStore: inner}
+
+	f := auditlog.Filter{
+		Since: time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC),
+		Until: time.Date(2026, 6, 4, 23, 59, 59, 0, time.UTC),
+	}
+	r := auditlog.NewReader(store, "")
+	evs, next, err := r.Page(context.Background(), f, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := eventNames(evs); len(got) != 1 || got[0] != "b" {
+		t.Fatalf("got %v want [b]", got)
+	}
+	if next != "" {
+		t.Fatalf("want empty cursor (since-floor reached), got %q", next)
+	}
+	// The walk must not list days outside [since.day, until.day]:
+	// floor probe (full prefix, MaxKeys 1) + 06/04 + 06/03 + 06/02 = 4.
+	for _, p := range store.listPrefixes {
+		if strings.Contains(p, "2026/06/05") || strings.Contains(p, "2026/06/01") {
+			t.Fatalf("walk listed out-of-range day prefix %q", p)
+		}
+	}
+}
+
+func TestReaderPage_DayBudgetSyntheticCursor(t *testing.T) {
+	inner := newFakeStore()
+	// One object far in the past; the gap from today exceeds the per-page
+	// day-list budget, so page 1 returns 0 events + a synthetic cursor,
+	// and a later page eventually reaches the object.
+	inner.put(dayKey("2020/01/01", "120000", 1), gzLines(
+		`{"ts":"2020-01-01T12:00:00Z","event":"ancient","tenant":"acme","repo":"app"}`,
+	))
+	inner.put(dayKey("2026/06/05", "120000", 2), gzLines(
+		`{"ts":"2026-06-05T12:00:00Z","event":"new","tenant":"acme","repo":"app"}`,
+	))
+	store := &countingListStore{fakeStore: inner}
+
+	r := auditlog.NewReader(store, "")
+	evs, next, err := r.Page(context.Background(), auditlog.Filter{}, "")
+	if err != nil {
+		t.Fatalf("page1: %v", err)
+	}
+	if got := eventNames(evs); len(got) != 1 || got[0] != "new" {
+		t.Fatalf("page1: got %v want [new]", got)
+	}
+	if next == "" {
+		t.Fatal("page1: want a cursor (older object exists)")
+	}
+
+	// Keep paging; each page burns up to maxDayListsPerPage day-lists.
+	// 2026-06-05 .. 2020-01-01 is ~2350 days -> must terminate well within
+	// 30 pages, ending with the ancient event and an empty cursor.
+	cursor := next
+	var found bool
+	for i := 0; i < 30; i++ {
+		evs, cursor, err = r.Page(context.Background(), auditlog.Filter{}, cursor)
+		if err != nil {
+			t.Fatalf("page %d: %v", i+2, err)
+		}
+		if len(evs) == 1 && evs[0].Event == "ancient" {
+			found = true
+			if cursor != "" {
+				t.Fatalf("after ancient: want empty cursor, got %q", cursor)
+			}
+			break
+		}
+		if len(evs) != 0 {
+			t.Fatalf("page %d: unexpected events %v", i+2, eventNames(evs))
+		}
+		if cursor == "" {
+			t.Fatal("cursor drained before reaching the ancient event")
+		}
+	}
+	if !found {
+		t.Fatal("never reached the ancient event within 30 pages")
+	}
+}
+
+func TestReaderPage_UnparseableKeyFailsLoudly(t *testing.T) {
+	inner := newFakeStore()
+	inner.put("sys/logs/activity/garbage.txt", []byte("junk"))
+	r := auditlog.NewReader(inner, "")
+	_, _, err := r.Page(context.Background(), auditlog.Filter{}, "")
+	if err == nil {
+		t.Fatal("want error for non-date-sharded key under the activity prefix")
 	}
 }
