@@ -34,7 +34,7 @@ func EmitSessionDestroyed(ctx context.Context, logger *slog.Logger, userID, name
 // web sessions. Tagged audit=true so it ships to the activity stream and shows
 // in the audit viewer, completing the session lifecycle alongside
 // session.created/destroyed.
-func EmitSessionRevoked(ctx context.Context, logger *slog.Logger, actor string, count int64) {
+func EmitSessionRevoked(ctx context.Context, logger *slog.Logger, actor, idHash string, count int64) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -42,6 +42,7 @@ func EmitSessionRevoked(ctx context.Context, logger *slog.Logger, actor string, 
 		slog.Bool("audit", true),
 		slog.String("event", "auth.session.revoked"),
 		slog.String("actor", actor),
+		slog.String("id_hash", idHash),
 		slog.Int64("count", count),
 	)
 }

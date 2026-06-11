@@ -102,13 +102,19 @@ func parseAuditFilter(r *http.Request) (auditlog.Filter, string, string) {
 }
 
 // toAuditRows formats decoded events for display. Shared with the per-repo
-// audit tab.
+// audit tab. A zero timestamp (missing/corrupt ts) is flagged visibly rather
+// than rendering as year 1 — such events also sort last and interact oddly
+// with date filters, so the operator should know the source line is damaged.
 func toAuditRows(events []auditlog.Event) []auditRow {
 	rows := make([]auditRow, 0, len(events))
 	for _, e := range events {
+		ts := "(no timestamp)"
+		if !e.Ts.IsZero() {
+			ts = e.Ts.UTC().Format("2006-01-02 15:04:05Z")
+		}
 		rows = append(rows, auditRow{
 			Event:   e,
-			TimeStr: e.Ts.UTC().Format("2006-01-02 15:04:05Z"),
+			TimeStr: ts,
 		})
 	}
 	return rows

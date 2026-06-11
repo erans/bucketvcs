@@ -338,3 +338,29 @@ func TestReaderPage_EventCapBreaksPage(t *testing.T) {
 		t.Fatalf("page2: expected empty next cursor, got %q", next2)
 	}
 }
+
+// TestReaderPage_PartialCorruptionLogged: an object that decodes but drops
+// malformed lines must produce an operator signal, same as whole-object skips.
+func TestReaderPage_PartialCorruptionLogged(t *testing.T) {
+	store := newFakeStore()
+	store.put("sys/logs/activity/120000", gzLines(
+		`{"ts":"2026-05-22T12:00:00Z","event":"good","tenant":"acme","repo":"app"}`,
+		`not-valid-json{{`,
+	))
+
+	var buf bytes.Buffer
+	r := auditlog.NewReader(store, "")
+	r.Logger = slog.New(slog.NewTextHandler(&buf, nil))
+
+	events, _, err := r.Page(context.Background(), auditlog.Filter{}, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := eventNames(events); len(got) != 1 || got[0] != "good" {
+		t.Fatalf("events: got %v want [good]", got)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "sys/logs/activity/120000") || !strings.Contains(out, "skipped_lines=1") {
+		t.Fatalf("partial corruption not logged with key+count; log:\n%s", out)
+	}
+}

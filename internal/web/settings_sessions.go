@@ -86,7 +86,7 @@ func (s *server) handleSessionRevoke(w http.ResponseWriter, r *http.Request) {
 		s.redirectFlash(w, r, "/settings/sessions", "session already gone")
 		return
 	}
-	EmitSessionRevoked(r.Context(), s.logger, sess.Name, n)
+	EmitSessionRevoked(r.Context(), s.logger, sess.Name, idHash, n)
 	s.redirectFlash(w, r, "/settings/sessions", "session revoked")
 }
 
@@ -115,8 +115,12 @@ func (s *server) handleSessionRevokeAll(w http.ResponseWriter, r *http.Request) 
 		s.renderError(w, r, http.StatusInternalServerError, "internal error")
 		return
 	}
-	EmitSessionRevokedAll(r.Context(), s.logger, sess.Name, n)
 	EmitAdminActionMetric(r.Context(), s.logger, "session", "revoke_all", "ok")
+	if n > 0 {
+		// Match the sibling revoke handlers: a no-op (no other sessions)
+		// records no audit event — nothing was revoked.
+		EmitSessionRevokedAll(r.Context(), s.logger, sess.Name, n)
+	}
 	s.redirectFlash(w, r, "/settings/sessions",
 		fmt.Sprintf("%d other session(s) signed out", n))
 }

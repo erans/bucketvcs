@@ -149,7 +149,7 @@ func (r *Reader) Page(ctx context.Context, f Filter, cursor string) ([]Event, st
 			consumed++
 			continue
 		}
-		evs, _, decErr := DecodeGz(obj.Body)
+		evs, skippedLines, decErr := DecodeGz(obj.Body)
 		size := obj.Metadata.Size
 		obj.Body.Close()
 		if decErr != nil {
@@ -157,6 +157,12 @@ func (r *Reader) Page(ctx context.Context, f Filter, cursor string) ([]Event, st
 			oldestIdx = i
 			consumed++
 			continue
+		}
+		if skippedLines > 0 && r.Logger != nil {
+			// Partial corruption: the object decoded but some lines were
+			// dropped — same operator signal as a whole-object skip.
+			r.Logger.Warn("auditlog: skipped malformed lines in activity object",
+				"key", keys[i], "skipped_lines", skippedLines)
 		}
 		for _, e := range evs {
 			if f.Match(e) {

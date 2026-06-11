@@ -187,3 +187,26 @@ func TestSessionsRevoke_NoAuditEventWhenAlreadyGone(t *testing.T) {
 		t.Fatalf("auth.session.revoked emitted for a no-op revoke (0 rows deleted); log:\n%s", buf.String())
 	}
 }
+
+// TestSessionsRevokeAll_NoAuditEventWhenNoOthers: revoke-all with no other
+// sessions deletes nothing and must not record auth.session.revoked_all —
+// matching the no-op rule of the sibling revoke handlers.
+func TestSessionsRevokeAll_NoAuditEventWhenNoOthers(t *testing.T) {
+	store := newFakeStore()
+	var buf bytes.Buffer
+	h := newTestHandlerWith(store, func(d *Deps) {
+		d.Logger = slog.New(slog.NewTextHandler(&buf, nil))
+	})
+
+	req := csrfPost(t, "/settings/sessions/revoke-all", nil)
+	addSessionCookie(t, req, store, userSession())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status %d, want 303; body:\n%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(buf.String(), "auth.session.revoked_all") {
+		t.Fatalf("auth.session.revoked_all emitted for a no-op revoke-all; log:\n%s", buf.String())
+	}
+}
