@@ -161,14 +161,17 @@ func (s *Store) DeleteSessionByHashForUser(ctx context.Context, userID, idHash s
 // admin view, plus the total session count. Ordered newest-first by last_seen.
 // limit > 0 caps the returned rows (the count is still the full total) so a
 // large deployment never loads the whole table for a display-capped page;
-// limit <= 0 returns every row.
+// limit <= 0 returns every row. LEFT JOIN + COALESCE keeps an orphaned session
+// (no matching user row) visible — and revocable — as "(deleted)" rather than
+// silently diverging from the COUNT(*).
 func (s *Store) ListAllSessions(ctx context.Context, limit int) ([]auth.AdminSessionInfo, int, error) {
 	var total int
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions`).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count sessions: %w", err)
 	}
-	query := `SELECT s.id_hash, s.provider, s.created_at, s.expires_at, s.last_seen, s.user_id, u.name
-	   FROM sessions s JOIN users u ON u.id = s.user_id
+	query := `SELECT s.id_hash, s.provider, s.created_at, s.expires_at, s.last_seen, s.user_id,
+	        COALESCE(u.name, '(deleted)')
+	   FROM sessions s LEFT JOIN users u ON u.id = s.user_id
 	  ORDER BY s.last_seen DESC`
 	var args []any
 	if limit > 0 {
@@ -194,6 +197,25 @@ func (s *Store) ListAllSessions(ctx context.Context, limit int) ([]auth.AdminSes
 		return nil, 0, fmt.Errorf("iterate admin sessions: %w", err)
 	}
 	return out, total, nil
+}
+
+// SessionOwnerByHash resolves a stored session id hash to its owning user, for
+// audit attribution before an admin revoke deletes the row (afterwards the
+// hash can no longer be resolved). A missing user row resolves to "(deleted)"
+// so attribution survives orphaned sessions. Returns auth.ErrNoSuchUser when
+// no session matches.
+func (s *Store) SessionOwnerByHash(ctx context.Context, idHash string) (userID, userName string, err error) {
+	err = s.db.QueryRowContext(ctx,
+		`SELECT s.user_id, COALESCE(u.name, '(deleted)')
+		   FROM sessions s LEFT JOIN users u ON u.id = s.user_id
+		  WHERE s.id_hash = ?`, idHash).Scan(&userID, &userName)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", auth.ErrNoSuchUser
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("session owner by hash: %w", err)
+	}
+	return userID, userName, nil
 }
 
 // DeleteSessionByHash deletes the session identified by idHash with no user

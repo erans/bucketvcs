@@ -129,6 +129,14 @@ func (f *fakeStore) ListAllSessions(ctx context.Context, limit int) ([]auth.Admi
 	}
 	return list, total, nil
 }
+func (f *fakeStore) SessionOwnerByHash(ctx context.Context, idHash string) (string, string, error) {
+	for _, s := range f.allSessions {
+		if s.IDHash == idHash {
+			return s.UserID, s.UserName, nil
+		}
+	}
+	return "", "", auth.ErrNoSuchUser
+}
 func (f *fakeStore) DeleteSessionByHash(ctx context.Context, idHash string) (int64, error) {
 	f.lastRevokeHash = idHash
 	if f.revokeCount < 0 {

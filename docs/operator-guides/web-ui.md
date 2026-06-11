@@ -839,12 +839,15 @@ manual equivalent, and additionally surfaces what is currently active.
 users, each row labelled with the owning user's name, provider, and timestamps,
 and a **revoke** button. This is the operator tool for forcibly signing out a
 specific user's session (for example during an incident). The page renders the
-first 500 sessions; on a large deployment use the CLI for the full list. Admin
+first 500 sessions; on a larger deployment, query the auth DB directly for the
+full list (`SELECT s.*, u.name FROM sessions s LEFT JOIN users u ON u.id =
+s.user_id` — there is no sessions CLI yet). Admin
 revocation removes the session regardless of which user owns it.
 
 Every session revocation emits a tagged audit event (`auth.session.revoked`,
 `auth.session.revoked_all`, or `auth.session.admin_revoked`) carrying the acting
-user. These join `auth.session.created`, `auth.session.destroyed`, and
+user; admin revocations additionally record the target user (resolved
+server-side before the delete). These join `auth.session.created`, `auth.session.destroyed`, and
 `auth.oidc.login` as part of the shipped activity stream, so the full session
 lifecycle — login through revocation — is visible in the audit viewer below.
 

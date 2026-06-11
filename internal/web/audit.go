@@ -61,8 +61,9 @@ func EmitSessionRevokedAll(ctx context.Context, logger *slog.Logger, actor strin
 }
 
 // EmitAdminSessionRevoked records an admin revoking another user's web session
-// by id hash. Tagged audit=true for activity-stream visibility.
-func EmitAdminSessionRevoked(ctx context.Context, logger *slog.Logger, actor, idHash string, count int64) {
+// by id hash, with the target user resolved BEFORE the delete (afterwards the
+// hash is unresolvable). Tagged audit=true for activity-stream visibility.
+func EmitAdminSessionRevoked(ctx context.Context, logger *slog.Logger, actor, idHash, targetUserID, targetUser string, count int64) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -71,6 +72,8 @@ func EmitAdminSessionRevoked(ctx context.Context, logger *slog.Logger, actor, id
 		slog.String("event", "auth.session.admin_revoked"),
 		slog.String("actor", actor),
 		slog.String("id_hash", idHash),
+		slog.String("target_user_id", targetUserID),
+		slog.String("target_user", targetUser),
 		slog.Int64("count", count),
 	)
 }

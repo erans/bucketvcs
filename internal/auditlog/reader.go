@@ -36,6 +36,14 @@ type Reader struct {
 	// Zero disables the page-level guard.
 	MaxBytesPerPage int64
 
+	// MaxEventsPerPage stops consuming further objects once this many matched
+	// events have accumulated (the cursor advances to the last fully-consumed
+	// object, so nothing is lost). Objects can decompress to 64 MiB each; this
+	// bounds how much decoded event data one page can hold in memory.
+	//
+	// Zero disables the guard.
+	MaxEventsPerPage int
+
 	// Logger, when non-nil, records objects skipped by Page (Get or decode
 	// failure) so an operator investigating missing audit events has a signal.
 	Logger *slog.Logger
@@ -44,22 +52,29 @@ type Reader struct {
 // NewReader builds a Reader over store. logPrefix is the operator-configured
 // log root (e.g. "sys/logs"); empty defaults to "sys/logs". The activity
 // objects live under "<logPrefix>/activity/". Trailing slashes on logPrefix
-// are trimmed. Defaults: ObjectsPerPage=20, MaxBytesPerPage=32 MiB.
+// are trimmed. Defaults: ObjectsPerPage=20, MaxBytesPerPage=32 MiB,
+// MaxEventsPerPage=5000.
 func NewReader(store ObjectStore, logPrefix string) *Reader {
 	if logPrefix == "" {
 		logPrefix = "sys/logs"
 	}
 	logPrefix = strings.TrimRight(logPrefix, "/")
 	return &Reader{
-		store:           store,
-		prefix:          logPrefix + "/activity/",
-		ObjectsPerPage:  20,
-		MaxBytesPerPage: 32 << 20,
+		store:            store,
+		prefix:           logPrefix + "/activity/",
+		ObjectsPerPage:   20,
+		MaxBytesPerPage:  32 << 20,
+		MaxEventsPerPage: 5000,
 	}
 }
 
 // listKeys returns all activity object keys under the prefix, ascending
 // (oldest..newest), paging store.List via ContinuationToken until exhausted.
+//
+// TODO(v2): every Page call re-lists the whole prefix (~35k keys/year at the
+// default 15-min ship interval, unbounded without retention). Exploit the
+// date-sharded key layout to list only recent partitions, or list backward
+// from the cursor's date prefix, and cap the per-request listing.
 func (r *Reader) listKeys(ctx context.Context) ([]string, error) {
 	var keys []string
 	token := ""
@@ -152,6 +167,9 @@ func (r *Reader) Page(ctx context.Context, f Filter, cursor string) ([]Event, st
 		oldestIdx = i
 		consumed++
 		if r.MaxBytesPerPage > 0 && bytesUsed >= r.MaxBytesPerPage {
+			break
+		}
+		if r.MaxEventsPerPage > 0 && len(events) >= r.MaxEventsPerPage {
 			break
 		}
 	}

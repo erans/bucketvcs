@@ -65,6 +65,9 @@ type DataStore interface {
 	ListSessionsForUser(ctx context.Context, userID, currentRawID string) ([]auth.SessionInfo, error)
 	DeleteSessionByHashForUser(ctx context.Context, userID, idHash string) (int64, error)
 	ListAllSessions(ctx context.Context, limit int) ([]auth.AdminSessionInfo, int, error)
+	// SessionOwnerByHash resolves a session id hash to its owner for audit
+	// attribution before an admin revoke deletes the row.
+	SessionOwnerByHash(ctx context.Context, idHash string) (userID, userName string, err error)
 	DeleteSessionByHash(ctx context.Context, idHash string) (int64, error)
 	ListAccessibleRepos(ctx context.Context, actor *auth.Actor) ([]Repo, error)
 	// GetVisibleRepo returns the repo if the actor may view it, or an error.

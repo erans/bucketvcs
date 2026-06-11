@@ -61,8 +61,10 @@ func TestAdminSessions_ListsAllAndRevoke(t *testing.T) {
 		if store.lastRevokeHash != "h1" {
 			t.Fatalf("DeleteSessionByHash called with %q, want %q", store.lastRevokeHash, "h1")
 		}
-		if !sink.Has("auth.session.admin_revoked", map[string]string{"id_hash": "h1"}) {
-			t.Fatalf("missing auth.session.admin_revoked audit event; events: %v", sink)
+		if !sink.Has("auth.session.admin_revoked", map[string]string{
+			"id_hash": "h1", "target_user_id": "u1", "target_user": "alice",
+		}) {
+			t.Fatalf("missing auth.session.admin_revoked audit event with target attribution; events: %v", sink)
 		}
 	})
 }

@@ -50,6 +50,9 @@ func (b *browseDataStore) DeleteSessionByHashForUser(ctx context.Context, userID
 func (b *browseDataStore) ListAllSessions(ctx context.Context, limit int) ([]auth.AdminSessionInfo, int, error) {
 	return nil, 0, nil
 }
+func (b *browseDataStore) SessionOwnerByHash(ctx context.Context, idHash string) (string, string, error) {
+	return "", "", nil
+}
 func (b *browseDataStore) DeleteSessionByHash(ctx context.Context, idHash string) (int64, error) {
 	return 0, nil
 }

@@ -336,6 +336,18 @@ func TestListAllSessionsAndDeleteByHash(t *testing.T) {
 		t.Fatalf("limit=1: len=%d total=%d, want len=1 total=2", len(capped), cappedTotal)
 	}
 
+	// SessionOwnerByHash resolves the owner for audit attribution.
+	ownerID, ownerName, err := s.SessionOwnerByHash(ctx, hashSessionID(aliceRaw))
+	if err != nil {
+		t.Fatalf("SessionOwnerByHash: %v", err)
+	}
+	if ownerID != uidA || ownerName != "alice" {
+		t.Fatalf("owner = (%q, %q), want (%q, alice)", ownerID, ownerName, uidA)
+	}
+	if _, _, err := s.SessionOwnerByHash(ctx, "no-such-hash"); !errors.Is(err, auth.ErrNoSuchUser) {
+		t.Fatalf("SessionOwnerByHash miss: err = %v, want ErrNoSuchUser", err)
+	}
+
 	// The admin view joins the user name.
 	byHash := map[string]auth.AdminSessionInfo{}
 	for _, a := range all {

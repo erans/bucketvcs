@@ -82,6 +82,14 @@ func (s *server) handleAdminSessionRevoke(w http.ResponseWriter, r *http.Request
 			return
 		}
 	}
+	// Resolve the target BEFORE deleting — afterwards the hash no longer maps
+	// to a user and the audit event couldn't say whose session was revoked.
+	// Best-effort: a failed lookup degrades to empty target attrs, never blocks
+	// the revoke. Server-side lookup only; a form-supplied user is not trusted.
+	targetUserID, targetUser, oerr := s.store.SessionOwnerByHash(r.Context(), idHash)
+	if oerr != nil {
+		targetUserID, targetUser = "", ""
+	}
 	n, err := s.store.DeleteSessionByHash(r.Context(), idHash)
 	if err != nil {
 		s.logger.Error("admin sessions: revoke", "id_hash", idHash, "err", err)
@@ -94,7 +102,7 @@ func (s *server) handleAdminSessionRevoke(w http.ResponseWriter, r *http.Request
 		s.redirectFlash(w, r, dest, "session already gone")
 		return
 	}
-	EmitAdminSessionRevoked(r.Context(), s.logger, SessionFromContext(r.Context()).Name, idHash, n)
+	EmitAdminSessionRevoked(r.Context(), s.logger, SessionFromContext(r.Context()).Name, idHash, targetUserID, targetUser, n)
 	EmitAdminActionMetric(r.Context(), s.logger, "session", "admin_revoke", "ok")
 	s.redirectFlash(w, r, dest, "session revoked")
 }

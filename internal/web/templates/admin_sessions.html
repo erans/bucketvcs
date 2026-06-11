@@ -3,7 +3,7 @@
 <div class="settings">
   {{template "adminnav" .}}
   <h2>all sessions</h2>
-  {{if .Truncated}}<p class="hint">showing first {{len .Sessions}} of {{.Total}} sessions; use the CLI for the full list.</p>{{end}}
+  {{if .Truncated}}<p class="hint">showing first {{len .Sessions}} of {{.Total}} sessions; query the auth DB for the full list.</p>{{end}}
   {{if .Sessions}}
   <table>
     <thead>

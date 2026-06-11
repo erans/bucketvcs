@@ -300,3 +300,41 @@ func TestReaderPage_ZeroObjectsPerPageDefaults(t *testing.T) {
 		t.Fatalf("zero ObjectsPerPage: got %v want [a]", got)
 	}
 }
+
+// TestReaderPage_EventCapBreaksPage: once MaxEventsPerPage matched events have
+// accumulated, the page stops consuming further objects; the cursor still
+// advances so all events remain reachable across successive pages.
+func TestReaderPage_EventCapBreaksPage(t *testing.T) {
+	store := newFakeStore()
+	store.put("sys/logs/activity/120000", gzLines(
+		`{"ts":"2026-05-22T12:00:00Z","event":"ev-a","tenant":"acme","repo":"app"}`,
+	))
+	store.put("sys/logs/activity/130000", gzLines(
+		`{"ts":"2026-05-22T13:00:00Z","event":"ev-b","tenant":"acme","repo":"app"}`,
+	))
+
+	r := auditlog.NewReader(store, "")
+	r.MaxEventsPerPage = 1
+
+	evs1, next1, err := r.Page(context.Background(), auditlog.Filter{}, "")
+	if err != nil {
+		t.Fatalf("page1: unexpected error: %v", err)
+	}
+	if got := eventNames(evs1); len(got) != 1 || got[0] != "ev-b" {
+		t.Fatalf("page1 events: got %v, want [ev-b]", got)
+	}
+	if next1 == "" {
+		t.Fatal("page1: expected non-empty next cursor (event cap should have broken early)")
+	}
+
+	evs2, next2, err := r.Page(context.Background(), auditlog.Filter{}, next1)
+	if err != nil {
+		t.Fatalf("page2: unexpected error: %v", err)
+	}
+	if got := eventNames(evs2); len(got) != 1 || got[0] != "ev-a" {
+		t.Fatalf("page2 events: got %v, want [ev-a]", got)
+	}
+	if next2 != "" {
+		t.Fatalf("page2: expected empty next cursor, got %q", next2)
+	}
+}
