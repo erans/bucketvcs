@@ -3,8 +3,11 @@ package auditlog_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"log/slog"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/bucketvcs/bucketvcs/internal/auditlog"
@@ -208,5 +211,71 @@ func TestReaderPage_ByteCapBreaksPage(t *testing.T) {
 	all = append(all, eventNames(evs3)...)
 	if len(all) != 3 || all[0] != "ev-c" || all[1] != "ev-b" || all[2] != "ev-a" {
 		t.Fatalf("full walk: got %v, want [ev-c ev-b ev-a]", all)
+	}
+}
+
+func TestReaderPage_DeletedCursorResumesAtPosition(t *testing.T) {
+	store := newFakeStore()
+	store.put("sys/logs/activity/120000", gzLines(
+		`{"ts":"2026-05-22T12:00:00Z","event":"a","tenant":"acme","repo":"app"}`,
+	))
+	store.put("sys/logs/activity/140000", gzLines(
+		`{"ts":"2026-05-22T14:00:00Z","event":"c","tenant":"acme","repo":"app"}`,
+	))
+
+	// Cursor names an object that no longer exists (retention swept 130000
+	// between page views). Pagination must resume with the keys strictly older
+	// than the cursor, not dead-end.
+	r := auditlog.NewReader(store, "")
+	events, next, err := r.Page(context.Background(), auditlog.Filter{}, "sys/logs/activity/130000")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := eventNames(events); len(got) != 1 || got[0] != "a" {
+		t.Fatalf("deleted cursor: got %v want [a]", got)
+	}
+	if next != "" {
+		t.Fatalf("expected empty next cursor, got %q", next)
+	}
+}
+
+// brokenGetStore wraps fakeStore so one key's Get fails: skipped objects must be
+// logged (not silently dropped) when a Logger is configured.
+type brokenGetStore struct {
+	*fakeStore
+	failKey string
+}
+
+func (s *brokenGetStore) Get(ctx context.Context, key string, opts *storage.GetOptions) (*storage.Object, error) {
+	if key == s.failKey {
+		return nil, errors.New("simulated get failure")
+	}
+	return s.fakeStore.Get(ctx, key, opts)
+}
+
+func TestReaderPage_SkippedObjectIsLogged(t *testing.T) {
+	inner := newFakeStore()
+	inner.put("sys/logs/activity/120000", gzLines(
+		`{"ts":"2026-05-22T12:00:00Z","event":"a","tenant":"acme","repo":"app"}`,
+	))
+	inner.put("sys/logs/activity/130000", gzLines(
+		`{"ts":"2026-05-22T13:00:00Z","event":"b","tenant":"acme","repo":"app"}`,
+	))
+	store := &brokenGetStore{fakeStore: inner, failKey: "sys/logs/activity/130000"}
+
+	var buf bytes.Buffer
+	r := auditlog.NewReader(store, "")
+	r.Logger = slog.New(slog.NewTextHandler(&buf, nil))
+
+	events, _, err := r.Page(context.Background(), auditlog.Filter{}, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := eventNames(events); len(got) != 1 || got[0] != "a" {
+		t.Fatalf("events: got %v want [a] (broken object skipped)", got)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "sys/logs/activity/130000") || !strings.Contains(out, "simulated get failure") {
+		t.Fatalf("skipped object not logged with key+error; log:\n%s", out)
 	}
 }

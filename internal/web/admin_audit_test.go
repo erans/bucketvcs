@@ -109,3 +109,26 @@ func TestAdminAudit_NilReaderNotice(t *testing.T) {
 		t.Errorf("expected 'not available' notice when audit is nil; body: %s", body)
 	}
 }
+
+// TestAdminAudit_PagerVisibleOnEmptyPage: pagination is object-based, so a page
+// can yield zero matching rows while older objects still hold matches. The
+// [older] link must render even when Rows is empty.
+func TestAdminAudit_PagerVisibleOnEmptyPage(t *testing.T) {
+	store := adminStore()
+	fr := &fakeAuditReader{events: nil, nextCursor: "older-cursor-key"}
+	h := newTestHandlerWith(store, func(d *Deps) { d.Audit = fr })
+	req := addSessionCookie(t, httptest.NewRequest(http.MethodGet, "/admin/audit?actor=ghost", nil), store, adminSession())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "no audit events match") {
+		t.Errorf("expected empty-state text; body: %s", body)
+	}
+	if !strings.Contains(body, "older-cursor-key") {
+		t.Errorf("pager [older] link must render on an empty page with a next cursor; body: %s", body)
+	}
+}

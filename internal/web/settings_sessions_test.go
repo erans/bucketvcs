@@ -1,9 +1,11 @@
 package web
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -158,5 +160,30 @@ func TestSessionsRevoke_CannotRevokeCurrent(t *testing.T) {
 	dec, err := base64.RawURLEncoding.DecodeString(fc.Value)
 	if err != nil || !strings.Contains(string(dec), "cannot revoke your current session") {
 		t.Fatalf("self-revoke: flash %q does not contain the current-session guard message", fc.Value)
+	}
+}
+
+// TestSessionsRevoke_NoAuditEventWhenAlreadyGone: a revoke that deletes zero
+// rows (session expired or already revoked) must NOT record an
+// auth.session.revoked audit event — nothing was revoked. Mirrors the admin
+// handler's n==0 behavior.
+func TestSessionsRevoke_NoAuditEventWhenAlreadyGone(t *testing.T) {
+	store := newFakeStore()
+	store.revokeCount = -1 // DeleteSessionByHashForUser reports 0 rows
+	var buf bytes.Buffer
+	h := newTestHandlerWith(store, func(d *Deps) {
+		d.Logger = slog.New(slog.NewTextHandler(&buf, nil))
+	})
+
+	req := csrfPost(t, "/settings/sessions/revoke", url.Values{"id_hash": {"hashGONE"}})
+	addSessionCookie(t, req, store, userSession())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status %d, want 303; body:\n%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(buf.String(), "auth.session.revoked") {
+		t.Fatalf("auth.session.revoked emitted for a no-op revoke (0 rows deleted); log:\n%s", buf.String())
 	}
 }

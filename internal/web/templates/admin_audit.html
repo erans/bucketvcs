@@ -30,11 +30,11 @@
     {{end}}
     </tbody>
   </table>
-  {{if .NextCursor}}
-  <p class="pager"><a href="/admin/audit?event={{urlquery .FEvent}}&amp;tenant={{urlquery .FTenant}}&amp;repo={{urlquery .FRepo}}&amp;actor={{urlquery .FActor}}&amp;since={{urlquery .FSince}}&amp;until={{urlquery .FUntil}}&amp;cursor={{urlquery .NextCursor}}">[older]</a></p>
-  {{end}}
   {{else}}
   <p class="empty">no audit events match.</p>
+  {{end}}
+  {{if .NextCursor}}
+  <p class="pager"><a href="/admin/audit?event={{urlquery .FEvent}}&amp;tenant={{urlquery .FTenant}}&amp;repo={{urlquery .FRepo}}&amp;actor={{urlquery .FActor}}&amp;since={{urlquery .FSince}}&amp;until={{urlquery .FUntil}}&amp;cursor={{urlquery .NextCursor}}">[older]</a></p>
   {{end}}
   {{else}}
   <p class="empty">audit log viewing is not available (no audit storage configured).</p>

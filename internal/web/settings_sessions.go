@@ -1,8 +1,6 @@
 package web
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"net/http"
 
@@ -67,10 +65,9 @@ func (s *server) handleSessionRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 	// The current session is not individually revocable (log out instead). The
 	// template omits its revoke form; this guards a hand-crafted POST. The stored
-	// id is SHA-256(rawCookieID), matching sqlitestore.hashSessionID.
+	// id is auth.HashSessionID(rawCookieID), shared with the sqlite store.
 	if c, err := r.Cookie(sessionCookieName); err == nil && c.Value != "" {
-		sum := sha256.Sum256([]byte(c.Value))
-		if hex.EncodeToString(sum[:]) == idHash {
+		if auth.HashSessionID(c.Value) == idHash {
 			s.redirectFlash(w, r, "/settings/sessions", "cannot revoke your current session; use log out")
 			return
 		}
@@ -82,13 +79,15 @@ func (s *server) handleSessionRevoke(w http.ResponseWriter, r *http.Request) {
 		s.renderError(w, r, http.StatusInternalServerError, "internal error")
 		return
 	}
-	EmitSessionRevoked(r.Context(), s.logger, sess.Name, n)
 	EmitAdminActionMetric(r.Context(), s.logger, "session", "revoke", "ok")
-	msg := "session revoked"
 	if n == 0 {
-		msg = "session already gone"
+		// Nothing was deleted (already revoked or expired); no audit event —
+		// mirrors the admin handler's no-op behavior.
+		s.redirectFlash(w, r, "/settings/sessions", "session already gone")
+		return
 	}
-	s.redirectFlash(w, r, "/settings/sessions", msg)
+	EmitSessionRevoked(r.Context(), s.logger, sess.Name, n)
+	s.redirectFlash(w, r, "/settings/sessions", "session revoked")
 }
 
 // handleSessionRevokeAll processes POST /settings/sessions/revoke-all: signs out

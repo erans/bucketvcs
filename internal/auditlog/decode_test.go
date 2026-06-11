@@ -3,6 +3,7 @@ package auditlog_test
 import (
 	"bytes"
 	"compress/gzip"
+	"strings"
 	"testing"
 	"time"
 
@@ -143,5 +144,30 @@ func TestDecodeGz_NotGzip(t *testing.T) {
 	_, _, err := auditlog.DecodeGz(bytes.NewReader([]byte("not gzip data")))
 	if err == nil {
 		t.Fatal("expected error for non-gzip input, got nil")
+	}
+}
+
+// TestDecodeGz_OversizedObjectErrors: an object whose decompressed size exceeds
+// the guard must return an error rather than silently truncating mid-stream —
+// a partially decoded object must be distinguishable from a complete one.
+func TestDecodeGz_OversizedObjectErrors(t *testing.T) {
+	var raw bytes.Buffer
+	gz := gzip.NewWriter(&raw)
+	line := []byte(`{"ts":"2026-05-22T12:00:00Z","event":"x","pad":"` + strings.Repeat("p", 1<<20) + "\"}\n")
+	for written := 0; written <= 65<<20; written += len(line) {
+		if _, err := gz.Write(line); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := auditlog.DecodeGz(bytes.NewReader(raw.Bytes()))
+	if err == nil {
+		t.Fatal("expected truncation error for oversized object, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("error %q does not indicate the size guard", err)
 	}
 }

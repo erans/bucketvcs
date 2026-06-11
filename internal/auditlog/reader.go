@@ -2,6 +2,7 @@ package auditlog
 
 import (
 	"context"
+	"log/slog"
 	"sort"
 	"strings"
 
@@ -34,6 +35,10 @@ type Reader struct {
 	//
 	// Zero disables the page-level guard.
 	MaxBytesPerPage int64
+
+	// Logger, when non-nil, records objects skipped by Page (Get or decode
+	// failure) so an operator investigating missing audit events has a signal.
+	Logger *slog.Logger
 }
 
 // NewReader builds a Reader over store. logPrefix is the operator-configured
@@ -75,6 +80,13 @@ func (r *Reader) listKeys(ctx context.Context) ([]string, error) {
 	return keys, nil
 }
 
+// logSkip records a best-effort-skipped activity object when a Logger is set.
+func (r *Reader) logSkip(key, stage string, err error) {
+	if r.Logger != nil {
+		r.Logger.Warn("auditlog: skipping activity object", "key", key, "stage", stage, "err", err)
+	}
+}
+
 // Page returns up to ObjectsPerPage objects' worth of filtered events,
 // newest-first, starting strictly older than cursor (empty cursor = newest).
 // The returned next cursor is the key of the oldest object included on this
@@ -92,17 +104,13 @@ func (r *Reader) Page(ctx context.Context, f Filter, cursor string) ([]Event, st
 	}
 
 	// end is the exclusive newest-side index: we consume keys[end-1] down to 0.
-	// Empty cursor → start at the newest (end = len). A found cursor → consume
-	// strictly-older indices (end = index of cursor). Cursor not found → end=0
-	// (nothing older to read).
+	// Empty cursor → start at the newest (end = len). Otherwise resume strictly
+	// older than the cursor: SearchStrings gives the first index >= cursor, so
+	// keys[:idx] are exactly the strictly-older keys whether or not the cursor
+	// object still exists (it may have been swept by retention between pages).
 	end := len(keys)
 	if cursor != "" {
-		idx := sort.SearchStrings(keys, cursor)
-		if idx < len(keys) && keys[idx] == cursor {
-			end = idx
-		} else {
-			end = 0
-		}
+		end = sort.SearchStrings(keys, cursor)
 	}
 
 	var events []Event
@@ -114,6 +122,7 @@ func (r *Reader) Page(ctx context.Context, f Filter, cursor string) ([]Event, st
 		obj, err := r.store.Get(ctx, keys[i], nil)
 		if err != nil {
 			// Best-effort skip: advance past this object.
+			r.logSkip(keys[i], "get", err)
 			oldestIdx = i
 			consumed++
 			continue
@@ -122,6 +131,7 @@ func (r *Reader) Page(ctx context.Context, f Filter, cursor string) ([]Event, st
 		size := obj.Metadata.Size
 		obj.Body.Close()
 		if decErr != nil {
+			r.logSkip(keys[i], "decode", decErr)
 			oldestIdx = i
 			consumed++
 			continue

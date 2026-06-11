@@ -3,10 +3,8 @@ package sqlitestore
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -23,12 +21,10 @@ func newSessionID() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// hashSessionID returns SHA-256(rawID) as hex. The id is high-entropy, so a
-// single SHA-256 (not argon2) is sufficient: there is no low-entropy secret to
-// brute-force, and lookups must be cheap (one per request).
+// hashSessionID delegates to auth.HashSessionID, the single source of truth
+// for the stored session-id hash (shared with the web current-session guard).
 func hashSessionID(rawID string) string {
-	sum := sha256.Sum256([]byte(rawID))
-	return hex.EncodeToString(sum[:])
+	return auth.HashSessionID(rawID)
 }
 
 // CreateSession inserts a session for userID and returns the raw cookie id.

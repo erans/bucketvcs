@@ -933,7 +933,11 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 					if store == nil {
 						return nil
 					}
-					return auditlog.NewReader(store, shiplog.DefaultPrefix)
+					rd := auditlog.NewReader(store, shiplog.DefaultPrefix)
+					// base handler, not the tap: reader diagnostics must never
+					// feed back into the shipped audit stream.
+					rd.Logger = slog.New(base)
+					return rd
 				}(),
 				RepoInit: func(ctx context.Context, tenant, repoName, actor string) error {
 					// Mirrors `bucketvcs init` defaults (cmd/bucketvcs/init.go).

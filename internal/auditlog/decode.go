@@ -20,7 +20,9 @@ const maxLineBytes = 4 << 20 // 4 MiB
 // It returns the decoded events, the number of malformed (skipped) lines, and
 // any error. A gzip-level error is returned immediately; malformed JSON lines
 // are skipped and counted rather than aborting the batch. Empty lines are
-// silently ignored and not counted as malformed.
+// silently ignored and not counted as malformed. An object whose decompressed
+// size exceeds maxObjectDecompressed returns an error (a partial decode is
+// never silently returned as complete).
 func DecodeGz(r io.Reader) ([]Event, int, error) {
 	gz, err := gzip.NewReader(r)
 	if err != nil {
@@ -28,7 +30,12 @@ func DecodeGz(r io.Reader) ([]Event, int, error) {
 	}
 	defer gz.Close()
 
-	scanner := bufio.NewScanner(io.LimitReader(gz, maxObjectDecompressed))
+	// Read one byte past the cap so a stream that exactly fills the limit is
+	// distinguishable from one that was cut off: consuming more than
+	// maxObjectDecompressed means the object kept going and we'd be returning a
+	// silently truncated decode.
+	cr := &countingReader{r: gz}
+	scanner := bufio.NewScanner(io.LimitReader(cr, maxObjectDecompressed+1))
 	buf := make([]byte, maxLineBytes)
 	scanner.Buffer(buf, maxLineBytes)
 
@@ -50,7 +57,22 @@ func DecodeGz(r io.Reader) ([]Event, int, error) {
 	if err := scanner.Err(); err != nil {
 		return nil, skipped, fmt.Errorf("auditlog: scan: %w", err)
 	}
+	if cr.n > maxObjectDecompressed {
+		return nil, skipped, fmt.Errorf("auditlog: object exceeds %d-byte decompressed limit", int64(maxObjectDecompressed))
+	}
 	return events, skipped, nil
+}
+
+// countingReader counts the bytes read through it.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }
 
 // eventFromMap lifts well-known keys into typed Event fields. actor wins over

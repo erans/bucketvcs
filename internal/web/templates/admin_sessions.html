@@ -4,7 +4,7 @@
   {{template "adminnav" .}}
   <h2>all sessions</h2>
   {{if .Flash}}<p class="flash">{{.Flash}}</p>{{end}}
-  {{if .Truncated}}<p class="hint">showing first 500 of {{.Total}} sessions; use the CLI for the full list.</p>{{end}}
+  {{if .Truncated}}<p class="hint">showing first {{len .Sessions}} of {{.Total}} sessions; use the CLI for the full list.</p>{{end}}
   {{if .Sessions}}
   <table>
     <thead>

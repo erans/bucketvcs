@@ -112,3 +112,23 @@ func TestRepoAudit_NilReaderNotice(t *testing.T) {
 		t.Errorf("expected 'not available' notice when audit is nil; body: %s", body)
 	}
 }
+
+// TestRepoAudit_PagerVisibleOnEmptyPage mirrors the admin-page guard: an empty
+// filtered page with a next cursor must still offer the [older] link.
+func TestRepoAudit_PagerVisibleOnEmptyPage(t *testing.T) {
+	store := repoAuditStore()
+	fr := &fakeAuditReader{events: nil, nextCursor: "older-cursor-key"}
+	h := newTestHandlerWith(store, func(d *Deps) { d.Audit = fr })
+	req := httptest.NewRequest(http.MethodGet, "/acme/demo/settings/audit?actor=ghost", nil)
+	addSessionCookie(t, req, store, userSession())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "older-cursor-key") {
+		t.Errorf("pager [older] link must render on an empty page with a next cursor; body: %s", body)
+	}
+}
