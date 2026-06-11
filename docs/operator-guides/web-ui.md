@@ -839,9 +839,11 @@ manual equivalent, and additionally surfaces what is currently active.
 users, each row labelled with the owning user's name, provider, and timestamps,
 and a **revoke** button. This is the operator tool for forcibly signing out a
 specific user's session (for example during an incident). The page renders the
-first 500 sessions; on a larger deployment, query the auth DB directly for the
-full list (`SELECT s.*, u.name FROM sessions s LEFT JOIN users u ON u.id =
-s.user_id` — there is no sessions CLI yet). Admin
+first 500 sessions; on a larger deployment use `bucketvcs session list`
+(NDJSON; one row per session). CLI revocation: `bucketvcs session revoke
+--id-hash=<h>` for one session, or `--user=<name>` for all of a user's
+sessions — a session whose user row was deleted shows as `(deleted)` and is
+revocable by hash only. Admin
 revocation removes the session regardless of which user owns it.
 
 Every session revocation emits a tagged audit event (`auth.session.revoked`,

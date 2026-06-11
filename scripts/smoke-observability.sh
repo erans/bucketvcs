@@ -263,6 +263,15 @@ assert_contains "$admin_sess" '<td class="mono">admin</td>' "admin sessions tabl
 assert_contains "$admin_sess" 'class="badge">current' "admin's own session is badged current"
 echo "  /admin/sessions lists user 'admin' (table row + current badge) OK"
 
+# ---- step 5b — sessions CLI agrees with the web view --------------------------
+echo ""
+echo "== Step 5b: bucketvcs session list (CLI) =="
+
+cli_sessions=$("$BUCKETVCS" session list --auth-db "$AUTH_DB")
+n_cli=$(printf '%s\n' "$cli_sessions" | grep -c '"user":"admin"' || true)
+assert_eq "$n_cli" "1" "CLI lists exactly the one live admin session"
+echo "  session list CLI OK"
+
 echo ""
 echo "SESSIONS_OK"
 
