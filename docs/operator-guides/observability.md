@@ -95,6 +95,7 @@ split is enumerated in [log shipping §1.1](log-shipping.md#11-the-two-streams).
 |---|---|
 | Live tail of everything (warnings, errors, requests) | stderr of the process (`journalctl -u bucketvcs`, container logs) |
 | Durable audit trail — who pushed / rejected / rotated, from `serve` | `sys/logs/activity/` in the store (gzipped NDJSON) — [log shipping](log-shipping.md) |
+| Browse the audit trail without leaving the browser | the web UI's audit viewer at `/admin/audit` (global) and `/{tenant}/{repo}/settings/audit` (repo-scoped) — [web UI guide §10](web-ui.md#10-session-management-and-audit-viewer) |
 | Billing / usage — bytes and durations per tenant/repo | `sys/logs/usage/` in the store (gzipped NDJSON) — [log shipping §6](log-shipping.md#6-consuming-the-logs) |
 | A specific feature's metric names | that feature's guide, §observability (index in §4 below) |
 | GC / maintenance audit + records | stderr of the CLI run, plus stored mark/sweep records under `tenants/.../gc/` — **not** shipped (see [gc.md §7](gc.md#7-reading-mark-and-sweep-records-for-post-incident-analysis), [log shipping §1.1](log-shipping.md#11-the-two-streams)) |
@@ -204,10 +205,13 @@ consequences worth stating precisely:
 - **No Prometheus endpoint.** There is no `/metrics` scrape target. Metrics are
   slog lines; translate them to your metrics backend (Loki/Vector/Promtail can
   parse the stream) if you want time series and alerting.
-- **No querying UI.** Shipped logs are durable objects, not a searchable index.
-  Bring your own query engine — the `sys/logs/` layout is Hive-style date
-  partitions of gzipped NDJSON and loads directly into Athena / BigQuery /
-  DuckDB external tables ([log shipping §6](log-shipping.md#6-consuming-the-logs)).
+- **The in-UI audit viewer is a reader, not a search index.** The web UI ships
+  an audit-log viewer (global `/admin/audit` + a per-repo tab, with event /
+  tenant / repo / actor / date filters — [web UI guide §10](web-ui.md#10-session-management-and-audit-viewer)),
+  but it pages through the shipped objects directly. For heavy analysis bring
+  your own query engine — the `sys/logs/` layout is Hive-style date partitions
+  of gzipped NDJSON and loads directly into Athena / BigQuery / DuckDB external
+  tables ([log shipping §6](log-shipping.md#6-consuming-the-logs)).
 - **CLI-emitted audit events are not shipped.** `gc.*`, `maintenance.*`,
   `lfs.gc.*`, `lfs.quota.reconcile`, and `repo.renamed` reach stderr only,
   because their emitters run outside `serve`. Scrape those subcommands' stderr
