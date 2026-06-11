@@ -2,6 +2,7 @@ package auditlog
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -10,6 +11,11 @@ import (
 
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
+
+// ErrBadCursor reports a pagination cursor that does not name a date-sharded
+// activity key. Cursors travel as raw query parameters, so callers should map
+// this to a client error, not a server failure.
+var ErrBadCursor = errors.New("auditlog: malformed cursor")
 
 // maxDayListsPerPage bounds how many day partitions one Page() lists (a
 // multi-page partition listing counts once; the floor probe is not counted).
@@ -97,6 +103,9 @@ func (r *Reader) dayOf(key string) (string, bool) {
 		return "", false
 	}
 	day := rest[:len(dayLayout)]
+	if rest[len(dayLayout)] != '/' {
+		return "", false
+	}
 	if _, err := time.Parse(dayLayout, day); err != nil {
 		return "", false
 	}
@@ -196,11 +205,17 @@ func (r *Reader) Page(ctx context.Context, f Filter, cursor string) ([]Event, st
 		if d, ok := r.dayOf(cursor); ok {
 			startDay = d
 		} else {
-			return nil, "", fmt.Errorf("auditlog: cursor %q does not match the date-sharded activity layout", cursor)
+			return nil, "", fmt.Errorf("%w: %q does not match the date-sharded activity layout", ErrBadCursor, cursor)
 		}
 	}
 	if !f.Until.IsZero() {
-		if u := f.Until.UTC().Format(dayLayout); u < startDay {
+		// Partition day = SHIP time, not event time: an event late on the
+		// until day can ship after UTC midnight into the next partition.
+		// Pad one day and let Filter.Match enforce the exact bound. A
+		// shipper stalled for longer than a day can still strand in-range
+		// events in even-later partitions; that residual lag exposure is
+		// accepted (the events reappear once until is widened).
+		if u := f.Until.UTC().AddDate(0, 0, 1).Format(dayLayout); u < startDay {
 			startDay = u
 		}
 	}
@@ -280,6 +295,10 @@ walk:
 				// A cap on the floor day's last (oldest) key means the
 				// walk is complete anyway -> empty next cursor, matching
 				// the previous implementation's oldestIdx>0 rule.
+				// When Since raised the floor above the oldest data day, a
+				// cap firing on the last in-range key still returns a cursor
+				// whose next page is empty — one wasted click, accepted
+				// (detecting it would require peeking ahead).
 				lastOfFloor = day == floorDay && i == len(keys)-1
 				break walk
 			}

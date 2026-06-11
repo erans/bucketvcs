@@ -133,6 +133,20 @@ func TestAdminAudit_PagerVisibleOnEmptyPage(t *testing.T) {
 	}
 }
 
+// TestAdminAudit_BadCursor400: a garbage ?cursor= is client input; the handler
+// must map auditlog.ErrBadCursor to 400, not 500.
+func TestAdminAudit_BadCursor400(t *testing.T) {
+	store := adminStore()
+	fr := &fakeAuditReader{err: auditlog.ErrBadCursor}
+	h := newTestHandlerWith(store, func(d *Deps) { d.Audit = fr })
+	req := addSessionCookie(t, httptest.NewRequest(http.MethodGet, "/admin/audit?cursor=garbage", nil), store, adminSession())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status %d, want 400; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestParseAuditFilter_UntilInclusiveOfNamedDayOnly: ?until=2026-06-01 must
 // include the whole named day but NOT the first instant of June 2 —
 // Filter.Until is an inclusive bound, so the parsed value must be the last

@@ -519,12 +519,34 @@ func TestReaderPage_SinceUntilNarrowWalkRange(t *testing.T) {
 	if next != "" {
 		t.Fatalf("want empty cursor (since-floor reached), got %q", next)
 	}
-	// The walk must not list days outside [since.day, until.day]:
-	// floor probe (full prefix, MaxKeys 1) + 06/04 + 06/03 + 06/02 = 4.
+	// The walk lists [since.day, until.day+1]: the until bound is padded one
+	// day because partition keys carry SHIP time and an event late on the
+	// until day can ship after UTC midnight into the next partition. Only
+	// days outside the padded range must stay unlisted:
+	// 2026/06/01 (below since) and 2026/06/06 (above until+1).
 	for _, p := range store.listPrefixes {
-		if strings.Contains(p, "2026/06/05") || strings.Contains(p, "2026/06/01") {
+		if strings.Contains(p, "2026/06/06") || strings.Contains(p, "2026/06/01") {
 			t.Fatalf("walk listed out-of-range day prefix %q", p)
 		}
+	}
+}
+
+// TestReaderPage_UntilPadCatchesLateShippedEvents: an event timestamped on the
+// until day but shipped after midnight (next-day partition) must still appear.
+func TestReaderPage_UntilPadCatchesLateShippedEvents(t *testing.T) {
+	store := newFakeStore()
+	// Event at 23:50 on 06/04, shipped 00:05 on 06/05.
+	store.put(dayKey("2026/06/05", "000500", 1), gzLines(
+		`{"ts":"2026-06-04T23:50:00Z","event":"late","tenant":"acme","repo":"app"}`,
+	))
+	r := fixedNow(auditlog.NewReader(store, ""))
+	f := auditlog.Filter{Until: time.Date(2026, 6, 4, 23, 59, 59, 0, time.UTC)}
+	evs, _, err := r.Page(context.Background(), f, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := eventNames(evs); len(got) != 1 || got[0] != "late" {
+		t.Fatalf("got %v want [late] (until+1 partition pad)", got)
 	}
 }
 
@@ -589,6 +611,17 @@ func TestReaderPage_UnparseableKeyFailsLoudly(t *testing.T) {
 	_, _, err := r.Page(context.Background(), auditlog.Filter{}, "")
 	if err == nil {
 		t.Fatal("want error for non-date-sharded key under the activity prefix")
+	}
+
+	// A key whose first 10 chars parse as a day but lack the '/' separator
+	// (2026/06/05x.gz) would never be listed by listDay; dayOf must reject it
+	// so the oldest-day probe fails loudly instead of going silently invisible.
+	inner2 := newFakeStore()
+	inner2.put("sys/logs/activity/2026/06/05x.gz", []byte("junk"))
+	r2 := fixedNow(auditlog.NewReader(inner2, ""))
+	_, _, err = r2.Page(context.Background(), auditlog.Filter{}, "")
+	if err == nil {
+		t.Fatal("want error for day-like key missing the '/' separator")
 	}
 }
 
