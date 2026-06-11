@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"log/slog"
 	"net/http"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
@@ -83,8 +82,7 @@ func (s *server) handleSessionRevoke(w http.ResponseWriter, r *http.Request) {
 		s.renderError(w, r, http.StatusInternalServerError, "internal error")
 		return
 	}
-	s.emitAdmin(r.Context(), "auth.session.revoked",
-		slog.String("id_hash", idHash), slog.Int64("count", n))
+	EmitSessionRevoked(r.Context(), s.logger, sess.Name, n)
 	EmitAdminActionMetric(r.Context(), s.logger, "session", "revoke", "ok")
 	msg := "session revoked"
 	if n == 0 {
@@ -118,7 +116,7 @@ func (s *server) handleSessionRevokeAll(w http.ResponseWriter, r *http.Request) 
 		s.renderError(w, r, http.StatusInternalServerError, "internal error")
 		return
 	}
-	s.emitAdmin(r.Context(), "auth.session.revoked_all", slog.Int64("count", n))
+	EmitSessionRevokedAll(r.Context(), s.logger, sess.Name, n)
 	EmitAdminActionMetric(r.Context(), s.logger, "session", "revoke_all", "ok")
 	s.redirectFlash(w, r, "/settings/sessions",
 		fmt.Sprintf("%d other session(s) signed out", n))

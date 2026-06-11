@@ -30,6 +30,51 @@ func EmitSessionDestroyed(ctx context.Context, logger *slog.Logger, userID, name
 	)
 }
 
+// EmitSessionRevoked records a user-initiated revocation of one of their own
+// web sessions. Tagged audit=true so it ships to the activity stream and shows
+// in the audit viewer, completing the session lifecycle alongside
+// session.created/destroyed.
+func EmitSessionRevoked(ctx context.Context, logger *slog.Logger, actor string, count int64) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.LogAttrs(ctx, slog.LevelInfo, "auth.session.revoked",
+		slog.Bool("audit", true),
+		slog.String("event", "auth.session.revoked"),
+		slog.String("actor", actor),
+		slog.Int64("count", count),
+	)
+}
+
+// EmitSessionRevokedAll records a user signing out all of their other web
+// sessions. Tagged audit=true for activity-stream visibility.
+func EmitSessionRevokedAll(ctx context.Context, logger *slog.Logger, actor string, count int64) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.LogAttrs(ctx, slog.LevelInfo, "auth.session.revoked_all",
+		slog.Bool("audit", true),
+		slog.String("event", "auth.session.revoked_all"),
+		slog.String("actor", actor),
+		slog.Int64("count", count),
+	)
+}
+
+// EmitAdminSessionRevoked records an admin revoking another user's web session
+// by id hash. Tagged audit=true for activity-stream visibility.
+func EmitAdminSessionRevoked(ctx context.Context, logger *slog.Logger, actor, idHash string, count int64) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.LogAttrs(ctx, slog.LevelInfo, "auth.session.admin_revoked",
+		slog.Bool("audit", true),
+		slog.String("event", "auth.session.admin_revoked"),
+		slog.String("actor", actor),
+		slog.String("id_hash", idHash),
+		slog.Int64("count", count),
+	)
+}
+
 func EmitOIDCLogin(ctx context.Context, logger *slog.Logger, userID, name, issuer, subject string) {
 	if logger == nil {
 		logger = slog.Default()

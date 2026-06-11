@@ -1,7 +1,6 @@
 package web
 
 import (
-	"log/slog"
 	"net/http"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
@@ -81,7 +80,7 @@ func (s *server) handleAdminSessionRevoke(w http.ResponseWriter, r *http.Request
 		s.redirectFlash(w, r, dest, "session already gone")
 		return
 	}
-	s.emitAdmin(r.Context(), "auth.session.admin_revoked", slog.String("id_hash", idHash))
+	EmitAdminSessionRevoked(r.Context(), s.logger, SessionFromContext(r.Context()).Name, idHash, n)
 	EmitAdminActionMetric(r.Context(), s.logger, "session", "admin_revoke", "ok")
 	s.redirectFlash(w, r, dest, "session revoked")
 }

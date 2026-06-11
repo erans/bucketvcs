@@ -842,10 +842,17 @@ specific user's session (for example during an incident). The page renders the
 first 500 sessions; on a large deployment use the CLI for the full list. Admin
 revocation removes the session regardless of which user owns it.
 
-Every session revocation emits an audit event (`auth.session.revoked`,
-`auth.session.revoked_all`, or `auth.session.admin_revoked`) carrying
-`source=web` and the acting user, so revocations themselves are auditable through
-the viewer below.
+Every session revocation emits a tagged audit event (`auth.session.revoked`,
+`auth.session.revoked_all`, or `auth.session.admin_revoked`) carrying the acting
+user. These join `auth.session.created`, `auth.session.destroyed`, and
+`auth.oidc.login` as part of the shipped activity stream, so the full session
+lifecycle — login through revocation — is visible in the audit viewer below.
+
+Note: other web-originated admin actions (build-trigger, webhook, policy, and
+repo changes made through the UI) are written to the server's process log with
+`source=web`, but are **not** currently part of the shipped activity stream the
+viewer renders. Surfacing those in the viewer is a documented follow-up (§11); for
+now, audit them via the process log.
 
 ### 10.2 Audit-log viewer
 
@@ -939,6 +946,10 @@ Features not yet implemented:
 
 **Settings and admin:**
 
+- Surfacing web-originated admin actions (build-trigger, webhook, policy, and repo
+  changes made through the UI) in the shipped activity stream. They are logged to
+  the process log with `source=web` today but are not yet rendered by the audit
+  viewer (see §10.1).
 - Per-user login-history view (the audit viewer surfaces session events, but a
   dedicated per-user login timeline is not yet built).
 - Session TTL/expiry controls per user (TTL is instance-wide via

@@ -1,6 +1,9 @@
 package web
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -95,5 +98,65 @@ func TestSessionsRevokeAll_Others(t *testing.T) {
 	}
 	if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
 		t.Fatal("revoke-all: no flash cookie set")
+	}
+}
+
+// TestSessionsRevoke_CSRFRejected: an authenticated POST to
+// /settings/sessions/revoke WITHOUT a valid CSRF token is rejected by postGuard
+// (403) and never reaches the store — the revoke method must not be called.
+func TestSessionsRevoke_CSRFRejected(t *testing.T) {
+	store := newFakeStore()
+	h := newTestHandler(store)
+
+	// Plain authed POST: session cookie but no CSRF cookie/token.
+	form := url.Values{"id_hash": {"hashOTHER"}}
+	req := httptest.NewRequest(http.MethodPost, "/settings/sessions/revoke",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	addSessionCookie(t, req, store, userSession())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("missing CSRF: status %d, want 403; body:\n%s", rec.Code, rec.Body.String())
+	}
+	if store.lastRevokeHash != "" {
+		t.Fatalf("CSRF-rejected POST still reached the store (lastRevokeHash=%q); revoke must not be called", store.lastRevokeHash)
+	}
+}
+
+// TestSessionsRevoke_CannotRevokeCurrent: posting the id hash of the user's OWN
+// current session is refused by the self-revoke guard — the handler 303s with a
+// "cannot revoke your current session" flash and DeleteSessionByHashForUser is
+// never called. The stored id is SHA-256(rawCookieValue); addSessionCookie uses
+// "test-sess-" + UserID as the raw value.
+func TestSessionsRevoke_CannotRevokeCurrent(t *testing.T) {
+	store := newFakeStore()
+	h := newTestHandler(store)
+
+	rawCookie := "test-sess-" + userSession().UserID
+	sum := sha256.Sum256([]byte(rawCookie))
+	currentHash := hex.EncodeToString(sum[:])
+
+	req := csrfPost(t, "/settings/sessions/revoke", url.Values{"id_hash": {currentHash}})
+	addSessionCookie(t, req, store, userSession())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("self-revoke: status %d, want 303; body:\n%s", rec.Code, rec.Body.String())
+	}
+	// The self-revoke guard must fire BEFORE the store is touched.
+	if store.lastRevokeHash != "" {
+		t.Fatalf("self-revoke guard did not fire: DeleteSessionByHashForUser was called with %q", store.lastRevokeHash)
+	}
+	// The flash carries the guard's message (base64url-encoded in the cookie).
+	fc := findCookie(rec.Result().Cookies(), flashCookieName)
+	if fc == nil {
+		t.Fatal("self-revoke: no flash cookie set")
+	}
+	dec, err := base64.RawURLEncoding.DecodeString(fc.Value)
+	if err != nil || !strings.Contains(string(dec), "cannot revoke your current session") {
+		t.Fatalf("self-revoke: flash %q does not contain the current-session guard message", fc.Value)
 	}
 }
