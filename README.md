@@ -23,7 +23,7 @@ Native **HTTPS and SSH**, Git **protocol v2**, and full compatibility with stock
 Protocol-v2 **bundle-URI** and **packfile-URI** acceleration offload heavy initial clones to signed object-storage URLs (CDN-frontable on cloud backends), so the gateway isn't streaming gigabytes on every onboarding.
 
 ### 🖥️ A web UI in the same binary
-Log in with a password or **OIDC single sign-on** and browse your code — syntax-highlighted file views with line-anchor links, commit logs, diffs, rendered READMEs. Self-service token and SSH-key management for every user; repo settings (grants, deploy keys, webhooks, protected refs/paths) delegated to repo admins; user/repo/quota administration for operators. No JavaScript build, no separate service — templates and assets are compiled into the binary, and every page works without JS.
+Log in with a password or **OIDC single sign-on** and browse your code — syntax-highlighted file views with line-anchor links, commit logs, diffs, ref-to-ref compare, rendered READMEs. Self-service token, SSH-key, and web-session management for every user; repo settings (grants, deploy keys, webhooks, protected refs/paths) delegated to repo admins; user/repo/quota/session administration and a built-in audit-log viewer for operators. No JavaScript build, no separate service — templates and assets are compiled into the binary, and every page works without JS.
 
 ### 🔋 Batteries included
 Not a toy. bucketvcs ships the things a real Git host needs:
@@ -33,7 +33,7 @@ Not a toy. bucketvcs ships the things a real Git host needs:
 - **Build triggers** — fire Google Cloud Build, AWS CodeBuild, Azure Pipelines, or any HTTP endpoint on push, with ref filters and a short-lived clone token → [guide & quickstarts](docs/build-triggers.md)
 - **Fine-grained auth** — scoped access tokens with rotation, SSH user & deploy keys, and per-IP rate-limiting on credential failures
 - **Policy & governance** — protected refs, protected paths, custom pre/post-receive hooks, and signed, retryable **webhooks**
-- **Audit & observability** — structured audit events and metrics for every push, policy decision, and admin action, with durable **log shipping** of the activity and usage (metering) streams into your bucket → [observability overview](docs/operator-guides/observability.md) · [log shipping](docs/operator-guides/log-shipping.md)
+- **Audit & observability** — structured audit events and metrics for every push, policy decision, and admin action, with durable **log shipping** of the activity and usage (metering) streams into your bucket — and an in-UI **audit-log viewer** (global and per-repo) plus **web-session management** with revocation → [observability overview](docs/operator-guides/observability.md) · [log shipping](docs/operator-guides/log-shipping.md)
 - **Self-maintaining** — background repack, commit-graph/reachability maintenance, and operator-driven garbage collection keep storage tight
 - **Regional read replicas** — serve clone and fetch traffic close to developers via `--replica-of` over provider-replicated buckets (S3 CRR, GCS dual-region, Azure RA-GRS); all pushes stay in the write region → [operator guide](docs/operator-guides/multi-region.md)
 - **Bring-your-own-bucket** — tenants can supply their own S3/GCS/Azure storage; bucketvcs routes their git traffic to their bucket. See [the operator guide](docs/operator-guides/byob.md)
@@ -157,9 +157,17 @@ The web UI is built in to the same binary — no separate service, no JavaScript
 |-------------------------------|------------------------------|
 | ![File tree](docs/screenshots/03-repo-tree.png) | ![File view](docs/screenshots/04-file.png) |
 
-| Commit history |
-|----------------|
-| ![Commit log](docs/screenshots/05-commits.png) |
+| Commit history | Commit diff |
+|----------------|-------------|
+| ![Commit log](docs/screenshots/05-commits.png) | ![Commit diff](docs/screenshots/06-commit-diff.png) |
+
+| Compare two refs |
+|------------------|
+| ![Compare view](docs/screenshots/07-compare.png) |
+
+| Session management | Audit log viewer |
+|--------------------|------------------|
+| ![Web sessions](docs/screenshots/08-sessions.png) | ![Audit log](docs/screenshots/09-admin-audit.png) |
 
 The UI is **optional**. Run without it by omitting `--ui` or passing `--ui=false` — the Git gateway and all CLI commands work the same either way.
 
