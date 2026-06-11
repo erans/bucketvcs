@@ -73,7 +73,7 @@ to every [GitHub Release](https://github.com/erans/bucketvcs/releases), alongsid
 a `checksums.txt`. Pick the version you want, then grab the matching artifact:
 
 ```bash
-VER=0.5.1   # latest: https://github.com/erans/bucketvcs/releases/latest
+VER=0.6.0   # latest: https://github.com/erans/bucketvcs/releases/latest
 ```
 
 **Linux** — `.deb`, `.rpm`, or a portable tarball (swap `amd64` → `arm64` on ARM):
@@ -104,7 +104,7 @@ xattr -d com.apple.quarantine /usr/local/bin/bucketvcs 2>/dev/null || true
 **Windows** (PowerShell) — zip:
 
 ```powershell
-$ver = "0.5.1"
+$ver = "0.6.0"
 Invoke-WebRequest "https://github.com/erans/bucketvcs/releases/download/v$ver/bucketvcs_${ver}_windows_amd64.zip" -OutFile bucketvcs.zip
 Expand-Archive bucketvcs.zip -DestinationPath $Env:LOCALAPPDATA\bucketvcs
 # then add %LOCALAPPDATA%\bucketvcs to your PATH

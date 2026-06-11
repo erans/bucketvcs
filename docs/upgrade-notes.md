@@ -5,6 +5,43 @@ anything to check before rolling a new version. Newest first. Install
 instructions live in the [README](../README.md#install); full feature docs in
 the [operator guides](operator-guides/).
 
+## v0.6.0
+
+No breaking changes. Two authdb schema migrations (0017 build triggers,
+0018 repo aliases) apply automatically on first open, on both the sqlite and
+postgres backends.
+
+- **Build triggers (new, opt-in).** Pushes can now kick off CI: a generic
+  signed webhook, Google Cloud Build, AWS CodeBuild, and Azure DevOps
+  (service-hook webhook or direct pipeline run). Off unless `serve` is started
+  with `--build-triggers` (connector credentials go in `--build-config`).
+  Durable delivery with retries and permanent-error classification (a
+  misconfigured trigger dead-letters instead of retrying forever). Manage via
+  the new `bucketvcs build` CLI or the repo-admin **Triggers** tab in the web
+  UI. See the [build-triggers guide](operator-guides/build-triggers.md).
+- **Repo rename now leaves a redirect.** `bucketvcs repo rename` records an
+  alias so clones keep working against the old name (Git over HTTPS/SSH,
+  LFS, and web URLs). Registering a new repo under the old name removes the
+  alias — a live repo always shadows an alias. Inspect or drop redirects with
+  `bucketvcs repo alias list|remove`. See
+  [repositories §4](operator-guides/repositories.md#4-rename-redirects--aliases).
+- **Web UI grew an observability surface.** Global admins get `/admin/sessions`
+  (view + revoke web sessions) and `/admin/audit` (browse the shipped audit
+  stream with event/tenant/repo/actor/date filters); repo admins get a
+  repo-scoped audit tab. Code browsing adds a compare view and per-file
+  history. See [web-ui §10](operator-guides/web-ui.md#10-session-management-and-audit-viewer).
+- **New `bucketvcs session list|revoke` CLI** — the escape hatch past the admin
+  page's display cap, and session revocation without a browser. Like other
+  CLI emitters, its audit line is stderr-only.
+- **Audit viewer paging is now bounded per page.** The viewer walks the
+  `sys/logs/activity/` date partitions backward with a per-page budget instead
+  of listing the whole prefix, so it stays fast on long-lived deployments. On
+  sparse prefixes a filtered page can legitimately render empty with an
+  `[older]` link — follow it to continue the scan. Do not place foreign
+  objects under `sys/logs/activity/`: keys that don't match the `YYYY/MM/DD/`
+  partition layout are treated as corruption and fail the audit page until
+  deleted.
+
 ## v0.5.1
 
 No breaking changes.
