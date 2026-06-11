@@ -90,6 +90,9 @@ func TestSessionsRevokeAll_Others(t *testing.T) {
 	if loc := rec.Header().Get("Location"); loc != "/settings/sessions" {
 		t.Fatalf("revoke-all: Location %q, want /settings/sessions", loc)
 	}
+	if store.lastRevokeAllUserID != "user1" {
+		t.Fatalf("revoke-all: recorded userID %q, want %q (must be user-scoped)", store.lastRevokeAllUserID, "user1")
+	}
 	if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
 		t.Fatal("revoke-all: no flash cookie set")
 	}

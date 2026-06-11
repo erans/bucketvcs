@@ -1,6 +1,8 @@
 package web
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -64,6 +66,16 @@ func (s *server) handleSessionRevoke(w http.ResponseWriter, r *http.Request) {
 		s.redirectFlash(w, r, "/settings/sessions", "missing session id")
 		return
 	}
+	// The current session is not individually revocable (log out instead). The
+	// template omits its revoke form; this guards a hand-crafted POST. The stored
+	// id is SHA-256(rawCookieID), matching sqlitestore.hashSessionID.
+	if c, err := r.Cookie(sessionCookieName); err == nil && c.Value != "" {
+		sum := sha256.Sum256([]byte(c.Value))
+		if hex.EncodeToString(sum[:]) == idHash {
+			s.redirectFlash(w, r, "/settings/sessions", "cannot revoke your current session; use log out")
+			return
+		}
+	}
 	n, err := s.store.DeleteSessionByHashForUser(r.Context(), sess.UserID, idHash)
 	if err != nil {
 		s.logger.Error("sessions: revoke", "err", err)
@@ -94,6 +106,10 @@ func (s *server) handleSessionRevokeAll(w http.ResponseWriter, r *http.Request) 
 	var curRaw string
 	if c, err := r.Cookie(sessionCookieName); err == nil {
 		curRaw = c.Value
+	}
+	if curRaw == "" {
+		s.redirectFlash(w, r, "/settings/sessions", "could not identify current session")
+		return
 	}
 	n, err := s.store.DeleteSessionsForUser(r.Context(), sess.UserID, curRaw)
 	if err != nil {

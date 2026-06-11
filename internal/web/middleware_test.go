@@ -17,26 +17,27 @@ type fakeStore struct {
 	deleteSessionsFor func(ctx context.Context, userID, exceptRawID string) (int64, error)
 
 	// session list/revoke (self-service + admin)
-	sessionsForUser   []auth.SessionInfo
-	allSessions       []auth.AdminSessionInfo
-	revokeCount       int64  // returned by DeleteSessionByHash* (0 => default 1)
-	lastRevokeUserID  string // recorded by DeleteSessionByHashForUser
-	lastRevokeHash    string // recorded by both revoke-by-hash methods
-	repos             func(actor *auth.Actor) []Repo
-	findByEmail       func(email string) (*auth.Actor, error)
-	findIdentity      func(issuer, subject string) (*auth.Actor, error)
-	linkIdentity      func(userID, issuer, subject, email string) error
-	perm              auth.Perm // returned by LookupRepoPerm
-	permErr           error     // when non-nil, LookupRepoPerm returns it
-	getVisibleRepo    func(ctx context.Context, actor *auth.Actor, tenant, name string) (*Repo, error)
-	getRepoFlags      func(ctx context.Context, tenant, repo string) (auth.RepoFlags, error)
-	setRepoPublic     func(ctx context.Context, tenant, repo string, public bool) error
-	renameRepo        func(ctx context.Context, tenant, oldName, newName string) error
-	deleteRepo        func(ctx context.Context, tenant, repo string) error
-	registerRepoIfNew func(ctx context.Context, tenant, name string) (bool, error)
-	getUserByName     func(ctx context.Context, name string) (*auth.User, error)
-	setPassword       func(ctx context.Context, userName, plaintext string) error
-	hasPassword       func(ctx context.Context, userName string) (bool, error)
+	sessionsForUser     []auth.SessionInfo
+	allSessions         []auth.AdminSessionInfo
+	revokeCount         int64  // returned by DeleteSessionByHash* (0 => default 1)
+	lastRevokeUserID    string // recorded by DeleteSessionByHashForUser
+	lastRevokeHash      string // recorded by both revoke-by-hash methods
+	lastRevokeAllUserID string // recorded by DeleteSessionsForUser
+	repos               func(actor *auth.Actor) []Repo
+	findByEmail         func(email string) (*auth.Actor, error)
+	findIdentity        func(issuer, subject string) (*auth.Actor, error)
+	linkIdentity        func(userID, issuer, subject, email string) error
+	perm                auth.Perm // returned by LookupRepoPerm
+	permErr             error     // when non-nil, LookupRepoPerm returns it
+	getVisibleRepo      func(ctx context.Context, actor *auth.Actor, tenant, name string) (*Repo, error)
+	getRepoFlags        func(ctx context.Context, tenant, repo string) (auth.RepoFlags, error)
+	setRepoPublic       func(ctx context.Context, tenant, repo string, public bool) error
+	renameRepo          func(ctx context.Context, tenant, oldName, newName string) error
+	deleteRepo          func(ctx context.Context, tenant, repo string) error
+	registerRepoIfNew   func(ctx context.Context, tenant, name string) (bool, error)
+	getUserByName       func(ctx context.Context, name string) (*auth.User, error)
+	setPassword         func(ctx context.Context, userName, plaintext string) error
+	hasPassword         func(ctx context.Context, userName string) (bool, error)
 
 	// token methods
 	listTokensForUser func(ctx context.Context, name string) ([]TokenInfo, error)
@@ -92,6 +93,7 @@ func (f *fakeStore) DeleteSession(ctx context.Context, raw string) error {
 	return nil
 }
 func (f *fakeStore) DeleteSessionsForUser(ctx context.Context, userID, exceptRawID string) (int64, error) {
+	f.lastRevokeAllUserID = userID
 	if f.deleteSessionsFor != nil {
 		return f.deleteSessionsFor(ctx, userID, exceptRawID)
 	}
