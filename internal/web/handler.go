@@ -156,6 +156,7 @@ func NewHandler(d Deps) http.Handler {
 	s.mux.HandleFunc("/admin/quotas/set", s.handleAdminQuotaSet)
 	s.mux.HandleFunc("/admin/quotas/clear", s.handleAdminQuotaClear)
 	s.mux.HandleFunc("/admin/quotas/reconcile", s.handleAdminQuotaReconcile)
+	s.mux.HandleFunc("/admin/audit", s.handleAdminAudit)
 	s.mux.HandleFunc("/admin/sessions", s.handleAdminSessions)
 	s.mux.HandleFunc("/admin/sessions/revoke", s.handleAdminSessionRevoke)
 	s.mux.HandleFunc("/", s.handleLanding)
