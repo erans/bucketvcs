@@ -11,7 +11,24 @@ import (
 	"os"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
+	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
 )
+
+// openExistingAuthDB opens an auth DB that must already exist — the session
+// commands are diagnostics; silently creating an empty DB on a typo'd path
+// would read as "no sessions". Returns a non-zero exit code on failure.
+func openExistingAuthDB(path string, stderr io.Writer) (*sqlitestore.Store, int) {
+	if _, err := os.Stat(path); err != nil {
+		fmt.Fprintf(stderr, "auth-db: %v\n", err)
+		return nil, 1
+	}
+	s, _, err := openAuthDB(path)
+	if err != nil {
+		fmt.Fprintf(stderr, "auth-db: %v\n", err)
+		return nil, 1
+	}
+	return s, 0
+}
 
 func runSession(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
@@ -45,14 +62,9 @@ func sessionList(ctx context.Context, args []string, stdout, stderr io.Writer) i
 		fmt.Fprintln(stderr, "usage: bucketvcs session list --auth-db=<path> [--user=<name>]")
 		return 2
 	}
-	if _, err := os.Stat(*authDB); err != nil {
-		fmt.Fprintf(stderr, "auth-db: %v\n", err)
-		return 1
-	}
-	s, _, err := openAuthDB(*authDB)
-	if err != nil {
-		fmt.Fprintf(stderr, "auth-db: %v\n", err)
-		return 1
+	s, code := openExistingAuthDB(*authDB, stderr)
+	if code != 0 {
+		return code
 	}
 	defer s.Close()
 	rows, _, err := s.ListAllSessions(ctx, 0)
@@ -98,18 +110,14 @@ func sessionRevoke(ctx context.Context, args []string, stdout, stderr io.Writer)
 		fmt.Fprintln(stderr, "usage: bucketvcs session revoke --auth-db=<path> (--id-hash=<hex> | --user=<name>)")
 		return 2
 	}
-	if _, err := os.Stat(*authDB); err != nil {
-		fmt.Fprintf(stderr, "auth-db: %v\n", err)
-		return 1
-	}
-	s, _, err := openAuthDB(*authDB)
-	if err != nil {
-		fmt.Fprintf(stderr, "auth-db: %v\n", err)
-		return 1
+	s, code := openExistingAuthDB(*authDB, stderr)
+	if code != 0 {
+		return code
 	}
 	defer s.Close()
 
 	var n int64
+	var err error
 	var targetUserID, targetUser string
 	if *idHash != "" {
 		// Best-effort owner attribution: never block the revoke on a lookup

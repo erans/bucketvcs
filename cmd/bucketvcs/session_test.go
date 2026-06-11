@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -178,6 +179,41 @@ func TestSessionRevoke_UsageErrors(t *testing.T) {
 	// unknown user
 	if code := runSession(context.Background(), []string{"revoke", "--auth-db", db, "--user", "nobody"}, &out, &errb); code != 1 {
 		t.Fatalf("unknown user: exit %d, want 1", code)
+	}
+}
+
+func TestSessionRevoke_OwnerLookupFailureIsUnresolved(t *testing.T) {
+	db, aliceRaws := seedSessionDB(t)
+	hash := auth.HashSessionID(aliceRaws[0])
+
+	// Make SessionOwnerByHash fail (its query names the users table) while
+	// the delete still works: rename users out of the way. SQLite >= 3.25
+	// rewrites the sessions FK to point at the renamed table, so the
+	// sessions-only DELETE keeps working — a plain DROP would not (the FK
+	// parent must exist for any sessions DML under foreign_keys=ON).
+	raw, err := sql.Open("sqlite", db)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	if _, err := raw.Exec(`ALTER TABLE users RENAME TO users_gone`); err != nil {
+		raw.Close()
+		t.Fatalf("rename users: %v", err)
+	}
+	raw.Close()
+
+	var out, errb bytes.Buffer
+	code := runSession(context.Background(), []string{"revoke", "--auth-db", db, "--id-hash", hash}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit %d (revoke must proceed despite lookup failure); stderr: %s", code, errb.String())
+	}
+	if !strings.Contains(out.String(), "revoked=1") {
+		t.Fatalf("stdout %q, want revoked=1", out.String())
+	}
+	if !strings.Contains(errb.String(), "could not resolve session owner") {
+		t.Fatalf("missing lookup-failure warning; stderr: %s", errb.String())
+	}
+	if !strings.Contains(errb.String(), "target_user=(unresolved)") {
+		t.Fatalf("missing (unresolved) audit attr; stderr: %s", errb.String())
 	}
 }
 

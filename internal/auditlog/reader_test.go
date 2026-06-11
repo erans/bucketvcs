@@ -760,3 +760,25 @@ func TestReaderPage_OnlyMarkersIsEmpty(t *testing.T) {
 		t.Fatalf("evs=%v next=%q err=%v, want empty page", eventNames(evs), next, err)
 	}
 }
+
+// TestReaderPage_CursorBelowSinceFloorIsEmpty: a cursor pointing below a
+// Since-raised floor yields an empty terminal page (startDay < floorDay).
+func TestReaderPage_CursorBelowSinceFloorIsEmpty(t *testing.T) {
+	store := newFakeStore()
+	store.put(dayKey("2026/06/01", "120000", 1), gzLines(
+		`{"ts":"2026-06-01T12:00:00Z","event":"a","tenant":"acme","repo":"app"}`,
+	))
+	store.put(dayKey("2026/06/05", "120000", 2), gzLines(
+		`{"ts":"2026-06-05T12:00:00Z","event":"b","tenant":"acme","repo":"app"}`,
+	))
+	r := fixedNow(auditlog.NewReader(store, ""))
+	f := auditlog.Filter{Since: time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC)}
+	// Cursor on 06/01 — below the since floor (06/03).
+	evs, next, err := r.Page(context.Background(), f, dayKey("2026/06/01", "120000", 1))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(evs) != 0 || next != "" {
+		t.Fatalf("evs=%v next=%q, want empty terminal page", eventNames(evs), next)
+	}
+}
