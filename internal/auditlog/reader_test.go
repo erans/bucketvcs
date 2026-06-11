@@ -29,18 +29,48 @@ func (s *fakeStore) put(key string, body []byte) {
 	s.objs[key] = body
 }
 
-// List returns ALL keys under prefix, ascending. ContinuationToken/MaxKeys are
-// ignored (single page) — sufficient for these tests.
+// fixedNow pins the reader's clock so fixture dates never age out of the
+// walk-from-today window (the per-page day-list budget would otherwise make
+// these tests fail when the calendar advances past fixtureDay+100).
+func fixedNow(r *auditlog.Reader) *auditlog.Reader {
+	auditlog.SetNow(r, func() time.Time {
+		return time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC)
+	})
+	return r
+}
+
+// List returns keys under prefix ascending, honoring MaxKeys (default 1000)
+// and ContinuationToken (resume strictly after the token key) so the
+// Reader's pagination loops are exercised. Page size 2 in tests via MaxKeys.
 func (s *fakeStore) List(ctx context.Context, prefix string, opts *storage.ListOptions) (*storage.ListPage, error) {
 	var keys []string
 	for k := range s.objs {
-		if len(k) >= len(prefix) && k[:len(prefix)] == prefix {
+		if strings.HasPrefix(k, prefix) {
 			keys = append(keys, k)
 		}
 	}
 	sort.Strings(keys)
+	maxKeys := 1000
+	token := ""
+	if opts != nil {
+		if opts.MaxKeys > 0 {
+			maxKeys = opts.MaxKeys
+		}
+		token = opts.ContinuationToken
+	}
+	if token != "" {
+		i := sort.SearchStrings(keys, token)
+		if i < len(keys) && keys[i] == token {
+			i++
+		}
+		keys = keys[i:]
+	}
 	page := &storage.ListPage{}
 	for _, k := range keys {
+		if len(page.Objects) == maxKeys {
+			page.NextToken = page.Objects[len(page.Objects)-1].Key
+			break
+		}
 		page.Objects = append(page.Objects, storage.ObjectMetadata{
 			Key:  k,
 			Size: int64(len(s.objs[k])),
@@ -84,7 +114,7 @@ func TestReaderPage_NewestFirstAndCursor(t *testing.T) {
 		`{"ts":"2026-05-22T14:00:00Z","event":"c","tenant":"acme","repo":"app"}`,
 	))
 
-	r := auditlog.NewReader(store, "")
+	r := fixedNow(auditlog.NewReader(store, ""))
 	r.ObjectsPerPage = 2
 
 	// Page 1: newest two objects (140000, 130000), events newest-first: c, b.
@@ -120,7 +150,7 @@ func TestReaderPage_CrossTenantFilterExcludes(t *testing.T) {
 		`{"ts":"2026-05-22T12:00:01Z","event":"other-evt","tenant":"other","repo":"app"}`,
 	))
 
-	r := auditlog.NewReader(store, "")
+	r := fixedNow(auditlog.NewReader(store, ""))
 	events, _, err := r.Page(context.Background(), auditlog.Filter{Tenant: "acme", Repo: "app"}, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -132,7 +162,7 @@ func TestReaderPage_CrossTenantFilterExcludes(t *testing.T) {
 
 func TestReaderPage_EmptyStore(t *testing.T) {
 	store := newFakeStore()
-	r := auditlog.NewReader(store, "")
+	r := fixedNow(auditlog.NewReader(store, ""))
 	events, next, err := r.Page(context.Background(), auditlog.Filter{}, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -166,7 +196,7 @@ func TestReaderPage_ByteCapBreaksPage(t *testing.T) {
 		`{"ts":"2026-05-22T14:00:00Z","event":"ev-c","tenant":"acme","repo":"app"}`,
 	))
 
-	r := auditlog.NewReader(store, "")
+	r := fixedNow(auditlog.NewReader(store, ""))
 	r.ObjectsPerPage = 10 // high — object cap must not trigger
 	r.MaxBytesPerPage = 1 // byte cap triggers after every single object
 
@@ -228,7 +258,7 @@ func TestReaderPage_DeletedCursorResumesAtPosition(t *testing.T) {
 	// Cursor names an object that no longer exists (retention swept 130000
 	// between page views). Pagination must resume with the keys strictly older
 	// than the cursor, not dead-end.
-	r := auditlog.NewReader(store, "")
+	r := fixedNow(auditlog.NewReader(store, ""))
 	events, next, err := r.Page(context.Background(), auditlog.Filter{}, "sys/logs/activity/2026/05/22/130000-aa-000002.ndjson.gz")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -266,7 +296,7 @@ func TestReaderPage_SkippedObjectIsLogged(t *testing.T) {
 	store := &brokenGetStore{fakeStore: inner, failKey: "sys/logs/activity/2026/05/22/130000-aa-000002.ndjson.gz"}
 
 	var buf bytes.Buffer
-	r := auditlog.NewReader(store, "")
+	r := fixedNow(auditlog.NewReader(store, ""))
 	r.Logger = slog.New(slog.NewTextHandler(&buf, nil))
 
 	events, _, err := r.Page(context.Background(), auditlog.Filter{}, "")
@@ -292,6 +322,7 @@ func TestReaderPage_ZeroObjectsPerPageDefaults(t *testing.T) {
 	// return an empty page — the guard falls back to the default page size.
 	r := &auditlog.Reader{}
 	*r = *auditlog.NewReader(store, "")
+	fixedNow(r)
 	r.ObjectsPerPage = 0
 
 	events, _, err := r.Page(context.Background(), auditlog.Filter{}, "")
@@ -315,7 +346,7 @@ func TestReaderPage_EventCapBreaksPage(t *testing.T) {
 		`{"ts":"2026-05-22T13:00:00Z","event":"ev-b","tenant":"acme","repo":"app"}`,
 	))
 
-	r := auditlog.NewReader(store, "")
+	r := fixedNow(auditlog.NewReader(store, ""))
 	r.MaxEventsPerPage = 1
 
 	evs1, next1, err := r.Page(context.Background(), auditlog.Filter{}, "")
@@ -351,7 +382,7 @@ func TestReaderPage_PartialCorruptionLogged(t *testing.T) {
 	))
 
 	var buf bytes.Buffer
-	r := auditlog.NewReader(store, "")
+	r := fixedNow(auditlog.NewReader(store, ""))
 	r.Logger = slog.New(slog.NewTextHandler(&buf, nil))
 
 	events, _, err := r.Page(context.Background(), auditlog.Filter{}, "")
@@ -398,7 +429,7 @@ func TestReaderPage_WalksDaysNewestFirst(t *testing.T) {
 	))
 	store := &countingListStore{fakeStore: inner}
 
-	r := auditlog.NewReader(store, "")
+	r := fixedNow(auditlog.NewReader(store, ""))
 	// Page 1 capped at 2 objects -> c, b; cursor points at b's object.
 	r.ObjectsPerPage = 2
 	evs, next, err := r.Page(context.Background(), auditlog.Filter{}, "")
@@ -440,7 +471,7 @@ func TestReaderPage_DoesNotListFullPrefix(t *testing.T) {
 	))
 	store := &countingListStore{fakeStore: inner}
 
-	r := auditlog.NewReader(store, "")
+	r := fixedNow(auditlog.NewReader(store, ""))
 	r.ObjectsPerPage = 1
 	// Cursor at the newest object's key: page 2 starts on 2026/06/05.
 	evs, next, err := r.Page(context.Background(), auditlog.Filter{}, "")
@@ -477,7 +508,7 @@ func TestReaderPage_SinceUntilNarrowWalkRange(t *testing.T) {
 		Since: time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC),
 		Until: time.Date(2026, 6, 4, 23, 59, 59, 0, time.UTC),
 	}
-	r := auditlog.NewReader(store, "")
+	r := fixedNow(auditlog.NewReader(store, ""))
 	evs, next, err := r.Page(context.Background(), f, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -510,7 +541,7 @@ func TestReaderPage_DayBudgetSyntheticCursor(t *testing.T) {
 	))
 	store := &countingListStore{fakeStore: inner}
 
-	r := auditlog.NewReader(store, "")
+	r := fixedNow(auditlog.NewReader(store, ""))
 	evs, next, err := r.Page(context.Background(), auditlog.Filter{}, "")
 	if err != nil {
 		t.Fatalf("page1: %v", err)
@@ -554,9 +585,50 @@ func TestReaderPage_DayBudgetSyntheticCursor(t *testing.T) {
 func TestReaderPage_UnparseableKeyFailsLoudly(t *testing.T) {
 	inner := newFakeStore()
 	inner.put("sys/logs/activity/garbage.txt", []byte("junk"))
-	r := auditlog.NewReader(inner, "")
+	r := fixedNow(auditlog.NewReader(inner, ""))
 	_, _, err := r.Page(context.Background(), auditlog.Filter{}, "")
 	if err == nil {
 		t.Fatal("want error for non-date-sharded key under the activity prefix")
 	}
+}
+
+// TestReaderPage_DayListPaginates: a day partition larger than one List page
+// is fully consumed (listDay follows ContinuationToken).
+func TestReaderPage_DayListPaginates(t *testing.T) {
+	store := newFakeStore()
+	for i := 1; i <= 5; i++ {
+		store.put(dayKey("2026/06/05", fmt.Sprintf("1200%02d", i), i), gzLines(
+			fmt.Sprintf(`{"ts":"2026-06-05T12:00:%02dZ","event":"e%d","tenant":"acme","repo":"app"}`, i, i),
+		))
+	}
+	pagingStore := &maxKeysCappedStore{fakeStore: store, cap: 2}
+	r := fixedNow(auditlog.NewReader(pagingStore, ""))
+	evs, next, err := r.Page(context.Background(), auditlog.Filter{}, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(evs) != 5 {
+		t.Fatalf("got %d events, want 5 (listDay must follow ContinuationToken)", len(evs))
+	}
+	if next != "" {
+		t.Fatalf("want empty cursor, got %q", next)
+	}
+}
+
+// maxKeysCappedStore forces small List pages regardless of the caller's
+// MaxKeys, exercising listDay's ContinuationToken loop.
+type maxKeysCappedStore struct {
+	*fakeStore
+	cap int
+}
+
+func (s *maxKeysCappedStore) List(ctx context.Context, prefix string, opts *storage.ListOptions) (*storage.ListPage, error) {
+	o := storage.ListOptions{}
+	if opts != nil {
+		o = *opts
+	}
+	if o.MaxKeys <= 0 || o.MaxKeys > s.cap {
+		o.MaxKeys = s.cap
+	}
+	return s.fakeStore.List(ctx, prefix, &o)
 }

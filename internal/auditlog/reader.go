@@ -11,8 +11,9 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/storage"
 )
 
-// maxDayListsPerPage bounds how many day-partition List calls one Page()
-// makes. A very sparse prefix (long empty gaps between partitions) stops at
+// maxDayListsPerPage bounds how many day partitions one Page() lists (a
+// multi-page partition listing counts once; the floor probe is not counted).
+// A very sparse prefix (long empty gaps between partitions) stops at
 // the budget and returns a synthetic day-boundary cursor so pagination always
 // terminates; the next page resumes the walk.
 const maxDayListsPerPage = 100
@@ -59,6 +60,10 @@ type Reader struct {
 	// Logger, when non-nil, records objects skipped by Page (Get or decode
 	// failure) so an operator investigating missing audit events has a signal.
 	Logger *slog.Logger
+
+	// now returns the wall clock; nil means time.Now. Tests pin it so
+	// fixture dates don't age out of the walk-from-today window.
+	now func() time.Time
 }
 
 // NewReader builds a Reader over store. logPrefix is the operator-configured
@@ -101,8 +106,10 @@ func (r *Reader) dayOf(key string) (string, bool) {
 // oldestDay probes the prefix with one MaxKeys=1 List. List returns keys in
 // ascending lexicographic order (ObjectStore.List contract), so the first key
 // is the oldest partition. Returns ("", nil) on an empty prefix and an error
-// for a key that does not match the shiplog layout (junk under the log
-// prefix must fail loudly, not be silently unreachable).
+// for a key that does not match the shiplog layout. Junk that sorts below
+// every partition fails every Page loudly until removed; junk sorting above
+// all partitions is never visited by the walk (it cannot shadow real
+// partitions).
 func (r *Reader) oldestDay(ctx context.Context) (string, error) {
 	page, err := r.store.List(ctx, r.prefix, &storage.ListOptions{MaxKeys: 1})
 	if err != nil {
@@ -142,6 +149,7 @@ func (r *Reader) listDay(ctx context.Context, day string) ([]string, error) {
 
 // prevDay steps a "YYYY/MM/DD" partition back one calendar day.
 func prevDay(day string) string {
+	// day is pre-validated by dayOf/Format; parse cannot fail.
 	t, _ := time.Parse(dayLayout, day)
 	return t.AddDate(0, 0, -1).Format(dayLayout)
 }
@@ -176,7 +184,14 @@ func (r *Reader) Page(ctx context.Context, f Filter, cursor string) ([]Event, st
 	// Start at the cursor's partition (resume) or today; date filters
 	// narrow both ends of the walk. Day strings compare lexicographically
 	// = chronologically.
-	startDay := time.Now().UTC().Format(dayLayout)
+	nowFn := r.now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+	// Future-dated keys (an instance's clock across the UTC day boundary)
+	// land in tomorrow's partition and stay invisible until the reader's
+	// date catches up — bounded by clock skew, not data loss.
+	startDay := nowFn().UTC().Format(dayLayout)
 	if cursor != "" {
 		if d, ok := r.dayOf(cursor); ok {
 			startDay = d
