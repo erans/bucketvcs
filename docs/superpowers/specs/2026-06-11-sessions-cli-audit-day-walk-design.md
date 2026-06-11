@@ -101,10 +101,11 @@ discovery changes:
    object/byte/event cap fires or the floor day is exhausted.
 4. **Day-list budget**: cap day lists per `Page` call (constant, 100). If the
    budget is hit before the page fills (a very sparse multi-year prefix), stop
-   and return a **synthetic cursor** `<prefix>/YYYY/MM/DD/` for the last
-   visited day — lexicographically smaller than every key in that day and
-   larger than every key in older days, so resume-strictly-older works
-   unchanged. The UI just shows `[older]`.
+   and return a **synthetic cursor** `<prefix>/YYYY/MM/DD/~` for the first
+   not-yet-listed day — `~` sorts above the key charset, so the cursor is
+   larger than every key in that day and smaller than every key in newer
+   days; resume-strictly-older starts the next page at that day, inclusive.
+   The UI just shows `[older]`.
 
 The next-cursor rule is unchanged for the normal case: the key of the oldest
 object consumed, or "" when the floor day was exhausted with no older days
@@ -138,8 +139,13 @@ cursor opacity posture (raw keys; accepted-risk note stays).
 - **Reader** (fake store): multi-day spread walks newest-first across
   partitions; day gaps cost nothing extra; cursor resume mid-day and across
   days; synthetic-cursor resume after a day-budget stop; `since`/`until`
-  narrowing the walk range; floor probe on empty store; **every existing
-  Reader test passes unmodified**.
+  narrowing the walk range; floor probe on empty store; **existing Reader
+  tests pass with their key fixtures updated to the production date-sharded
+  layout** (the old flat fake keys, e.g. `sys/logs/activity/120000`, never
+  occur in production — shiplog always writes
+  `…/YYYY/MM/DD/HHMMSS-<instance>-<seq>.ndjson.gz`). A key under the prefix
+  that does not match the layout makes `Page` fail loudly (operator junk in
+  the log prefix) rather than being silently invisible.
 - **Conformance**: ascending-order assertion in the storage conformance
   suite (runs against all 4 adapters in CI).
 - **Smoke**: extend `scripts/smoke-observability.sh` with a
