@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
+
+	"github.com/bucketvcs/bucketvcs/internal/auth"
 )
 
 func runSession(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -102,8 +105,11 @@ func sessionRevoke(ctx context.Context, args []string, stdout, stderr io.Writer)
 	if *idHash != "" {
 		// Best-effort owner attribution: never block the revoke on a lookup
 		// failure (including auth.ErrNoSession — the hash may already be gone).
-		if ownerID, ownerName, oerr := s.SessionOwnerByHash(ctx, *idHash); oerr == nil {
+		ownerID, ownerName, oerr := s.SessionOwnerByHash(ctx, *idHash)
+		if oerr == nil {
 			targetUserID, targetUser = ownerID, ownerName
+		} else if !errors.Is(oerr, auth.ErrNoSession) {
+			fmt.Fprintf(stderr, "warning: could not resolve session owner for audit attribution: %v\n", oerr)
 		}
 		n, err = s.DeleteSessionByHash(ctx, *idHash)
 	} else {

@@ -891,6 +891,11 @@ objects, never the live spool. As a result:
   `--log-ship-interval` (e.g. `5s`) so events surface within seconds. In
   production the default interval keeps object-write volume reasonable; the
   viewer is an after-the-fact audit trail, not a real-time monitor.
+- **On a deployment that has been idle for months, the first page can render
+  empty with an `[older]` link** while the viewer walks older partitions — each
+  page scans a bounded window of ~100 day partitions, so a long quiet stretch
+  may exhaust the window before reaching data. Keep clicking `[older]`, or use a
+  `since`/`until` filter to jump the walk straight to the right date range.
 
 See the [log shipping operator guide](log-shipping.md) for the full shipping
 model, spool sizing, and crash-recovery behaviour.

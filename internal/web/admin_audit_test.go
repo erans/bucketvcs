@@ -125,8 +125,11 @@ func TestAdminAudit_PagerVisibleOnEmptyPage(t *testing.T) {
 		t.Fatalf("status %d, want 200; body: %s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "no audit events match") {
-		t.Errorf("expected empty-state text; body: %s", body)
+	if !strings.Contains(body, "no events on this page yet") {
+		t.Errorf("expected bounded-walk empty-state hint; body: %s", body)
+	}
+	if strings.Contains(body, "no audit events match") {
+		t.Errorf("terminal empty-state must not render when a next cursor exists; body: %s", body)
 	}
 	if !strings.Contains(body, "older-cursor-key") {
 		t.Errorf("pager [older] link must render on an empty page with a next cursor; body: %s", body)

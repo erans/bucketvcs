@@ -665,3 +665,18 @@ func (s *maxKeysCappedStore) List(ctx context.Context, prefix string, opts *stor
 	}
 	return s.fakeStore.List(ctx, prefix, &o)
 }
+
+// TestReaderPage_BadCursorSentinel: a malformed cursor must surface as
+// ErrBadCursor through the real Page (the web handlers map it to 400; a
+// regression to a plain error would silently turn those back into 500s).
+func TestReaderPage_BadCursorSentinel(t *testing.T) {
+	store := newFakeStore()
+	store.put(dayKey("2026/06/05", "120000", 1), gzLines(
+		`{"ts":"2026-06-05T12:00:00Z","event":"a","tenant":"acme","repo":"app"}`,
+	))
+	r := fixedNow(auditlog.NewReader(store, ""))
+	_, _, err := r.Page(context.Background(), auditlog.Filter{}, "garbage")
+	if !errors.Is(err, auditlog.ErrBadCursor) {
+		t.Fatalf("err = %v, want ErrBadCursor", err)
+	}
+}
