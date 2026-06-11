@@ -388,7 +388,9 @@ func test29_7(t *testing.T, f Factory) {
 func testListPagination(t *testing.T, f Factory) {
 	s := newStore(t, f)
 	const total = 25
-	for i := 0; i < total; i++ {
+	// Seed in descending order so the ascending-order assertion below tests
+	// sorting, not insertion-order preservation.
+	for i := total - 1; i >= 0; i-- {
 		if _, err := s.PutIfAbsent(ctx(), Key("p/page", i), bytes.NewReader([]byte{byte(i)}), nil); err != nil {
 			t.Fatalf("seed %d: %v", i, err)
 		}
