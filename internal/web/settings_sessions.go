@@ -12,6 +12,17 @@ type sessionsData struct {
 	Sessions []auth.SessionInfo
 }
 
+// isCurrentSessionHash reports whether idHash is the stored hash of the
+// session cookie this request arrived on. Shared by the self-service and
+// admin revoke guards ("cannot revoke your current session").
+func (s *server) isCurrentSessionHash(r *http.Request, idHash string) bool {
+	c, err := r.Cookie(sessionCookieName)
+	if err != nil || c.Value == "" {
+		return false
+	}
+	return auth.HashSessionID(c.Value) == idHash
+}
+
 // handleSessionsPage renders GET /settings/sessions: the signed-in user's active
 // web sessions, with the current one badged and not revocable.
 func (s *server) handleSessionsPage(w http.ResponseWriter, r *http.Request) {
@@ -64,14 +75,11 @@ func (s *server) handleSessionRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The current session is not individually revocable (log out instead). The
-	// template omits its revoke form; this guards a hand-crafted POST. The stored
-	// id is auth.HashSessionID(rawCookieID), shared with the sqlite store.
-	if c, err := r.Cookie(sessionCookieName); err == nil && c.Value != "" {
-		if auth.HashSessionID(c.Value) == idHash {
-			EmitAdminActionMetric(r.Context(), s.logger, "session", "revoke", "invalid")
-			s.redirectFlash(w, r, "/settings/sessions", "cannot revoke your current session; use log out")
-			return
-		}
+	// template omits its revoke form; this guards a hand-crafted POST.
+	if s.isCurrentSessionHash(r, idHash) {
+		EmitAdminActionMetric(r.Context(), s.logger, "session", "revoke", "invalid")
+		s.redirectFlash(w, r, "/settings/sessions", "cannot revoke your current session; use log out")
+		return
 	}
 	n, err := s.store.DeleteSessionByHashForUser(r.Context(), sess.UserID, idHash)
 	if err != nil {
@@ -80,14 +88,16 @@ func (s *server) handleSessionRevoke(w http.ResponseWriter, r *http.Request) {
 		s.renderError(w, r, http.StatusInternalServerError, "internal error")
 		return
 	}
-	EmitAdminActionMetric(r.Context(), s.logger, "session", "revoke", "ok")
 	if n == 0 {
-		// Nothing was deleted (already revoked or expired); no audit event —
-		// mirrors the admin handler's no-op behavior.
+		// Nothing was deleted (already revoked or expired); no audit event and
+		// a distinct metric label — mirrors the admin handler, and keeps the
+		// "ok" count meaning real revocations under retries/double-clicks.
+		EmitAdminActionMetric(r.Context(), s.logger, "session", "revoke", "noop")
 		s.redirectFlash(w, r, "/settings/sessions", "session already gone")
 		return
 	}
 	EmitSessionRevoked(r.Context(), s.logger, sess.Name, idHash, n)
+	EmitAdminActionMetric(r.Context(), s.logger, "session", "revoke", "ok")
 	s.redirectFlash(w, r, "/settings/sessions", "session revoked")
 }
 

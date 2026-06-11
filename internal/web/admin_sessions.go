@@ -44,6 +44,7 @@ func (s *server) handleAdminSessions(w http.ResponseWriter, r *http.Request) {
 		for i := range list {
 			if list[i].IDHash == curHash {
 				list[i].IsCurrent = true
+				break // hashes are unique; at most one row matches
 			}
 		}
 	}
@@ -78,12 +79,10 @@ func (s *server) handleAdminSessionRevoke(w http.ResponseWriter, r *http.Request
 	}
 	// The admin's own session is not revocable here (log out instead). The
 	// template omits its revoke form; this guards a hand-crafted POST.
-	if c, cerr := r.Cookie(sessionCookieName); cerr == nil && c.Value != "" {
-		if auth.HashSessionID(c.Value) == idHash {
-			EmitAdminActionMetric(r.Context(), s.logger, "session", "admin_revoke", "invalid")
-			s.redirectFlash(w, r, dest, "cannot revoke your current session; use log out")
-			return
-		}
+	if s.isCurrentSessionHash(r, idHash) {
+		EmitAdminActionMetric(r.Context(), s.logger, "session", "admin_revoke", "invalid")
+		s.redirectFlash(w, r, dest, "cannot revoke your current session; use log out")
+		return
 	}
 	// Resolve the target BEFORE deleting — afterwards the hash no longer maps
 	// to a user and the audit event couldn't say whose session was revoked.
@@ -101,7 +100,7 @@ func (s *server) handleAdminSessionRevoke(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if n == 0 {
-		EmitAdminActionMetric(r.Context(), s.logger, "session", "admin_revoke", "ok")
+		EmitAdminActionMetric(r.Context(), s.logger, "session", "admin_revoke", "noop")
 		s.redirectFlash(w, r, dest, "session already gone")
 		return
 	}
