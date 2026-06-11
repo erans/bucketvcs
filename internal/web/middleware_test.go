@@ -15,6 +15,13 @@ type fakeStore struct {
 	verify            func(ctx context.Context, u, p string) (*auth.Actor, error)
 	sessions          map[string]*auth.Session // keyed by raw id
 	deleteSessionsFor func(ctx context.Context, userID, exceptRawID string) (int64, error)
+
+	// session list/revoke (self-service + admin)
+	sessionsForUser   []auth.SessionInfo
+	allSessions       []auth.AdminSessionInfo
+	revokeCount       int64  // returned by DeleteSessionByHash* (0 => default 1)
+	lastRevokeUserID  string // recorded by DeleteSessionByHashForUser
+	lastRevokeHash    string // recorded by both revoke-by-hash methods
 	repos             func(actor *auth.Actor) []Repo
 	findByEmail       func(email string) (*auth.Actor, error)
 	findIdentity      func(issuer, subject string) (*auth.Actor, error)
@@ -96,6 +103,28 @@ func (f *fakeStore) DeleteSessionsForUser(ctx context.Context, userID, exceptRaw
 		}
 	}
 	return n, nil
+}
+
+func (f *fakeStore) ListSessionsForUser(ctx context.Context, userID, currentRawID string) ([]auth.SessionInfo, error) {
+	return f.sessionsForUser, nil
+}
+func (f *fakeStore) DeleteSessionByHashForUser(ctx context.Context, userID, idHash string) (int64, error) {
+	f.lastRevokeUserID = userID
+	f.lastRevokeHash = idHash
+	if f.revokeCount != 0 {
+		return f.revokeCount, nil
+	}
+	return 1, nil
+}
+func (f *fakeStore) ListAllSessions(ctx context.Context) ([]auth.AdminSessionInfo, error) {
+	return f.allSessions, nil
+}
+func (f *fakeStore) DeleteSessionByHash(ctx context.Context, idHash string) (int64, error) {
+	f.lastRevokeHash = idHash
+	if f.revokeCount != 0 {
+		return f.revokeCount, nil
+	}
+	return 1, nil
 }
 func (f *fakeStore) ListAccessibleRepos(ctx context.Context, actor *auth.Actor) ([]Repo, error) {
 	if f.repos == nil {

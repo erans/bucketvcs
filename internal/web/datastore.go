@@ -55,6 +55,16 @@ type DataStore interface {
 	// identified by exceptRawID ("" = delete all). Returns the number deleted.
 	// Used on password change to revoke attacker-held cookies.
 	DeleteSessionsForUser(ctx context.Context, userID, exceptRawID string) (int64, error)
+
+	// ListSessionsForUser returns the user's sessions newest-first, marking the
+	// one whose stored hash matches currentRawID. The raw cookie id is never
+	// returned (only the SHA-256 hash). DeleteSessionByHashForUser is user-scoped
+	// (a cross-user hash affects 0 rows); ListAllSessions/DeleteSessionByHash are
+	// the unscoped admin surface.
+	ListSessionsForUser(ctx context.Context, userID, currentRawID string) ([]auth.SessionInfo, error)
+	DeleteSessionByHashForUser(ctx context.Context, userID, idHash string) (int64, error)
+	ListAllSessions(ctx context.Context) ([]auth.AdminSessionInfo, error)
+	DeleteSessionByHash(ctx context.Context, idHash string) (int64, error)
 	ListAccessibleRepos(ctx context.Context, actor *auth.Actor) ([]Repo, error)
 	// GetVisibleRepo returns the repo if the actor may view it, or an error.
 	// The web layer treats any error as 404 (anti-enumeration).

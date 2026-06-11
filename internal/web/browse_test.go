@@ -41,6 +41,18 @@ func (b *browseDataStore) DeleteSession(ctx context.Context, raw string) error {
 func (b *browseDataStore) DeleteSessionsForUser(ctx context.Context, userID, exceptRawID string) (int64, error) {
 	return 0, nil
 }
+func (b *browseDataStore) ListSessionsForUser(ctx context.Context, userID, currentRawID string) ([]auth.SessionInfo, error) {
+	return nil, nil
+}
+func (b *browseDataStore) DeleteSessionByHashForUser(ctx context.Context, userID, idHash string) (int64, error) {
+	return 0, nil
+}
+func (b *browseDataStore) ListAllSessions(ctx context.Context) ([]auth.AdminSessionInfo, error) {
+	return nil, nil
+}
+func (b *browseDataStore) DeleteSessionByHash(ctx context.Context, idHash string) (int64, error) {
+	return 0, nil
+}
 func (b *browseDataStore) ListAccessibleRepos(ctx context.Context, a *auth.Actor) ([]Repo, error) {
 	return nil, nil
 }
