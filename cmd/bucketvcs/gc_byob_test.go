@@ -23,6 +23,11 @@ func makeByobKey(t *testing.T) string {
 	if _, err := rand.Read(key); err != nil {
 		t.Fatalf("rand.Read: %v", err)
 	}
+	// openByobStore TrimSpaces the key file; a random first/last byte that
+	// happens to be whitespace (~5% of runs) would shrink/shift the key and
+	// flake the test. Pin both ends outside the ASCII whitespace range.
+	key[0] |= 0x80
+	key[len(key)-1] |= 0x80
 	path := filepath.Join(t.TempDir(), "byob.key")
 	if err := os.WriteFile(path, key, 0o600); err != nil {
 		t.Fatalf("write key: %v", err)
