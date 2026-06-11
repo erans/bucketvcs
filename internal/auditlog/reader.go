@@ -161,7 +161,9 @@ func (r *Reader) Page(ctx context.Context, f Filter, cursor string) ([]Event, st
 		next = keys[oldestIdx]
 	}
 
-	sort.Slice(events, func(a, b int) bool {
+	// Stable: events with equal timestamps keep their within-object NDJSON
+	// order across reloads of the same page.
+	sort.SliceStable(events, func(a, b int) bool {
 		return events[a].Ts.After(events[b].Ts)
 	})
 

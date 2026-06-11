@@ -121,8 +121,13 @@ func (f *fakeStore) DeleteSessionByHashForUser(ctx context.Context, userID, idHa
 	}
 	return 1, nil
 }
-func (f *fakeStore) ListAllSessions(ctx context.Context) ([]auth.AdminSessionInfo, error) {
-	return f.allSessions, nil
+func (f *fakeStore) ListAllSessions(ctx context.Context, limit int) ([]auth.AdminSessionInfo, int, error) {
+	total := len(f.allSessions)
+	list := f.allSessions
+	if limit > 0 && len(list) > limit {
+		list = list[:limit]
+	}
+	return list, total, nil
 }
 func (f *fakeStore) DeleteSessionByHash(ctx context.Context, idHash string) (int64, error) {
 	f.lastRevokeHash = idHash

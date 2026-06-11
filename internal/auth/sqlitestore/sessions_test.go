@@ -316,12 +316,24 @@ func TestListAllSessionsAndDeleteByHash(t *testing.T) {
 		t.Fatalf("CreateSession bob: %v", err)
 	}
 
-	all, err := s.ListAllSessions(ctx)
+	all, total, err := s.ListAllSessions(ctx, 0)
 	if err != nil {
 		t.Fatalf("ListAllSessions: %v", err)
 	}
 	if len(all) != 2 {
 		t.Fatalf("len = %d, want 2", len(all))
+	}
+	if total != 2 {
+		t.Fatalf("total = %d, want 2", total)
+	}
+
+	// limit caps the rows but the total still reports the full table.
+	capped, cappedTotal, err := s.ListAllSessions(ctx, 1)
+	if err != nil {
+		t.Fatalf("ListAllSessions limit=1: %v", err)
+	}
+	if len(capped) != 1 || cappedTotal != 2 {
+		t.Fatalf("limit=1: len=%d total=%d, want len=1 total=2", len(capped), cappedTotal)
 	}
 
 	// The admin view joins the user name.

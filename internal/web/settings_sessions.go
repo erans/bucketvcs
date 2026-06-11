@@ -43,7 +43,7 @@ func (s *server) handleSessionsPage(w http.ResponseWriter, r *http.Request) {
 		s.renderError(w, r, http.StatusInternalServerError, "render error")
 		return
 	}
-	EmitRequestMetric(r.Context(), s.logger, "settings_sessions", 200)
+	EmitRequestMetric(r.Context(), s.logger, "settings_sessions", http.StatusOK)
 }
 
 // handleSessionRevoke processes POST /settings/sessions/revoke: signs out one of

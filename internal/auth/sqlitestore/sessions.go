@@ -157,15 +157,27 @@ func (s *Store) DeleteSessionByHashForUser(ctx context.Context, userID, idHash s
 	return n, nil
 }
 
-// ListAllSessions returns every session joined with its owner's identity, for
-// the admin view. Ordered newest-first by last_seen.
-func (s *Store) ListAllSessions(ctx context.Context) ([]auth.AdminSessionInfo, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT s.id_hash, s.provider, s.created_at, s.expires_at, s.last_seen, s.user_id, u.name
-		   FROM sessions s JOIN users u ON u.id = s.user_id
-		  ORDER BY s.last_seen DESC`)
+// ListAllSessions returns sessions joined with their owner's identity, for the
+// admin view, plus the total session count. Ordered newest-first by last_seen.
+// limit > 0 caps the returned rows (the count is still the full total) so a
+// large deployment never loads the whole table for a display-capped page;
+// limit <= 0 returns every row.
+func (s *Store) ListAllSessions(ctx context.Context, limit int) ([]auth.AdminSessionInfo, int, error) {
+	var total int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions`).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count sessions: %w", err)
+	}
+	query := `SELECT s.id_hash, s.provider, s.created_at, s.expires_at, s.last_seen, s.user_id, u.name
+	   FROM sessions s JOIN users u ON u.id = s.user_id
+	  ORDER BY s.last_seen DESC`
+	var args []any
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list all sessions: %w", err)
+		return nil, 0, fmt.Errorf("list all sessions: %w", err)
 	}
 	defer rows.Close()
 
@@ -174,14 +186,14 @@ func (s *Store) ListAllSessions(ctx context.Context) ([]auth.AdminSessionInfo, e
 		var info auth.AdminSessionInfo
 		if err := rows.Scan(&info.IDHash, &info.Provider, &info.CreatedAt, &info.ExpiresAt, &info.LastSeen,
 			&info.UserID, &info.UserName); err != nil {
-			return nil, fmt.Errorf("scan admin session: %w", err)
+			return nil, 0, fmt.Errorf("scan admin session: %w", err)
 		}
 		out = append(out, info)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate admin sessions: %w", err)
+		return nil, 0, fmt.Errorf("iterate admin sessions: %w", err)
 	}
-	return out, nil
+	return out, total, nil
 }
 
 // DeleteSessionByHash deletes the session identified by idHash with no user

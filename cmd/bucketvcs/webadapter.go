@@ -46,8 +46,8 @@ func (a *webAdapter) ListSessionsForUser(ctx context.Context, userID, currentRaw
 func (a *webAdapter) DeleteSessionByHashForUser(ctx context.Context, userID, idHash string) (int64, error) {
 	return a.s.DeleteSessionByHashForUser(ctx, userID, idHash)
 }
-func (a *webAdapter) ListAllSessions(ctx context.Context) ([]auth.AdminSessionInfo, error) {
-	return a.s.ListAllSessions(ctx)
+func (a *webAdapter) ListAllSessions(ctx context.Context, limit int) ([]auth.AdminSessionInfo, int, error) {
+	return a.s.ListAllSessions(ctx, limit)
 }
 func (a *webAdapter) DeleteSessionByHash(ctx context.Context, idHash string) (int64, error) {
 	return a.s.DeleteSessionByHash(ctx, idHash)

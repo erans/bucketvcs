@@ -47,8 +47,8 @@ func (b *browseDataStore) ListSessionsForUser(ctx context.Context, userID, curre
 func (b *browseDataStore) DeleteSessionByHashForUser(ctx context.Context, userID, idHash string) (int64, error) {
 	return 0, nil
 }
-func (b *browseDataStore) ListAllSessions(ctx context.Context) ([]auth.AdminSessionInfo, error) {
-	return nil, nil
+func (b *browseDataStore) ListAllSessions(ctx context.Context, limit int) ([]auth.AdminSessionInfo, int, error) {
+	return nil, 0, nil
 }
 func (b *browseDataStore) DeleteSessionByHash(ctx context.Context, idHash string) (int64, error) {
 	return 0, nil

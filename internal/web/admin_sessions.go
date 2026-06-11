@@ -7,8 +7,8 @@ import (
 )
 
 // adminSessionsDisplayCap is the maximum number of sessions rendered in the
-// admin page. ListAllSessions returns the full table; we cap here so a large
-// deployment never produces a multi-megabyte page.
+// admin page, pushed into the store query as a LIMIT so a large deployment
+// never loads the full table (or produces a multi-megabyte page).
 const adminSessionsDisplayCap = 500
 
 type adminSessionsData struct {
@@ -28,7 +28,7 @@ func (s *server) handleAdminSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess := SessionFromContext(r.Context())
-	list, err := s.store.ListAllSessions(r.Context())
+	list, total, err := s.store.ListAllSessions(r.Context(), adminSessionsDisplayCap)
 	if err != nil {
 		s.logger.Error("admin sessions: list", "err", err)
 		s.renderError(w, r, http.StatusInternalServerError, "internal error")
@@ -45,12 +45,7 @@ func (s *server) handleAdminSessions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	total := len(list)
-	truncated := false
-	if len(list) > adminSessionsDisplayCap {
-		list = list[:adminSessionsDisplayCap]
-		truncated = true
-	}
+	truncated := total > len(list)
 	d := adminSessionsData{
 		base:      base{Session: sess, CSRF: issueCSRF(w, requestIsTLS(r, s.trustProxy)), Flash: takeFlash(w, r)},
 		Sessions:  list,

@@ -60,10 +60,11 @@ type DataStore interface {
 	// one whose stored hash matches the SHA-256 of currentRawID. The raw cookie id is never
 	// returned (only the SHA-256 hash). DeleteSessionByHashForUser is user-scoped
 	// (a cross-user hash affects 0 rows); ListAllSessions/DeleteSessionByHash are
-	// the unscoped admin surface.
+	// the unscoped admin surface. ListAllSessions returns at most limit rows
+	// (limit <= 0 = unlimited) plus the total session count.
 	ListSessionsForUser(ctx context.Context, userID, currentRawID string) ([]auth.SessionInfo, error)
 	DeleteSessionByHashForUser(ctx context.Context, userID, idHash string) (int64, error)
-	ListAllSessions(ctx context.Context) ([]auth.AdminSessionInfo, error)
+	ListAllSessions(ctx context.Context, limit int) ([]auth.AdminSessionInfo, int, error)
 	DeleteSessionByHash(ctx context.Context, idHash string) (int64, error)
 	ListAccessibleRepos(ctx context.Context, actor *auth.Actor) ([]Repo, error)
 	// GetVisibleRepo returns the repo if the actor may view it, or an error.
