@@ -145,6 +145,10 @@ func TestSessionRevoke_ByUser(t *testing.T) {
 			t.Fatalf("stderr missing %q:\n%s", want, errb.String())
 		}
 	}
+	// id_hash is not applicable on the by-user path and must be omitted.
+	if strings.Contains(errb.String(), "id_hash=") {
+		t.Fatalf("stderr contains id_hash= on --user path:\n%s", errb.String())
+	}
 	// bob's session survives.
 	out.Reset()
 	if code := runSession(context.Background(), []string{"list", "--auth-db", db}, &out, &errb); code != 0 {

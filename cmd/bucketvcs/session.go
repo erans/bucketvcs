@@ -110,6 +110,9 @@ func sessionRevoke(ctx context.Context, args []string, stdout, stderr io.Writer)
 			targetUserID, targetUser = ownerID, ownerName
 		} else if !errors.Is(oerr, auth.ErrNoSession) {
 			fmt.Fprintf(stderr, "warning: could not resolve session owner for audit attribution: %v\n", oerr)
+			// Make the failed lookup explicit in the audit line (vs. "not
+			// applicable" on the --user path, where the attrs are omitted).
+			targetUser = "(unresolved)"
 		}
 		n, err = s.DeleteSessionByHash(ctx, *idHash)
 	} else {
@@ -129,15 +132,22 @@ func sessionRevoke(ctx context.Context, args []string, stdout, stderr io.Writer)
 	// handlers, a no-op revoke (count=0) emits no audit event.
 	if n > 0 {
 		logger := slog.New(slog.NewTextHandler(stderr, nil))
-		logger.LogAttrs(ctx, slog.LevelInfo, "auth.session.admin_revoked",
+		attrs := []slog.Attr{
 			slog.Bool("audit", true),
 			slog.String("event", "auth.session.admin_revoked"),
 			slog.String("actor", "cli"),
-			slog.String("id_hash", *idHash),
-			slog.String("target_user_id", targetUserID),
-			slog.String("target_user", targetUser),
 			slog.Int64("count", n),
-		)
+		}
+		if *idHash != "" {
+			attrs = append(attrs, slog.String("id_hash", *idHash))
+		}
+		if targetUserID != "" {
+			attrs = append(attrs, slog.String("target_user_id", targetUserID))
+		}
+		if targetUser != "" {
+			attrs = append(attrs, slog.String("target_user", targetUser))
+		}
+		logger.LogAttrs(ctx, slog.LevelInfo, "auth.session.admin_revoked", attrs...)
 	}
 	fmt.Fprintf(stdout, "revoked=%d\n", n)
 	return 0

@@ -604,6 +604,49 @@ func TestReaderPage_DayBudgetSyntheticCursor(t *testing.T) {
 	}
 }
 
+// TestReaderPage_SyntheticCursorIncludesItsDay: when the day budget fires, the
+// synthetic cursor must resume INCLUDING the not-yet-listed day it points at —
+// an object on that exact day must appear on the next page.
+func TestReaderPage_SyntheticCursorIncludesItsDay(t *testing.T) {
+	store := newFakeStore()
+	// Newest object pins startDay; the second object sits exactly 100 days
+	// (the per-page day-list budget) below it, i.e. on the first day the
+	// budget prevents page 1 from listing.
+	store.put(dayKey("2026/06/05", "120000", 2), gzLines(
+		`{"ts":"2026-06-05T12:00:00Z","event":"new","tenant":"acme","repo":"app"}`,
+	))
+	store.put(dayKey("2026/02/25", "120000", 1), gzLines(
+		`{"ts":"2026-02-25T12:00:00Z","event":"boundary","tenant":"acme","repo":"app"}`,
+	))
+	r := fixedNow(auditlog.NewReader(store, ""))
+
+	// fixedNow pins today=2026/06/11; page 1 walks 06/11 down 100 day-lists
+	// (through 2026/03/04) and stops with a synthetic cursor at 2026/03/03.
+	evs, next, err := r.Page(context.Background(), auditlog.Filter{}, "")
+	if err != nil {
+		t.Fatalf("page1: %v", err)
+	}
+	if got := eventNames(evs); len(got) != 1 || got[0] != "new" {
+		t.Fatalf("page1: got %v want [new]", got)
+	}
+	if next == "" {
+		t.Fatal("page1: want synthetic cursor")
+	}
+
+	// Page 2 walks 03/03 down; 2026/02/25 is within its 100-day budget, so
+	// the boundary object must appear (and the floor is reached -> "").
+	evs2, next2, err := r.Page(context.Background(), auditlog.Filter{}, next)
+	if err != nil {
+		t.Fatalf("page2: %v", err)
+	}
+	if got := eventNames(evs2); len(got) != 1 || got[0] != "boundary" {
+		t.Fatalf("page2: got %v want [boundary] (synthetic cursor must include its day)", got)
+	}
+	if next2 != "" {
+		t.Fatalf("page2: want empty cursor, got %q", next2)
+	}
+}
+
 func TestReaderPage_UnparseableKeyFailsLoudly(t *testing.T) {
 	inner := newFakeStore()
 	inner.put("sys/logs/activity/garbage.txt", []byte("junk"))
