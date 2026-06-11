@@ -34,6 +34,17 @@ func (s *server) handleAdminSessions(w http.ResponseWriter, r *http.Request) {
 		s.renderError(w, r, http.StatusInternalServerError, "internal error")
 		return
 	}
+	// Badge the admin's own session (ListAllSessions has no currentRawID
+	// parameter, so IsCurrent arrives false): the template hides its revoke
+	// form, sparing the admin a self-sign-out mis-click.
+	if c, cerr := r.Cookie(sessionCookieName); cerr == nil && c.Value != "" {
+		curHash := auth.HashSessionID(c.Value)
+		for i := range list {
+			if list[i].IDHash == curHash {
+				list[i].IsCurrent = true
+			}
+		}
+	}
 	total := len(list)
 	truncated := false
 	if len(list) > adminSessionsDisplayCap {
@@ -67,6 +78,14 @@ func (s *server) handleAdminSessionRevoke(w http.ResponseWriter, r *http.Request
 		EmitAdminActionMetric(r.Context(), s.logger, "session", "admin_revoke", "invalid")
 		s.redirectFlash(w, r, dest, "id_hash required")
 		return
+	}
+	// The admin's own session is not revocable here (log out instead). The
+	// template omits its revoke form; this guards a hand-crafted POST.
+	if c, cerr := r.Cookie(sessionCookieName); cerr == nil && c.Value != "" {
+		if auth.HashSessionID(c.Value) == idHash {
+			s.redirectFlash(w, r, dest, "cannot revoke your current session; use log out")
+			return
+		}
 	}
 	n, err := s.store.DeleteSessionByHash(r.Context(), idHash)
 	if err != nil {

@@ -126,6 +126,9 @@ func (f *fakeStore) ListAllSessions(ctx context.Context) ([]auth.AdminSessionInf
 }
 func (f *fakeStore) DeleteSessionByHash(ctx context.Context, idHash string) (int64, error) {
 	f.lastRevokeHash = idHash
+	if f.revokeCount < 0 {
+		return 0, nil
+	}
 	if f.revokeCount != 0 {
 		return f.revokeCount, nil
 	}

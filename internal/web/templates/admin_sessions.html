@@ -19,11 +19,13 @@
       <td title="{{abstime .LastSeen}}">{{reltime .LastSeen}}</td>
       <td title="{{abstime .ExpiresAt}}">{{reltime .ExpiresAt}}</td>
       <td>
+        {{if .IsCurrent}}<span class="badge">current</span>{{else}}
         <form method="post" action="/admin/sessions/revoke" class="inline">
           <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
           <input type="hidden" name="id_hash" value="{{.IDHash}}">
           <button type="submit">revoke</button>
         </form>
+        {{end}}
       </td>
     </tr>
     {{end}}

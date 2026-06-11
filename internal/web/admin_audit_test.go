@@ -132,3 +132,23 @@ func TestAdminAudit_PagerVisibleOnEmptyPage(t *testing.T) {
 		t.Errorf("pager [older] link must render on an empty page with a next cursor; body: %s", body)
 	}
 }
+
+// TestParseAuditFilter_UntilInclusiveOfNamedDayOnly: ?until=2026-06-01 must
+// include the whole named day but NOT the first instant of June 2 —
+// Filter.Until is an inclusive bound, so the parsed value must be the last
+// instant of the named day, not next-day midnight.
+func TestParseAuditFilter_UntilInclusiveOfNamedDayOnly(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/admin/audit?until=2026-06-01", nil)
+	f, _, until := parseAuditFilter(req)
+	if until != "2026-06-01" {
+		t.Fatalf("raw until = %q, want 2026-06-01", until)
+	}
+	endOfDay := auditlog.Event{Ts: time.Date(2026, 6, 1, 23, 59, 59, 999999999, time.UTC)}
+	if !f.Match(endOfDay) {
+		t.Errorf("event at the last instant of the named day must match")
+	}
+	nextMidnight := auditlog.Event{Ts: time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC)}
+	if f.Match(nextMidnight) {
+		t.Errorf("event at next-day midnight must NOT match an until=named-day filter")
+	}
+}

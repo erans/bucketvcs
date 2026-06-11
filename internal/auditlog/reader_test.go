@@ -279,3 +279,24 @@ func TestReaderPage_SkippedObjectIsLogged(t *testing.T) {
 		t.Fatalf("skipped object not logged with key+error; log:\n%s", out)
 	}
 }
+
+func TestReaderPage_ZeroObjectsPerPageDefaults(t *testing.T) {
+	store := newFakeStore()
+	store.put("sys/logs/activity/120000", gzLines(
+		`{"ts":"2026-05-22T12:00:00Z","event":"a","tenant":"acme","repo":"app"}`,
+	))
+
+	// A directly-constructed Reader (zero ObjectsPerPage) must not silently
+	// return an empty page — the guard falls back to the default page size.
+	r := &auditlog.Reader{}
+	*r = *auditlog.NewReader(store, "")
+	r.ObjectsPerPage = 0
+
+	events, _, err := r.Page(context.Background(), auditlog.Filter{}, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := eventNames(events); len(got) != 1 || got[0] != "a" {
+		t.Fatalf("zero ObjectsPerPage: got %v want [a]", got)
+	}
+}

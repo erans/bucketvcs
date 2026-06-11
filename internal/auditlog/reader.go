@@ -118,7 +118,14 @@ func (r *Reader) Page(ctx context.Context, f Filter, cursor string) ([]Event, st
 	oldestIdx := -1
 	var bytesUsed int64
 
-	for i := end - 1; i >= 0 && consumed < r.ObjectsPerPage; i-- {
+	// Defensive default for directly-constructed Readers: a zero page size
+	// would otherwise return an empty page indistinguishable from "no events".
+	perPage := r.ObjectsPerPage
+	if perPage <= 0 {
+		perPage = 20
+	}
+
+	for i := end - 1; i >= 0 && consumed < perPage; i-- {
 		obj, err := r.store.Get(ctx, keys[i], nil)
 		if err != nil {
 			// Best-effort skip: advance past this object.

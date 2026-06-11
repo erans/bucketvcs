@@ -19,10 +19,10 @@ const maxLineBytes = 4 << 20 // 4 MiB
 // DecodeGz decompresses r as gzip and decodes the NDJSON lines into Events.
 // It returns the decoded events, the number of malformed (skipped) lines, and
 // any error. A gzip-level error is returned immediately; malformed JSON lines
-// are skipped and counted rather than aborting the batch. Empty lines are
-// silently ignored and not counted as malformed. An object whose decompressed
-// size exceeds maxObjectDecompressed returns an error (a partial decode is
-// never silently returned as complete).
+// and lines over maxLineBytes are skipped and counted rather than aborting the
+// batch. Empty lines are silently ignored and not counted as malformed. An
+// object whose decompressed size exceeds maxObjectDecompressed returns an
+// error (a partial decode is never silently returned as complete).
 func DecodeGz(r io.Reader) ([]Event, int, error) {
 	gz, err := gzip.NewReader(r)
 	if err != nil {
@@ -35,32 +35,65 @@ func DecodeGz(r io.Reader) ([]Event, int, error) {
 	// maxObjectDecompressed means the object kept going and we'd be returning a
 	// silently truncated decode.
 	cr := &countingReader{r: gz}
-	scanner := bufio.NewScanner(io.LimitReader(cr, maxObjectDecompressed+1))
-	buf := make([]byte, maxLineBytes)
-	scanner.Buffer(buf, maxLineBytes)
+	br := bufio.NewReaderSize(io.LimitReader(cr, maxObjectDecompressed+1), 64<<10)
 
 	var events []Event
 	skipped := 0
+	var line []byte
+	overLong := false
 
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue // silently skip empty lines
+	// flush decodes the accumulated line (or counts it: over-long lines and
+	// malformed JSON are skipped; empty lines are ignored) and resets state.
+	flush := func() {
+		// CRLF parity with the previous bufio.ScanLines implementation.
+		if n := len(line); n > 0 && line[n-1] == '\r' {
+			line = line[:n-1]
 		}
-		var m map[string]any
-		if err := json.Unmarshal(line, &m); err != nil {
+		switch {
+		case overLong:
 			skipped++
-			continue
+		case len(line) > 0:
+			var m map[string]any
+			if err := json.Unmarshal(line, &m); err != nil {
+				skipped++
+			} else {
+				events = append(events, eventFromMap(m))
+			}
 		}
-		events = append(events, eventFromMap(m))
+		line = line[:0]
+		overLong = false
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, skipped, fmt.Errorf("auditlog: scan: %w", err)
+
+	for {
+		frag, err := br.ReadSlice('\n')
+		if n := len(frag); n > 0 && frag[n-1] == '\n' {
+			frag = frag[:n-1]
+		}
+		if !overLong {
+			if len(line)+len(frag) > maxLineBytes {
+				// Keep consuming the rest of the line but discard it: one
+				// oversized line must not fail the surrounding batch.
+				overLong = true
+				line = line[:0]
+			} else {
+				line = append(line, frag...)
+			}
+		}
+		switch err {
+		case nil:
+			flush() // delimiter found: full line accumulated
+		case bufio.ErrBufferFull:
+			// mid-line: keep reading fragments
+		case io.EOF:
+			flush() // final line without trailing newline
+			if cr.n > maxObjectDecompressed {
+				return nil, skipped, fmt.Errorf("auditlog: object exceeds %d-byte decompressed limit", int64(maxObjectDecompressed))
+			}
+			return events, skipped, nil
+		default:
+			return nil, skipped, fmt.Errorf("auditlog: scan: %w", err)
+		}
 	}
-	if cr.n > maxObjectDecompressed {
-		return nil, skipped, fmt.Errorf("auditlog: object exceeds %d-byte decompressed limit", int64(maxObjectDecompressed))
-	}
-	return events, skipped, nil
 }
 
 // countingReader counts the bytes read through it.

@@ -171,3 +171,27 @@ func TestDecodeGz_OversizedObjectErrors(t *testing.T) {
 		t.Fatalf("error %q does not indicate the size guard", err)
 	}
 }
+
+// TestDecodeGz_OverlongLineSkipped: a single NDJSON line over the per-line cap
+// is counted as malformed and skipped — it must not fail the whole object
+// (which would silently drop every well-formed event around it).
+func TestDecodeGz_OverlongLineSkipped(t *testing.T) {
+	good1 := `{"ts":"2026-05-22T12:00:00Z","event":"first","tenant":"acme","repo":"app"}`
+	huge := `{"ts":"2026-05-22T12:00:01Z","event":"huge","pad":"` + strings.Repeat("p", 5<<20) + `"}`
+	good2 := `{"ts":"2026-05-22T12:00:02Z","event":"second","tenant":"acme","repo":"app"}`
+
+	events, skipped, err := auditlog.DecodeGz(bytes.NewReader(gzLines(good1, huge, good2)))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if skipped != 1 {
+		t.Errorf("skipped = %d, want 1 (the over-long line)", skipped)
+	}
+	if len(events) != 2 || events[0].Event != "first" || events[1].Event != "second" {
+		var names []string
+		for _, e := range events {
+			names = append(names, e.Event)
+		}
+		t.Fatalf("events = %v, want [first second]", names)
+	}
+}

@@ -70,7 +70,8 @@ func (s *server) handleAdminAudit(w http.ResponseWriter, r *http.Request) {
 
 // parseAuditFilter builds an auditlog.Filter from the request query. event maps
 // to EventPrefix; tenant/repo/actor match exactly. since/until are parsed as
-// "2006-01-02" dates; until is advanced by 24h so the named day is inclusive.
+// "2006-01-02" dates; until is extended to the last instant of the named day so
+// the whole day is inclusive.
 // Bad dates are ignored (the bound is left zero). It returns the raw since/until
 // query strings so the caller can echo them back into the form. Shared with the
 // per-repo audit tab.
@@ -91,8 +92,10 @@ func parseAuditFilter(r *http.Request) (auditlog.Filter, string, string) {
 	}
 	if until != "" {
 		if t, err := time.Parse("2006-01-02", until); err == nil {
-			// Inclusive of the named day: bound is the start of the next day.
-			f.Until = t.Add(24 * time.Hour)
+			// Inclusive of the named day: Filter.Until is itself inclusive, so
+			// the bound is the LAST instant of the day — a flat +24h would also
+			// admit an event stamped exactly at the next day's midnight.
+			f.Until = t.Add(24*time.Hour - time.Nanosecond)
 		}
 	}
 	return f, since, until
