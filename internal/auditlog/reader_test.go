@@ -723,3 +723,40 @@ func TestReaderPage_BadCursorSentinel(t *testing.T) {
 		t.Fatalf("err = %v, want ErrBadCursor", err)
 	}
 }
+
+// TestReaderPage_FolderMarkersTolerated: zero-byte console "folder marker"
+// keys (ending in "/") at the prefix, intermediate, and in-day levels must
+// not brick or pollute the walk.
+func TestReaderPage_FolderMarkersTolerated(t *testing.T) {
+	store := newFakeStore()
+	store.put("sys/logs/activity/", nil)
+	store.put("sys/logs/activity/2026/", nil)
+	store.put("sys/logs/activity/2026/06/", nil)
+	store.put("sys/logs/activity/2026/06/05/", nil)
+	store.put(dayKey("2026/06/05", "120000", 1), gzLines(
+		`{"ts":"2026-06-05T12:00:00Z","event":"a","tenant":"acme","repo":"app"}`,
+	))
+	r := fixedNow(auditlog.NewReader(store, ""))
+	evs, next, err := r.Page(context.Background(), auditlog.Filter{}, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := eventNames(evs); len(got) != 1 || got[0] != "a" {
+		t.Fatalf("got %v want [a]", got)
+	}
+	if next != "" {
+		t.Fatalf("want empty cursor, got %q", next)
+	}
+}
+
+// TestReaderPage_OnlyMarkersIsEmpty: a prefix containing nothing but folder
+// markers behaves as an empty store.
+func TestReaderPage_OnlyMarkersIsEmpty(t *testing.T) {
+	store := newFakeStore()
+	store.put("sys/logs/activity/", nil)
+	r := fixedNow(auditlog.NewReader(store, ""))
+	evs, next, err := r.Page(context.Background(), auditlog.Filter{}, "")
+	if err != nil || len(evs) != 0 || next != "" {
+		t.Fatalf("evs=%v next=%q err=%v, want empty page", eventNames(evs), next, err)
+	}
+}

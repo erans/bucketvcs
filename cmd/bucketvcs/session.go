@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 )
@@ -43,6 +44,10 @@ func sessionList(ctx context.Context, args []string, stdout, stderr io.Writer) i
 	if fs.NArg() != 0 || *authDB == "" {
 		fmt.Fprintln(stderr, "usage: bucketvcs session list --auth-db=<path> [--user=<name>]")
 		return 2
+	}
+	if _, err := os.Stat(*authDB); err != nil {
+		fmt.Fprintf(stderr, "auth-db: %v\n", err)
+		return 1
 	}
 	s, _, err := openAuthDB(*authDB)
 	if err != nil {
@@ -92,6 +97,10 @@ func sessionRevoke(ctx context.Context, args []string, stdout, stderr io.Writer)
 	if fs.NArg() != 0 || *authDB == "" || (*idHash == "") == (*user == "") {
 		fmt.Fprintln(stderr, "usage: bucketvcs session revoke --auth-db=<path> (--id-hash=<hex> | --user=<name>)")
 		return 2
+	}
+	if _, err := os.Stat(*authDB); err != nil {
+		fmt.Fprintf(stderr, "auth-db: %v\n", err)
+		return 1
 	}
 	s, _, err := openAuthDB(*authDB)
 	if err != nil {

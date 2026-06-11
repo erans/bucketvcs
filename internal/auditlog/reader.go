@@ -38,7 +38,7 @@ type ObjectStore interface {
 // oldest object included on the previous page; the next page consumes objects
 // strictly older than that key. Key discovery walks the date-sharded
 // partition layout (<prefix>/YYYY/MM/DD/) backward from the cursor's day
-// (or today) to a floor day learned from one MaxKeys=1 probe, so a page
+// (or today) to a floor day learned from a small probe listing, so a page
 // costs a handful of small partition listings instead of a full-prefix scan.
 // Within a page, objects are read newest-first
 // and the resulting events are sorted by timestamp descending.
@@ -112,26 +112,40 @@ func (r *Reader) dayOf(key string) (string, bool) {
 	return day, true
 }
 
-// oldestDay probes the prefix with one MaxKeys=1 List. List returns keys in
-// ascending lexicographic order (ObjectStore.List contract), so the first key
-// is the oldest partition. Returns ("", nil) on an empty prefix and an error
-// for a key that does not match the shiplog layout. Junk that sorts below
-// every partition fails every Page loudly until removed; junk sorting above
-// all partitions is never visited by the walk (it cannot shadow real
-// partitions).
+// oldestDay probes the prefix with a small probe listing. List returns keys
+// in ascending lexicographic order (ObjectStore.List contract), so the first
+// non-marker key is the oldest partition. Returns ("", nil) on an empty
+// prefix and an error for a key that does not match the shiplog layout. Junk
+// that sorts below every partition fails every Page loudly until removed;
+// junk sorting above all partitions is never visited by the walk (it cannot
+// shadow real partitions).
 func (r *Reader) oldestDay(ctx context.Context) (string, error) {
-	page, err := r.store.List(ctx, r.prefix, &storage.ListOptions{MaxKeys: 1})
-	if err != nil {
-		return "", err
+	// Console-created "folder marker" objects (keys ending in "/", e.g. the
+	// prefix itself or an intermediate <prefix>2026/06/ entry) sort before
+	// real partitions and are benign — skip them. A real shiplog key never
+	// ends in "/". The loud-error contract applies to the first NON-marker
+	// key only.
+	token := ""
+	for {
+		page, err := r.store.List(ctx, r.prefix, &storage.ListOptions{MaxKeys: 16, ContinuationToken: token})
+		if err != nil {
+			return "", err
+		}
+		for _, o := range page.Objects {
+			if strings.HasSuffix(o.Key, "/") {
+				continue
+			}
+			day, ok := r.dayOf(o.Key)
+			if !ok {
+				return "", fmt.Errorf("auditlog: key %q under %q does not match the date-sharded activity layout", o.Key, r.prefix)
+			}
+			return day, nil
+		}
+		if page.NextToken == "" {
+			return "", nil
+		}
+		token = page.NextToken
 	}
-	if len(page.Objects) == 0 {
-		return "", nil
-	}
-	day, ok := r.dayOf(page.Objects[0].Key)
-	if !ok {
-		return "", fmt.Errorf("auditlog: key %q under %q does not match the date-sharded activity layout", page.Objects[0].Key, r.prefix)
-	}
-	return day, nil
 }
 
 // listDay returns all keys under one day partition, descending (newest
@@ -145,6 +159,9 @@ func (r *Reader) listDay(ctx context.Context, day string) ([]string, error) {
 			return nil, err
 		}
 		for _, o := range page.Objects {
+			if strings.HasSuffix(o.Key, "/") {
+				continue // console folder marker, not a shipped object
+			}
 			keys = append(keys, o.Key)
 		}
 		if page.NextToken == "" {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -177,5 +178,19 @@ func TestSessionRevoke_UsageErrors(t *testing.T) {
 	// unknown user
 	if code := runSession(context.Background(), []string{"revoke", "--auth-db", db, "--user", "nobody"}, &out, &errb); code != 1 {
 		t.Fatalf("unknown user: exit %d, want 1", code)
+	}
+}
+
+func TestSessionList_MissingDBErrors(t *testing.T) {
+	var out, errb bytes.Buffer
+	missing := filepath.Join(t.TempDir(), "nope", "auth.db")
+	if code := runSession(context.Background(), []string{"list", "--auth-db", missing}, &out, &errb); code != 1 {
+		t.Fatalf("missing db: exit %d, want 1 (must not create an empty db)", code)
+	}
+	if _, err := os.Stat(missing); err == nil {
+		t.Fatal("missing db path was created by a read command")
+	}
+	if code := runSession(context.Background(), []string{"revoke", "--auth-db", missing, "--user", "alice"}, &out, &errb); code != 1 {
+		t.Fatalf("missing db revoke: exit %d, want 1", code)
 	}
 }
