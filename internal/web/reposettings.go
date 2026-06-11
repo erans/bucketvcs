@@ -94,6 +94,8 @@ func (s *server) handleRepoSettings(w http.ResponseWriter, r *http.Request, sr s
 		s.repoSettingsHooks(w, r, sr)
 	case "triggers":
 		s.repoSettingsTriggers(w, r, sr)
+	case "audit":
+		s.repoSettingsAudit(w, r, sr)
 	default:
 		s.renderError(w, r, http.StatusNotFound, "not found")
 	}
