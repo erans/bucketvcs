@@ -23,6 +23,8 @@ func openExistingAuthDB(path string, stderr io.Writer) (*sqlitestore.Store, int)
 	// backends don't create-on-open from a typo).
 	// SQLitePath strips a sqlite:/file: DSN scheme (and any query params)
 	// so the stat hits the real on-disk file, not the literal DSN string.
+	// Best-effort: stat-then-open is racy (a file deleted in between is
+	// still created empty by Open); good enough for an operator CLI guard.
 	if !sqlitestore.IsNonSQLiteValue(path) {
 		if _, err := os.Stat(sqlitestore.SQLitePath(path)); err != nil {
 			fmt.Fprintf(stderr, "auth-db: %v\n", err)
@@ -79,6 +81,14 @@ func sessionList(ctx context.Context, args []string, stdout, stderr io.Writer) i
 		return code
 	}
 	defer s.Close()
+	// Validate --user up front (like revoke does): a typo'd name must read as
+	// "no such user", not as a false "no sessions" during an incident.
+	if *user != "" {
+		if _, uerr := s.GetUserByName(ctx, *user); uerr != nil {
+			fmt.Fprintf(stderr, "%v\n", uerr)
+			return 1
+		}
+	}
 	rows, _, err := s.ListAllSessions(ctx, 0)
 	if err != nil {
 		fmt.Fprintf(stderr, "%v\n", err)

@@ -89,6 +89,20 @@ func TestSessionList_UserFilter(t *testing.T) {
 	}
 }
 
+func TestSessionList_UnknownUserErrors(t *testing.T) {
+	// --user with a nonexistent name must not read as "no sessions": list
+	// validates the name up front, like revoke.
+	db, _ := seedSessionDB(t)
+	var out, errb bytes.Buffer
+	code := runSession(context.Background(), []string{"list", "--auth-db", db, "--user", "nobody"}, &out, &errb)
+	if code != 1 {
+		t.Fatalf("unknown user: exit %d, want 1; stderr: %s", code, errb.String())
+	}
+	if out.Len() != 0 {
+		t.Fatalf("unknown user must print nothing to stdout, got:\n%s", out.String())
+	}
+}
+
 func TestSessionList_UsageErrors(t *testing.T) {
 	var out, errb bytes.Buffer
 	if code := runSession(context.Background(), nil, &out, &errb); code != 2 {
