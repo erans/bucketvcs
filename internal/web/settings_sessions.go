@@ -126,11 +126,13 @@ func (s *server) handleSessionRevokeAll(w http.ResponseWriter, r *http.Request) 
 		s.renderError(w, r, http.StatusInternalServerError, "internal error")
 		return
 	}
-	EmitAdminActionMetric(r.Context(), s.logger, "session", "revoke_all", "ok")
 	if n > 0 {
 		// Match the sibling revoke handlers: a no-op (no other sessions)
-		// records no audit event — nothing was revoked.
+		// records no audit event and a distinct metric label.
 		EmitSessionRevokedAll(r.Context(), s.logger, sess.Name, n)
+		EmitAdminActionMetric(r.Context(), s.logger, "session", "revoke_all", "ok")
+	} else {
+		EmitAdminActionMetric(r.Context(), s.logger, "session", "revoke_all", "noop")
 	}
 	s.redirectFlash(w, r, "/settings/sessions",
 		fmt.Sprintf("%d other session(s) signed out", n))

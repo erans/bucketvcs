@@ -137,7 +137,9 @@ func TestDecodeGz_EmptyLinesSkipped(t *testing.T) {
 	if len(events) != 2 {
 		t.Fatalf("expected 2 events, got %d", len(events))
 	}
-	_ = skipped
+	if skipped != 0 {
+		t.Fatalf("empty lines must not count as malformed; skipped = %d", skipped)
+	}
 }
 
 func TestDecodeGz_NotGzip(t *testing.T) {
