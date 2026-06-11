@@ -57,7 +57,7 @@ type DataStore interface {
 	DeleteSessionsForUser(ctx context.Context, userID, exceptRawID string) (int64, error)
 
 	// ListSessionsForUser returns the user's sessions newest-first, marking the
-	// one whose stored hash matches currentRawID. The raw cookie id is never
+	// one whose stored hash matches the SHA-256 of currentRawID. The raw cookie id is never
 	// returned (only the SHA-256 hash). DeleteSessionByHashForUser is user-scoped
 	// (a cross-user hash affects 0 rows); ListAllSessions/DeleteSessionByHash are
 	// the unscoped admin surface.
