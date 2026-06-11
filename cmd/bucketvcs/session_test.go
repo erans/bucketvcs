@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
 )
 
@@ -93,5 +94,67 @@ func TestSessionList_UsageErrors(t *testing.T) {
 	}
 	if code := runSession(context.Background(), []string{"list"}, &out, &errb); code != 2 {
 		t.Fatalf("missing --auth-db: exit %d, want 2", code)
+	}
+}
+
+func TestSessionRevoke_ByHash(t *testing.T) {
+	db, aliceRaws := seedSessionDB(t)
+	hash := auth.HashSessionID(aliceRaws[0])
+	var out, errb bytes.Buffer
+	code := runSession(context.Background(), []string{"revoke", "--auth-db", db, "--id-hash", hash}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, errb.String())
+	}
+	if !strings.Contains(out.String(), "revoked=1") {
+		t.Fatalf("stdout %q, want revoked=1", out.String())
+	}
+	// Idempotent: second revoke reports 0 and still exits 0.
+	out.Reset()
+	if code := runSession(context.Background(), []string{"revoke", "--auth-db", db, "--id-hash", hash}, &out, &errb); code != 0 {
+		t.Fatalf("re-revoke exit %d", code)
+	}
+	if !strings.Contains(out.String(), "revoked=0") {
+		t.Fatalf("stdout %q, want revoked=0", out.String())
+	}
+}
+
+func TestSessionRevoke_ByUser(t *testing.T) {
+	db, _ := seedSessionDB(t)
+	var out, errb bytes.Buffer
+	code := runSession(context.Background(), []string{"revoke", "--auth-db", db, "--user", "alice"}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, errb.String())
+	}
+	if !strings.Contains(out.String(), "revoked=2") {
+		t.Fatalf("stdout %q, want revoked=2 (both alice sessions)", out.String())
+	}
+	// bob's session survives.
+	out.Reset()
+	if code := runSession(context.Background(), []string{"list", "--auth-db", db}, &out, &errb); code != 0 {
+		t.Fatalf("list exit %d", code)
+	}
+	if got := strings.Count(out.String(), `"user":"bob"`); got != 1 {
+		t.Fatalf("bob sessions after alice revoke = %d, want 1", got)
+	}
+	if strings.Contains(out.String(), `"user":"alice"`) {
+		t.Fatal("alice sessions remain after revoke --user")
+	}
+}
+
+func TestSessionRevoke_UsageErrors(t *testing.T) {
+	db, aliceRaws := seedSessionDB(t)
+	hash := auth.HashSessionID(aliceRaws[0])
+	var out, errb bytes.Buffer
+	// both flags
+	if code := runSession(context.Background(), []string{"revoke", "--auth-db", db, "--id-hash", hash, "--user", "alice"}, &out, &errb); code != 2 {
+		t.Fatalf("both flags: exit %d, want 2", code)
+	}
+	// neither flag
+	if code := runSession(context.Background(), []string{"revoke", "--auth-db", db}, &out, &errb); code != 2 {
+		t.Fatalf("neither flag: exit %d, want 2", code)
+	}
+	// unknown user
+	if code := runSession(context.Background(), []string{"revoke", "--auth-db", db, "--user", "nobody"}, &out, &errb); code != 1 {
+		t.Fatalf("unknown user: exit %d, want 1", code)
 	}
 }

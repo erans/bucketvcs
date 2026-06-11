@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 )
 
 func runSession(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -69,8 +70,49 @@ func sessionList(ctx context.Context, args []string, stdout, stderr io.Writer) i
 	return 0
 }
 
-// sessionRevoke is implemented in Task 5; stub so the group compiles.
+// sessionRevoke deletes sessions by stored id hash or by owning user name.
+// Idempotent: deleting an already-gone session prints revoked=0 and exits 0.
+// The audit trail for CLI revocations is stderr-only (CLI emitters are not
+// shipped; see the observability operator guide).
 func sessionRevoke(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	fmt.Fprintln(stderr, "session revoke: not implemented")
-	return 2
+	fs := flag.NewFlagSet("session revoke", flag.ContinueOnError)
+	authDB := fs.String("auth-db", "", "path to auth.db")
+	idHash := fs.String("id-hash", "", "stored session id hash (from session list / the admin page)")
+	user := fs.String("user", "", "revoke ALL sessions of this user name")
+	fs.SetOutput(stderr)
+	if err := fs.Parse(reorderFlagsFirst(args, nil)); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 || *authDB == "" || (*idHash == "") == (*user == "") {
+		fmt.Fprintln(stderr, "usage: bucketvcs session revoke --auth-db=<path> (--id-hash=<hex> | --user=<name>)")
+		return 2
+	}
+	s, _, err := openAuthDB(*authDB)
+	if err != nil {
+		fmt.Fprintf(stderr, "auth-db: %v\n", err)
+		return 1
+	}
+	defer s.Close()
+
+	var n int64
+	if *idHash != "" {
+		n, err = s.DeleteSessionByHash(ctx, *idHash)
+	} else {
+		u, uerr := s.GetUserByName(ctx, *user)
+		if uerr != nil {
+			fmt.Fprintf(stderr, "%v\n", uerr)
+			return 1
+		}
+		n, err = s.DeleteSessionsForUser(ctx, u.ID, "")
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
+		return 1
+	}
+	// stderr-only audit line (CLI events are not shipped).
+	slog.Info("auth.session.admin_revoked",
+		"audit", true, "event", "auth.session.admin_revoked",
+		"actor", "cli", "id_hash", *idHash, "target_user", *user, "count", n)
+	fmt.Fprintf(stdout, "revoked=%d\n", n)
+	return 0
 }
