@@ -62,6 +62,16 @@ func TestAdminAudit_RendersAndFilters(t *testing.T) {
 			t.Errorf("body missing %q; body: %s", want, body)
 		}
 	}
+	// Guard against embedded-struct dump: a correct render never emits "map[".
+	// If {{.Event}} resolves to the embedded auditlog.Event struct instead of the
+	// Event.Event string field, the Attrs map is printed as "map[...]".
+	if strings.Contains(body, "map[") {
+		t.Errorf("body contains struct-dump artefact \"map[\"; event cell is rendering the embedded struct instead of the event-name string; body: %s", body)
+	}
+	// Guard pager cursor: the [older] link must carry the next-page cursor.
+	if !strings.Contains(body, "older-cursor-key") {
+		t.Errorf("body missing pager cursor %q; body: %s", "older-cursor-key", body)
+	}
 	if fr.calls != 1 {
 		t.Fatalf("Page called %d times, want 1", fr.calls)
 	}

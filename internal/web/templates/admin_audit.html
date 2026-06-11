@@ -23,7 +23,7 @@
     {{range .Rows}}
     <tr>
       <td class="mono">{{.TimeStr}}</td>
-      <td class="mono">{{.Event}}</td>
+      <td class="mono">{{.Event.Event}}</td>
       <td>{{.Tenant}}{{if .Repo}} · {{.Repo}}{{end}}</td>
       <td>{{.Actor}}</td>
     </tr>
