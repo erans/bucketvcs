@@ -65,7 +65,11 @@ type ObjectStore interface {
 	// ErrNotFound if absent.
 	DeleteIfVersionMatches(ctx context.Context, key string, expected ObjectVersion) error
 
-	// List returns one page of objects under prefix.
+	// List returns one page of objects under prefix. Keys are returned in
+	// lexicographically ascending order, both within a page and across
+	// pages of one logical listing (S3/GCS/Azure guarantee this natively;
+	// localfs sorts). Callers may rely on the first key of an unfiltered
+	// listing being the lexicographic minimum under the prefix.
 	List(ctx context.Context, prefix string, opts *ListOptions) (*ListPage, error)
 
 	// CreateMultipart begins a multipart upload targeting key.
