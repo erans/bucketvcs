@@ -117,12 +117,28 @@ func TestSessionList_DSNAuthDBSkipsStat(t *testing.T) {
 	// postgres:// DSNs are not filesystem paths; they must reach the
 	// backend (and fail at connect) rather than dying on os.Stat.
 	var out, errb bytes.Buffer
-	code := runSession(context.Background(), []string{"list", "--auth-db", "postgres://user@host/db"}, &out, &errb)
+	code := runSession(context.Background(), []string{"list", "--auth-db", "postgres://user@127.0.0.1:1/db"}, &out, &errb)
 	if code != 1 {
 		t.Fatalf("dsn auth-db: exit %d, want 1 (connect failure); stderr: %s", code, errb.String())
 	}
 	if strings.Contains(errb.String(), "no such file or directory") {
 		t.Fatalf("dsn auth-db must not be stat-checked, stderr: %s", errb.String())
+	}
+}
+
+func TestSessionList_SQLiteDSNAuthDB(t *testing.T) {
+	// sqlite:-scheme DSNs name a real on-disk file; the no-create stat
+	// check must strip the scheme (via sqlitestore.SQLitePath) instead of
+	// stat-ing the literal "sqlite:/..." string.
+	db, _ := seedSessionDB(t)
+	var out, errb bytes.Buffer
+	code := runSession(context.Background(), []string{"list", "--auth-db", "sqlite:" + db}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("sqlite: DSN auth-db: exit %d, want 0; stderr: %s", code, errb.String())
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("got %d lines, want 3:\n%s", len(lines), out.String())
 	}
 }
 

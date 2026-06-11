@@ -896,6 +896,10 @@ objects, never the live spool. As a result:
   page scans a bounded window of ~100 day partitions, so a long quiet stretch
   may exhaust the window before reaching data. Keep clicking `[older]`, or use a
   `since`/`until` filter to jump the walk straight to the right date range.
+- **Do not place foreign objects under `sys/logs/activity/`** (e.g. a README or
+  a manual note) — the audit viewer treats any key that does not match the
+  `YYYY/MM/DD/` partition layout as corruption and fails the page (HTTP 500)
+  until the object is deleted.
 
 See the [log shipping operator guide](log-shipping.md) for the full shipping
 model, spool sizing, and crash-recovery behaviour.

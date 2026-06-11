@@ -21,8 +21,10 @@ func openExistingAuthDB(path string, stderr io.Writer) (*sqlitestore.Store, int)
 	// The no-create existence check only applies to the embedded sqlite
 	// file backend; postgres://-style DSNs are passed through (their
 	// backends don't create-on-open from a typo).
+	// SQLitePath strips a sqlite:/file: DSN scheme (and any query params)
+	// so the stat hits the real on-disk file, not the literal DSN string.
 	if !sqlitestore.IsNonSQLiteValue(path) {
-		if _, err := os.Stat(path); err != nil {
+		if _, err := os.Stat(sqlitestore.SQLitePath(path)); err != nil {
 			fmt.Fprintf(stderr, "auth-db: %v\n", err)
 			return nil, 1
 		}
