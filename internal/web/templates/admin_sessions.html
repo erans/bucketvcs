@@ -1,0 +1,37 @@
+{{define "title"}}sessions · admin · bucketvcs{{end}}
+{{define "content"}}
+<div class="settings">
+  {{template "adminnav" .}}
+  <h2>all sessions</h2>
+  {{if .Flash}}<p class="flash">{{.Flash}}</p>{{end}}
+  {{if .Truncated}}<p class="hint">showing first 500 of {{.Total}} sessions; use the CLI for the full list.</p>{{end}}
+  {{if .Sessions}}
+  <table>
+    <thead>
+      <tr><th>user</th><th>provider</th><th>created</th><th>last seen</th><th>expires</th><th>actions</th></tr>
+    </thead>
+    <tbody>
+    {{range .Sessions}}
+    <tr>
+      <td class="mono">{{.UserName}}</td>
+      <td>{{.Provider}}</td>
+      <td title="{{abstime .CreatedAt}}">{{reltime .CreatedAt}}</td>
+      <td title="{{abstime .LastSeen}}">{{reltime .LastSeen}}</td>
+      <td title="{{abstime .ExpiresAt}}">{{reltime .ExpiresAt}}</td>
+      <td>
+        <form method="post" action="/admin/sessions/revoke" class="inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="hidden" name="id_hash" value="{{.IDHash}}">
+          <button type="submit">revoke</button>
+        </form>
+      </td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="empty">no active sessions.</p>
+  {{end}}
+</div>
+{{end}}
+{{template "base" .}}
