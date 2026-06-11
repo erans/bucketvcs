@@ -839,9 +839,11 @@ manual equivalent, and additionally surfaces what is currently active.
 users, each row labelled with the owning user's name, provider, and timestamps,
 and a **revoke** button. This is the operator tool for forcibly signing out a
 specific user's session (for example during an incident). The page renders the
-first 500 sessions; on a larger deployment, query the auth DB directly for the
-full list (`SELECT s.*, u.name FROM sessions s LEFT JOIN users u ON u.id =
-s.user_id` — there is no sessions CLI yet). Admin
+first 500 sessions; on a larger deployment use `bucketvcs session list`
+(NDJSON; one row per session). CLI revocation: `bucketvcs session revoke
+--id-hash=<h>` for one session, or `--user=<name>` for all of a user's
+sessions — a session whose user row was deleted shows as `(deleted)` and is
+revocable by hash only. Admin
 revocation removes the session regardless of which user owns it.
 
 Every session revocation emits a tagged audit event (`auth.session.revoked`,
@@ -889,6 +891,15 @@ objects, never the live spool. As a result:
   `--log-ship-interval` (e.g. `5s`) so events surface within seconds. In
   production the default interval keeps object-write volume reasonable; the
   viewer is an after-the-fact audit trail, not a real-time monitor.
+- **On a deployment that has been idle for months, the first page can render
+  empty with an `[older]` link** while the viewer walks older partitions — each
+  page scans a bounded window of ~100 day partitions, so a long quiet stretch
+  may exhaust the window before reaching data. Keep clicking `[older]`, or use a
+  `since`/`until` filter to jump the walk straight to the right date range.
+- **Do not place foreign objects under `sys/logs/activity/`** (e.g. a README or
+  a manual note) — the audit viewer treats any key that does not match the
+  `YYYY/MM/DD/` partition layout as corruption and fails the page (HTTP 500)
+  until the object is deleted.
 
 See the [log shipping operator guide](log-shipping.md) for the full shipping
 model, spool sizing, and crash-recovery behaviour.

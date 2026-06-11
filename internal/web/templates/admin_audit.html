@@ -31,7 +31,11 @@
     </tbody>
   </table>
   {{else}}
+  {{if .NextCursor}}
+  <p class="empty">no events on this page yet — the viewer scans a bounded window of storage partitions per page; follow [older] to continue searching.</p>
+  {{else}}
   <p class="empty">no audit events match.</p>
+  {{end}}
   {{end}}
   {{if .NextCursor}}
   <p class="pager"><a href="/admin/audit?event={{urlquery .FEvent}}&amp;tenant={{urlquery .FTenant}}&amp;repo={{urlquery .FRepo}}&amp;actor={{urlquery .FActor}}&amp;since={{urlquery .FSince}}&amp;until={{urlquery .FUntil}}&amp;cursor={{urlquery .NextCursor}}">[older]</a></p>

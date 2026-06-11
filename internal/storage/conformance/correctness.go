@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"sort"
 	"testing"
 
 	"github.com/bucketvcs/bucketvcs/internal/storage"
@@ -387,13 +388,16 @@ func test29_7(t *testing.T, f Factory) {
 func testListPagination(t *testing.T, f Factory) {
 	s := newStore(t, f)
 	const total = 25
-	for i := 0; i < total; i++ {
+	// Seed in descending order so the ascending-order assertion below tests
+	// sorting, not insertion-order preservation.
+	for i := total - 1; i >= 0; i-- {
 		if _, err := s.PutIfAbsent(ctx(), Key("p/page", i), bytes.NewReader([]byte{byte(i)}), nil); err != nil {
 			t.Fatalf("seed %d: %v", i, err)
 		}
 	}
 
 	got := map[string]bool{}
+	var ordered []string
 	token := ""
 	for iter := 0; iter < 100; iter++ {
 		page, err := s.List(ctx(), "p/page/", &storage.ListOptions{MaxKeys: 7, ContinuationToken: token})
@@ -405,6 +409,7 @@ func testListPagination(t *testing.T, f Factory) {
 				t.Errorf("duplicate key in pagination: %s", md.Key)
 			}
 			got[md.Key] = true
+			ordered = append(ordered, md.Key)
 		}
 		if page.NextToken == "" {
 			break
@@ -416,6 +421,12 @@ func testListPagination(t *testing.T, f Factory) {
 	}
 	if len(got) != total {
 		t.Errorf("paginated total = %d, want %d", len(got), total)
+	}
+	// Ordering contract: List returns keys lexicographically ascending,
+	// within a page AND across pages. internal/auditlog's day-walk floor
+	// probe (List MaxKeys:1 -> oldest key) depends on this.
+	if !sort.StringsAreSorted(ordered) {
+		t.Errorf("List keys not lexicographically ascending across pages: %v", ordered)
 	}
 }
 

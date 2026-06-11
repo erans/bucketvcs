@@ -213,7 +213,8 @@ consequences worth stating precisely:
   of gzipped NDJSON and loads directly into Athena / BigQuery / DuckDB external
   tables ([log shipping §6](log-shipping.md#6-consuming-the-logs)).
 - **CLI-emitted audit events are not shipped.** `gc.*`, `maintenance.*`,
-  `lfs.gc.*`, `lfs.quota.reconcile`, and `repo.renamed` reach stderr only,
+  `lfs.gc.*`, `lfs.quota.reconcile`, `repo.renamed`, and `session revoke`
+  reach stderr only,
   because their emitters run outside `serve`. Scrape those subcommands' stderr
   for a durable trail ([log shipping §1.1](log-shipping.md#11-the-two-streams)).
 - **Metrics are log lines.** A `kill -9` can lose the OS-buffer tail of the

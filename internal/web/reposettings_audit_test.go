@@ -113,6 +113,21 @@ func TestRepoAudit_NilReaderNotice(t *testing.T) {
 	}
 }
 
+// TestRepoAudit_BadCursor400: a garbage ?cursor= is client input; the handler
+// must map auditlog.ErrBadCursor to 400, not 500.
+func TestRepoAudit_BadCursor400(t *testing.T) {
+	store := repoAuditStore()
+	fr := &fakeAuditReader{err: auditlog.ErrBadCursor}
+	h := newTestHandlerWith(store, func(d *Deps) { d.Audit = fr })
+	req := httptest.NewRequest(http.MethodGet, "/acme/demo/settings/audit?cursor=garbage", nil)
+	addSessionCookie(t, req, store, userSession())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status %d, want 400; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestRepoAudit_PagerVisibleOnEmptyPage mirrors the admin-page guard: an empty
 // filtered page with a next cursor must still offer the [older] link.
 func TestRepoAudit_PagerVisibleOnEmptyPage(t *testing.T) {

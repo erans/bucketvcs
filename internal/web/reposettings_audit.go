@@ -1,6 +1,11 @@
 package web
 
-import "net/http"
+import (
+	"errors"
+	"net/http"
+
+	"github.com/bucketvcs/bucketvcs/internal/auditlog"
+)
 
 // repoAuditData is the view-model for the per-repo audit tab. The forced
 // Tenant/Repo are the security boundary: a repo-admin can only ever see their
@@ -41,6 +46,10 @@ func (s *server) repoSettingsAudit(w http.ResponseWriter, r *http.Request, sr se
 		f.Repo = sr.repo
 		d.FEvent, d.FActor, d.FSince, d.FUntil = r.URL.Query().Get("event"), r.URL.Query().Get("actor"), since, until
 		evs, next, err := s.audit.Page(r.Context(), f, r.URL.Query().Get("cursor"))
+		if errors.Is(err, auditlog.ErrBadCursor) {
+			s.renderError(w, r, http.StatusBadRequest, "bad cursor")
+			return
+		}
 		if err != nil {
 			s.logger.Error("repo audit: page", "tenant", sr.tenant, "repo", sr.repo, "err", err)
 			s.renderError(w, r, http.StatusInternalServerError, "internal error")

@@ -125,11 +125,28 @@ func TestAdminAudit_PagerVisibleOnEmptyPage(t *testing.T) {
 		t.Fatalf("status %d, want 200; body: %s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "no audit events match") {
-		t.Errorf("expected empty-state text; body: %s", body)
+	if !strings.Contains(body, "no events on this page yet") {
+		t.Errorf("expected bounded-walk empty-state hint; body: %s", body)
+	}
+	if strings.Contains(body, "no audit events match") {
+		t.Errorf("terminal empty-state must not render when a next cursor exists; body: %s", body)
 	}
 	if !strings.Contains(body, "older-cursor-key") {
 		t.Errorf("pager [older] link must render on an empty page with a next cursor; body: %s", body)
+	}
+}
+
+// TestAdminAudit_BadCursor400: a garbage ?cursor= is client input; the handler
+// must map auditlog.ErrBadCursor to 400, not 500.
+func TestAdminAudit_BadCursor400(t *testing.T) {
+	store := adminStore()
+	fr := &fakeAuditReader{err: auditlog.ErrBadCursor}
+	h := newTestHandlerWith(store, func(d *Deps) { d.Audit = fr })
+	req := addSessionCookie(t, httptest.NewRequest(http.MethodGet, "/admin/audit?cursor=garbage", nil), store, adminSession())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status %d, want 400; body: %s", rec.Code, rec.Body.String())
 	}
 }
 

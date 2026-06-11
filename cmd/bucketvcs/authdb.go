@@ -57,8 +57,14 @@ func openAuthDB(flag string, opts ...sqlitestore.Option) (*sqlitestore.Store, st
 	if err != nil {
 		return nil, "", err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, "", err
+	// Parent-dir creation only makes sense for the embedded sqlite file
+	// backend; postgres://-style DSNs are not filesystem paths.
+	if !sqlitestore.IsNonSQLiteValue(path) {
+		// SQLitePath strips a sqlite:/file: DSN scheme so we create the
+		// real parent directory, not a literal "sqlite:" path component.
+		if err := os.MkdirAll(filepath.Dir(sqlitestore.SQLitePath(path)), 0o700); err != nil {
+			return nil, "", err
+		}
 	}
 	s, err := sqlitestore.Open(path, opts...)
 	if err != nil {

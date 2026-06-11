@@ -1,6 +1,7 @@
 package web
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
@@ -53,6 +54,10 @@ func (s *server) handleAdminAudit(w http.ResponseWriter, r *http.Request) {
 		d.FSince = since
 		d.FUntil = until
 		events, next, err := s.audit.Page(r.Context(), f, r.URL.Query().Get("cursor"))
+		if errors.Is(err, auditlog.ErrBadCursor) {
+			s.renderError(w, r, http.StatusBadRequest, "bad cursor")
+			return
+		}
 		if err != nil {
 			s.logger.Error("admin audit: page", "err", err)
 			s.renderError(w, r, http.StatusInternalServerError, "internal error")
