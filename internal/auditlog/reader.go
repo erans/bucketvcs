@@ -74,7 +74,9 @@ func NewReader(store ObjectStore, logPrefix string) *Reader {
 // TODO(v2): every Page call re-lists the whole prefix (~35k keys/year at the
 // default 15-min ship interval, unbounded without retention). Exploit the
 // date-sharded key layout to list only recent partitions, or list backward
-// from the cursor's date prefix, and cap the per-request listing.
+// from the cursor's date prefix, and cap the per-request listing. Note the
+// per-repo audit tab makes this reachable by every repo admin (not just
+// global admins), so the listing cost is the broader-exposure concern.
 func (r *Reader) listKeys(ctx context.Context) ([]string, error) {
 	var keys []string
 	token := ""
@@ -104,6 +106,10 @@ func (r *Reader) logSkip(key, stage string, err error) {
 
 // Page returns up to ObjectsPerPage objects' worth of filtered events,
 // newest-first, starting strictly older than cursor (empty cursor = newest).
+// The cursor is a raw activity object key; callers that echo it to
+// semi-privileged viewers (the per-repo audit tab) expose deployment-wide
+// shipping metadata (timestamps/instance ids/sequence numbers — names only,
+// never contents). Accepted for v1; opacify (HMAC) if that ever matters.
 // The returned next cursor is the key of the oldest object included on this
 // page, or "" when no older objects remain.
 //

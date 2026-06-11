@@ -344,8 +344,8 @@ func TestListAllSessionsAndDeleteByHash(t *testing.T) {
 	if ownerID != uidA || ownerName != "alice" {
 		t.Fatalf("owner = (%q, %q), want (%q, alice)", ownerID, ownerName, uidA)
 	}
-	if _, _, err := s.SessionOwnerByHash(ctx, "no-such-hash"); !errors.Is(err, auth.ErrNoSuchUser) {
-		t.Fatalf("SessionOwnerByHash miss: err = %v, want ErrNoSuchUser", err)
+	if _, _, err := s.SessionOwnerByHash(ctx, "no-such-hash"); !errors.Is(err, auth.ErrNoSession) {
+		t.Fatalf("SessionOwnerByHash miss: err = %v, want ErrNoSession", err)
 	}
 
 	// The admin view joins the user name.

@@ -135,7 +135,7 @@ func (f *fakeStore) SessionOwnerByHash(ctx context.Context, idHash string) (stri
 			return s.UserID, s.UserName, nil
 		}
 	}
-	return "", "", auth.ErrNoSuchUser
+	return "", "", auth.ErrNoSession
 }
 func (f *fakeStore) DeleteSessionByHash(ctx context.Context, idHash string) (int64, error) {
 	f.lastRevokeHash = idHash

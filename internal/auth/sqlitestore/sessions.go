@@ -202,15 +202,17 @@ func (s *Store) ListAllSessions(ctx context.Context, limit int) ([]auth.AdminSes
 // SessionOwnerByHash resolves a stored session id hash to its owning user, for
 // audit attribution before an admin revoke deletes the row (afterwards the
 // hash can no longer be resolved). A missing user row resolves to "(deleted)"
-// so attribution survives orphaned sessions. Returns auth.ErrNoSuchUser when
-// no session matches.
+// so attribution survives orphaned sessions. Returns auth.ErrNoSession when
+// no session matches (NOT ErrNoSuchUser — that sentinel is classified as a
+// credential failure by auth.IsCredentialError and would count toward the M18
+// rate limiter if ever surfaced through an auth path).
 func (s *Store) SessionOwnerByHash(ctx context.Context, idHash string) (userID, userName string, err error) {
 	err = s.db.QueryRowContext(ctx,
 		`SELECT s.user_id, COALESCE(u.name, '(deleted)')
 		   FROM sessions s LEFT JOIN users u ON u.id = s.user_id
 		  WHERE s.id_hash = ?`, idHash).Scan(&userID, &userName)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", "", auth.ErrNoSuchUser
+		return "", "", auth.ErrNoSession
 	}
 	if err != nil {
 		return "", "", fmt.Errorf("session owner by hash: %w", err)

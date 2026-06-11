@@ -36,7 +36,9 @@ func (s *server) handleAdminSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	// Badge the admin's own session (ListAllSessions has no currentRawID
 	// parameter, so IsCurrent arrives false): the template hides its revoke
-	// form, sparing the admin a self-sign-out mis-click.
+	// form, sparing the admin a self-sign-out mis-click. Best-effort under
+	// truncation (the row may fall outside the display cap) — the guard in
+	// handleAdminSessionRevoke is the real protection.
 	if c, cerr := r.Cookie(sessionCookieName); cerr == nil && c.Value != "" {
 		curHash := auth.HashSessionID(c.Value)
 		for i := range list {
