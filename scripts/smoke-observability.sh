@@ -257,8 +257,11 @@ echo "== Step 5: GET /admin/sessions lists the user =="
 
 admin_sess=$(curl -sS -b "$JAR_A" "$BASE_URL/admin/sessions")
 assert_contains "$admin_sess" "all sessions" "admin sessions page renders"
-assert_contains "$admin_sess" "admin" "admin sessions page lists user 'admin'"
-echo "  /admin/sessions lists user 'admin' OK"
+# The bare substring "admin" appears in nav links/title regardless of table
+# contents; assert on the joined user-name cell markup instead.
+assert_contains "$admin_sess" '<td class="mono">admin</td>' "admin sessions table lists user 'admin'"
+assert_contains "$admin_sess" 'class="badge">current' "admin's own session is badged current"
+echo "  /admin/sessions lists user 'admin' (table row + current badge) OK"
 
 echo ""
 echo "SESSIONS_OK"

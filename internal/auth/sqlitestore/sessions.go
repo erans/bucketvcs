@@ -165,8 +165,17 @@ func (s *Store) DeleteSessionByHashForUser(ctx context.Context, userID, idHash s
 // (no matching user row) visible — and revocable — as "(deleted)" rather than
 // silently diverging from the COUNT(*).
 func (s *Store) ListAllSessions(ctx context.Context, limit int) ([]auth.AdminSessionInfo, int, error) {
+	// One read transaction: COUNT and the row SELECT must see the same
+	// snapshot, or concurrent session churn can make Truncated/Total drift
+	// against the returned rows.
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, 0, fmt.Errorf("begin list sessions: %w", err)
+	}
+	defer tx.Rollback()
+
 	var total int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions`).Scan(&total); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions`).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count sessions: %w", err)
 	}
 	query := `SELECT s.id_hash, s.provider, s.created_at, s.expires_at, s.last_seen, s.user_id,
@@ -178,7 +187,7 @@ func (s *Store) ListAllSessions(ctx context.Context, limit int) ([]auth.AdminSes
 		query += ` LIMIT ?`
 		args = append(args, limit)
 	}
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("list all sessions: %w", err)
 	}

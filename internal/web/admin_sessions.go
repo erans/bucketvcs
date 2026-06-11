@@ -80,6 +80,7 @@ func (s *server) handleAdminSessionRevoke(w http.ResponseWriter, r *http.Request
 	// template omits its revoke form; this guards a hand-crafted POST.
 	if c, cerr := r.Cookie(sessionCookieName); cerr == nil && c.Value != "" {
 		if auth.HashSessionID(c.Value) == idHash {
+			EmitAdminActionMetric(r.Context(), s.logger, "session", "admin_revoke", "invalid")
 			s.redirectFlash(w, r, dest, "cannot revoke your current session; use log out")
 			return
 		}

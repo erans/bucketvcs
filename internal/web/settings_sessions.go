@@ -68,6 +68,7 @@ func (s *server) handleSessionRevoke(w http.ResponseWriter, r *http.Request) {
 	// id is auth.HashSessionID(rawCookieID), shared with the sqlite store.
 	if c, err := r.Cookie(sessionCookieName); err == nil && c.Value != "" {
 		if auth.HashSessionID(c.Value) == idHash {
+			EmitAdminActionMetric(r.Context(), s.logger, "session", "revoke", "invalid")
 			s.redirectFlash(w, r, "/settings/sessions", "cannot revoke your current session; use log out")
 			return
 		}
