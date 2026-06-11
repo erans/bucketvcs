@@ -57,7 +57,7 @@ func sessionList(ctx context.Context, args []string, stdout, stderr io.Writer) i
 		if *user != "" && row.UserName != *user {
 			continue
 		}
-		_ = enc.Encode(map[string]any{
+		if err := enc.Encode(map[string]any{
 			"id_hash":    row.IDHash,
 			"user_id":    row.UserID,
 			"user":       row.UserName,
@@ -65,7 +65,10 @@ func sessionList(ctx context.Context, args []string, stdout, stderr io.Writer) i
 			"created_at": row.CreatedAt,
 			"expires_at": row.ExpiresAt,
 			"last_seen":  row.LastSeen,
-		})
+		}); err != nil {
+			fmt.Fprintf(stderr, "encode: %v\n", err)
+			return 1
+		}
 	}
 	return 0
 }
@@ -95,7 +98,13 @@ func sessionRevoke(ctx context.Context, args []string, stdout, stderr io.Writer)
 	defer s.Close()
 
 	var n int64
+	var targetUserID, targetUser string
 	if *idHash != "" {
+		// Best-effort owner attribution: never block the revoke on a lookup
+		// failure (including auth.ErrNoSession — the hash may already be gone).
+		if ownerID, ownerName, oerr := s.SessionOwnerByHash(ctx, *idHash); oerr == nil {
+			targetUserID, targetUser = ownerID, ownerName
+		}
 		n, err = s.DeleteSessionByHash(ctx, *idHash)
 	} else {
 		u, uerr := s.GetUserByName(ctx, *user)
@@ -103,16 +112,27 @@ func sessionRevoke(ctx context.Context, args []string, stdout, stderr io.Writer)
 			fmt.Fprintf(stderr, "%v\n", uerr)
 			return 1
 		}
+		targetUserID, targetUser = u.ID, u.Name
 		n, err = s.DeleteSessionsForUser(ctx, u.ID, "")
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "%v\n", err)
 		return 1
 	}
-	// stderr-only audit line (CLI events are not shipped).
-	slog.Info("auth.session.admin_revoked",
-		"audit", true, "event", "auth.session.admin_revoked",
-		"actor", "cli", "id_hash", *idHash, "target_user", *user, "count", n)
+	// stderr-only audit line (CLI events are not shipped). Like the web
+	// handlers, a no-op revoke (count=0) emits no audit event.
+	if n > 0 {
+		logger := slog.New(slog.NewTextHandler(stderr, nil))
+		logger.LogAttrs(ctx, slog.LevelInfo, "auth.session.admin_revoked",
+			slog.Bool("audit", true),
+			slog.String("event", "auth.session.admin_revoked"),
+			slog.String("actor", "cli"),
+			slog.String("id_hash", *idHash),
+			slog.String("target_user_id", targetUserID),
+			slog.String("target_user", targetUser),
+			slog.Int64("count", n),
+		)
+	}
 	fmt.Fprintf(stdout, "revoked=%d\n", n)
 	return 0
 }

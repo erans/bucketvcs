@@ -95,6 +95,9 @@ func TestSessionList_UsageErrors(t *testing.T) {
 	if code := runSession(context.Background(), []string{"list"}, &out, &errb); code != 2 {
 		t.Fatalf("missing --auth-db: exit %d, want 2", code)
 	}
+	if code := runSession(context.Background(), []string{"bogus"}, &out, &errb); code != 2 {
+		t.Fatalf("unknown subcommand: exit %d, want 2", code)
+	}
 }
 
 func TestSessionRevoke_ByHash(t *testing.T) {
@@ -108,13 +111,22 @@ func TestSessionRevoke_ByHash(t *testing.T) {
 	if !strings.Contains(out.String(), "revoked=1") {
 		t.Fatalf("stdout %q, want revoked=1", out.String())
 	}
-	// Idempotent: second revoke reports 0 and still exits 0.
+	for _, want := range []string{"auth.session.admin_revoked", "target_user=alice", "count=1"} {
+		if !strings.Contains(errb.String(), want) {
+			t.Fatalf("stderr missing %q:\n%s", want, errb.String())
+		}
+	}
+	// Idempotent: second revoke reports 0 and still exits 0, with no audit line.
 	out.Reset()
+	errb.Reset()
 	if code := runSession(context.Background(), []string{"revoke", "--auth-db", db, "--id-hash", hash}, &out, &errb); code != 0 {
 		t.Fatalf("re-revoke exit %d", code)
 	}
 	if !strings.Contains(out.String(), "revoked=0") {
 		t.Fatalf("stdout %q, want revoked=0", out.String())
+	}
+	if strings.Contains(errb.String(), "auth.session.admin_revoked") {
+		t.Fatalf("no-op revoke must not emit audit line, stderr:\n%s", errb.String())
 	}
 }
 
@@ -127,6 +139,11 @@ func TestSessionRevoke_ByUser(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "revoked=2") {
 		t.Fatalf("stdout %q, want revoked=2 (both alice sessions)", out.String())
+	}
+	for _, want := range []string{"target_user=alice", "count=2"} {
+		if !strings.Contains(errb.String(), want) {
+			t.Fatalf("stderr missing %q:\n%s", want, errb.String())
+		}
 	}
 	// bob's session survives.
 	out.Reset()
