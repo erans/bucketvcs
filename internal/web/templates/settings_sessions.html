@@ -1,0 +1,43 @@
+{{define "title"}}sessions · bucketvcs{{end}}
+{{define "content"}}
+<div class="settings">
+  {{template "settingsnav" .}}
+  <h2>web sessions</h2>
+  {{if .Sessions}}
+  <table>
+    <thead>
+      <tr><th>provider</th><th>created</th><th>last seen</th><th>expires</th><th>state</th><th>actions</th></tr>
+    </thead>
+    <tbody>
+    {{range .Sessions}}
+    <tr>
+      <td>{{.Provider}}</td>
+      <td title="{{abstime .CreatedAt}}">{{reltime .CreatedAt}}</td>
+      <td title="{{abstime .LastSeen}}">{{reltime .LastSeen}}</td>
+      <td title="{{abstime .ExpiresAt}}">{{reltime .ExpiresAt}}</td>
+      <td>{{if .IsCurrent}}<span class="badge">current</span>{{else}}other{{end}}</td>
+      <td>
+        {{if not .IsCurrent}}
+        <form method="post" action="/settings/sessions/revoke" class="inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="hidden" name="id_hash" value="{{.IDHash}}">
+          <button type="submit">revoke</button>
+        </form>
+        {{end}}
+      </td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  <h2>sign out other sessions</h2>
+  <p class="hint">Revokes every session except this one.</p>
+  <form method="post" action="/settings/sessions/revoke-all" class="inline">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <button type="submit">sign out all others</button>
+  </form>
+  {{else}}
+  <p class="empty">no active sessions.</p>
+  {{end}}
+</div>
+{{end}}
+{{template "base" .}}
