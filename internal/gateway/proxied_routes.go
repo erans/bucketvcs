@@ -192,7 +192,6 @@ func isHex(s string, n int) bool {
 		switch {
 		case c >= '0' && c <= '9':
 		case c >= 'a' && c <= 'f':
-		case c >= 'A' && c <= 'F':
 		default:
 			return false
 		}

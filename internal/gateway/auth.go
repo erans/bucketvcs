@@ -71,31 +71,16 @@ func RunAuth(w http.ResponseWriter, r *http.Request, store auth.Store, rr *Route
 		return nil, false
 	}
 
-	flags, err := store.GetRepoFlags(ctx, rr.Tenant, rr.Repo)
-	if errors.Is(err, auth.ErrNoSuchRepo) {
-		// Alias fallback: a renamed-away name resolves to its live target.
-		if f2, ok := resolveAlias(ctx, store, rr, logger); ok {
-			flags, err = f2, nil
-		}
-	}
-	if errors.Is(err, auth.ErrNoSuchRepo) {
-		http.Error(w, "not found", http.StatusNotFound)
-		return nil, false
-	}
-	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return nil, false
-	}
-
 	var actor *auth.Actor
 	var tokenID string
 	var scope *auth.Scope
-	if user, pass, hasBasic := r.BasicAuth(); hasBasic {
-		actor, tokenID, scope, err = store.VerifyCredential(ctx, auth.BasicPassword{Username: user, Password: pass})
+	var hasBasic bool
+	var err error
+	if u, p, ok := r.BasicAuth(); ok {
+		hasBasic = ok
+		basicUser = u
+		actor, tokenID, scope, err = store.VerifyCredential(ctx, auth.BasicPassword{Username: u, Password: p})
 		if err != nil {
-			// Only credential-state errors map to 401. Backend / internal
-			// errors (DB unreachable, etc.) must surface as 500 so they
-			// aren't masked as bad credentials.
 			if auth.IsCredentialError(err) {
 				limiter.MarkFailure(ip, basicUser)
 				ratelimit.EmitRateLimitMetric(ctx, logger, "failure_counted")
@@ -105,7 +90,6 @@ func RunAuth(w http.ResponseWriter, r *http.Request, store auth.Store, rr *Route
 			}
 			return nil, false
 		}
-		// Best-effort last-used update off the hot path.
 		go func(id string) {
 			tctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 			defer cancel()
@@ -115,12 +99,28 @@ func RunAuth(w http.ResponseWriter, r *http.Request, store auth.Store, rr *Route
 			http.Error(w, "scope mismatch", http.StatusForbidden)
 			return nil, false
 		}
-		// Successful credential verification resets the rate-limit bucket
-		// (good behavior earns full quota back). Scope mismatch above is a
-		// policy denial, not a credential failure, so it deliberately does
-		// NOT reset — but it also does NOT count as failure.
 		limiter.MarkSuccess(ip, basicUser)
 		ratelimit.EmitRateLimitMetric(ctx, logger, "success_reset")
+	}
+
+	flags, err := store.GetRepoFlags(ctx, rr.Tenant, rr.Repo)
+	if errors.Is(err, auth.ErrNoSuchRepo) {
+		if f2, ok := resolveAlias(ctx, store, rr, logger); ok {
+			flags, err = f2, nil
+		}
+	}
+	if errors.Is(err, auth.ErrNoSuchRepo) {
+		// For anonymous requests, don't distinguish missing repo from auth failure.
+		if !hasBasic && actor == nil {
+			challenge(w, "authentication required")
+			return nil, false
+		}
+		http.Error(w, "not found", http.StatusNotFound)
+		return nil, false
+	}
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return nil, false
 	}
 
 	var perm auth.Perm

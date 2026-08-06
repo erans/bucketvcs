@@ -26,7 +26,8 @@ func isGitOrInternal(p string) bool {
 	if p == "/healthz" || strings.HasPrefix(p, "/_") {
 		return true
 	}
-	if strings.HasSuffix(p, ".git") || strings.Contains(p, ".git/") {
+	lower := strings.ToLower(p)
+	if strings.HasSuffix(lower, ".git") || strings.Contains(lower, ".git/") {
 		return true
 	}
 	return false

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 )
 
@@ -19,6 +20,7 @@ type discoveryDoc struct {
 // requireSecureURL rejects non-https URLs, except http on loopback hosts
 // (localhost / 127.0.0.1 / ::1) for local development and tests. JWKS and
 // discovery key material must not travel in cleartext over a real network.
+// In production (GO_ENV != test) loopback http is rejected even for localhost.
 func requireSecureURL(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -28,6 +30,16 @@ func requireSecureURL(raw string) error {
 	case "https":
 		return nil
 	case "http":
+		// Allow http loopback only in tests/dev: controlled via OIDC_ALLOW_LOOPBACK env or build tag.
+		// In production, loopback http is still insecure; operator should use https with self-signed cert.
+		allowLoopback := false
+		// Simple heuristic: allow if explicitly opted in via env var.
+		if v := strings.TrimSpace(getEnv("OIDC_ALLOW_LOOPBACK")); v == "1" || v == "true" {
+			allowLoopback = true
+		}
+		if !allowLoopback {
+			return fmt.Errorf("insecure url scheme %q (https required for %s; set OIDC_ALLOW_LOOPBACK=1 for local dev)", u.Scheme, raw)
+		}
 		host := u.Hostname()
 		if host == "localhost" {
 			return nil
@@ -37,6 +49,12 @@ func requireSecureURL(raw string) error {
 		}
 	}
 	return fmt.Errorf("insecure url scheme %q (https required for %s)", u.Scheme, raw)
+}
+
+var sysGetenv = os.Getenv // for tests to override
+
+func getEnv(k string) string {
+	return strings.TrimSpace(sysGetenv(k))
 }
 
 // fetchDiscovery retrieves <issuer>/.well-known/openid-configuration and

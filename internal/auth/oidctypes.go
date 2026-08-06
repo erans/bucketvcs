@@ -41,10 +41,9 @@ func MatchRule(rules []OIDCTrustRule, claims map[string]any) *OIDCTrustRule {
 		}
 		return sorted[i].ID < sorted[j].ID
 	})
-	aud, _ := claims["aud"].(string)
 	for i := range sorted {
 		r := &sorted[i]
-		if r.Audience != aud {
+		if !audMatches(r.Audience, claims["aud"]) {
 			continue
 		}
 		if claimsSatisfy(r.Claims, claims) {
@@ -63,4 +62,25 @@ func claimsSatisfy(required map[string]string, claims map[string]any) bool {
 		}
 	}
 	return true
+}
+
+// audMatches handles both string and []string / []any aud shapes per OIDC spec.
+func audMatches(want string, raw any) bool {
+	switch v := raw.(type) {
+	case string:
+		return v == want
+	case []string:
+		for _, s := range v {
+			if s == want {
+				return true
+			}
+		}
+	case []any:
+		for _, e := range v {
+			if s, ok := e.(string); ok && s == want {
+				return true
+			}
+		}
+	}
+	return false
 }

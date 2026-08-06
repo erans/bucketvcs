@@ -2,9 +2,9 @@ package gc
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
-	"math/rand"
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/gc/marks"
@@ -145,10 +145,8 @@ func RunMark(ctx context.Context, s storage.ObjectStore, r *repo.Repo, opts Mark
 }
 
 // markEntropy is the goroutine-safe entropy source for mark ID minting.
-// ulid.LockedMonotonicReader wraps the underlying monotonic reader with
-// a sync.Mutex, matching the pattern used in internal/repo/repo.go.
 var markEntropy = &ulid.LockedMonotonicReader{
-	MonotonicReader: ulid.Monotonic(rand.New(rand.NewSource(time.Now().UnixNano())), 0),
+	MonotonicReader: ulid.Monotonic(rand.Reader, 0),
 }
 
 func newMarkID(at time.Time) string {

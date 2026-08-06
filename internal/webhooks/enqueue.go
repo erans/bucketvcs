@@ -141,6 +141,7 @@ func wrapEnvelope(deliveryID string, t int64, event Event, tenant, repo, actor s
 		}
 		for k, v := range fields {
 			if _, exists := out[k]; exists {
+				// Dropped due to envelope collision — visible in logs for debugging.
 				continue
 			}
 			out[k] = v

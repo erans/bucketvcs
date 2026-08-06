@@ -111,8 +111,10 @@ func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = s.store.DeleteSession(r.Context(), c.Value)
 	}
+	secure := requestIsTLS(r, s.trustProxy)
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true,
+		Secure: secure, SameSite: http.SameSiteLaxMode,
 	})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }

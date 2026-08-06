@@ -210,7 +210,9 @@ func handleBatch(ctx context.Context, w http.ResponseWriter, r *http.Request, de
 	// from the metric counter, not the audit stream.
 	body := http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB hard cap on Batch body
 	var req BatchRequest
-	if err := json.NewDecoder(body).Decode(&req); err != nil {
+	dec := json.NewDecoder(body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
 			WriteError(w, http.StatusRequestEntityTooLarge, "request body too large")
