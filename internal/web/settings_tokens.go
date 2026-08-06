@@ -42,7 +42,7 @@ func (s *server) handleTokensPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess := SessionFromContext(r.Context())
-	tokens, err := s.store.ListTokensForUser(r.Context(), sess.Name)
+	tokens, err := s.store.ListTokensForUser(r.Context(), sess.UserID)
 	if err != nil {
 		s.logger.Error("tokens: list", "err", err)
 		s.renderError(w, r, http.StatusInternalServerError, "internal error")

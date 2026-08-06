@@ -830,14 +830,14 @@ func (s *Store) verifyBasicPassword(ctx context.Context, bp auth.BasicPassword) 
 	if err != nil {
 		return nil, "", nil, err
 	}
-	if err := auth.VerifyHash(secret, tok.SecretHash); err != nil {
-		return nil, "", nil, auth.ErrInvalidCredential
-	}
 	if tok.RevokedAt != nil {
 		return nil, "", nil, auth.ErrTokenRevoked
 	}
 	if tok.ExpiresAt != nil && *tok.ExpiresAt <= time.Now().Unix() {
 		return nil, "", nil, auth.ErrTokenExpired
+	}
+	if err := auth.VerifyHash(secret, tok.SecretHash); err != nil {
+		return nil, "", nil, auth.ErrInvalidCredential
 	}
 
 	// Repo-bound (OIDC-minted) tokens: the (tenant, repo, perm) binding IS the
@@ -1118,7 +1118,12 @@ func scanSSHKeys(rows *sql.Rows) ([]auth.SSHKey, error) {
 // unique prefix. Returns auth.ErrNoSuchKey if no key matches, or a wrapped
 // auth.ErrConflict if the prefix is ambiguous (matches more than one key).
 func (s *Store) RevokeSSHKey(ctx context.Context, keyIDOrPrefix string) error {
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM ssh_keys WHERE id LIKE ? || '%'`, keyIDOrPrefix)
+	if !isSafeTokenIDPrefix(keyIDOrPrefix) {
+		// Reject LIKE wildcards %/_ and non-alphanumerics; treat as not found
+		// to avoid ambiguous-prefix leakage or wildcard enumeration.
+		return auth.ErrNoSuchKey
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM ssh_keys WHERE id LIKE ? || '%' ESCAPE '\'`, keyIDOrPrefix)
 	if err != nil {
 		return err
 	}

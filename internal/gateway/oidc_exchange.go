@@ -59,10 +59,7 @@ func (s *Server) handleOIDCExchange(w http.ResponseWriter, r *http.Request) {
 		writeOIDCError(w, http.StatusBadRequest, "unsupported_grant_type", "")
 		return
 	}
-	// We accept an empty subject_token_type for client compatibility (some CI
-	// token-exchange callers omit it); a present-but-non-JWT value is rejected.
-	// The token is fully JWT-verified regardless, so leniency here is safe.
-	if st := r.PostForm.Get("subject_token_type"); st != "" && st != subjectTokenJWT {
+	if st := r.PostForm.Get("subject_token_type"); st != subjectTokenJWT {
 		emitOIDCMetric(ctx, s.logger, "bad_request")
 		writeOIDCError(w, http.StatusBadRequest, "invalid_request", "unsupported subject_token_type")
 		return
@@ -83,7 +80,9 @@ func (s *Server) handleOIDCExchange(w http.ResponseWriter, r *http.Request) {
 	}
 	issuer, err := s.opts.OIDCStore.FindOIDCIssuerByURL(ctx, iss)
 	if err != nil {
-		// Unknown issuer: uniform 400, NO JWKS fetch.
+		// Unknown issuer: uniform 400, NO JWKS fetch. Count as failure for rate limiting.
+		s.opts.Limiter.MarkFailure(ip, "")
+		ratelimit.EmitRateLimitMetric(ctx, s.logger, "failure_counted")
 		auth.EmitOIDCRejected(ctx, s.logger, "unknown", ip, "unknown_issuer")
 		emitOIDCMetric(ctx, s.logger, "bad_request")
 		writeOIDCError(w, http.StatusBadRequest, "invalid_request", "")
@@ -180,14 +179,24 @@ func unverifiedIssuer(raw string) (string, bool) {
 	if len(parts) < 2 {
 		return "", false
 	}
+	// Bound payload size to avoid OOM on attacker-controlled tokens.
+	if len(parts[1]) > 8000 {
+		return "", false
+	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
+		return "", false
+	}
+	if len(payload) > 4096 {
 		return "", false
 	}
 	var c struct {
 		Iss string `json:"iss"`
 	}
 	if err := json.Unmarshal(payload, &c); err != nil || c.Iss == "" {
+		return "", false
+	}
+	if len(c.Iss) > 2048 {
 		return "", false
 	}
 	return c.Iss, true
