@@ -2,6 +2,7 @@ package web
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
@@ -29,7 +30,14 @@ func (s *server) aliasRedirect(w http.ResponseWriter, r *http.Request, tenant, n
 	newPrefix := "/" + tenant + "/" + target
 	dest := newPrefix + strings.TrimPrefix(r.URL.Path, oldPrefix)
 	if r.URL.RawQuery != "" {
-		dest += "?" + r.URL.RawQuery
+		// Re-encode query via ParseQuery to strip attacker-controlled
+		// raw encodings (e.g. %0d%0a) and ensure valid escaping.
+		if q, err := url.ParseQuery(r.URL.RawQuery); err == nil {
+			enc := q.Encode()
+			if enc != "" {
+				dest += "?" + enc
+			}
+		}
 	}
 	auth.EmitRepoAliasResolvedMetric(r.Context(), s.logger, "ui")
 	http.Redirect(w, r, dest, http.StatusFound) // 302

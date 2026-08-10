@@ -46,7 +46,7 @@ type bucket struct {
 // upstream allowlist (currently deferred; see spec §1.2).
 type Limiter struct {
 	cfg   Config
-	mu    sync.Mutex
+	mu    sync.RWMutex
 	perIP map[string]*bucket
 	stop  chan struct{}
 	wg    sync.WaitGroup

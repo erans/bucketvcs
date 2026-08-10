@@ -268,12 +268,11 @@ func (h *proxiedObjectHandler) servePut(ctx context.Context, w http.ResponseWrit
 	// mismatched bytes at an OID slot.
 	actualHash := hex.EncodeToString(hasher.Sum(nil))
 	if actualHash != oid {
-		// If we just wrote bad bytes, delete with fresh version to avoid TOCTOU.
+		// If we just wrote bad bytes, delete exactly the version we created
+		// to avoid TOCTOU with a concurrent good PUT. Only delete when we
+		// were the writer (err==nil); ErrAlreadyExists means we didn't write.
 		if err == nil {
-			if meta, herr := h.store.Head(ctx, key); herr == nil {
-				_ = h.store.DeleteIfVersionMatches(ctx, key, meta.Version)
-			}
-			_ = version // avoid unused
+			_ = h.store.DeleteIfVersionMatches(ctx, key, version)
 		}
 		http.Error(w, "content hash mismatch", http.StatusUnprocessableEntity)
 		emitObjectServedMetric(ctx, h.logger, op, "hash_mismatch")

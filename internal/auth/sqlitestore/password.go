@@ -63,6 +63,9 @@ func (s *Store) VerifyPassword(ctx context.Context, userName, plaintext string) 
 		return nil, fmt.Errorf("lookup user: %w", err)
 	}
 	if !pwHash.Valid || pwHash.String == "" {
+		// Hash the plaintext with a fresh salt to burn ~100ms similar to
+		// VerifyHash, mitigating user-enumeration via timing.
+		_, _ = auth.HashSecret(plaintext)
 		return nil, auth.ErrInvalidCredential // no password set
 	}
 	if err := auth.VerifyHash(plaintext, pwHash.String); err != nil {

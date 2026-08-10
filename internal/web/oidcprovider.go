@@ -15,16 +15,17 @@ type idTokenVerifier interface {
 
 // OIDCProvider is the resolved browser-login configuration (built in serve.go).
 type OIDCProvider struct {
-	Issuer      string
-	ClientID    string
-	AuthURL     string
-	TokenURL    string
-	RedirectURL string
-	Scopes      []string
-	Label       string
-	HMACKey     []byte          // temp-cookie integrity (per process)
-	Verifier    idTokenVerifier // nil => built from oidc.NewVerifier() in NewHandler
-	Secret      string          // optional client secret
+	Issuer         string
+	ClientID       string
+	AuthURL        string
+	TokenURL       string
+	RedirectURL    string
+	Scopes         []string
+	Label          string
+	HMACKey        []byte          // temp-cookie integrity (per process)
+	Verifier       idTokenVerifier // nil => built from oidc.NewVerifier() in NewHandler
+	Secret         string          // optional client secret
+	AllowEmailLink bool            // if true, first OIDC login auto-links by verified email (TOFU)
 }
 
 // oauthConfig builds the x/oauth2 config for this provider.

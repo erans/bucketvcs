@@ -72,8 +72,9 @@ func (s *server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	st, decErr := decodeOIDCState(s.oidc.HMACKey, c.Value)
-	// always clear the temp cookie
-	http.SetCookie(w, &http.Cookie{Name: oidcCookieName, Value: "", Path: "/login/oidc", MaxAge: -1, HttpOnly: true})
+	// always clear the temp cookie — must mirror Secure/SameSite so browsers
+	// overwrite the Secure cookie on HTTPS.
+	http.SetCookie(w, &http.Cookie{Name: oidcCookieName, Value: "", Path: "/login/oidc", MaxAge: -1, HttpOnly: true, Secure: requestIsTLS(r, s.trustProxy), SameSite: http.SameSiteLaxMode})
 	if decErr != nil {
 		reject(http.StatusBadRequest, "state_mismatch", "")
 		return
@@ -137,6 +138,10 @@ func (s *server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	// 8. resolve user
 	actor, err := s.store.FindIdentity(r.Context(), s.oidc.Issuer, subject)
 	if errors.Is(err, auth.ErrNoSuchUser) {
+		if !s.oidc.AllowEmailLink {
+			reject(http.StatusUnauthorized, "no_user", email)
+			return
+		}
 		// TOFU: match by verified email, then pin (issuer, subject)
 		actor, err = s.store.FindUserByEmail(r.Context(), email)
 		if errors.Is(err, auth.ErrNoSuchUser) {
@@ -184,6 +189,7 @@ func (s *server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookieName, Value: raw, Path: "/",
 		HttpOnly: true, Secure: requestIsTLS(r, s.trustProxy), SameSite: http.SameSiteLaxMode,
+		MaxAge: int(s.ttl.Seconds()), Expires: time.Now().Add(s.ttl),
 	})
 	EmitLoginMetric(r.Context(), s.logger, "success", "oidc")
 	EmitOIDCLogin(r.Context(), s.logger, actor.UserID, actor.Name, s.oidc.Issuer, subject)

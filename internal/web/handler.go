@@ -178,9 +178,14 @@ func (s *server) renderError(w http.ResponseWriter, r *http.Request, code int, m
 // safeNext returns a local redirect target, defaulting to "/". Prevents open
 // redirects: it rejects empty, non-"/"-prefixed, "//"-prefixed (protocol-relative),
 // and any value containing a backslash (browsers normalize "\" to "/" in the
-// authority position, so "/\evil.com" would redirect off-site).
+// authority position, so "/\evil.com" would redirect off-site). Also rejects
+// encoded slashes that browsers normalize to "//".
 func safeNext(v string) string {
 	if v == "" || !strings.HasPrefix(v, "/") || strings.HasPrefix(v, "//") || strings.ContainsRune(v, '\\') {
+		return "/"
+	}
+	// Reject encoded slashes that browsers normalize to "//" (protocol-relative).
+	if strings.Contains(strings.ToLower(v), "%2f") || strings.Contains(strings.ToLower(v), "%5c") {
 		return "/"
 	}
 	return v

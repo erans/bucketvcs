@@ -47,7 +47,7 @@ func NewResolver(cfg ResolverConfig) *StoreResolver {
 		cfg.Now = time.Now
 	}
 	if cfg.CredsTTL <= 0 {
-		cfg.CredsTTL = time.Hour
+		cfg.CredsTTL = 5 * time.Minute
 	}
 	return &StoreResolver{cfg: cfg, cache: map[string]*entry{}}
 }
@@ -104,8 +104,11 @@ func (r *StoreResolver) openTenant(ctx context.Context, tenant string) (storage.
 		}
 		return nil, fmt.Errorf("byob: binding for %s: %w", tenant, err)
 	}
-	plain, err := Decrypt(r.cfg.EncKey, b.CredsJSON)
+	plain, err := DecryptForTenant(r.cfg.EncKey, b.CredsJSON, tenant)
 	if err != nil {
+		// Decrypt failure likely means rotated key or corrupted creds;
+		// evict any stale entry so next Resolve retries.
+		r.Invalidate(tenant)
 		return nil, fmt.Errorf("byob: decrypt creds for %s: %w", tenant, err)
 	}
 	s, err := r.cfg.OpenStore(b.StoreURL, plain)

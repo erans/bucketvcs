@@ -15,6 +15,23 @@ import (
 
 const authRealm = `Basic realm="bucketvcs"`
 
+type tokenUsageJob struct {
+	store  auth.Store
+	tokenID string
+}
+
+var tokenUsageQueue = make(chan tokenUsageJob, 1024)
+
+func init() {
+	go func() {
+		for job := range tokenUsageQueue {
+			tctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			_ = job.store.TouchTokenUsage(tctx, job.tokenID)
+			cancel()
+		}
+	}()
+}
+
 // actorContextKey is the context key under which the authenticated actor is
 // stored after successful auth. Handlers retrieve it via ActorFromContext.
 type actorContextKey struct{}
@@ -90,11 +107,13 @@ func RunAuth(w http.ResponseWriter, r *http.Request, store auth.Store, rr *Route
 			}
 			return nil, false
 		}
-		go func(id string) {
-			tctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-			defer cancel()
-			_ = store.TouchTokenUsage(tctx, id)
-		}(tokenID)
+		// Best-effort last-used update off the hot path. Non-blocking
+		// enqueue to avoid spawning unbounded goroutines under burst.
+		select {
+		case tokenUsageQueue <- tokenUsageJob{store: store, tokenID: tokenID}:
+		default:
+			// Queue full — drop the update (best-effort, like before)
+		}
 		if scope != nil && (scope.Tenant != rr.Tenant || scope.Repo != rr.Repo) {
 			http.Error(w, "scope mismatch", http.StatusForbidden)
 			return nil, false
