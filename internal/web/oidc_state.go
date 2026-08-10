@@ -34,6 +34,11 @@ func encodeOIDCState(key []byte, st oidcState) string {
 
 // decodeOIDCState verifies the HMAC and expiry and returns the state.
 func decodeOIDCState(key []byte, enc string) (oidcState, error) {
+	return decodeOIDCStateWithNow(key, enc, time.Now)
+}
+
+// decodeOIDCStateWithNow is like decodeOIDCState but with injectable clock for tests.
+func decodeOIDCStateWithNow(key []byte, enc string, now func() time.Time) (oidcState, error) {
 	dot := strings.IndexByte(enc, '.')
 	if dot <= 0 {
 		return oidcState{}, errBadOIDCState
@@ -55,8 +60,8 @@ func decodeOIDCState(key []byte, enc string) (oidcState, error) {
 	if err := json.Unmarshal(payload, &st); err != nil {
 		return oidcState{}, errBadOIDCState
 	}
-	// Allow 30s clock skew.
-	if st.Exp == 0 || time.Now().Unix() > st.Exp+30 {
+	// Allow 30s clock skew (from main) with injectable clock (from PR).
+	if st.Exp == 0 || now().Unix() > st.Exp+30 {
 		return oidcState{}, errBadOIDCState
 	}
 	return st, nil

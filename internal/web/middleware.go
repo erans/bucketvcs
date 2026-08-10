@@ -35,3 +35,12 @@ func requestIsTLS(r *http.Request, trustProxy bool) bool {
 	}
 	return false
 }
+
+// warnIfProxyHeaderMismatched logs a warning when X-Forwarded-Proto is seen
+// but trustProxy is false — a common misconfig that silently downgrades
+// Secure cookies.
+func warnIfProxyHeaderMismatched(r *http.Request, trustProxy bool, logger interface{ Warn(string, ...any) }) {
+	if !trustProxy && r.Header.Get("X-Forwarded-Proto") != "" && logger != nil {
+		logger.Warn("web: X-Forwarded-Proto seen but --trust-proxy-headers not set; Secure cookies may be downgraded")
+	}
+}

@@ -86,6 +86,11 @@ func (s *server) handleTokenCreate(w http.ResponseWriter, r *http.Request) {
 		s.redirectFlash(w, r, "/settings/tokens", "invalid scopes: "+scopesStr)
 		return
 	}
+	if scopes == auth.ScopeLegacy {
+		EmitAdminActionMetric(r.Context(), s.logger, "token", "create", "invalid")
+		s.redirectFlash(w, r, "/settings/tokens", "legacy scope not allowed for new tokens — use 'all' or explicit scopes")
+		return
+	}
 	var expiresAt *int64
 	if d := r.PostFormValue("expires"); d != "" {
 		dur, err := time.ParseDuration(d)

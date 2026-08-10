@@ -210,10 +210,8 @@ type Options struct {
 	// (the default), the gateway behaves exactly as before BYOB: all
 	// tenants share the single store passed to NewServer.
 	//
-	// Note: the proxied URL handler routes (/_bundle/, /_pack/, /_lfs/)
-	// use the operator store directly and do NOT go through StoreResolver.
-	// Those routes sign/verify HMAC tokens against the operator store;
-	// per-tenant routing for proxied delivery is deferred.
+	// Proxied URL handlers (/_bundle/, /_pack/) now route through
+	// StoreResolver when non-nil, fixing BYOB tenant isolation.
 	StoreResolver ByobResolver
 
 	// Usage, when non-nil, receives operation-metering events
@@ -402,7 +400,7 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 		s.mux.HandleFunc("/healthz/replica", s.handleHealthzReplica)
 	}
 	if len(opts.ProxiedURLSigningKey) > 0 {
-		proxied := NewProxiedHandler(store, opts.ProxiedURLSigningKey, "/_bundle/", "/_pack/", s.logger, opts.Usage)
+		proxied := NewProxiedHandlerWithResolver(store, opts.StoreResolver, opts.ProxiedURLSigningKey, "/_bundle/", "/_pack/", s.logger, opts.Usage)
 		s.mux.Handle("/_bundle/", proxied)
 		s.mux.Handle("/_pack/", proxied)
 	}

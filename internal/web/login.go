@@ -3,6 +3,7 @@ package web
 import (
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/gateway"
@@ -82,6 +83,8 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			HttpOnly: true,
 			Secure:   secure,
 			SameSite: http.SameSiteLaxMode,
+			MaxAge:   int(s.ttl.Seconds()),
+			Expires:  time.Now().Add(s.ttl),
 		})
 		EmitLoginMetric(r.Context(), s.logger, "success", "password")
 		EmitSessionCreated(r.Context(), s.logger, actor.UserID, actor.Name, "password")

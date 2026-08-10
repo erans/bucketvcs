@@ -2,6 +2,7 @@ package web
 
 import (
 	"net/http"
+	"path"
 	"strings"
 )
 
@@ -20,6 +21,12 @@ func Dispatcher(gitHandler, uiHandler http.Handler) http.Handler {
 }
 
 func isGitOrInternal(p string) bool {
+	clean := path.Clean(p)
+	if clean != p {
+		// Reject non-canonical paths (//, /../) uniformly before routing
+		// to avoid gateway vs UI canonicalization divergence.
+		return false
+	}
 	if strings.HasPrefix(p, "/_ui/") {
 		return false // UI static assets
 	}
