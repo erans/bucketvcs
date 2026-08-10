@@ -119,8 +119,8 @@ func TestRunAuth_NoSuchRepo404(t *testing.T) {
 	if _, ok := RunAuth(w, r, st, rr, nil, false, nil); ok {
 		t.Fatal("expected deny")
 	}
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", w.Code)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
 	}
 }
 
@@ -489,10 +489,10 @@ func TestRunAuth_ResolvesAlias(t *testing.T) {
 		r := req(t, "POST", "/acme/nope.git/git-upload-pack", "", "", "")
 		_, ok := RunAuth(w, r, st, rr, nil, false, nil)
 		if ok {
-			t.Fatal("expected 404 for truly-unknown repo")
+			t.Fatal("expected 401 for truly-unknown repo")
 		}
-		if w.Code != http.StatusNotFound {
-			t.Fatalf("status = %d, want 404", w.Code)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", w.Code)
 		}
 	})
 }

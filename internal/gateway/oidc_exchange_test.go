@@ -88,7 +88,8 @@ func TestOIDCExchange_HappyPath(t *testing.T) {
 	s := newOIDCTestServer(t, store, ver)
 
 	form := url.Values{
-		"grant_type":    {grantTokenExchange},
+		"grant_type": {grantTokenExchange},
+		"subject_token_type": {subjectTokenJWT},
 		"subject_token": {fakeJWT(iss)},
 	}
 	r := httptest.NewRequest(http.MethodPost, "/_oidc/token", strings.NewReader(form.Encode()))
@@ -113,7 +114,7 @@ func TestOIDCExchange_UnknownIssuer_NoVerify(t *testing.T) {
 	store := &fakeOIDCStore{issuers: map[string]auth.OIDCIssuer{}}
 	ver := &fakeVerifier{}
 	s := newOIDCTestServer(t, store, ver)
-	form := url.Values{"grant_type": {grantTokenExchange}, "subject_token": {fakeJWT("https://nope")}}
+	form := url.Values{"grant_type": {grantTokenExchange}, "subject_token_type": {subjectTokenJWT}, "subject_token": {fakeJWT("https://nope")}}
 	r := httptest.NewRequest(http.MethodPost, "/_oidc/token", strings.NewReader(form.Encode()))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
@@ -134,7 +135,7 @@ func TestOIDCExchange_NoRule_403(t *testing.T) {
 	}
 	ver := &fakeVerifier{claims: map[string]any{"aud": "aud", "sub": "s"}}
 	s := newOIDCTestServer(t, store, ver)
-	form := url.Values{"grant_type": {grantTokenExchange}, "subject_token": {fakeJWT(iss)}}
+	form := url.Values{"grant_type": {grantTokenExchange}, "subject_token_type": {subjectTokenJWT}, "subject_token": {fakeJWT(iss)}}
 	r := httptest.NewRequest(http.MethodPost, "/_oidc/token", strings.NewReader(form.Encode()))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
@@ -156,7 +157,8 @@ func TestOIDCExchange_DownScopeReadFromWriteRule(t *testing.T) {
 	ver := &fakeVerifier{claims: map[string]any{"aud": "aud", "sub": "s"}}
 	s := newOIDCTestServer(t, store, ver)
 	form := url.Values{
-		"grant_type":    {grantTokenExchange},
+		"grant_type": {grantTokenExchange},
+		"subject_token_type": {subjectTokenJWT},
 		"subject_token": {fakeJWT(iss)},
 		"scope":         {"repo:read"},
 	}
