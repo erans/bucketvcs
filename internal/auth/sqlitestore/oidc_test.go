@@ -204,14 +204,15 @@ func TestAddOIDCIssuer_DuplicateURL(t *testing.T) {
 }
 
 func TestMatchRule_ArrayAudFailsClosed(t *testing.T) {
-	// Array-valued aud is not supported in v1; such a token must NOT match
-	// (fails closed). Documented limitation.
+	// Array-valued aud is supported per OIDC spec: aud may be string or
+	// []string/[]any. A token with array aud containing the rule audience
+	// must match. See auth.audMatches.
 	rules := []auth.OIDCTrustRule{{
 		ID: "r1", Audience: "aud", Tenant: "org", Repo: "app", Claims: map[string]string{},
 	}}
 	claims := map[string]any{"aud": []any{"aud", "other"}}
-	if got := auth.MatchRule(rules, claims); got != nil {
-		t.Fatalf("array aud should fail closed (no match), got %+v", got)
+	if got := auth.MatchRule(rules, claims); got == nil {
+		t.Fatalf("array aud containing audience should match, got no match")
 	}
 }
 

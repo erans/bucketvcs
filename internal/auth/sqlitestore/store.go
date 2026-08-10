@@ -291,10 +291,10 @@ func (s *Store) DeleteUser(ctx context.Context, name string) error {
 	return tx.Commit()
 }
 
-// isSafeTokenIDPrefix accepts any non-empty ASCII alphanumeric prefix.
+// isSafeTokenIDPrefix accepts any non-empty ASCII alphanumeric prefix plus "_" and "-" which are used by SSH key IDs (bvsk_...).
 // Real token IDs use the Crockford-base32 alphabet (auth.GenerateToken),
 // which is a strict subset; the broader alphanumeric check still excludes
-// SQL LIKE metacharacters (% _) and any other shell/SQL-special characters
+// SQL LIKE metacharacters (% ) and any other shell/SQL-special characters
 // while remaining permissive enough for synthetic IDs used in tests.
 func isSafeTokenIDPrefix(s string) bool {
 	if s == "" {
@@ -305,7 +305,8 @@ func isSafeTokenIDPrefix(s string) bool {
 		switch {
 		case c >= '0' && c <= '9',
 			c >= 'A' && c <= 'Z',
-			c >= 'a' && c <= 'z':
+			c >= 'a' && c <= 'z',
+			c == '_' || c == '-' :
 			// safe
 		default:
 			return false
@@ -1119,11 +1120,12 @@ func scanSSHKeys(rows *sql.Rows) ([]auth.SSHKey, error) {
 // auth.ErrConflict if the prefix is ambiguous (matches more than one key).
 func (s *Store) RevokeSSHKey(ctx context.Context, keyIDOrPrefix string) error {
 	if !isSafeTokenIDPrefix(keyIDOrPrefix) {
-		// Reject LIKE wildcards %/_ and non-alphanumerics; treat as not found
+		// Reject LIKE wildcards % and non-alphanumerics; treat as not found
 		// to avoid ambiguous-prefix leakage or wildcard enumeration.
+		// "_" is allowed (SSH keys use bvsk_...) and is matched literally via substr.
 		return auth.ErrNoSuchKey
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM ssh_keys WHERE id LIKE ? || '%' ESCAPE '\'`, keyIDOrPrefix)
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM ssh_keys WHERE substr(id, 1, ?) = ?`, len(keyIDOrPrefix), keyIDOrPrefix)
 	if err != nil {
 		return err
 	}
