@@ -17,17 +17,20 @@ import (
 
 // fakeStore is an in-memory minimal auth.Store for middleware tests.
 type fakeStore struct {
-	credActor *auth.Actor
-	credToken string
-	credScope *auth.Scope
-	credErr   error
-	perm      auth.Perm
-	flags     auth.RepoFlags
-	flagsErr  error
-	flagsFn   func(tenant, repo string) (auth.RepoFlags, error)
+	credActor   *auth.Actor
+	credToken   string
+	credScope   *auth.Scope
+	credErr     error
+	verifyCalls int
+	perm        auth.Perm
+	flags       auth.RepoFlags
+	flagsErr    error
+	flagsFn     func(tenant, repo string) (auth.RepoFlags, error)
+	touchCh     chan string
 }
 
 func (f *fakeStore) VerifyCredential(ctx context.Context, c auth.Credential) (*auth.Actor, string, *auth.Scope, error) {
+	f.verifyCalls++
 	return f.credActor, f.credToken, f.credScope, f.credErr
 }
 func (f *fakeStore) LookupRepoPerm(ctx context.Context, a *auth.Actor, t, r string) (auth.Perm, error) {
@@ -42,8 +45,17 @@ func (f *fakeStore) GetRepoFlags(ctx context.Context, t, r string) (auth.RepoFla
 	}
 	return f.flags, f.flagsErr
 }
-func (f *fakeStore) TouchTokenUsage(ctx context.Context, id string) error { return nil }
-func (f *fakeStore) Close() error                                         { return nil }
+func (f *fakeStore) TouchTokenUsage(ctx context.Context, id string) error {
+	if f.touchCh != nil {
+		select {
+		case f.touchCh <- id:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+func (f *fakeStore) Close() error { return nil }
 
 // SSH key stubs — not exercised by auth middleware tests.
 func (f *fakeStore) AddSSHKey(ctx context.Context, k auth.SSHKey) error { return nil }
@@ -111,16 +123,61 @@ func TestRunAuth_AnonymousReadPrivate_Challenge(t *testing.T) {
 	}
 }
 
-func TestRunAuth_NoSuchRepo404(t *testing.T) {
-	st := &fakeStore{flagsErr: auth.ErrNoSuchRepo}
+func TestRunAuth_AnonymousNoSuchRepoMatchesPrivateChallenge_U17(t *testing.T) {
+	for name, st := range map[string]*fakeStore{
+		"missing": {flagsErr: auth.ErrNoSuchRepo},
+		"private": {flags: auth.RepoFlags{PublicRead: false}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rr := &RoutedRequest{Tenant: "a", Repo: "b", Op: OpUploadPack, RequiredAction: auth.ActionRead}
+			w := httptest.NewRecorder()
+			r := req(t, "POST", "/a/b.git/git-upload-pack", "", "", "")
+			if _, ok := RunAuth(w, r, st, rr, nil, false, nil); ok {
+				t.Fatal("expected deny")
+			}
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want uniform 401", w.Code)
+			}
+			if got := w.Header().Get("WWW-Authenticate"); !strings.HasPrefix(got, "Basic ") {
+				t.Fatalf("WWW-Authenticate = %q, want Basic challenge", got)
+			}
+		})
+	}
+}
+
+func TestRunAuth_InvalidBasicNoSuchRepoStillGets401_U17Review(t *testing.T) {
+	st := &fakeStore{flagsErr: auth.ErrNoSuchRepo, credErr: auth.ErrInvalidCredential}
 	rr := &RoutedRequest{Tenant: "a", Repo: "b", Op: OpUploadPack, RequiredAction: auth.ActionRead}
 	w := httptest.NewRecorder()
-	r := req(t, "POST", "/a/b.git/git-upload-pack", "", "", "")
+	r := req(t, "POST", "/a/b.git/git-upload-pack", "", "alice", "wrong")
 	if _, ok := RunAuth(w, r, st, rr, nil, false, nil); ok {
 		t.Fatal("expected deny")
 	}
 	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", w.Code)
+		t.Fatalf("status = %d, want uniform 401", w.Code)
+	}
+	if st.verifyCalls != 1 {
+		t.Fatalf("VerifyCredential calls = %d, want 1", st.verifyCalls)
+	}
+}
+
+func TestRunAuth_AuthenticatedNoSuchRepoStill404_U17(t *testing.T) {
+	st := &fakeStore{
+		flagsErr:  auth.ErrNoSuchRepo,
+		credActor: &auth.Actor{UserID: "u1", Name: "alice"},
+		credToken: "tok1",
+	}
+	rr := &RoutedRequest{Tenant: "a", Repo: "b", Op: OpUploadPack, RequiredAction: auth.ActionRead}
+	w := httptest.NewRecorder()
+	r := req(t, "POST", "/a/b.git/git-upload-pack", "", "alice", "bvts_token")
+	if _, ok := RunAuth(w, r, st, rr, nil, false, nil); ok {
+		t.Fatal("expected deny")
+	}
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", w.Code)
+	}
+	if st.verifyCalls != 1 {
+		t.Fatalf("VerifyCredential calls = %d, want 1", st.verifyCalls)
 	}
 }
 
@@ -227,6 +284,53 @@ func TestRunAuth_ScopeMismatch(t *testing.T) {
 
 // TestRunAuth_ScopeMatch verifies that a scoped credential bound to acme/web
 // allows write access to acme/web without going through LookupRepoPerm.
+func TestRunAuth_ScopeMismatchDoesNotTouchTokenUsage_U21(t *testing.T) {
+	touchCh := make(chan string, 1)
+	st := &fakeStore{
+		credActor: &auth.Actor{UserID: "_oidc", Name: "oidc"},
+		credToken: "tok-scope-mismatch",
+		credScope: &auth.Scope{Tenant: "acme", Repo: "web", Perm: auth.PermWrite},
+		flags:     auth.RepoFlags{},
+		touchCh:   touchCh,
+	}
+	rr := &RoutedRequest{Tenant: "acme", Repo: "other", Op: OpReceivePack, RequiredAction: auth.ActionWrite}
+	w := httptest.NewRecorder()
+	r := req(t, "POST", "/acme/other.git/git-receive-pack", "", "oidc", "token")
+	if _, ok := RunAuth(w, r, st, rr, nil, false, nil); ok || w.Code != http.StatusForbidden {
+		t.Fatalf("result ok=%v status=%d, want denied 403", ok, w.Code)
+	}
+	select {
+	case id := <-touchCh:
+		t.Fatalf("scope-mismatched request touched token %q", id)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestRunAuth_ScopeMatchTouchesTokenUsage_U21(t *testing.T) {
+	touchCh := make(chan string, 1)
+	st := &fakeStore{
+		credActor: &auth.Actor{UserID: "_oidc", Name: "oidc"},
+		credToken: "tok-scope-match",
+		credScope: &auth.Scope{Tenant: "acme", Repo: "web", Perm: auth.PermWrite},
+		flags:     auth.RepoFlags{},
+		touchCh:   touchCh,
+	}
+	rr := &RoutedRequest{Tenant: "acme", Repo: "web", Op: OpReceivePack, RequiredAction: auth.ActionWrite}
+	w := httptest.NewRecorder()
+	r := req(t, "POST", "/acme/web.git/git-receive-pack", "", "oidc", "token")
+	if _, ok := RunAuth(w, r, st, rr, nil, false, nil); !ok {
+		t.Fatalf("status=%d body=%q, want allow", w.Code, w.Body.String())
+	}
+	select {
+	case id := <-touchCh:
+		if id != "tok-scope-match" {
+			t.Fatalf("touched token = %q", id)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("matching scoped request did not touch token")
+	}
+}
+
 func TestRunAuth_ScopeMatch(t *testing.T) {
 	actor := &auth.Actor{UserID: "deploy:bvsk_x", Name: "deploy-key:ci"}
 	st := &fakeStore{
@@ -483,16 +587,16 @@ func TestRunAuth_ResolvesAlias(t *testing.T) {
 		}
 	})
 
-	t.Run("truly_missing_name_still_404s", func(t *testing.T) {
+	t.Run("truly_missing_name_anonymous_is_uniform_401", func(t *testing.T) {
 		rr := &RoutedRequest{Tenant: "acme", Repo: "nope", Op: OpUploadPack, RequiredAction: auth.ActionRead}
 		w := httptest.NewRecorder()
 		r := req(t, "POST", "/acme/nope.git/git-upload-pack", "", "", "")
 		_, ok := RunAuth(w, r, st, rr, nil, false, nil)
 		if ok {
-			t.Fatal("expected 401 for truly-unknown repo")
+			t.Fatal("expected deny for truly-unknown repo")
 		}
 		if w.Code != http.StatusUnauthorized {
-			t.Fatalf("status = %d, want 401", w.Code)
+			t.Fatalf("status = %d, want uniform anonymous 401", w.Code)
 		}
 	})
 }

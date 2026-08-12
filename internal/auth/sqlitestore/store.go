@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
+	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 )
 
 // Store is the SQLite-backed implementation of auth.Store.
@@ -419,17 +420,17 @@ func (s *Store) GetTokenByID(ctx context.Context, id string) (*Token, error) {
 	return t, nil
 }
 
-// ListTokensForUser returns all tokens for user `name` ordered by created_at desc.
-func (s *Store) ListTokensForUser(ctx context.Context, name string) ([]*Token, error) {
-	u, err := s.GetUserByName(ctx, name)
-	if err != nil {
-		return nil, err
-	}
+// ListTokensForUser returns all tokens owned by user `userID` ordered by
+// created_at desc. The argument is a user ID, not a name: callers that hold
+// a name (e.g. the `token list` CLI) resolve it via GetUserByName first.
+// Taking the ID directly keeps the web settings page — which only ever has
+// the session's UserID — from bouncing off a name lookup.
+func (s *Store) ListTokensForUser(ctx context.Context, userID string) ([]*Token, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, user_id, secret_hash, COALESCE(label,''), created_at,
 		        expires_at, last_used_at, revoked_at, scopes
 		   FROM tokens WHERE user_id = ?
-		  ORDER BY created_at DESC`, u.ID,
+		  ORDER BY created_at DESC`, userID,
 	)
 	if err != nil {
 		return nil, err
@@ -571,6 +572,9 @@ func (s *Store) RegisterRepoIfNew(ctx context.Context, tenant, name string) (boo
 // was new, drops any alias of the same name in the same transaction — a live
 // repo always shadows a stale alias.
 func (s *Store) registerRepo(ctx context.Context, tenant, name string) (bool, error) {
+	if !keys.ValidateID(tenant) || !keys.ValidateID(name) {
+		return false, fmt.Errorf("sqlitestore.registerRepo: tenant and repo must satisfy durable-key naming rules")
+	}
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{})
 	if err != nil {
 		return false, fmt.Errorf("sqlitestore.registerRepo: begin: %w", err)

@@ -131,8 +131,10 @@ func runTenantStorageBind(ctx context.Context, args []string, stdout, stderr io.
 		return 1
 	}
 
-	// Encrypt the credentials.
-	encCreds, err := byob.Encrypt(keyBytes[:32], credsBytes)
+	// Encrypt the credentials with the tenant as AAD (U-8): the row
+	// decrypts only via DecryptForTenant(..., tenant), with the legacy
+	// nil-AAD fallback reserved for pre-existing rows.
+	encCreds, err := byob.EncryptForTenant(keyBytes[:32], credsBytes, *tenant)
 	if err != nil {
 		fmt.Fprintf(stderr, "tenant storage bind: encrypt creds: %v\n", err)
 		return 1
@@ -273,8 +275,9 @@ func runTenantStorageVerify(ctx context.Context, args []string, stdout, stderr i
 		return 1
 	}
 
-	// Decrypt credentials.
-	plainCreds, err := byob.Decrypt(keyBytes[:32], binding.CredsJSON)
+	// Decrypt credentials under the tenant AAD; the nil-AAD fallback keeps
+	// pre-U-8 rows readable.
+	plainCreds, err := byob.DecryptForTenant(keyBytes[:32], binding.CredsJSON, *tenant)
 	if err != nil {
 		fmt.Fprintf(stderr, "tenant storage verify: decrypt creds: %v\n", err)
 		return 1

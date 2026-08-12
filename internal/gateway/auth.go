@@ -16,7 +16,7 @@ import (
 const authRealm = `Basic realm="bucketvcs"`
 
 type tokenUsageJob struct {
-	store  auth.Store
+	store   auth.Store
 	tokenID string
 }
 
@@ -39,6 +39,18 @@ type actorContextKey struct{}
 // ActorFromContext returns the authenticated actor or nil if anonymous.
 func ActorFromContext(ctx context.Context) *auth.Actor {
 	v, _ := ctx.Value(actorContextKey{}).(*auth.Actor)
+	return v
+}
+
+// scopeContextKey is the context key under which RunAuth stores the verified
+// credential scope (deploy-key SSH / OIDC-minted tokens). Handlers retrieve
+// it via ScopeFromContext.
+type scopeContextKey struct{}
+
+// ScopeFromContext returns the verified credential scope attached by RunAuth,
+// or nil when the credential is unscoped (ordinary user tokens).
+func ScopeFromContext(ctx context.Context) *auth.Scope {
+	v, _ := ctx.Value(scopeContextKey{}).(*auth.Scope)
 	return v
 }
 
@@ -107,17 +119,22 @@ func RunAuth(w http.ResponseWriter, r *http.Request, store auth.Store, rr *Route
 			}
 			return nil, false
 		}
-		// Best-effort last-used update off the hot path. Non-blocking
-		// enqueue to avoid spawning unbounded goroutines under burst.
-		select {
-		case tokenUsageQueue <- tokenUsageJob{store: store, tokenID: tokenID}:
-		default:
-			// Queue full — drop the update (best-effort, like before)
-		}
 		if scope != nil && (scope.Tenant != rr.Tenant || scope.Repo != rr.Repo) {
 			http.Error(w, "scope mismatch", http.StatusForbidden)
 			return nil, false
 		}
+		// U-21: record usage only after a scoped credential has passed its
+		// tenant/repo binding check. A forbidden cross-repo probe must not
+		// advance last_used_at.
+		select {
+		case tokenUsageQueue <- tokenUsageJob{store: store, tokenID: tokenID}:
+		default:
+			// Queue full — drop the update (best-effort, like before).
+		}
+		// Successful credential verification resets the rate-limit bucket
+		// (good behavior earns full quota back). Scope mismatch above is a
+		// policy denial, not a credential failure, so it deliberately does
+		// NOT reset — but it also does NOT count as failure.
 		limiter.MarkSuccess(ip, basicUser)
 		ratelimit.EmitRateLimitMetric(ctx, logger, "success_reset")
 	}
@@ -168,7 +185,15 @@ func RunAuth(w http.ResponseWriter, r *http.Request, store auth.Store, rr *Route
 		return nil, false
 	}
 
-	*r = *r.WithContext(context.WithValue(ctx, actorContextKey{}, actor))
+	// U-1: attach the verified scope alongside the actor so downstream
+	// handlers (the LFS batch handler upload write check) use the same
+	// pre-authorized permission instead of re-deriving it from grants the
+	// synthetic owner never holds.
+	ctx = context.WithValue(ctx, actorContextKey{}, actor)
+	if scope != nil {
+		ctx = context.WithValue(ctx, scopeContextKey{}, scope)
+	}
+	*r = *r.WithContext(ctx)
 	return actor, true
 }
 

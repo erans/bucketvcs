@@ -73,7 +73,10 @@ func (r *Repo) CommitMarkerKey(txID string) string {
 	return r.TxRecordKey(txID) + ".commit"
 }
 
-func validID(s string) bool {
+// ValidateID reports whether s can safely identify a tenant or repository in
+// durable object keys. Ingress validators and registry stores use this same
+// contract so unusable route/registry names cannot be created.
+func ValidateID(s string) bool {
 	if !idPattern.MatchString(s) {
 		return false
 	}
@@ -84,6 +87,8 @@ func validID(s string) bool {
 	}
 	return true
 }
+
+func validID(s string) bool { return ValidateID(s) }
 
 // CanonicalPackKey returns the path for a canonical (.pack) object in the
 // canonical area. Used by M2.

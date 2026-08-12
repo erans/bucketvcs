@@ -161,7 +161,8 @@ func NewHandler(d Deps) http.Handler {
 	s.mux.HandleFunc("/admin/sessions/revoke", s.handleAdminSessionRevoke)
 	s.mux.HandleFunc("/", s.handleLanding)
 
-	return sessionMiddleware(s.store, s.ttl)(cspMiddleware(s.mux))
+	h := sessionMiddleware(s.store, s.ttl)(cspMiddleware(s.mux))
+	return proxyHeaderWarningMiddleware(h, s.trustProxy, s.logger)
 }
 
 // renderError writes a styled error page with the given status code.

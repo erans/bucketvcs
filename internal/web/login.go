@@ -51,9 +51,16 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 		actor, err := s.store.VerifyPassword(r.Context(), username, r.PostFormValue("password"))
 		if err != nil {
-			if auth.IsCredentialError(err) {
-				s.limiter.MarkFailure(ip, username) // nil-safe
+			if !auth.IsCredentialError(err) {
+				// Backend authdb failure (lookup error, DB down, ...): mirror
+				// gateway RunAuth -- a 500, not the credential page, and no
+				// MarkFailure (a backend outage is not a credential failure; U-11).
+				s.logger.Error("login: verify password backend error", "err", err)
+				EmitLoginMetric(r.Context(), s.logger, "error", "password")
+				s.renderError(w, r, http.StatusInternalServerError, "login temporarily unavailable")
+				return
 			}
+			s.limiter.MarkFailure(ip, username) // nil-safe
 			EmitLoginMetric(r.Context(), s.logger, "invalid", "password")
 			tok := issueCSRF(w, secure)
 			w.WriteHeader(http.StatusUnauthorized)

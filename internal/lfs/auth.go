@@ -20,10 +20,12 @@ type SSHAuthResponse struct {
 // token row. We deliberately do NOT reuse auth.Store — token creation
 // is admin-only and not part of the gateway request-path interface.
 //
-// The scopes argument carries the M17 TokenScope bitmask. SSH-issued LFS
-// tokens currently pass auth.ScopeLegacy (=0) because the gateway's LFS
-// path falls back to grant-table semantics when scopes is zero. A future
-// M17 follow-up may narrow these to lfs:read/lfs:write per op.
+// The scopes argument carries the M17 TokenScope bitmask; the scopeTenant/
+// scopeRepo/scopePerm triple carries the M22-style repo binding. SSH-issued
+// LFS tokens bind to (tenant, repo) with a perm matching the handshake op
+// (download→"read"/ScopeLFSRead, upload→"write"/ScopeLFSWrite) — OIDC-mint
+// parity per U-15; the gateway's scope check pins the token to the minted
+// repo and its Decide fails writes for download-minted tokens.
 type TokenIssuer interface {
 	CreateToken(ctx context.Context, tokenID, userID, secretHash, label string, expiresAt *int64, scopes auth.TokenScope, scopeTenant, scopeRepo, scopePerm string) error
 }
@@ -76,7 +78,20 @@ func IssueSSHToken(ctx context.Context, issuer TokenIssuer, userID, userName, te
 	expUnix := expires.Unix()
 	label := fmt.Sprintf("lfs-ssh:%s:%s/%s", op, tenant, repo)
 
-	if err := issuer.CreateToken(ctx, id, userID, hash, label, &expUnix, auth.ScopeLegacy, "", "", ""); err != nil {
+	// U-15: bind the token to (tenant, repo) at the op's permission and carry
+	// the matching LFS scope bit (download→read, upload→write — EffectiveScopes
+	// folds read into write), OIDC-mint parity. The gateway enforces the
+	// binding via the VerifyCredential-returned scope; legacy unscoped minting
+	// let the bearer touch every repo the user owned.
+	var scopes auth.TokenScope
+	var scopePerm string
+	switch op {
+	case "download":
+		scopes, scopePerm = auth.ScopeLFSRead, "read"
+	case "upload":
+		scopes, scopePerm = auth.ScopeLFSWrite, "write"
+	}
+	if err := issuer.CreateToken(ctx, id, userID, hash, label, &expUnix, scopes, tenant, repo, scopePerm); err != nil {
 		return SSHAuthResponse{}, fmt.Errorf("lfs.IssueSSHToken: CreateToken: %w", err)
 	}
 

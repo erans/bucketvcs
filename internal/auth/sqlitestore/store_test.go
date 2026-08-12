@@ -286,7 +286,7 @@ func TestListTokensForUser(t *testing.T) {
 	uid, _ := s.CreateUser(ctx, "alice", false)
 	_ = s.CreateToken(ctx, "tok1AAAAAAAAAAAAAAAAAAAA", uid, "$argon2id$1", "a", nil, auth.ScopeLegacy, "", "", "")
 	_ = s.CreateToken(ctx, "tok2AAAAAAAAAAAAAAAAAAAA", uid, "$argon2id$2", "b", nil, auth.ScopeLegacy, "", "", "")
-	rows, err := s.ListTokensForUser(ctx, "alice")
+	rows, err := s.ListTokensForUser(ctx, uid)
 	if err != nil {
 		t.Fatalf("ListTokensForUser: %v", err)
 	}

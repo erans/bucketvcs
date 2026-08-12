@@ -156,7 +156,14 @@ func tokenList(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return 1
 	}
 	defer s.Close()
-	rows, err := s.ListTokensForUser(ctx, fs.Arg(0))
+	// The CLI takes a user NAME; ListTokensForUser is keyed by user ID (U-3).
+	// Resolve name -> id here so the CLI surface stays unchanged.
+	u, err := s.GetUserByName(ctx, fs.Arg(0))
+	if err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
+		return 1
+	}
+	rows, err := s.ListTokensForUser(ctx, u.ID)
 	if err != nil {
 		fmt.Fprintf(stderr, "%v\n", err)
 		return 1

@@ -8,6 +8,28 @@ import (
 	"testing"
 )
 
+func TestOIDCCLI_IssuerAddPreservesIdentityAndRejectsInsecure_U18(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "auth.db")
+	ctx := context.Background()
+	run := func(args ...string) (int, string, string) {
+		var out, errb bytes.Buffer
+		code := runOIDC(ctx, args, &out, &errb)
+		return code, out.String(), errb.String()
+	}
+
+	const exact = "https://issuer.example/"
+	code, out, errOut := run("issuer", "add", "--auth-db", db, "--alias", "ok", "--url", exact)
+	if code != 0 {
+		t.Fatalf("issuer add: code=%d stderr=%s", code, errOut)
+	}
+	if !strings.Contains(out, "url="+exact) {
+		t.Fatalf("output = %q, want exact issuer identity", out)
+	}
+	if code, _, errOut := run("issuer", "add", "--auth-db", db, "--alias", "bad", "--url", "http://issuer.example"); code == 0 || !strings.Contains(errOut, "https required") {
+		t.Fatalf("insecure add: code=%d stderr=%q", code, errOut)
+	}
+}
+
 func TestOIDCCLI_IssuerAndRuleRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	db := filepath.Join(dir, "auth.db")

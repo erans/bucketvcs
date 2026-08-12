@@ -101,7 +101,7 @@ func (b *browseDataStore) SetPassword(ctx context.Context, userName, plaintext s
 func (b *browseDataStore) HasPassword(ctx context.Context, userName string) (bool, error) {
 	panic("browseDataStore.HasPassword not implemented")
 }
-func (b *browseDataStore) ListTokensForUser(ctx context.Context, name string) ([]TokenInfo, error) {
+func (b *browseDataStore) ListTokensForUser(ctx context.Context, userID string) ([]TokenInfo, error) {
 	panic("browseDataStore.ListTokensForUser not implemented")
 }
 func (b *browseDataStore) GetTokenOwner(ctx context.Context, id string) (string, error) {

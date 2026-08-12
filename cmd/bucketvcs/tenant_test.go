@@ -69,8 +69,10 @@ func TestTenantStorageBind_LocalfsRoundTrip(t *testing.T) {
 	if b.Provider != "localfs" {
 		t.Fatalf("provider=%s", b.Provider)
 	}
-	// Verify creds are encrypted and round-trip correctly.
-	plain, err := byob.Decrypt(make([]byte, 32), b.CredsJSON)
+	// Verify creds are encrypted under the tenant AAD and round-trip
+	// correctly (U-8: bind uses EncryptForTenant, so nil-AAD Decrypt no
+	// longer opens the row).
+	plain, err := byob.DecryptForTenant(make([]byte, 32), b.CredsJSON, "acme")
 	if err != nil {
 		t.Fatalf("Decrypt: %v", err)
 	}

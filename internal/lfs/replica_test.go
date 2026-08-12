@@ -28,7 +28,7 @@ func newReplicaHandlerForTest(t *testing.T, store *Store, authStore *fakeAuth, a
 	lfsH := NewHTTPHandler(Deps{
 		AuthStore:        authStore,
 		ActorFromContext: func(context.Context) *auth.Actor { return actor },
-		NewStore:         func(tenant, repo string) *Store { return store },
+		NewStore:         func(context.Context, string, string) (*Store, error) { return store, nil },
 		PresignTTL:       5 * time.Minute,
 		Logger:           captureLogger(&bytes.Buffer{}),
 		LocksStore:       locks.New(authdb),

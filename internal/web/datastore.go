@@ -112,7 +112,8 @@ type DataStore interface {
 	HasPassword(ctx context.Context, userName string) (bool, error)
 
 	// Tokens (self-service; ownership enforced by handlers).
-	ListTokensForUser(ctx context.Context, name string) ([]TokenInfo, error)
+	// Token listing is keyed by user ID (the session's UserID), never by name.
+	ListTokensForUser(ctx context.Context, userID string) ([]TokenInfo, error)
 	GetTokenOwner(ctx context.Context, id string) (userID string, err error)
 	CreateToken(ctx context.Context, id, userID, secretHash, label string,
 		expiresAt *int64, scopes auth.TokenScope) error

@@ -5,7 +5,9 @@ import (
 	"log/slog"
 )
 
-// EmitLoginMetric records a login outcome. result ∈ "success"|"invalid"|"ratelimited";
+// EmitLoginMetric records a login outcome. result ∈ "success"|"invalid"|"ratelimited"|"error"
+// ("error": backend failure — distinct from "invalid" so credential-indicating
+// dashboards aren't polluted by authdb outages; U-11).
 // provider ∈ "password"|"oidc".
 func EmitLoginMetric(ctx context.Context, logger *slog.Logger, result, provider string) {
 	if logger == nil {

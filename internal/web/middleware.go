@@ -2,6 +2,7 @@ package web
 
 import (
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -43,4 +44,18 @@ func warnIfProxyHeaderMismatched(r *http.Request, trustProxy bool, logger interf
 	if !trustProxy && r.Header.Get("X-Forwarded-Proto") != "" && logger != nil {
 		logger.Warn("web: X-Forwarded-Proto seen but --trust-proxy-headers not set; Secure cookies may be downgraded")
 	}
+}
+
+// proxyHeaderWarningMiddleware wires the mismatch diagnostic into every web
+// request while bounding it to one warning per handler instance. The warning
+// is intentionally outside cookie-setting handlers so it also catches a proxy
+// misconfiguration before the first login attempt.
+func proxyHeaderWarningMiddleware(next http.Handler, trustProxy bool, logger interface{ Warn(string, ...any) }) http.Handler {
+	var once sync.Once
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !trustProxy && r.Header.Get("X-Forwarded-Proto") != "" {
+			once.Do(func() { warnIfProxyHeaderMismatched(r, trustProxy, logger) })
+		}
+		next.ServeHTTP(w, r)
+	})
 }

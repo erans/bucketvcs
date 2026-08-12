@@ -245,7 +245,7 @@ func TestAdminUserCreate_Happy(t *testing.T) {
 			t.Fatal("missing auth.user.created audit event with password_set=true")
 		}
 	})
-	t.Run("CreateUser ok + SetPassword fails → flash (user exists), audit password_set=false", func(t *testing.T) {
+	t.Run("CreateUser ok + SetPassword fails → rollback event, no creation event", func(t *testing.T) {
 		store := adminStore()
 		store.createUser = func(ctx context.Context, name string, isAdmin bool) (string, error) {
 			return "uid-" + name, nil
@@ -259,7 +259,8 @@ func TestAdminUserCreate_Happy(t *testing.T) {
 		addSessionCookie(t, req, store, adminSession())
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
-		// The user DOES exist now, so a bare 500 is wrong: flash + 303 instead.
+		// Cleanup succeeds, so the failed create is rolled back and reported
+		// through a retryable flash rather than a bare 500.
 		if rec.Code != http.StatusSeeOther {
 			t.Fatalf("status %d, want 303; body=%s", rec.Code, rec.Body.String())
 		}
@@ -269,9 +270,13 @@ func TestAdminUserCreate_Happy(t *testing.T) {
 		if findCookie(rec.Result().Cookies(), flashCookieName) == nil {
 			t.Fatal("expected flash cookie when set-password fails")
 		}
-		// The auth.user.created event must still fire (the user exists).
-		if !sink.Has("auth.user.created", map[string]string{"user": "frank", "password_set": "false"}) {
-			t.Fatal("missing auth.user.created audit event with password_set=false")
+		if !sink.Has("auth.user.create_rolled_back", map[string]string{
+			"user": "frank", "reason": "password_set_failed",
+		}) {
+			t.Fatal("missing auth.user.create_rolled_back audit event")
+		}
+		if sink.Has("auth.user.created", map[string]string{"user": "frank"}) {
+			t.Fatal("rolled-back user emitted phantom auth.user.created event")
 		}
 	})
 }

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bucketvcs/bucketvcs/internal/byob"
 	"github.com/bucketvcs/bucketvcs/internal/gateway/routenames"
 	"github.com/bucketvcs/bucketvcs/internal/proxiedurl"
 	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
@@ -209,18 +210,25 @@ func isHex(s string, n int) bool {
 	return true
 }
 
-func (h *proxiedHandler) storeForTenant(ctx context.Context, tenant string) storage.ObjectStore {
-	if h.resolver != nil {
-		if s, err := h.resolver.Resolve(ctx, tenant); err == nil {
-			return s
-		}
-	}
-	return h.store
+// storeForTenant applies the shared BYOB store-selection policy
+// (byob.StoreForTenant): the operator store is served only when the tenant's
+// binding is genuinely absent; every resolution error fails closed so proxied
+// fetches never silently read (or miss) content in the wrong bucket (U-5).
+func (h *proxiedHandler) storeForTenant(ctx context.Context, tenant string) (storage.ObjectStore, error) {
+	return byob.StoreForTenant(ctx, h.resolver, h.store, tenant)
 }
 
 func (h *proxiedHandler) serveObject(ctx context.Context, w *countingResponseWriter, r *http.Request, kind, hash, tenant, repo, key string, reqStart time.Time) {
 	rangeHdr := r.Header.Get("Range")
-	store := h.storeForTenant(ctx, tenant)
+	store, err := h.storeForTenant(ctx, tenant)
+	if err != nil {
+		// U-5: fail closed on resolution error. Serving the operator store
+		// here either leaks wrong-bucket content or 404s at tenant prefixes,
+		// which protocol-v2 clients read as "bundle GC'd" and answer with
+		// fallback full-clone storms.
+		http.Error(w, "storage error", http.StatusInternalServerError)
+		return
+	}
 	if rangeHdr == "" {
 		// Full object.
 		meta, err := store.Head(ctx, key)

@@ -1,17 +1,12 @@
-// Package routenames provides the shared name-validation regex for
-// tenant and repo names. Both the HTTP route parser (internal/gateway)
-// and the SSH exec-command parser (internal/sshd) import this package
-// so that exactly the same character set is accepted on both transports.
+// Package routenames provides the shared tenant/repository name validator used
+// by HTTP, SSH, LFS, web administration, and CLI registration entry points.
 package routenames
 
-import "regexp"
+import "github.com/bucketvcs/bucketvcs/internal/repo/keys"
 
-// nameRE is the canonical character class for tenant and repo names.
-// A name must be non-empty and consist solely of ASCII letters, digits,
-// dots, underscores, and hyphens.
-var nameRE = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
-
-// ValidateName reports whether s is an acceptable tenant or repo name.
+// ValidateName reports whether s satisfies the durable-key identifier
+// contract: 1..128 ASCII letters, digits, underscores, or hyphens. Dots are
+// intentionally rejected because keys.NewRepo cannot represent them.
 func ValidateName(s string) bool {
-	return nameRE.MatchString(s)
+	return keys.ValidateID(s)
 }

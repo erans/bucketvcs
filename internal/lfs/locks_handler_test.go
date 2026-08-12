@@ -45,7 +45,7 @@ func newLocksHarness(t *testing.T) *locksTestHarness {
 	h.handler = lfs.NewHTTPHandler(lfs.Deps{
 		AuthStore:        authdb,
 		ActorFromContext: func(context.Context) *auth.Actor { return h.actor },
-		NewStore:         func(tenant, repo string) *lfs.Store { return nil }, // unused on locks routes
+		NewStore:         func(context.Context, string, string) (*lfs.Store, error) { return nil, nil }, // unused on locks routes
 		LocksStore:       h.store,
 	})
 	return h
@@ -166,7 +166,7 @@ func TestLocksCreate_LocksDisabledReturns503(t *testing.T) {
 	handler := lfs.NewHTTPHandler(lfs.Deps{
 		AuthStore:        authdb,
 		ActorFromContext: func(context.Context) *auth.Actor { return actor },
-		NewStore:         func(tenant, repo string) *lfs.Store { return nil },
+		NewStore:         func(context.Context, string, string) (*lfs.Store, error) { return nil, nil },
 		// LocksStore intentionally nil
 	})
 	body, _ := json.Marshal(lfs.LockRequest{Path: "a.psd"})
@@ -399,7 +399,7 @@ func TestLocksUnlock_LocksDisabledReturns503(t *testing.T) {
 	handler := lfs.NewHTTPHandler(lfs.Deps{
 		AuthStore:        authdb,
 		ActorFromContext: func(context.Context) *auth.Actor { return actor },
-		NewStore:         func(tenant, repo string) *lfs.Store { return nil },
+		NewStore:         func(context.Context, string, string) (*lfs.Store, error) { return nil, nil },
 		// LocksStore nil
 	})
 	req := httptest.NewRequest(http.MethodPost,
@@ -431,7 +431,7 @@ func newLocksHarnessWithLogger(t *testing.T, buf *bytes.Buffer) *locksTestHarnes
 	h.handler = lfs.NewHTTPHandler(lfs.Deps{
 		AuthStore:        authdb,
 		ActorFromContext: func(context.Context) *auth.Actor { return h.actor },
-		NewStore:         func(tenant, repo string) *lfs.Store { return nil },
+		NewStore:         func(context.Context, string, string) (*lfs.Store, error) { return nil, nil },
 		LocksStore:       h.store,
 		Logger:           logger,
 	})

@@ -117,13 +117,16 @@ func (s *Service) CheckPaths(ctx context.Context, tenant, repo, refname string,
 	if err != nil {
 		return fmt.Errorf("policy: check paths: %w", err)
 	}
+	// One budget spans every applicable rule and changed path in this push;
+	// per-match limits alone can be multiplied by a large change set.
+	budget := &pathMatchBudget{limit: maxCheckPathsMatchStates}
 	for _, rule := range rules {
 		refOK, perr := path.Match(rule.RefnamePattern, refname)
 		if perr != nil || !refOK {
 			continue
 		}
 		for _, changed := range changedPaths {
-			pathOK, perr := MatchPath(rule.PathPattern, changed)
+			pathOK, perr := matchPathWithBudget(rule.PathPattern, changed, budget)
 			if perr != nil {
 				return fmt.Errorf("policy: check paths: bad pattern %q: %w",
 					rule.PathPattern, perr)

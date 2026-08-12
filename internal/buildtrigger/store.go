@@ -13,7 +13,6 @@ import (
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/auth/sqlitestore"
-	"github.com/bucketvcs/bucketvcs/internal/gateway/routenames"
 	"github.com/bucketvcs/bucketvcs/internal/policy"
 )
 
@@ -33,6 +32,23 @@ func New(db sqlitestore.Querier) *Service {
 // Create inserts a new trigger with a server-generated secret (for
 // generic/cloudbuild kinds). Returns the Trigger with Secret populated
 // (shown once). Subsequent reads return empty Secret + a SecretPreview.
+// validTriggerName preserves the historical build-trigger label contract.
+// Trigger labels are database/UI labels, not durable-key path segments, so
+// dots remain valid even though tenant/repository identifiers reject them.
+func validTriggerName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Service) Create(ctx context.Context, in TriggerInput) (Trigger, error) {
 	if in.Tenant == "" {
 		return Trigger{}, fmt.Errorf("%w: tenant must not be empty", ErrInvalidInput)
@@ -43,7 +59,7 @@ func (s *Service) Create(ctx context.Context, in TriggerInput) (Trigger, error) 
 	if in.Name == "" {
 		return Trigger{}, fmt.Errorf("%w: name must not be empty", ErrInvalidInput)
 	}
-	if !routenames.ValidateName(in.Name) {
+	if !validTriggerName(in.Name) {
 		return Trigger{}, fmt.Errorf("%w: invalid name %q", ErrInvalidInput, in.Name)
 	}
 
@@ -233,7 +249,7 @@ func (s *Service) Edit(ctx context.Context, id string, in EditInput) (Trigger, e
 	if err != nil {
 		return Trigger{}, err
 	}
-	if in.Name == "" || !routenames.ValidateName(in.Name) {
+	if !validTriggerName(in.Name) {
 		return Trigger{}, fmt.Errorf("%w: invalid name %q", ErrInvalidInput, in.Name)
 	}
 	ttl := in.TokenTTL

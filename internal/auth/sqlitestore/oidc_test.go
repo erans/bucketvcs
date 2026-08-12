@@ -3,6 +3,7 @@ package sqlitestore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -26,6 +27,41 @@ func TestMigration0010_OIDCTablesAndSystemUser(t *testing.T) {
 	if _, err := s.db.ExecContext(ctx,
 		`INSERT INTO oidc_issuers (alias, issuer_url, created_at) VALUES ('gh','https://i',1)`); err != nil {
 		t.Fatalf("insert issuer: %v", err)
+	}
+}
+
+func TestAddOIDCIssuer_ValidatesAndPreservesExactIssuerIdentity_U18(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	for _, raw := range []string{
+		"http://issuer.example", "issuer.example", " https://issuer.example",
+		"https://", "https://user@issuer.example", "https://issuer.example?q=1",
+		"https://issuer.example#fragment",
+	} {
+		if err := s.AddOIDCIssuer(ctx, "bad", raw); err == nil {
+			t.Fatalf("AddOIDCIssuer(%q) succeeded, want validation error", raw)
+		}
+	}
+
+	const exact = "https://issuer.example/"
+	if err := s.AddOIDCIssuer(ctx, "exact", exact); err != nil {
+		t.Fatalf("add issuer: %v", err)
+	}
+	iss, err := s.FindOIDCIssuerByURL(ctx, exact)
+	if err != nil {
+		t.Fatalf("lookup exact issuer: %v", err)
+	}
+	if iss.IssuerURL != exact {
+		t.Fatalf("stored issuer = %q, want exact %q", iss.IssuerURL, exact)
+	}
+	if _, err := s.FindOIDCIssuerByURL(ctx, "https://issuer.example"); !errors.Is(err, ErrNoSuchOIDCIssuer) {
+		t.Fatalf("slash-free lookup matched distinct issuer identity: %v", err)
+	}
+
+	for i, raw := range []string{"http://localhost:8080/", "http://127.0.0.1:8080/", "http://[::1]:8080/"} {
+		if err := s.AddOIDCIssuer(ctx, fmt.Sprintf("loopback-%d", i), raw); err != nil {
+			t.Fatalf("loopback issuer %q rejected: %v", raw, err)
+		}
 	}
 }
 

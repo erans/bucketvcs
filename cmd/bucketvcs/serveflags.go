@@ -92,13 +92,14 @@ type serveFlags struct {
 	uiBrowseTimeout *time.Duration
 
 	// M24 Phase 1.5 — OIDC browser login (relying-party).
-	oidcLogin      *bool
-	oidcIssuer     *string
-	oidcClientID   *string
-	oidcSecretFile *string
-	oidcRedirect   *string
-	oidcScopes     *string
-	oidcLabel      *string
+	oidcLogin          *bool
+	oidcIssuer         *string
+	oidcClientID       *string
+	oidcSecretFile     *string
+	oidcRedirect       *string
+	oidcScopes         *string
+	oidcLabel          *string
+	oidcAllowEmailLink *bool
 
 	// M25 webhook egress policy (populated by repeatable fs.Func flags).
 	webhookAllowCIDRs []netip.Prefix
@@ -264,6 +265,12 @@ func registerServeFlags(fs *flag.FlagSet) *serveFlags {
 	sf.oidcRedirect = fs.String("oidc-login-redirect-url", "", "OAuth2 redirect URL, e.g. https://host/login/oidc/callback")
 	sf.oidcScopes = fs.String("oidc-login-scopes", "openid,email,profile", "Comma-separated OIDC scopes")
 	sf.oidcLabel = fs.String("oidc-login-label", "Single sign-on", "Login-page SSO button label")
+	// U-2: default true so OIDC onboarding works out of the box; explicit opt-out.
+	// When true, a first OIDC login with no pre-provisioned (issuer, subject)
+	// link resolves the user by verified email and pins the link (TOFU). Set
+	// false to require operators to pre-link identities.
+	sf.oidcAllowEmailLink = fs.Bool("oidc-login-allow-email-link", true,
+		"First OIDC login auto-links by verified email (TOFU); set false to require pre-provisioned identity links")
 
 	// M26 multi-region read replicas. Setting --replica-of activates
 	// replica mode: this gateway serves reads from --store (the regional

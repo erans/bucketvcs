@@ -115,10 +115,13 @@ func (s *server) handleAdminUserCreate(w http.ResponseWriter, r *http.Request) {
 				s.logger.Error("admin: rollback user after set-password failure", "user", name, "err", derr)
 			} else {
 				EmitAdminActionMetric(r.Context(), s.logger, "admin_users", "create", "error")
-				s.emitAdmin(r.Context(), "auth.user.created",
+				// U-20: the account no longer exists, so recording a successful
+				// creation would leave a phantom audit entry. Preserve the failed
+				// attempt as an explicit rollback event instead.
+				s.emitAdmin(r.Context(), "auth.user.create_rolled_back",
 					slog.String("user", name),
 					slog.Bool("is_admin", isAdmin),
-					slog.Bool("password_set", false),
+					slog.String("reason", "password_set_failed"),
 				)
 				s.redirectFlash(w, r, base, "user "+strconv.Quote(name)+" creation failed (password set error) — rolled back, please retry")
 				return

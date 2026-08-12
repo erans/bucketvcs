@@ -92,6 +92,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	uiEnabled, uiAddr, uiDir, uiSessionTTL, uiBrowseTimeout := sf.uiEnabled, sf.uiAddr, sf.uiDir, sf.uiSessionTTL, sf.uiBrowseTimeout
 	oidcLogin, oidcIssuer, oidcClientID := sf.oidcLogin, sf.oidcIssuer, sf.oidcClientID
 	oidcSecretFile, oidcRedirect, oidcScopes, oidcLabel := sf.oidcSecretFile, sf.oidcRedirect, sf.oidcScopes, sf.oidcLabel
+	oidcAllowEmailLink := sf.oidcAllowEmailLink
 	replicaOf, replicaCheckInterval, writeRegionURL := sf.replicaOf, sf.replicaCheckInterval, sf.writeRegionURL
 
 	if err := fs.Parse(args); err != nil {
@@ -838,16 +839,21 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			LFSProxiedURLSigningKey: signingKey,
 			LFSProxiedBaseURL:       *proxiedBaseURL,
 			LFSLocksStore:           lfsLocksStore,
-			Policy:                  policySvc,
-			Webhooks:                webhookSvc,
-			BuildTriggers:           buildSvc,
-			Hooks:                   hooksSvc,
-			Limiter:                 rateLimiter,
-			TrustProxyHeaders:       *trustProxyHeaders,
-			OIDCEnabled:             *oidcEnabled,
-			OIDCStore:               oidcStore,
-			OIDCVerifier:            oidcVerifier,
-			Replica:                 replicaCfg,
+			// U-16: quota enforcement (Batch CheckBatch) + proxied-verify
+			// charging (Quota.Add) were constructed here but never threaded
+			// into the gateway; quotaSvc is nil when --lfs=false, which the
+			// gateway treats as enforcement disabled.
+			Quota:             quotaSvc,
+			Policy:            policySvc,
+			Webhooks:          webhookSvc,
+			BuildTriggers:     buildSvc,
+			Hooks:             hooksSvc,
+			Limiter:           rateLimiter,
+			TrustProxyHeaders: *trustProxyHeaders,
+			OIDCEnabled:       *oidcEnabled,
+			OIDCStore:         oidcStore,
+			OIDCVerifier:      oidcVerifier,
+			Replica:           replicaCfg,
 			StoreResolver: func() gateway.ByobResolver {
 				if storeResolver == nil {
 					return nil
@@ -903,6 +909,8 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 					Scopes:      splitCSV(*oidcScopes),
 					Label:       *oidcLabel,
 					HMACKey:     hmacKey,
+					// U-2: wired from --oidc-login-allow-email-link (default true).
+					AllowEmailLink: *oidcAllowEmailLink,
 				}
 				logger.Info("oidc browser login enabled", "issuer", *oidcIssuer)
 			}
@@ -976,7 +984,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			if quotaSvc != nil {
 				webDeps.Quotas = quotaSvc
 				webDeps.QuotaReconcile = func(ctx context.Context, tenant string, dryRun bool) (quota.Report, error) {
-					return quotaSvc.Reconcile(ctx, store, tenant, dryRun)
+					return reconcileQuotaForTenant(ctx, quotaSvc, storeResolver, store, tenant, dryRun)
 				}
 			}
 			uiHandler = web.NewHandler(webDeps)
