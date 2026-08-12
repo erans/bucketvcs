@@ -64,22 +64,49 @@ func New(db sqlitestore.Querier, logger *slog.Logger) *Service {
 }
 
 // Set creates or updates a quota row.
+//
+// Creation path (no existing row): any orphan quota_credits rows are
+// swept first. Orphans can exist from damaged/pre-fix writes; a stale
+// credit for oid X would suppress the next post-Set Add(tenant, X, ...)
+// (n == 0 short-circuit) and permanently under-count used_bytes (U-10).
+// Sweeping at creation restarts the idempotency ledger empty; used_bytes
+// starts at 0 and reconcile remains the authoritative re-sync for
+// historical bytes.
+//
+// Update path (row exists): only limit_bytes/updated_at change. Credits
+// and used_bytes are preserved — deleting live credits would let a
+// re-verify double-count bytes already reflected in the counter.
 func (s *Service) Set(ctx context.Context, tenant string, limitBytes int64) error {
 	if limitBytes < 0 {
 		return fmt.Errorf("quota: limit must be >= 0 (got %d)", limitBytes)
 	}
 	now := time.Now().Unix()
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO quotas (tenant, limit_bytes, used_bytes, updated_at)
-		VALUES (?, ?, 0, ?)
-		ON CONFLICT(tenant) DO UPDATE SET
-			limit_bytes = excluded.limit_bytes,
-			updated_at  = excluded.updated_at
-	`, tenant, limitBytes, now)
-	if err != nil {
-		return fmt.Errorf("quota set %q: %w", tenant, err)
-	}
-	return nil
+	return s.db.RunInTx(ctx, func(tx sqlitestore.Tx) error {
+		var one int
+		err := tx.QueryRowContext(ctx,
+			`SELECT 1 FROM quotas WHERE tenant = ?`, tenant).Scan(&one)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("quota set %q: lookup: %w", tenant, err)
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			if _, err := tx.ExecContext(ctx,
+				`DELETE FROM quota_credits WHERE tenant = ?`, tenant); err != nil {
+				return fmt.Errorf("quota set %q: sweep orphan credits: %w", tenant, err)
+			}
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO quotas (tenant, limit_bytes, used_bytes, updated_at)
+				VALUES (?, ?, 0, ?)`, tenant, limitBytes, now); err != nil {
+				return fmt.Errorf("quota set %q: insert: %w", tenant, err)
+			}
+			return nil
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE quotas SET limit_bytes = ?, updated_at = ? WHERE tenant = ?`,
+			limitBytes, now, tenant); err != nil {
+			return fmt.Errorf("quota set %q: update: %w", tenant, err)
+		}
+		return nil
+	})
 }
 
 // Get returns the current state. Exists=false when no row exists.
@@ -195,6 +222,19 @@ func (s *Service) Add(ctx context.Context, tenant, oid string, bytes int64) erro
 	}
 	now := time.Now().Unix()
 	return s.db.RunInTx(ctx, func(tx sqlitestore.Tx) error {
+		// Unlimited tenants (no quota row) are a genuine no-op (U-10): no
+		// credit insert, no counter write. A credit here would orphan into
+		// any later `quota set` and suppress the first post-Set increment
+		// for this oid (the under-count sweep-test documents).
+		var one int
+		err := tx.QueryRowContext(ctx,
+			`SELECT 1 FROM quotas WHERE tenant = ?`, tenant).Scan(&one)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil // no quota row — no-op, no credit (per doc above)
+		}
+		if err != nil {
+			return fmt.Errorf("quota add %q oid=%s: lookup: %w", tenant, oid, err)
+		}
 		res, err := tx.ExecContext(ctx, `
 			INSERT INTO quota_credits (tenant, oid, bytes, recorded_at)
 			VALUES (?, ?, ?, ?)

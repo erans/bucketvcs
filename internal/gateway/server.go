@@ -16,6 +16,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/hooks"
 	"github.com/bucketvcs/bucketvcs/internal/lfs"
 	"github.com/bucketvcs/bucketvcs/internal/lfs/locks"
+	"github.com/bucketvcs/bucketvcs/internal/lfs/quota"
 	"github.com/bucketvcs/bucketvcs/internal/mirror"
 	"github.com/bucketvcs/bucketvcs/internal/policy"
 	"github.com/bucketvcs/bucketvcs/internal/replica"
@@ -151,6 +152,17 @@ type Options struct {
 	// /info/lfs/locks/<id>/unlock) are dispatched to the LFS handler
 	// with this store attached. Ignored when LFSEnabled is false.
 	LFSLocksStore *locks.Store
+
+	// Quota enables M13.5 LFS quota enforcement + charging (U-16). When
+	// non-nil, it is threaded into both LFS dep surfaces: the Batch
+	// handler calls Quota.CheckBatch on every upload batch (rejecting
+	// over-limit tenants with per-object 507s) and the proxied verify
+	// handler calls Quota.Add after a successful verify (charging
+	// used_bytes once per (tenant, oid)). When nil, handlers behave
+	// exactly as pre-quota deployments: no enforcement, no charging.
+	// Ignored when LFSEnabled is false. Construct via
+	// internal/lfs/quota.New(authdb.DB(), logger).
+	Quota *quota.Service
 
 	// Policy enables M14 protected-refs enforcement in receive-pack
 	// step 8b. When nil, ref updates are accepted as in pre-M14
@@ -443,6 +455,7 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 			PresignTTL: ttl,
 			Logger:     opts.Logger,
 			LocksStore: opts.LFSLocksStore,
+			Quota:      opts.Quota,
 			Webhooks:   opts.Webhooks,
 
 			ReadOnlyReplica: opts.Replica != nil,
@@ -460,6 +473,7 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 				Resolver: opts.StoreResolver, // BYOB per-tenant routing for proxied LFS (U-7); nil keeps operator-store behavior
 				Key:      proxiedKey,
 				Logger:   opts.Logger,
+				Quota:    opts.Quota,
 				Webhooks: opts.Webhooks,
 
 				ReadOnlyReplica: opts.Replica != nil,
