@@ -33,12 +33,16 @@ func issueCSRF(w http.ResponseWriter, secure bool) string {
 }
 
 // checkCSRF returns true iff the form field matches the cookie (constant-time).
+// Uses PostForm (body only) to avoid query-string fixation.
 func checkCSRF(r *http.Request) bool {
 	c, err := r.Cookie(csrfCookieName)
 	if err != nil || c.Value == "" {
 		return false
 	}
-	form := r.PostFormValue(csrfFormField)
+	if err := r.ParseForm(); err != nil {
+		return false
+	}
+	form := r.PostForm.Get(csrfFormField)
 	if form == "" {
 		return false
 	}

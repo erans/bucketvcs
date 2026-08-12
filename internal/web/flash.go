@@ -28,7 +28,7 @@ func takeFlash(w http.ResponseWriter, r *http.Request) string {
 		return ""
 	}
 	http.SetCookie(w, &http.Cookie{
-		Name: flashCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true,
+		Name: flashCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: c.Secure, SameSite: http.SameSiteLaxMode,
 	})
 	b, err := base64.RawURLEncoding.DecodeString(c.Value)
 	if err != nil {

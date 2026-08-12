@@ -106,10 +106,26 @@ func (s *server) handleAdminUserCreate(w http.ResponseWriter, r *http.Request) {
 	passwordSet := false
 	if password != "" {
 		if err := s.store.SetPassword(r.Context(), name, password); err != nil {
-			// The user was already created, so a bare 500 would be misleading
-			// (a retry hits "user already exists"). Surface the partial state:
-			// the account exists but has no password.
 			s.logger.Error("admin: set password after create", "user", name, "err", err)
+			// Best-effort cleanup of the partially-created account so a retry
+			// does not hit "user already exists". If cleanup fails, fall back
+			// to the original flash that leaves the orphan visible to the
+			// operator; if it succeeds, surface a retryable flash.
+			if derr := s.store.DeleteUser(r.Context(), name); derr != nil {
+				s.logger.Error("admin: rollback user after set-password failure", "user", name, "err", derr)
+			} else {
+				EmitAdminActionMetric(r.Context(), s.logger, "admin_users", "create", "error")
+				// U-20: the account no longer exists, so recording a successful
+				// creation would leave a phantom audit entry. Preserve the failed
+				// attempt as an explicit rollback event instead.
+				s.emitAdmin(r.Context(), "auth.user.create_rolled_back",
+					slog.String("user", name),
+					slog.Bool("is_admin", isAdmin),
+					slog.String("reason", "password_set_failed"),
+				)
+				s.redirectFlash(w, r, base, "user "+strconv.Quote(name)+" creation failed (password set error) — rolled back, please retry")
+				return
+			}
 			EmitAdminActionMetric(r.Context(), s.logger, "admin_users", "create", "error")
 			s.emitAdmin(r.Context(), "auth.user.created",
 				slog.String("user", name),

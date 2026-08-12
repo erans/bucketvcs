@@ -125,9 +125,10 @@ func (s *server) browseError(w http.ResponseWriter, r *http.Request, err error) 
 
 // queryPage parses ?page= as a non-negative int (default 0).
 // maxLogPage caps ?page= so a crafted URL cannot force an O(history)
-// `git log --skip` walk on a large repo (2000 pages × 50/page reaches the
-// most recent 100k commits; beyond that the pager simply pins to the cap).
-const maxLogPage = 2000
+// `git log --skip` walk on a large repo (100 pages × 50/page = 5k commits
+// is enough for UI browsing; beyond that the pager pins to the cap to avoid
+// resource exhaustion).
+const maxLogPage = 100
 
 func queryPage(r *http.Request) int {
 	n, err := strconv.Atoi(r.URL.Query().Get("page"))
@@ -294,8 +295,9 @@ func (s *server) handleRaw(w http.ResponseWriter, r *http.Request, br browseRout
 		w.Header().Set("Content-Disposition", "attachment; filename*=UTF-8''"+rfc5987Encode(filepath.Base(res.Path)))
 	} else {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Header().Set("Content-Disposition", "inline")
+		w.Header().Set("Content-Disposition", "attachment; filename*=UTF-8''"+rfc5987Encode(filepath.Base(res.Path)))
 	}
+	w.Header().Set("X-Frame-Options", "DENY")
 	EmitRequestMetric(r.Context(), s.logger, "raw", http.StatusOK)
 	_, _ = w.Write(b.Bytes)
 }
@@ -398,8 +400,10 @@ func (s *server) handleCompare(w http.ResponseWriter, r *http.Request, br browse
 		base := r.URL.Query().Get("base")
 		head := r.URL.Query().Get("head")
 		if base != "" && head != "" {
-			http.Redirect(w, r, "/"+br.tenant+"/"+br.repo+"/compare/"+base+".."+head, http.StatusSeeOther)
-			return
+			if isValidCompareSpec(base) && isValidCompareSpec(head) {
+				http.Redirect(w, r, "/"+br.tenant+"/"+br.repo+"/compare/"+base+".."+head, http.StatusSeeOther)
+				return
+			}
 		}
 		if base == "" {
 			base = refs.Default
@@ -475,6 +479,40 @@ func (s *server) header(w http.ResponseWriter, r *http.Request, br browseRoute, 
 		Tenant: br.tenant, Repo: br.repo, Ref: ref, OID: oid, Refs: refs,
 		CanAdmin: s.canAdminRepo(r, br.tenant, br.repo),
 	}
+}
+
+// isValidCompareSpec validates base/head query params before reflecting them
+// into a Location redirect. Rejects control chars, URL delimiters, and
+// traversal sequences that would break the canonical /compare/<base>..<head>
+// contract. Accepts 40-hex OIDs or ref names (allowing '/' and '-' but not
+// '//' or '..').
+func isValidCompareSpec(s string) bool {
+	if s == "" || len(s) > 256 {
+		return false
+	}
+	if strings.Contains(s, "\r") || strings.Contains(s, "\n") || strings.Contains(s, "\x00") {
+		return false
+	}
+	if strings.Contains(s, "?") || strings.Contains(s, "#") || strings.Contains(s, "%") {
+		return false
+	}
+	if strings.Contains(s, "..") || strings.Contains(s, "//") || strings.Contains(s, "\\") {
+		return false
+	}
+	if browsemodel.IsHex40(s) {
+		return true
+	}
+	// Ref name: allow alphanum, '/', '-', '_', '.', but must not start/end with '/' or '.'
+	for _, c := range s {
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '/' || c == '-' || c == '_' || c == '.' {
+			continue
+		}
+		return false
+	}
+	if strings.HasPrefix(s, "/") || strings.HasSuffix(s, "/") || strings.HasPrefix(s, ".") {
+		return false
+	}
+	return true
 }
 
 // renderBrowse renders a browse page to a buffer (so a render error becomes a
