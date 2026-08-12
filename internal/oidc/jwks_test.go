@@ -32,6 +32,7 @@ func newIssuerServer(t *testing.T, keys map[string]*rsa.PrivateKey, jwksHits *in
 }
 
 func TestVerifierVerify(t *testing.T) {
+	t.Setenv("OIDC_ALLOW_LOOPBACK", "1")
 	key := newRSAKey(t)
 	var hits int32
 	srv := newIssuerServer(t, map[string]*rsa.PrivateKey{"k1": key}, &hits)

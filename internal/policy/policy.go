@@ -13,6 +13,8 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/repo/oidconst"
 )
 
+var mergeBaseSem = make(chan struct{}, 4)
+
 // ProtectedRef is one row in the protected_refs table.
 type ProtectedRef struct {
 	Tenant         string
@@ -212,7 +214,15 @@ func (s *Service) CheckUpdate(ctx context.Context, tenant, repo, bareDir string,
 //	exit 1 -> not ancestor (non-FF; reject)
 //	exit 2 or other -> error (corrupt bare, missing OID, etc.)
 func isFastForward(ctx context.Context, bareDir, oldOID, newOID string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "--no-replace-objects", "-C", bareDir,
+	select {
+	case mergeBaseSem <- struct{}{}:
+		defer func() { <-mergeBaseSem }()
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, "git", "--no-replace-objects", "-C", bareDir,
 		"merge-base", "--is-ancestor", oldOID, newOID)
 	stderr := &bytes.Buffer{}
 	cmd.Stderr = stderr

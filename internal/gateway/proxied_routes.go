@@ -203,7 +203,6 @@ func isHex(s string, n int) bool {
 		switch {
 		case c >= '0' && c <= '9':
 		case c >= 'a' && c <= 'f':
-		case c >= 'A' && c <= 'F':
 		default:
 			return false
 		}
@@ -211,7 +210,8 @@ func isHex(s string, n int) bool {
 	return true
 }
 
-// storeForTenant applies the shared BYOB store-selection policy (byob.StoreForTenant): the operator store is served only when the tenant's
+// storeForTenant applies the shared BYOB store-selection policy
+// (byob.StoreForTenant): the operator store is served only when the tenant's
 // binding is genuinely absent; every resolution error fails closed so proxied
 // fetches never silently read (or miss) content in the wrong bucket (U-5).
 func (h *proxiedHandler) storeForTenant(ctx context.Context, tenant string) (storage.ObjectStore, error) {

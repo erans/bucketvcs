@@ -10,6 +10,7 @@ import (
 )
 
 func TestDiscover(t *testing.T) {
+	t.Setenv("OIDC_ALLOW_LOOPBACK", "1")
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/.well-known/openid-configuration" {
@@ -36,6 +37,7 @@ func TestDiscover(t *testing.T) {
 }
 
 func TestDiscover_IssuerMismatch(t *testing.T) {
+	t.Setenv("OIDC_ALLOW_LOOPBACK", "1")
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{

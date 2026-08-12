@@ -64,10 +64,14 @@ func (r *StoreResolver) Resolve(ctx context.Context, tenant string) (storage.Obj
 		return e.store, nil
 	}
 	if ok && e.inflight != nil {
-		// Another goroutine is opening; wait for it.
+		// Another goroutine is opening; wait for it, respecting cancellation.
 		ch := e.inflight
 		r.mu.Unlock()
-		<-ch
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 		return r.Resolve(ctx, tenant) // re-enter to read result
 	}
 	// Cache miss or expired: take responsibility for opening.

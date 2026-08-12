@@ -60,7 +60,8 @@ func decodeOIDCStateWithNow(key []byte, enc string, now func() time.Time) (oidcS
 	if err := json.Unmarshal(payload, &st); err != nil {
 		return oidcState{}, errBadOIDCState
 	}
-	if st.Exp == 0 || now().Unix() > st.Exp {
+	// Allow 30s clock skew with an injectable clock for deterministic tests.
+	if st.Exp == 0 || now().Unix() > st.Exp+30 {
 		return oidcState{}, errBadOIDCState
 	}
 	return st, nil
