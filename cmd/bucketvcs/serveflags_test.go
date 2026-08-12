@@ -66,3 +66,41 @@ func TestRegisterServeFlags_BadDenyHost(t *testing.T) {
 type nullWriter struct{}
 
 func (nullWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+// TestRegisterServeFlags_OIDCAllowEmailLink is the U-2 regression: browser
+// OIDC first-login must auto-link by verified email (TOFU) out of the box,
+// with an explicit opt-out. Before the fix, OIDCProvider.AllowEmailLink was
+// never wired from any flag, so the callback always rejected first logins
+// with "no_user". The flag is asserted via fs.Lookup so the test fails at
+// runtime (not compile time) when the registration is missing.
+func TestRegisterServeFlags_OIDCAllowEmailLink(t *testing.T) {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	_ = registerServeFlags(fs)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatalf("parse defaults: %v", err)
+	}
+	f := fs.Lookup("oidc-login-allow-email-link")
+	if f == nil {
+		t.Fatal("flag oidc-login-allow-email-link not registered")
+	}
+	if f.DefValue != "true" {
+		t.Errorf("default = %q, want 'true' (TOFU on out of the box)", f.DefValue)
+	}
+	if f.Value.String() != "true" {
+		t.Errorf("value after default parse = %q, want 'true'", f.Value.String())
+	}
+
+	// Explicit opt-out must be honored.
+	fs2 := flag.NewFlagSet("serve", flag.ContinueOnError)
+	_ = registerServeFlags(fs2)
+	if err := fs2.Parse([]string{"--oidc-login-allow-email-link=false"}); err != nil {
+		t.Fatalf("parse opt-out: %v", err)
+	}
+	f2 := fs2.Lookup("oidc-login-allow-email-link")
+	if f2 == nil {
+		t.Fatal("flag oidc-login-allow-email-link not registered on second FlagSet")
+	}
+	if f2.Value.String() != "false" {
+		t.Errorf("opt-out value = %q, want 'false'", f2.Value.String())
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 )
@@ -58,11 +59,20 @@ func (s *Store) VerifyPassword(ctx context.Context, userName, plaintext string) 
 	)
 	if err := row.Scan(&id, &name, &adminInt, &disabled, &pwHash); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			// U-14: burn the verify cost before answering — an unknown user
+			// must take the same argon2id work as a known-user verify so
+			// the no-rows path doesn't enumerate valid usernames by timing.
+			// Verifying against a fixed dummy PHC (auth.HashSecret params)
+			// mirrors the known-user VerifyHash call below.
+			_ = auth.VerifyHash(plaintext, timingBurnPHC())
 			return nil, auth.ErrInvalidCredential
 		}
 		return nil, fmt.Errorf("lookup user: %w", err)
 	}
 	if !pwHash.Valid || pwHash.String == "" {
+		// Hash the plaintext with a fresh salt to burn ~100ms similar to
+		// VerifyHash, mitigating user-enumeration via timing.
+		_, _ = auth.HashSecret(plaintext)
 		return nil, auth.ErrInvalidCredential // no password set
 	}
 	if err := auth.VerifyHash(plaintext, pwHash.String); err != nil {
@@ -72,4 +82,25 @@ func (s *Store) VerifyPassword(ctx context.Context, userName, plaintext string) 
 		return nil, auth.ErrUserDisabled
 	}
 	return &auth.Actor{UserID: id, Name: name, IsAdmin: adminInt != 0, Scopes: auth.ScopeLegacy}, nil
+}
+
+var (
+	timingBurnPHCOnce sync.Once
+	timingBurnPHCVal  string
+)
+
+// timingBurnPHC lazily computes a fixed PHC-encoded dummy hash using
+// auth.HashSecret (same argon2id cost params as stored password hashes).
+// Lazy so import/init of the store package doesn't burn ~100ms on startup;
+// a crypto/rand failure is catastrophic process-wide, so we panic loud
+// (same convention as web's issueCSRF).
+func timingBurnPHC() string {
+	timingBurnPHCOnce.Do(func() {
+		h, err := auth.HashSecret("bucketvcs timing-burn dummy")
+		if err != nil {
+			panic("sqlitestore: hash timing-burn dummy PHC: " + err.Error())
+		}
+		timingBurnPHCVal = h
+	})
+	return timingBurnPHCVal
 }

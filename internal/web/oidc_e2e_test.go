@@ -26,6 +26,7 @@ import (
 // httptest.NewServer binds 127.0.0.1, which the discovery layer treats as a
 // loopback exception to its https-only rule — so http is allowed here.
 func TestOIDC_EndToEnd(t *testing.T) {
+	t.Setenv("OIDC_ALLOW_LOOPBACK", "1")
 	if testing.Short() {
 		t.Skip("e2e: real RSA keygen + HTTP discovery; skipped under -short")
 	}
@@ -113,14 +114,15 @@ func TestOIDC_EndToEnd(t *testing.T) {
 	stubURL = stub.URL
 
 	provider := &OIDCProvider{
-		Issuer:      stubURL,
-		ClientID:    "cid",
-		AuthURL:     stubURL + "/authorize",
-		TokenURL:    stubURL + "/token",
-		RedirectURL: stubURL + "/login/oidc/callback",
-		Scopes:      []string{"openid", "email"},
-		HMACKey:     []byte("0123456789abcdef0123456789abcdef"),
-		Verifier:    nil, // <- REAL verifier
+		Issuer:         stubURL,
+		ClientID:       "cid",
+		AuthURL:        stubURL + "/authorize",
+		TokenURL:       stubURL + "/token",
+		RedirectURL:    stubURL + "/login/oidc/callback",
+		Scopes:         []string{"openid", "email"},
+		HMACKey:        []byte("0123456789abcdef0123456789abcdef"),
+		Verifier:       nil, // <- REAL verifier
+		AllowEmailLink: true,
 	}
 
 	store := newFakeStore()

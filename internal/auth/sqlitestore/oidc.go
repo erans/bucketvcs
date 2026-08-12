@@ -7,18 +7,57 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 )
 
+// NormalizeOIDCIssuerURL validates an issuer URL at the trust boundary and
+// returns it byte-for-byte unchanged. Despite the historical function name,
+// an OIDC issuer is a protocol identity compared exactly against discovery
+// metadata and JWT `iss`; normalizing a trailing slash, host case, or path
+// would create a different issuer. HTTPS is required except for loopback HTTP.
+func NormalizeOIDCIssuerURL(raw string) (string, error) {
+	if raw == "" || strings.TrimSpace(raw) != raw {
+		return "", fmt.Errorf("oidc: issuer URL must be non-empty and contain no surrounding whitespace")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Opaque != "" || u.Host == "" {
+		return "", fmt.Errorf("oidc: invalid issuer URL %q", raw)
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("oidc: issuer URL must not contain userinfo, query, or fragment")
+	}
+	switch u.Scheme {
+	case "https":
+	case "http":
+		host := u.Hostname()
+		if !strings.EqualFold(host, "localhost") {
+			ip := net.ParseIP(host)
+			if ip == nil || !ip.IsLoopback() {
+				return "", fmt.Errorf("oidc: https required for non-loopback issuer %q", raw)
+			}
+		}
+	default:
+		return "", fmt.Errorf("oidc: https required for issuer %q", raw)
+	}
+	return raw, nil
+}
+
 // AddOIDCIssuer registers a trusted issuer. Returns auth.ErrConflict if the
 // alias or issuer_url already exists.
 func (s *Store) AddOIDCIssuer(ctx context.Context, alias, issuerURL string) error {
-	if alias == "" || issuerURL == "" {
-		return fmt.Errorf("oidc: alias and issuer_url required")
+	if alias == "" {
+		return fmt.Errorf("oidc: alias required")
 	}
-	_, err := s.db.ExecContext(ctx,
+	issuerURL, err := NormalizeOIDCIssuerURL(issuerURL)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO oidc_issuers (alias, issuer_url, created_at) VALUES (?, ?, `+s.backend.NowSeconds()+`)`,
 		alias, issuerURL)
 	if err != nil {
@@ -64,6 +103,8 @@ func (s *Store) RemoveOIDCIssuer(ctx context.Context, alias string) error {
 
 // FindOIDCIssuerByURL resolves an issuer by its exact URL.
 func (s *Store) FindOIDCIssuerByURL(ctx context.Context, issuerURL string) (auth.OIDCIssuer, error) {
+	// Exact comparison is required by OIDC and preserves rows registered
+	// before URL validation was added, including trailing-slash issuers.
 	row := s.db.QueryRowContext(ctx,
 		`SELECT alias, issuer_url, created_at FROM oidc_issuers WHERE issuer_url = ?`, issuerURL)
 	var i auth.OIDCIssuer

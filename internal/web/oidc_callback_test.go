@@ -39,6 +39,7 @@ func callbackEnv(t *testing.T, store DataStore, claims oidc.Claims, verr error) 
 			Scopes:      []string{"openid", "email"},
 			HMACKey:     []byte("0123456789abcdef0123456789abcdef"),
 			Verifier:    fakeVerifier{claims: claims, err: verr},
+			AllowEmailLink: true,
 		},
 	}
 	return NewHandler(dep), tokenSrv.Close

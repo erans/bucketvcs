@@ -41,6 +41,16 @@ type Deps struct {
 	// Optional: a nil function means every request is anonymous.
 	ActorFromContext func(context.Context) *auth.Actor
 
+	// ScopeFromContext returns the verified credential scope attached by
+	// upstream middleware (gateway.RunAuth via gateway.ScopeFromContext),
+	// or nil for unscoped credentials (ordinary user tokens). When a
+	// bound-to-(tenant, repo) scope is present, the Batch upload write
+	// check uses scope.Perm instead of re-deriving permission from the
+	// AuthStore: scoped owners (deploy keys, the synthetic _oidc user)
+	// hold no grant rows, so LookupRepoPerm would always deny them (U-1).
+	// Optional: nil means no scope is ever recovered.
+	ScopeFromContext func(context.Context) *auth.Scope
+
 	// NewStore is REQUIRED. It returns the per-repo lfs.Store for the
 	// given (tenant, repo), or an error when the per-tenant store cannot
 	// be resolved — resolution failures MUST NOT substitute the operator
@@ -293,20 +303,35 @@ func handleBatch(ctx context.Context, w http.ResponseWriter, r *http.Request, de
 		}
 		var perm auth.Perm
 		if actor != nil {
-			p, perr := deps.AuthStore.LookupRepoPerm(ctx, actor, tenant, repo)
-			if errors.Is(perr, auth.ErrNoSuchRepo) {
-				WriteError(w, http.StatusNotFound, "repository not found")
-				emitBatchRequestMetric(ctx, logger, req.Operation, "notfound")
-				emitLFSBatch(ctx, logger, tenant+"/"+repo, actorName(actor), req.Operation, 0, "notfound")
-				return
+			// U-1: a verified credential scope (deploy-key SSH / OIDC-minted
+			// token) carries the pre-authorized perm for exactly this
+			// (tenant, repo); its backing owner holds no grant rows, so
+			// re-deriving permission from the store would always deny. RunAuth
+			// already rejected cross-repo use; the tenant/repo equality here
+			// is a defensive re-assertion. Anything else falls through to the
+			// DB lookup (unchanged).
+			var sc *auth.Scope
+			if deps.ScopeFromContext != nil {
+				sc = deps.ScopeFromContext(ctx)
 			}
-			if perr != nil {
-				WriteError(w, http.StatusInternalServerError, "internal error")
-				emitBatchRequestMetric(ctx, logger, req.Operation, "error")
-				emitLFSBatch(ctx, logger, tenant+"/"+repo, actorName(actor), req.Operation, 0, "error")
-				return
+			if sc != nil && sc.Tenant == tenant && sc.Repo == repo {
+				perm = sc.Perm
+			} else {
+				p, perr := deps.AuthStore.LookupRepoPerm(ctx, actor, tenant, repo)
+				if errors.Is(perr, auth.ErrNoSuchRepo) {
+					WriteError(w, http.StatusNotFound, "repository not found")
+					emitBatchRequestMetric(ctx, logger, req.Operation, "notfound")
+					emitLFSBatch(ctx, logger, tenant+"/"+repo, actorName(actor), req.Operation, 0, "notfound")
+					return
+				}
+				if perr != nil {
+					WriteError(w, http.StatusInternalServerError, "internal error")
+					emitBatchRequestMetric(ctx, logger, req.Operation, "error")
+					emitLFSBatch(ctx, logger, tenant+"/"+repo, actorName(actor), req.Operation, 0, "error")
+					return
+				}
+				perm = p
 			}
-			perm = p
 		}
 		if ok, reason := auth.Decide(actor, perm, auth.ActionWrite, flags); !ok {
 			if actor == nil {

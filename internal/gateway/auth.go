@@ -15,6 +15,23 @@ import (
 
 const authRealm = `Basic realm="bucketvcs"`
 
+type tokenUsageJob struct {
+	store   auth.Store
+	tokenID string
+}
+
+var tokenUsageQueue = make(chan tokenUsageJob, 1024)
+
+func init() {
+	go func() {
+		for job := range tokenUsageQueue {
+			tctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			_ = job.store.TouchTokenUsage(tctx, job.tokenID)
+			cancel()
+		}
+	}()
+}
+
 // actorContextKey is the context key under which the authenticated actor is
 // stored after successful auth. Handlers retrieve it via ActorFromContext.
 type actorContextKey struct{}
@@ -22,6 +39,18 @@ type actorContextKey struct{}
 // ActorFromContext returns the authenticated actor or nil if anonymous.
 func ActorFromContext(ctx context.Context) *auth.Actor {
 	v, _ := ctx.Value(actorContextKey{}).(*auth.Actor)
+	return v
+}
+
+// scopeContextKey is the context key under which RunAuth stores the verified
+// credential scope (deploy-key SSH / OIDC-minted tokens). Handlers retrieve
+// it via ScopeFromContext.
+type scopeContextKey struct{}
+
+// ScopeFromContext returns the verified credential scope attached by RunAuth,
+// or nil when the credential is unscoped (ordinary user tokens).
+func ScopeFromContext(ctx context.Context) *auth.Scope {
+	v, _ := ctx.Value(scopeContextKey{}).(*auth.Scope)
 	return v
 }
 
@@ -79,6 +108,27 @@ func RunAuth(w http.ResponseWriter, r *http.Request, store auth.Store, rr *Route
 		}
 	}
 	if errors.Is(err, auth.ErrNoSuchRepo) {
+		// U-17: a syntactically present Basic header is not authentication.
+		// Verify it before revealing the 404; anonymous and invalid-credential
+		// probes receive the same 401 as an existing private repository.
+		user, pass, hasBasic := r.BasicAuth()
+		if !hasBasic {
+			challenge(w, "authentication required")
+			return nil, false
+		}
+		_, _, _, credErr := store.VerifyCredential(ctx, auth.BasicPassword{Username: user, Password: pass})
+		if credErr != nil {
+			if auth.IsCredentialError(credErr) {
+				limiter.MarkFailure(ip, basicUser)
+				ratelimit.EmitRateLimitMetric(ctx, logger, "failure_counted")
+				challenge(w, "invalid credentials")
+			} else {
+				http.Error(w, "internal error", http.StatusInternalServerError)
+			}
+			return nil, false
+		}
+		limiter.MarkSuccess(ip, basicUser)
+		ratelimit.EmitRateLimitMetric(ctx, logger, "success_reset")
 		http.Error(w, "not found", http.StatusNotFound)
 		return nil, false
 	}
@@ -105,15 +155,17 @@ func RunAuth(w http.ResponseWriter, r *http.Request, store auth.Store, rr *Route
 			}
 			return nil, false
 		}
-		// Best-effort last-used update off the hot path.
-		go func(id string) {
-			tctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-			defer cancel()
-			_ = store.TouchTokenUsage(tctx, id)
-		}(tokenID)
 		if scope != nil && (scope.Tenant != rr.Tenant || scope.Repo != rr.Repo) {
 			http.Error(w, "scope mismatch", http.StatusForbidden)
 			return nil, false
+		}
+		// U-21: record usage only after a scoped credential has passed its
+		// tenant/repo binding check. A forbidden cross-repo probe must not
+		// advance last_used_at.
+		select {
+		case tokenUsageQueue <- tokenUsageJob{store: store, tokenID: tokenID}:
+		default:
+			// Queue full — drop the update (best-effort, like before).
 		}
 		// Successful credential verification resets the rate-limit bucket
 		// (good behavior earns full quota back). Scope mismatch above is a
@@ -149,7 +201,15 @@ func RunAuth(w http.ResponseWriter, r *http.Request, store auth.Store, rr *Route
 		return nil, false
 	}
 
-	*r = *r.WithContext(context.WithValue(ctx, actorContextKey{}, actor))
+	// U-1: attach the verified scope alongside the actor so downstream
+	// handlers (the LFS batch handler upload write check) use the same
+	// pre-authorized permission instead of re-deriving it from grants the
+	// synthetic owner never holds.
+	ctx = context.WithValue(ctx, actorContextKey{}, actor)
+	if scope != nil {
+		ctx = context.WithValue(ctx, scopeContextKey{}, scope)
+	}
+	*r = *r.WithContext(ctx)
 	return actor, true
 }
 

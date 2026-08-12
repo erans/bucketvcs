@@ -40,11 +40,15 @@ type fakeStore struct {
 	hasPassword         func(ctx context.Context, userName string) (bool, error)
 
 	// token methods
-	listTokensForUser func(ctx context.Context, name string) ([]TokenInfo, error)
-	getTokenOwner     func(ctx context.Context, id string) (string, error)
-	createToken       func(ctx context.Context, id, userID, secretHash, label string, expiresAt *int64, scopes auth.TokenScope) error
-	revokeToken       func(ctx context.Context, id string) error
-	rotateToken       func(ctx context.Context, id, newSecretHash string) error
+	// tokensByUser is the honest token table: ListTokensForUser filters it by
+	// the userID argument (the U-3 fix keyed the API by user ID; a fake that
+	// ignores its argument would let a handler regression pass silently).
+	tokensByUser  map[string][]TokenInfo
+	listTokensErr error // optional error injection for ListTokensForUser
+	getTokenOwner func(ctx context.Context, id string) (string, error)
+	createToken   func(ctx context.Context, id, userID, secretHash, label string, expiresAt *int64, scopes auth.TokenScope) error
+	revokeToken   func(ctx context.Context, id string) error
+	rotateToken   func(ctx context.Context, id, newSecretHash string) error
 
 	// SSH key methods
 	listSSHKeysForUser func(ctx context.Context, userID string) ([]auth.SSHKey, error)
@@ -231,11 +235,11 @@ func (f *fakeStore) HasPassword(ctx context.Context, userName string) (bool, err
 	}
 	return true, nil
 }
-func (f *fakeStore) ListTokensForUser(ctx context.Context, name string) ([]TokenInfo, error) {
-	if f.listTokensForUser != nil {
-		return f.listTokensForUser(ctx, name)
+func (f *fakeStore) ListTokensForUser(ctx context.Context, userID string) ([]TokenInfo, error) {
+	if f.listTokensErr != nil {
+		return nil, f.listTokensErr
 	}
-	return nil, nil
+	return f.tokensByUser[userID], nil
 }
 func (f *fakeStore) GetTokenOwner(ctx context.Context, id string) (string, error) {
 	if f.getTokenOwner != nil {

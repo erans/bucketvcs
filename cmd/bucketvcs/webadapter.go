@@ -126,8 +126,8 @@ func (a *webAdapter) HasPassword(ctx context.Context, userName string) (bool, er
 	return a.s.HasPassword(ctx, userName)
 }
 
-func (a *webAdapter) ListTokensForUser(ctx context.Context, name string) ([]web.TokenInfo, error) {
-	rows, err := a.s.ListTokensForUser(ctx, name)
+func (a *webAdapter) ListTokensForUser(ctx context.Context, userID string) ([]web.TokenInfo, error) {
+	rows, err := a.s.ListTokensForUser(ctx, userID)
 	if err != nil {
 		return nil, err
 	}

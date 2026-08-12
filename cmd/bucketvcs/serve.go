@@ -92,6 +92,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	uiEnabled, uiAddr, uiDir, uiSessionTTL, uiBrowseTimeout := sf.uiEnabled, sf.uiAddr, sf.uiDir, sf.uiSessionTTL, sf.uiBrowseTimeout
 	oidcLogin, oidcIssuer, oidcClientID := sf.oidcLogin, sf.oidcIssuer, sf.oidcClientID
 	oidcSecretFile, oidcRedirect, oidcScopes, oidcLabel := sf.oidcSecretFile, sf.oidcRedirect, sf.oidcScopes, sf.oidcLabel
+	oidcAllowEmailLink := sf.oidcAllowEmailLink
 	replicaOf, replicaCheckInterval, writeRegionURL := sf.replicaOf, sf.replicaCheckInterval, sf.writeRegionURL
 
 	if err := fs.Parse(args); err != nil {
@@ -908,6 +909,8 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 					Scopes:      splitCSV(*oidcScopes),
 					Label:       *oidcLabel,
 					HMACKey:     hmacKey,
+					// U-2: wired from --oidc-login-allow-email-link (default true).
+					AllowEmailLink: *oidcAllowEmailLink,
 				}
 				logger.Info("oidc browser login enabled", "issuer", *oidcIssuer)
 			}

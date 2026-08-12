@@ -83,11 +83,16 @@ func runOIDCIssuer(ctx context.Context, args []string, stdout, stderr io.Writer)
 			return 1
 		}
 		defer st.Close()
-		if err := st.AddOIDCIssuer(ctx, *alias, *urlF); err != nil {
+		validatedURL, err := sqlitestore.NormalizeOIDCIssuerURL(*urlF)
+		if err != nil {
 			fmt.Fprintf(stderr, "oidc issuer add: %v\n", err)
 			return 1
 		}
-		fmt.Fprintf(stdout, "alias=%s  url=%s\n", *alias, *urlF)
+		if err := st.AddOIDCIssuer(ctx, *alias, validatedURL); err != nil {
+			fmt.Fprintf(stderr, "oidc issuer add: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "alias=%s  url=%s\n", *alias, validatedURL)
 		return 0
 	case "list":
 		fs := flag.NewFlagSet("oidc issuer list", flag.ContinueOnError)

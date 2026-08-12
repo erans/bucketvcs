@@ -42,7 +42,7 @@ func (s *server) handleTokensPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess := SessionFromContext(r.Context())
-	tokens, err := s.store.ListTokensForUser(r.Context(), sess.Name)
+	tokens, err := s.store.ListTokensForUser(r.Context(), sess.UserID)
 	if err != nil {
 		s.logger.Error("tokens: list", "err", err)
 		s.renderError(w, r, http.StatusInternalServerError, "internal error")
@@ -84,6 +84,11 @@ func (s *server) handleTokenCreate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		EmitAdminActionMetric(r.Context(), s.logger, "token", "create", "invalid")
 		s.redirectFlash(w, r, "/settings/tokens", "invalid scopes: "+scopesStr)
+		return
+	}
+	if scopes == auth.ScopeLegacy {
+		EmitAdminActionMetric(r.Context(), s.logger, "token", "create", "invalid")
+		s.redirectFlash(w, r, "/settings/tokens", "legacy scope not allowed for new tokens — use 'all' or explicit scopes")
 		return
 	}
 	var expiresAt *int64

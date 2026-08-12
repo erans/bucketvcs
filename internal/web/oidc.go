@@ -137,6 +137,10 @@ func (s *server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	// 8. resolve user
 	actor, err := s.store.FindIdentity(r.Context(), s.oidc.Issuer, subject)
 	if errors.Is(err, auth.ErrNoSuchUser) {
+		if !s.oidc.AllowEmailLink {
+			reject(http.StatusUnauthorized, "no_user", email)
+			return
+		}
 		// TOFU: match by verified email, then pin (issuer, subject)
 		actor, err = s.store.FindUserByEmail(r.Context(), email)
 		if errors.Is(err, auth.ErrNoSuchUser) {

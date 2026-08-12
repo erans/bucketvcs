@@ -46,7 +46,7 @@ type bucket struct {
 // upstream allowlist (currently deferred; see spec §1.2).
 type Limiter struct {
 	cfg   Config
-	mu    sync.Mutex
+	mu    sync.RWMutex
 	perIP map[string]*bucket
 	stop  chan struct{}
 	wg    sync.WaitGroup
@@ -250,7 +250,10 @@ func (l *Limiter) sweepOnce() {
 		// Capture last-access BEFORE decayLocked overwrites it with `now`.
 		idle := now.Sub(b.lastDecay)
 		l.decayLocked(b, now)
-		if b.failures <= 0 || idle > idleCutoff {
+		// U-12: refill-disabled mode promises that only MarkSuccess clears a
+		// loaded bucket. Keep such buckets even after a long idle period;
+		// normal refill mode retains age-based eviction as its memory bound.
+		if b.failures <= 0 || (l.cfg.RefillPerMinute > 0 && idle > idleCutoff) {
 			delete(l.perIP, k)
 		}
 	}

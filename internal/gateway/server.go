@@ -437,6 +437,7 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 		s.lfsHandler = lfs.NewHTTPHandler(lfs.Deps{
 			AuthStore:        opts.AuthStore,
 			ActorFromContext: ActorFromContext,
+			ScopeFromContext: ScopeFromContext,
 			NewStore: func(ctx context.Context, tenant, repo string) (*lfs.Store, error) {
 				st, err := byob.StoreForTenant(ctx, s.resolver, s.store, tenant)
 				if err != nil {

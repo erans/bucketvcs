@@ -49,6 +49,7 @@ func (s *Server) handleOIDCExchange(w http.ResponseWriter, r *http.Request) {
 		writeOIDCError(w, http.StatusTooManyRequests, "slow_down", "rate limited")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB cap
 	if err := r.ParseForm(); err != nil {
 		emitOIDCMetric(ctx, s.logger, "bad_request")
 		writeOIDCError(w, http.StatusBadRequest, "invalid_request", "bad form")

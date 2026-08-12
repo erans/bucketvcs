@@ -106,7 +106,7 @@ func TestListTokensIncludesScopes(t *testing.T) {
 	if err := s.CreateToken(ctx, "tok2AAAAAAAAAAAAAAAAAAAA", uid, "h2", "b", nil, auth.ScopeRepoAdmin, "", "", ""); err != nil {
 		t.Fatalf("CreateToken 2: %v", err)
 	}
-	list, err := s.ListTokensForUser(ctx, "alice")
+	list, err := s.ListTokensForUser(ctx, uid)
 	if err != nil {
 		t.Fatalf("ListTokensForUser: %v", err)
 	}

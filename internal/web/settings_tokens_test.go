@@ -12,14 +12,14 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 )
 
-// tokensFixture builds a fakeStore with two tokens for "user1":
-// one active, one revoked.
+// tokensFixture builds a fakeStore with two tokens for user1's userID
+// ("user1": one active, one revoked.
 func tokensFixture() *fakeStore {
 	store := newFakeStore()
 	now := time.Now().Unix()
 	revoked := now - 60
-	store.listTokensForUser = func(ctx context.Context, name string) ([]TokenInfo, error) {
-		return []TokenInfo{
+	store.tokensByUser = map[string][]TokenInfo{
+		"user1": []TokenInfo{
 			{
 				ID:        "tok1AAAAAAAAAAAAAAAAAAA",
 				Label:     "ci-token",
@@ -33,7 +33,7 @@ func tokensFixture() *fakeStore {
 				CreatedAt: now - 7200,
 				RevokedAt: &revoked,
 			},
-		}, nil
+		},
 	}
 	return store
 }
@@ -107,8 +107,8 @@ func TestTokensPageRenders(t *testing.T) {
 func TestTokensPageExpiredState(t *testing.T) {
 	store := newFakeStore()
 	past := time.Now().Add(-time.Hour).Unix()
-	store.listTokensForUser = func(ctx context.Context, name string) ([]TokenInfo, error) {
-		return []TokenInfo{
+	store.tokensByUser = map[string][]TokenInfo{
+		"user1": []TokenInfo{
 			{
 				ID:        "tokExpAAAAAAAAAAAAAAAAA",
 				Label:     "expired-token",
@@ -116,7 +116,7 @@ func TestTokensPageExpiredState(t *testing.T) {
 				CreatedAt: time.Now().Add(-24 * time.Hour).Unix(),
 				ExpiresAt: &past,
 			},
-		}, nil
+		},
 	}
 	h := newTestHandler(store)
 	req := addSessionCookie(t, httptest.NewRequest(http.MethodGet, "/settings/tokens", nil), store, userSession())
@@ -130,7 +130,31 @@ func TestTokensPageExpiredState(t *testing.T) {
 	}
 }
 
-// --- POST /settings/tokens/create ---
+// TestTokensPageScopesToSessionUser pins the U-3 fix at the handler layer with
+// the now-honest fake: the page must list exactly the session user's tokens,
+// looked up by UserID — never another user's rows, and never a name-based
+// lookup (userSession().Name is "user", which must NOT match the table key
+// "user1").
+func TestTokensPageScopesToSessionUser(t *testing.T) {
+	store := newFakeStore()
+	store.tokensByUser = map[string][]TokenInfo{
+		"user1": []TokenInfo{{ID: "tokU1AAAAAAAAAAAAAAAAAA", Label: "mine-token", CreatedAt: time.Now().Unix()}},
+		"user2": []TokenInfo{{ID: "tokU2AAAAAAAAAAAAAAAAAA", Label: "other-token", CreatedAt: time.Now().Unix()}},
+	}
+	h := newTestHandler(store)
+	req := addSessionCookie(t, httptest.NewRequest(http.MethodGet, "/settings/tokens", nil), store, userSession())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200; body:\n%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "mine-token") {
+		t.Fatalf("own token missing; handler must list tokens by the session UserID:\n%s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "other-token") {
+		t.Fatalf("other user's token leaked onto the page:\n%s", rec.Body.String())
+	}
+}
 
 func TestTokenCreateFormSecurity(t *testing.T) {
 	store := newFakeStore()
