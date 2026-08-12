@@ -352,22 +352,20 @@ func TestHandler_Batch_RequestBodyTooLarge(t *testing.T) {
 
 // TestParseLFSPath_RejectsAdversarialNames covers the validRouteName
 // guard in parseLFSPath: tenant/repo segments must match the canonical
-// routenames.ValidateName character set [A-Za-z0-9._-], which rejects
-// path separators, control chars, and non-ASCII. Leading dots and
-// dot-sequences like ".." are syntactically valid names and are not
-// rejected by the validator — namespace escape would require a Path
-// separator (/), which routenames.ValidateName rejects.
+// durable-key routenames.ValidateName contract [A-Za-z0-9_-]{1,128},
+// which rejects dots as well as separators, controls, and non-ASCII.
 func TestParseLFSPath_RejectsAdversarialNames(t *testing.T) {
 	cases := []struct {
 		path      string
 		wantRoute lfsRoute
 		reason    string
 	}{
-		{"/acme/..git/info/lfs/objects/batch", lfsRouteBatch, "..git is syntactically valid per routenames.ValidateName"},
+		{"/acme/..git/info/lfs/objects/batch", lfsRouteNone, "dots violate durable-key naming"},
 		{"/../acme.git/info/lfs/objects/batch", lfsRouteNone, "tenant is '..' but path is not clean (/../)"},
 		{"/./acme.git/info/lfs/objects/batch", lfsRouteNone, "tenant is '.' but path is not clean (/./)"},
-		{"/acme/.hidden.git/info/lfs/objects/batch", lfsRouteBatch, ".hidden.git is syntactically valid per routenames.ValidateName"},
-		{"/acme/foo.bar.git/info/lfs/objects/batch", lfsRouteBatch, "valid sanity-pin"},
+		{"/acme/.hidden.git/info/lfs/objects/batch", lfsRouteNone, "leading dot violates durable-key naming"},
+		{"/acme/foo.bar.git/info/lfs/objects/batch", lfsRouteNone, "dot violates durable-key naming"},
+		{"/acme/foo-bar.git/info/lfs/objects/batch", lfsRouteBatch, "valid sanity-pin"},
 		{"/acme/foo/../bar.git/info/lfs/objects/batch", lfsRouteNone, "path not clean: foo/../bar is traversal"},
 	}
 	for _, c := range cases {

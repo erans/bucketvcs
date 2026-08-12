@@ -59,7 +59,8 @@ func TestSplitTenantRepo_RejectsMultiSlash(t *testing.T) {
 		wantRepo string
 	}{
 		{in: "acme/foo", wantOK: true, wantTen: "acme", wantRepo: "foo"},
-		{in: "Acme.Co_1/repo-2", wantOK: true, wantTen: "Acme.Co_1", wantRepo: "repo-2"},
+		{in: "Acme_Co_1/repo-2", wantOK: true, wantTen: "Acme_Co_1", wantRepo: "repo-2"},
+		{in: "Acme.Co_1/repo-2", wantOK: false},
 		{in: "acme/foo/bar", wantOK: false},
 		{in: "acme", wantOK: false},
 		{in: "acme/", wantOK: false},

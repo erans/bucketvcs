@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
+	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 )
 
 // Store is the SQLite-backed implementation of auth.Store.
@@ -570,6 +571,9 @@ func (s *Store) RegisterRepoIfNew(ctx context.Context, tenant, name string) (boo
 // was new, drops any alias of the same name in the same transaction — a live
 // repo always shadows a stale alias.
 func (s *Store) registerRepo(ctx context.Context, tenant, name string) (bool, error) {
+	if !keys.ValidateID(tenant) || !keys.ValidateID(name) {
+		return false, fmt.Errorf("sqlitestore.registerRepo: tenant and repo must satisfy durable-key naming rules")
+	}
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{})
 	if err != nil {
 		return false, fmt.Errorf("sqlitestore.registerRepo: begin: %w", err)

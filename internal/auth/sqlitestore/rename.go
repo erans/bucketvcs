@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
+	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
 )
 
 // ErrRepoExists is returned by RenameRepo when the destination (tenant, name)
@@ -32,6 +33,12 @@ var ErrRepoExists = errors.New("sqlitestore: destination repo already exists")
 // layer. The API takes only the new bare name (not a tenant/name pair) to
 // make cross-tenant rename impossible by signature.
 func (s *Store) RenameRepo(ctx context.Context, tenant, oldName, newName string) error {
+	// Validate the destination at the storage boundary. Deliberately do not
+	// validate oldName: operators must be able to repair rows created before
+	// strict durable-key validation was introduced.
+	if !keys.ValidateID(tenant) || !keys.ValidateID(newName) {
+		return fmt.Errorf("sqlitestore.RenameRepo: tenant and destination must satisfy durable-key naming rules")
+	}
 	if newName == oldName {
 		return fmt.Errorf("sqlitestore.RenameRepo: new name equals old name")
 	}
