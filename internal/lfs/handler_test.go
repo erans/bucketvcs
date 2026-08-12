@@ -93,7 +93,7 @@ func newHandlerForTest(t *testing.T, store *Store, authStore *fakeAuth, actor *a
 	lfsH := NewHTTPHandler(Deps{
 		AuthStore:        authStore,
 		ActorFromContext: actorFromTestContext,
-		NewStore:         func(tenant, repo string) *Store { return store },
+		NewStore:         func(context.Context, string, string) (*Store, error) { return store, nil },
 		PresignTTL:       5 * time.Minute,
 		Logger:           captureLogger(&bytes.Buffer{}),
 	})
@@ -301,7 +301,7 @@ func TestNewHTTPHandler_PanicsOnNilAuthStore(t *testing.T) {
 			t.Fatal("expected panic on nil AuthStore")
 		}
 	}()
-	NewHTTPHandler(Deps{NewStore: func(string, string) *Store { return nil }})
+	NewHTTPHandler(Deps{NewStore: func(context.Context, string, string) (*Store, error) { return nil, nil }})
 }
 
 // TestNewHTTPHandler_PanicsOnNilNewStore is the companion check for
@@ -431,7 +431,7 @@ func newHandlerForTestWithUsage(t *testing.T, store *Store, authStore *fakeAuth,
 	lfsH := NewHTTPHandler(Deps{
 		AuthStore:        authStore,
 		ActorFromContext: actorFromTestContext,
-		NewStore:         func(tenant, repo string) *Store { return store },
+		NewStore:         func(context.Context, string, string) (*Store, error) { return store, nil },
 		PresignTTL:       5 * time.Minute,
 		Logger:           captureLogger(&bytes.Buffer{}),
 		Usage:            usage,

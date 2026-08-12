@@ -8,7 +8,8 @@ import (
 )
 
 // ByobResolver is satisfied by *byob.StoreResolver. Defined as an interface
-// to avoid a direct dependency on internal/byob from the gateway package.
+// to keep the gateway decoupled from the concrete resolver type; the shared
+// store-selection policy itself lives in byob.StoreForTenant.
 type ByobResolver interface {
 	Resolve(ctx context.Context, tenant string) (storage.ObjectStore, error)
 }

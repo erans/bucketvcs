@@ -262,7 +262,7 @@ func runDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 				nowUnix := time.Now().Unix()
 				var fails, warns, oks int
 				for _, b := range bindings {
-					plain, err := byob.Decrypt(encKey, b.CredsJSON)
+					plain, err := byob.DecryptForTenant(encKey, b.CredsJSON, b.Tenant) // tenant AAD; nil-AAD fallback keeps pre-U-8 rows checkable
 					if err != nil {
 						fails++
 						continue

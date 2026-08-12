@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bucketvcs/bucketvcs/internal/byob"
 	"github.com/bucketvcs/bucketvcs/internal/lfs/quota"
 	"github.com/bucketvcs/bucketvcs/internal/proxiedurl"
 	"github.com/bucketvcs/bucketvcs/internal/replica"
@@ -31,9 +32,17 @@ const maxLFSObjectSize = 5 << 30
 
 // ProxiedDeps is the dependency surface NewProxiedObjectHandler needs.
 type ProxiedDeps struct {
-	// Store is the underlying object store; LFS object bytes are
-	// written via PutIfAbsent and read via Get.
+	// Store is the operator's object store. When Resolver is nil it serves
+	// every tenant (pre-BYOB behavior); LFS object bytes are written via
+	// PutIfAbsent and read via Get.
 	Store storage.ObjectStore
+
+	// Resolver, when non-nil, selects the per-tenant BYOB store for each
+	// proxied transfer under the shared byob.StoreForTenant policy: the
+	// operator Store is admitted only when the tenant's binding is genuinely
+	// absent (auth.ErrNoSuchBinding); every resolution/decrypt/open error
+	// fails closed with a 500 and never touches the operator store (U-7).
+	Resolver byob.Resolver
 
 	// Key is the HMAC signing key shared with Store.WithProxied.
 	Key []byte
@@ -77,6 +86,7 @@ func NewProxiedObjectHandler(deps ProxiedDeps) http.Handler {
 	}
 	h := &proxiedObjectHandler{
 		store:           deps.Store,
+		resolver:        deps.Resolver,
 		key:             deps.Key,
 		logger:          deps.Logger,
 		now:             time.Now,
@@ -94,6 +104,7 @@ func NewProxiedObjectHandler(deps ProxiedDeps) http.Handler {
 
 type proxiedObjectHandler struct {
 	store           storage.ObjectStore
+	resolver        byob.Resolver
 	key             []byte
 	logger          *slog.Logger
 	now             func() time.Time
@@ -188,10 +199,10 @@ func (h *proxiedObjectHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if r.Method == http.MethodPut {
-		h.servePut(ctx, w, r, op, hash, oid, storageKey)
+		h.servePut(ctx, w, r, op, hash, tenant, oid, storageKey)
 		return
 	}
-	h.serveGet(ctx, w, r, op, hash, storageKey)
+	h.serveGet(ctx, w, r, op, hash, tenant, storageKey)
 }
 
 // splitProxiedLFSPath parses /_lfs/<tenant>/<repo>/<oid>. Validates
@@ -216,7 +227,24 @@ func splitProxiedLFSPath(p string) (tenant, repo, oid string, ok bool) {
 	return tenant, repo, oid, true
 }
 
-func (h *proxiedObjectHandler) servePut(ctx context.Context, w http.ResponseWriter, r *http.Request, op, hash, oid, key string) {
+// storeForTenant applies the shared BYOB store-selection policy (byob.StoreForTenant) per request: operator store only for a genuinely-absent
+// binding; resolution errors fail closed (U-7).
+func (h *proxiedObjectHandler) storeForTenant(ctx context.Context, tenant string) (storage.ObjectStore, error) {
+	return byob.StoreForTenant(ctx, h.resolver, h.store, tenant)
+}
+
+func (h *proxiedObjectHandler) servePut(ctx context.Context, w http.ResponseWriter, r *http.Request, op, hash, tenant, oid, key string) {
+	// Per-request store selection AFTER token verification (ServeHTTP's
+	// token gates run before any store call — order unchanged). Resolver
+	// error fails closed with 500; the operator store is admitted only for
+	// a genuinely-absent binding (U-7).
+	store, rerr := h.storeForTenant(ctx, tenant)
+	if rerr != nil {
+		http.Error(w, "storage error", http.StatusInternalServerError)
+		emitObjectServedMetric(ctx, h.logger, op, "error")
+		emitLFSObjectServed(ctx, h.logger, op, hash, 0, http.StatusInternalServerError)
+		return
+	}
 	body := http.MaxBytesReader(w, r.Body, maxLFSObjectSize)
 	defer body.Close()
 
@@ -224,7 +252,7 @@ func (h *proxiedObjectHandler) servePut(ctx context.Context, w http.ResponseWrit
 	teed := io.TeeReader(body, hasher)
 	cr := &countingReader{r: teed}
 
-	version, err := h.store.PutIfAbsent(ctx, key, cr, nil)
+	version, err := store.PutIfAbsent(ctx, key, cr, nil)
 
 	// MaxBytesReader error short-circuits before hash check — the hash
 	// is incomplete and the bytes were not stored. 413 with no
@@ -268,9 +296,11 @@ func (h *proxiedObjectHandler) servePut(ctx context.Context, w http.ResponseWrit
 	// mismatched bytes at an OID slot.
 	actualHash := hex.EncodeToString(hasher.Sum(nil))
 	if actualHash != oid {
-		// If we just wrote bad bytes, best-effort delete.
+		// If we just wrote bad bytes, delete exactly the version we created
+		// to avoid TOCTOU with a concurrent good PUT. Only delete when we
+		// were the writer (err==nil); ErrAlreadyExists means we didn't write.
 		if err == nil {
-			_ = h.store.DeleteIfVersionMatches(ctx, key, version)
+			_ = store.DeleteIfVersionMatches(ctx, key, version)
 		}
 		http.Error(w, "content hash mismatch", http.StatusUnprocessableEntity)
 		emitObjectServedMetric(ctx, h.logger, op, "hash_mismatch")
@@ -289,8 +319,16 @@ func (h *proxiedObjectHandler) servePut(ctx context.Context, w http.ResponseWrit
 	emitLFSObjectServed(ctx, h.logger, op, hash, cr.n, http.StatusOK)
 }
 
-func (h *proxiedObjectHandler) serveGet(ctx context.Context, w http.ResponseWriter, r *http.Request, op, hash, key string) {
-	meta, err := h.store.Head(ctx, key)
+func (h *proxiedObjectHandler) serveGet(ctx context.Context, w http.ResponseWriter, r *http.Request, op, hash, tenant, key string) {
+	// Same per-request selection as servePut (U-7).
+	store, rerr := h.storeForTenant(ctx, tenant)
+	if rerr != nil {
+		http.Error(w, "storage error", http.StatusInternalServerError)
+		emitObjectServedMetric(ctx, h.logger, op, "error")
+		emitLFSObjectServed(ctx, h.logger, op, hash, 0, http.StatusInternalServerError)
+		return
+	}
+	meta, err := store.Head(ctx, key)
 	if errors.Is(err, storage.ErrNotFound) {
 		http.Error(w, "not found", http.StatusNotFound)
 		emitObjectServedMetric(ctx, h.logger, op, "missing")
@@ -310,7 +348,7 @@ func (h *proxiedObjectHandler) serveGet(ctx context.Context, w http.ResponseWrit
 		emitLFSObjectServed(ctx, h.logger, op, hash, 0, http.StatusOK)
 		return
 	}
-	obj, err := h.store.Get(ctx, key, nil)
+	obj, err := store.Get(ctx, key, nil)
 	if err != nil {
 		http.Error(w, "storage error", http.StatusInternalServerError)
 		emitObjectServedMetric(ctx, h.logger, op, "error")
@@ -384,7 +422,17 @@ func (h *proxiedObjectHandler) serveVerify(ctx context.Context, w http.ResponseW
 		return
 	}
 
-	store := NewStore(h.store, RepoLFSPrefix(tenant, repo))
+	// Same per-request selection as servePut/serveGet; verify must read the
+	// tenant's store or cloud BYOB verify would probe the operator bucket
+	// (U-7).
+	base, rerr := h.storeForTenant(ctx, tenant)
+	if rerr != nil {
+		WriteError(w, http.StatusInternalServerError, "storage error")
+		emitVerifyRequestMetric(ctx, h.logger, "error")
+		emitLFSVerify(ctx, h.logger, repoFQN, "", oid, 0, "error")
+		return
+	}
+	store := NewStore(base, RepoLFSPrefix(tenant, repo))
 	err := Verify(ctx, store, oid, vreq.Size)
 	switch {
 	case err == nil:

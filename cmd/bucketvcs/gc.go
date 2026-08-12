@@ -64,6 +64,10 @@ func runGC(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "gc: --include-git-objects requires --lfs (default invocation already runs Git GC)")
 		return 2
 	}
+	if *byobKeyFile != "" && *authDBFlag == "" {
+		fmt.Fprintln(stderr, "gc: --byob-encryption-key requires --auth-db")
+		return 2
+	}
 	if *format != "text" && *format != "json" {
 		fmt.Fprintf(stderr, "gc: --format must be text or json (got %q)\n", *format)
 		return 2
@@ -81,10 +85,22 @@ func runGC(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 
 	var store storage.ObjectStore
-	if *repoFlag != "" && *authDBFlag != "" && *byobKeyFile != "" {
+	// When authdb is supplied, always inspect binding presence. A missing key
+	// for a present BYOB binding is an operational error, not permission to
+	// fall back to the operator store.
+	if *repoFlag != "" && *authDBFlag != "" {
 		tenantID, _, err2 := splitTenantRepo(*repoFlag)
 		if err2 == nil {
-			if ts, ok := openByobStore(ctx, tenantID, *authDBFlag, *byobKeyFile, stderr); ok {
+			ts, ok, berr := openByobStore(ctx, tenantID, *authDBFlag, *byobKeyFile)
+			if berr != nil {
+				// U-4: binding present but unresolvable (authdb/key/decrypt/
+				// open failure) — abort instead of silently GC-ing the
+				// operator store's same-named repo. Genuinely-absent
+				// bindings (ok==false, berr==nil) keep the --store fallback.
+				fmt.Fprintf(stderr, "gc: %v\n", berr)
+				return 1
+			}
+			if ok {
 				store = ts
 			}
 		}

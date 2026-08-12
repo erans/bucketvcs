@@ -137,6 +137,10 @@ func runMaintenance(ctx context.Context, args []string, stdout, stderr io.Writer
 		fmt.Fprintln(stderr, "maintenance: --repo and --all-repos are mutually exclusive")
 		return 2
 	}
+	if *byobKeyFile != "" && *authDBFlag == "" {
+		fmt.Fprintln(stderr, "maintenance: --byob-encryption-key requires --auth-db")
+		return 2
+	}
 	if *recentWindow < time.Hour {
 		fmt.Fprintf(stderr, "maintenance: --recent-window=%s is below the 1h minimum\n", *recentWindow)
 		return 2
@@ -172,10 +176,20 @@ func runMaintenance(ctx context.Context, args []string, stdout, stderr io.Writer
 	}
 
 	var store storage.ObjectStore
-	if *repoFlag != "" && *authDBFlag != "" && *byobKeyFile != "" {
+	// Supplying authdb opts this repo into binding inspection even when the
+	// key flag is accidentally omitted; a present binding must fail closed.
+	if *repoFlag != "" && *authDBFlag != "" {
 		tenantID, _, err2 := splitTenantRepo(*repoFlag)
 		if err2 == nil {
-			if ts, ok := openByobStore(ctx, tenantID, *authDBFlag, *byobKeyFile, stderr); ok {
+			ts, ok, berr := openByobStore(ctx, tenantID, *authDBFlag, *byobKeyFile)
+			if berr != nil {
+				// U-4: abort on binding-present resolution failure; never
+				// fall through to --store silently. Genuinely-absent
+				// bindings keep the fallback.
+				fmt.Fprintf(stderr, "maintenance: %v\n", berr)
+				return 1
+			}
+			if ok {
 				store = ts
 			}
 		}

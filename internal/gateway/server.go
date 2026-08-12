@@ -12,6 +12,7 @@ import (
 	"github.com/bucketvcs/bucketvcs/internal/auth"
 	"github.com/bucketvcs/bucketvcs/internal/auth/ratelimit"
 	"github.com/bucketvcs/bucketvcs/internal/buildtrigger"
+	"github.com/bucketvcs/bucketvcs/internal/byob"
 	"github.com/bucketvcs/bucketvcs/internal/hooks"
 	"github.com/bucketvcs/bucketvcs/internal/lfs"
 	"github.com/bucketvcs/bucketvcs/internal/lfs/locks"
@@ -210,10 +211,8 @@ type Options struct {
 	// (the default), the gateway behaves exactly as before BYOB: all
 	// tenants share the single store passed to NewServer.
 	//
-	// Note: the proxied URL handler routes (/_bundle/, /_pack/, /_lfs/)
-	// use the operator store directly and do NOT go through StoreResolver.
-	// Those routes sign/verify HMAC tokens against the operator store;
-	// per-tenant routing for proxied delivery is deferred.
+	// Proxied URL handlers (/_bundle/, /_pack/) now route through
+	// StoreResolver when non-nil, fixing BYOB tenant isolation.
 	StoreResolver ByobResolver
 
 	// Usage, when non-nil, receives operation-metering events
@@ -402,7 +401,7 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 		s.mux.HandleFunc("/healthz/replica", s.handleHealthzReplica)
 	}
 	if len(opts.ProxiedURLSigningKey) > 0 {
-		proxied := NewProxiedHandler(store, opts.ProxiedURLSigningKey, "/_bundle/", "/_pack/", s.logger, opts.Usage)
+		proxied := NewProxiedHandlerWithResolver(store, opts.StoreResolver, opts.ProxiedURLSigningKey, "/_bundle/", "/_pack/", s.logger, opts.Usage)
 		s.mux.Handle("/_bundle/", proxied)
 		s.mux.Handle("/_pack/", proxied)
 	}
@@ -426,16 +425,20 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 		s.lfsHandler = lfs.NewHTTPHandler(lfs.Deps{
 			AuthStore:        opts.AuthStore,
 			ActorFromContext: ActorFromContext,
-			NewStore: func(tenant, repo string) *lfs.Store {
-				st, err := s.resolveStore(context.Background(), tenant)
+			NewStore: func(ctx context.Context, tenant, repo string) (*lfs.Store, error) {
+				st, err := byob.StoreForTenant(ctx, s.resolver, s.store, tenant)
 				if err != nil {
-					st = s.store // fallback on error; lfs handler returns per-object errors
+					// U-6: fail closed. The shared BYOB policy admits the
+					// operator store only when the binding is genuinely
+					// absent; any resolution error surfaces as a
+					// request-level batch error (no silent substitution).
+					return nil, err
 				}
 				ls := lfs.NewStore(st, lfs.RepoLFSPrefix(tenant, repo))
 				if len(proxiedKey) >= 16 && proxiedBase != "" {
 					ls = ls.WithProxied(proxiedKey, proxiedBase, tenant, repo)
 				}
-				return ls
+				return ls, nil
 			},
 			PresignTTL: ttl,
 			Logger:     opts.Logger,
@@ -454,6 +457,7 @@ func NewServer(store storage.ObjectStore, opts Options) (*Server, error) {
 		if len(proxiedKey) >= 16 {
 			s.lfsObjectHandler = lfs.NewProxiedObjectHandler(lfs.ProxiedDeps{
 				Store:    store,
+				Resolver: opts.StoreResolver, // BYOB per-tenant routing for proxied LFS (U-7); nil keeps operator-store behavior
 				Key:      proxiedKey,
 				Logger:   opts.Logger,
 				Webhooks: opts.Webhooks,

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bucketvcs/bucketvcs/internal/byob"
 	"github.com/bucketvcs/bucketvcs/internal/gateway/routenames"
 	"github.com/bucketvcs/bucketvcs/internal/proxiedurl"
 	"github.com/bucketvcs/bucketvcs/internal/repo/keys"
@@ -29,11 +30,20 @@ import (
 // logger is used for served-* metrics and the proxied.url.served audit
 // event. If nil, slog.Default() is used.
 func NewProxiedHandler(store storage.ObjectStore, key []byte, bundlePrefix, packPrefix string, logger *slog.Logger, usage UsageSink) http.Handler {
+	return NewProxiedHandlerWithResolver(store, nil, key, bundlePrefix, packPrefix, logger, usage)
+}
+
+// NewProxiedHandlerWithResolver is like NewProxiedHandler but routes
+// through resolver when non-nil, fixing BYOB tenant isolation for proxied
+// bundle/pack delivery. When resolver is nil, behavior is identical to
+// NewProxiedHandler (operator store only, pre-BYOB).
+func NewProxiedHandlerWithResolver(store storage.ObjectStore, resolver ByobResolver, key []byte, bundlePrefix, packPrefix string, logger *slog.Logger, usage UsageSink) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &proxiedHandler{
 		store:        store,
+		resolver:     resolver,
 		key:          key,
 		bundlePrefix: bundlePrefix,
 		packPrefix:   packPrefix,
@@ -45,6 +55,7 @@ func NewProxiedHandler(store storage.ObjectStore, key []byte, bundlePrefix, pack
 
 type proxiedHandler struct {
 	store        storage.ObjectStore
+	resolver     ByobResolver
 	key          []byte
 	bundlePrefix string
 	packPrefix   string
@@ -200,11 +211,27 @@ func isHex(s string, n int) bool {
 	return true
 }
 
+// storeForTenant applies the shared BYOB store-selection policy (byob.StoreForTenant): the operator store is served only when the tenant's
+// binding is genuinely absent; every resolution error fails closed so proxied
+// fetches never silently read (or miss) content in the wrong bucket (U-5).
+func (h *proxiedHandler) storeForTenant(ctx context.Context, tenant string) (storage.ObjectStore, error) {
+	return byob.StoreForTenant(ctx, h.resolver, h.store, tenant)
+}
+
 func (h *proxiedHandler) serveObject(ctx context.Context, w *countingResponseWriter, r *http.Request, kind, hash, tenant, repo, key string, reqStart time.Time) {
 	rangeHdr := r.Header.Get("Range")
+	store, err := h.storeForTenant(ctx, tenant)
+	if err != nil {
+		// U-5: fail closed on resolution error. Serving the operator store
+		// here either leaks wrong-bucket content or 404s at tenant prefixes,
+		// which protocol-v2 clients read as "bundle GC'd" and answer with
+		// fallback full-clone storms.
+		http.Error(w, "storage error", http.StatusInternalServerError)
+		return
+	}
 	if rangeHdr == "" {
 		// Full object.
-		meta, err := h.store.Head(ctx, key)
+		meta, err := store.Head(ctx, key)
 		if err != nil {
 			writeStoreError(w, err)
 			return
@@ -219,7 +246,7 @@ func (h *proxiedHandler) serveObject(ctx context.Context, w *countingResponseWri
 		if r.Method == http.MethodHead {
 			return
 		}
-		obj, err := h.store.Get(ctx, key, nil)
+		obj, err := store.Get(ctx, key, nil)
 		if err != nil {
 			writeStoreError(w, err)
 			return
@@ -242,7 +269,7 @@ func (h *proxiedHandler) serveObject(ctx context.Context, w *countingResponseWri
 	// 206 with an empty body), and (b) populate Content-Range with the
 	// total instead of "/*". The extra round-trip is acceptable because
 	// the v2 client only fetches ranges a handful of times per session.
-	meta, herr := h.store.Head(ctx, key)
+	meta, herr := store.Head(ctx, key)
 	if herr != nil {
 		writeStoreError(w, herr)
 		return
@@ -275,7 +302,7 @@ func (h *proxiedHandler) serveObject(ctx context.Context, w *countingResponseWri
 		w.WriteHeader(http.StatusPartialContent)
 		return
 	}
-	rc, err := h.store.GetRange(ctx, key, start, end)
+	rc, err := store.GetRange(ctx, key, start, end)
 	if err != nil {
 		writeStoreError(w, err)
 		return

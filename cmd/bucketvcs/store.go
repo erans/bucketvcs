@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"time"
@@ -178,46 +177,52 @@ func openStoreWithCreds(rawURL string, credsJSON []byte) (storage.ObjectStore, e
 }
 
 // openByobStore looks up the per-tenant BYOB binding from authdb and opens
-// that store. Returns (store, true) when a binding exists; (nil, false) when
-// absent or on error — the caller falls back to the --store flag. Errors are
-// printed to stderr.
-func openByobStore(ctx context.Context, tenant, authDBPath, keyFile string, stderr io.Writer) (storage.ObjectStore, bool) {
-	rawKey, err := os.ReadFile(keyFile)
-	if err != nil {
-		fmt.Fprintf(stderr, "byob: read key: %v\n", err)
-		return nil, false
-	}
-	rawKey = bytes.TrimSpace(rawKey)
-	if len(rawKey) < 32 {
-		fmt.Fprintf(stderr, "byob: key must be >= 32 bytes\n")
-		return nil, false
-	}
+// that store. Three-way result, distinguishing the one sanctioned fallback
+// from operational failure (U-4):
+//
+//   - (store, true, nil)  — binding exists and resolved; caller uses it.
+//   - (nil, false, nil)   — binding genuinely absent (auth.ErrNoSuchBinding);
+//     the only case where the caller falls back to --store.
+//   - (nil, false, err)   — binding present but unresolvable (authdb error,
+//     key unreadable/too short, decrypt failure, open failure): callers must
+//     abort non-zero and never touch the operator store.
+//
+// Operation order matters: binding presence is checked before the key file is
+// touched, so a tenant with no binding keeps the --store fallback even when
+// key material is bad or missing. Creds decrypt under the tenant AAD
+// (DecryptForTenant), with the legacy nil-AAD row fallback intact.
+func openByobStore(ctx context.Context, tenant, authDBPath, keyFile string) (storage.ObjectStore, bool, error) {
 	authStore, _, err := openAuthDB(authDBPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "byob: authdb: %v\n", err)
-		return nil, false
+		return nil, false, fmt.Errorf("byob: authdb: %w", err)
 	}
 	defer authStore.Close()
 
 	b, err := authStore.GetStorageBinding(ctx, tenant)
 	if errors.Is(err, auth.ErrNoSuchBinding) {
-		return nil, false // no binding; caller uses --store
+		return nil, false, nil // no binding; caller uses --store
 	}
 	if err != nil {
-		fmt.Fprintf(stderr, "byob: binding lookup %s: %v\n", tenant, err)
-		return nil, false
+		return nil, false, fmt.Errorf("byob: binding lookup %s: %w", tenant, err)
 	}
-	plain, err := byob.Decrypt(rawKey[:32], b.CredsJSON)
+
+	rawKey, err := os.ReadFile(keyFile)
 	if err != nil {
-		fmt.Fprintf(stderr, "byob: decrypt creds %s: %v\n", tenant, err)
-		return nil, false
+		return nil, false, fmt.Errorf("byob: read key for tenant %s: %w", tenant, err)
+	}
+	rawKey = bytes.TrimSpace(rawKey)
+	if len(rawKey) < 32 {
+		return nil, false, fmt.Errorf("byob: key file for tenant %s must hold >= 32 bytes (got %d)", tenant, len(rawKey))
+	}
+	plain, err := byob.DecryptForTenant(rawKey[:32], b.CredsJSON, tenant)
+	if err != nil {
+		return nil, false, fmt.Errorf("byob: decrypt creds %s: %w", tenant, err)
 	}
 	s, err := openStoreWithCreds(b.StoreURL, plain)
 	if err != nil {
-		fmt.Fprintf(stderr, "byob: open store %s: %v\n", tenant, err)
-		return nil, false
+		return nil, false, fmt.Errorf("byob: open store %s: %w", tenant, err)
 	}
-	return s, true
+	return s, true, nil
 }
 
 // applyEnvToConfig layers env vars onto a Config seed produced by
