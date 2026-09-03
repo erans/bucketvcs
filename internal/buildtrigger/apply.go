@@ -19,25 +19,26 @@ type applyDoc struct {
 
 // applyTrigger is one entry in the declarative apply document.
 type applyTrigger struct {
-	Tenant       string   `yaml:"tenant"`
-	Repo         string   `yaml:"repo"`
-	Name         string   `yaml:"name"`
-	Kind         string   `yaml:"kind"`
-	URL          string   `yaml:"url"`
-	Secret       string   `yaml:"secret"`
-	AWSRegion    string   `yaml:"aws_region"`
-	AWSProject   string   `yaml:"aws_project"`
-	AWSConnector    string `yaml:"aws_connector"`
-	AzureWebhookURL string `yaml:"azure_webhook_url"`
-	AzureSigHeader  string `yaml:"azure_sig_header"`
-	AzureConnector  string `yaml:"azure_connector"`
-	AzureProject    string `yaml:"azure_project"`
-	AzurePipelineID int    `yaml:"azure_pipeline_id"`
+	Tenant          string   `yaml:"tenant"`
+	Repo            string   `yaml:"repo"`
+	Name            string   `yaml:"name"`
+	Kind            string   `yaml:"kind"`
+	URL             string   `yaml:"url"`
+	AllowHTTP       bool     `yaml:"allow_http"`
+	Secret          string   `yaml:"secret"`
+	AWSRegion       string   `yaml:"aws_region"`
+	AWSProject      string   `yaml:"aws_project"`
+	AWSConnector    string   `yaml:"aws_connector"`
+	AzureWebhookURL string   `yaml:"azure_webhook_url"`
+	AzureSigHeader  string   `yaml:"azure_sig_header"`
+	AzureConnector  string   `yaml:"azure_connector"`
+	AzureProject    string   `yaml:"azure_project"`
+	AzurePipelineID int      `yaml:"azure_pipeline_id"`
 	RefInclude      []string `yaml:"ref_include"`
-	RefExclude   []string `yaml:"ref_exclude"`
-	TokenMode    string   `yaml:"token_mode"`
-	TokenScopes  []string `yaml:"token_scopes"`
-	TokenTTL     string   `yaml:"token_ttl"`
+	RefExclude      []string `yaml:"ref_exclude"`
+	TokenMode       string   `yaml:"token_mode"`
+	TokenScopes     []string `yaml:"token_scopes"`
+	TokenTTL        string   `yaml:"token_ttl"`
 }
 
 // ApplyResult summarises what Apply changed.
@@ -130,6 +131,7 @@ func toInput(at applyTrigger) (TriggerInput, error) {
 		Kind:   Kind(at.Kind),
 		Config: Config{
 			URL:             at.URL,
+			AllowHTTP:       at.AllowHTTP,
 			Secret:          at.Secret,
 			AWSRegion:       at.AWSRegion,
 			AWSProject:      at.AWSProject,

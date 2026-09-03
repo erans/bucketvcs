@@ -131,7 +131,13 @@ func StartWorker(ctx context.Context, svc *Service, cfg WorkerConfig) {
 				wg.Add(1)
 				go func() {
 					defer func() { <-sem; wg.Done() }()
-					deliver(ctx, svc, client, cfg, row, logger)
+					// B18: detach shutdown cancellation from in-flight
+					// deliveries. With the parent ctx, a shutdown cancels
+					// every HTTP attempt and its result write, parking
+					// claimed rows in_flight until reclaim. The per-row
+					// HTTP timeout still bounds each delivery, and the
+					// wg.Wait() on shutdown bounds the drain.
+					deliver(context.WithoutCancel(ctx), svc, client, cfg, row, logger)
 				}()
 			}
 		}

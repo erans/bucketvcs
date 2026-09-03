@@ -221,8 +221,11 @@ func registerServeFlags(fs *flag.FlagSet) *serveFlags {
 		"absolute directory containing hook script files (required when --hooks-enabled=true)")
 	sf.hooksUnsafeNoSandbox = fs.Bool("hooks-unsafe-no-sandbox", false,
 		"run hooks without bwrap namespace isolation. REQUIRED on macOS/non-Linux. NOT multi-tenant safe.")
+	// A7: fail-closed default pinned. "allow" lets pushes proceed when
+	// hook enforcement itself is broken (missing script, sandbox
+	// failure) — exactly when policy matters most.
 	sf.hooksOnInternalError = fs.String("hooks-on-internal-error", "reject",
-		"behavior when a hook subprocess fails for non-rejection reasons: reject | allow")
+		"behavior when a hook subprocess fails for non-rejection reasons: reject (default, fail-closed) | allow (fail-open: pushes proceed unenforced)")
 	sf.hooksTimeoutSec = fs.Int("hooks-timeout-sec", 30,
 		"wall-clock timeout per hook subprocess")
 	sf.hooksCPUSec = fs.Int("hooks-cpu-sec", 10,

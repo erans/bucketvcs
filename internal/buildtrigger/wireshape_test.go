@@ -112,7 +112,7 @@ func TestWireShape_Generic(t *testing.T) {
 	svc, _ := newTestSvc(t)
 	tr, err := svc.Create(context.Background(), TriggerInput{
 		Tenant: "acme", Repo: "app", Name: "g", Kind: KindGeneric,
-		Config: Config{URL: srv.URL}, RefInclude: []string{"refs/heads/main"},
+		Config: Config{URL: srv.URL, AllowHTTP: true}, RefInclude: []string{"refs/heads/main"},
 		TokenMode: TokenInject,
 	})
 	if err != nil {
@@ -153,7 +153,7 @@ func TestWireShape_CloudBuild(t *testing.T) {
 	svc, _ := newTestSvc(t)
 	tr, err := svc.Create(context.Background(), TriggerInput{
 		Tenant: "acme", Repo: "app", Name: "cb", Kind: KindCloudBuild,
-		Config: Config{URL: srv.URL}, RefInclude: []string{"refs/heads/main"},
+		Config: Config{URL: srv.URL, AllowHTTP: true}, RefInclude: []string{"refs/heads/main"},
 		TokenMode: TokenInject,
 	})
 	if err != nil {
@@ -285,7 +285,7 @@ func TestWireShape_AzureWebhook(t *testing.T) {
 	svc, _ := newTestSvc(t)
 	tr, err := svc.Create(context.Background(), TriggerInput{
 		Tenant: "acme", Repo: "app", Name: "aw", Kind: KindAzureWebhook,
-		Config:     Config{AzureWebhookURL: srv.URL, Secret: secret},
+		Config:     Config{AzureWebhookURL: srv.URL, AllowHTTP: true, Secret: secret},
 		RefInclude: []string{"refs/heads/main"}, TokenMode: TokenInject,
 	})
 	if err != nil {
@@ -328,7 +328,7 @@ func TestWireShape_AzureWebhook_CustomHeaderAndUnsigned(t *testing.T) {
 	svc, _ := newTestSvc(t)
 	tr, err := svc.Create(context.Background(), TriggerInput{
 		Tenant: "acme", Repo: "app", Name: "awc", Kind: KindAzureWebhook,
-		Config:     Config{AzureWebhookURL: srv.URL, Secret: "s", AzureSigHeader: "X-Custom-Sig"},
+		Config:     Config{AzureWebhookURL: srv.URL, AllowHTTP: true, Secret: "s", AzureSigHeader: "X-Custom-Sig"},
 		RefInclude: []string{"refs/heads/main"},
 	})
 	if err != nil {
@@ -356,7 +356,7 @@ func TestWireShape_AzureWebhook_CustomHeaderAndUnsigned(t *testing.T) {
 	svc2, _ := newTestSvc(t)
 	if _, err := svc2.Create(context.Background(), TriggerInput{
 		Tenant: "acme", Repo: "app", Name: "awu", Kind: KindAzureWebhook,
-		Config:     Config{AzureWebhookURL: srv2.URL}, // no secret
+		Config:     Config{AzureWebhookURL: srv2.URL, AllowHTTP: true}, // no secret
 		RefInclude: []string{"refs/heads/main"},
 	}); err != nil {
 		t.Fatalf("create: %v", err)

@@ -6,6 +6,25 @@ import (
 	"testing"
 )
 
+// TestRegisterServeFlags_HooksFailClosedDefault is the A7 regression:
+// hook enforcement must fail closed out of the box. "allow" lets pushes
+// proceed when the enforcer itself is broken — exactly when policy
+// matters most — so the default must stay "reject".
+func TestRegisterServeFlags_HooksFailClosedDefault(t *testing.T) {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	_ = registerServeFlags(fs)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatalf("parse defaults: %v", err)
+	}
+	f := fs.Lookup("hooks-on-internal-error")
+	if f == nil {
+		t.Fatal("flag hooks-on-internal-error not registered")
+	}
+	if f.DefValue != "reject" {
+		t.Errorf("default = %q, want 'reject' (fail-closed)", f.DefValue)
+	}
+}
+
 // TestRegisterServeFlags_WebhookEgress verifies the repeatable M25 egress
 // flags accumulate into the serveFlags slices and that a malformed CIDR is
 // surfaced as a parse error.

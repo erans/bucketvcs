@@ -134,6 +134,11 @@ func TestStore_CreateValidation(t *testing.T) {
 		{Tenant: "acme", Repo: "app", Name: "n", Kind: KindGeneric, Config: Config{URL: "https://x"}, TokenMode: "bogus"},
 		// codebuild with AWSProject set but AWSRegion empty
 		{Tenant: "acme", Repo: "app", Name: "n", Kind: KindCodeBuild, Config: Config{AWSProject: "p", AWSRegion: ""}},
+		// A8: plaintext http without the explicit allow_http override
+		{Tenant: "acme", Repo: "app", Name: "n", Kind: KindGeneric, Config: Config{URL: "http://x"}},
+		{Tenant: "acme", Repo: "app", Name: "n", Kind: KindAzureWebhook, Config: Config{AzureWebhookURL: "http://x"}},
+		// non-http(s) scheme still rejected even with the override
+		{Tenant: "acme", Repo: "app", Name: "n", Kind: KindGeneric, Config: Config{URL: "ftp://x", AllowHTTP: true}},
 	}
 	for i, in := range bad {
 		if _, err := svc.Create(ctx, in); !errors.Is(err, ErrInvalidInput) {
@@ -182,6 +187,26 @@ func TestStore_DefaultsTokenModeAndScopes(t *testing.T) {
 	}
 	if gen.TokenTTL != 15*time.Minute {
 		t.Fatalf("default ttl=%v", gen.TokenTTL)
+	}
+}
+
+// TestCreate_PlaintextRequiresAllowHTTP is the A8 regression: URL-bearing
+// triggers require https unless allow_http explicitly acknowledges the
+// plaintext credential exposure.
+func TestCreate_PlaintextRequiresAllowHTTP(t *testing.T) {
+	svc, _ := newTestSvc(t)
+	ctx := context.Background()
+	tr, err := svc.Create(ctx, TriggerInput{Tenant: "acme", Repo: "app", Name: "plain",
+		Kind: KindGeneric, Config: Config{URL: "http://internal/hook", AllowHTTP: true}})
+	if err != nil {
+		t.Fatalf("allow_http plaintext should create: %v", err)
+	}
+	got, err := svc.Get(ctx, tr.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !got.Config.AllowHTTP {
+		t.Error("allow_http should round-trip through config_json")
 	}
 }
 
