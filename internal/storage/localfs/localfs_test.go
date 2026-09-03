@@ -250,6 +250,60 @@ func TestListPrefixDoesNotNarrowOnDirectoryBoundary(t *testing.T) {
 	}
 }
 
+// TestListPagination_SeesWritesBetweenPages is the B8 regression: the
+// memoized listing must never serve stale keys. A write between pages
+// invalidates the cache, so a paginated walk observes the new key.
+func TestListPagination_SeesWritesBetweenPages(t *testing.T) {
+	dir := t.TempDir()
+	s, err := localfs.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	put := func(k string) {
+		t.Helper()
+		if _, err := s.PutIfAbsent(ctx, k, bytes.NewReader([]byte("v")), nil); err != nil {
+			t.Fatalf("PutIfAbsent(%q): %v", k, err)
+		}
+	}
+	put("p/a")
+	put("p/b")
+	put("p/c")
+
+	// Prime the cache with a full listing.
+	if _, err := s.List(ctx, "p/", nil); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	// Mutate, then paginate one key per page across the mutation.
+	put("p/aa")
+	var got []string
+	token := ""
+	for {
+		page, err := s.List(ctx, "p/", &storage.ListOptions{MaxKeys: 1, ContinuationToken: token})
+		if err != nil {
+			t.Fatalf("List page: %v", err)
+		}
+		for _, md := range page.Objects {
+			got = append(got, md.Key)
+		}
+		if page.NextToken == "" {
+			break
+		}
+		token = page.NextToken
+	}
+	want := []string{"p/a", "p/aa", "p/b", "p/c"}
+	if len(got) != len(want) {
+		t.Fatalf("paginated keys = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("paginated keys = %v, want %v", got, want)
+		}
+	}
+}
+
 // TestListRejectsEscapingPrefix asserts List validates the prefix and
 // refuses to walk paths that could escape the bucket.
 func TestListRejectsEscapingPrefix(t *testing.T) {

@@ -6,7 +6,7 @@ import "log/slog"
 // completion of a mark phase. The audit=true field is the M8 contract
 // for §31 audit emission; M15 will route audit-tagged events to the
 // durable audit store without changing call sites.
-func LogMarkCompleted(logger *slog.Logger, repoID, markID string, manifestVersion uint64, txCount, packCount, idxCount int) {
+func LogMarkCompleted(logger *slog.Logger, repoID, markID string, manifestVersion uint64, txCount, packCount, idxCount, bundleCount, orphanMarkerCount int) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -19,12 +19,14 @@ func LogMarkCompleted(logger *slog.Logger, repoID, markID string, manifestVersio
 		"candidate_tx_records", txCount,
 		"candidate_canonical_packs", packCount,
 		"candidate_indexes", idxCount,
+		"candidate_bundles", bundleCount,
+		"candidate_orphan_markers", orphanMarkerCount,
 	)
 }
 
 // LogSweepCompleted emits an audit-tagged structured log line for the
 // completion of a sweep phase.
-func LogSweepCompleted(logger *slog.Logger, repoID, sweepID, markID string, deletedTx, deletedPacks, deletedIdx, skippedRevived, skippedRetention, skippedVersion, skippedNotFound, skippedDisarmed, errorsCount int) {
+func LogSweepCompleted(logger *slog.Logger, repoID, sweepID, markID string, deletedTx, deletedPacks, deletedIdx, deletedBundles, deletedOrphanMarkers, skippedRevived, skippedRetention, skippedVersion, skippedNotFound, skippedDisarmed, errorsCount int) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -37,6 +39,8 @@ func LogSweepCompleted(logger *slog.Logger, repoID, sweepID, markID string, dele
 		"deleted_tx_records", deletedTx,
 		"deleted_canonical_packs", deletedPacks,
 		"deleted_indexes", deletedIdx,
+		"deleted_bundles", deletedBundles,
+		"deleted_orphan_markers", deletedOrphanMarkers,
 		"skipped_revived", skippedRevived,
 		"skipped_retention_not_met", skippedRetention,
 		"skipped_version_mismatch", skippedVersion,

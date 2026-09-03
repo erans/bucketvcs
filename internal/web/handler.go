@@ -14,6 +14,11 @@ import (
 // DefaultSessionTTL is used when Deps.SessionTTL is zero.
 const DefaultSessionTTL = 168 * time.Hour
 
+// DefaultSessionMaxAge caps total session lifetime from creation when
+// Deps.SessionMaxAge is zero. Bounds the sliding TTL so active sessions
+// (including stolen cookies) cannot live forever.
+const DefaultSessionMaxAge = 24 * time.Hour
+
 // uiCSP is the strict policy for all UI responses. Possible because the UI has
 // zero inline styles/scripts (class-based chroma + diff classes). Blocks remote
 // README images by design (img-src 'self') — see the operator guide. The raw
@@ -29,14 +34,15 @@ func cspMiddleware(next http.Handler) http.Handler {
 
 // Deps are the web handler's dependencies (composition-root wired).
 type Deps struct {
-	Store      DataStore
-	Logger     *slog.Logger
-	Limiter    *ratelimit.Limiter // nil => no rate limiting
-	UIDir      string             // "" => embedded assets
-	SessionTTL time.Duration      // 0 => DefaultSessionTTL
-	TrustProxy bool               // for Secure-cookie / client-IP decisions
-	OIDC       *OIDCProvider      // nil => OIDC login disabled
-	Content    ContentStore       // nil => code browse disabled (routes 404)
+	Store         DataStore
+	Logger        *slog.Logger
+	Limiter       *ratelimit.Limiter // nil => no rate limiting
+	UIDir         string             // "" => embedded assets
+	SessionTTL    time.Duration      // 0 => DefaultSessionTTL
+	SessionMaxAge time.Duration      // 0 => DefaultSessionMaxAge; absolute cap from creation
+	TrustProxy    bool               // for Secure-cookie / client-IP decisions
+	OIDC          *OIDCProvider      // nil => OIDC login disabled
+	Content       ContentStore       // nil => code browse disabled (routes 404)
 
 	// Phase 3 admin services. All nil-able; nil disables the corresponding
 	// settings pages (they render a "not enabled" notice or 404).
@@ -58,6 +64,7 @@ type server struct {
 	limiter    *ratelimit.Limiter
 	render     *renderer
 	ttl        time.Duration
+	maxAge     time.Duration
 	trustProxy bool
 	mux        *http.ServeMux
 	oidc       *OIDCProvider
@@ -87,6 +94,9 @@ func NewHandler(d Deps) http.Handler {
 	if d.SessionTTL <= 0 {
 		d.SessionTTL = DefaultSessionTTL
 	}
+	if d.SessionMaxAge <= 0 {
+		d.SessionMaxAge = DefaultSessionMaxAge
+	}
 	r, err := newRenderer(d.UIDir)
 	if err != nil {
 		panic("web: parse templates: " + err.Error())
@@ -97,6 +107,7 @@ func NewHandler(d Deps) http.Handler {
 		limiter:        d.Limiter,
 		render:         r,
 		ttl:            d.SessionTTL,
+		maxAge:         d.SessionMaxAge,
 		trustProxy:     d.TrustProxy,
 		content:        d.Content,
 		mux:            http.NewServeMux(),
@@ -161,7 +172,7 @@ func NewHandler(d Deps) http.Handler {
 	s.mux.HandleFunc("/admin/sessions/revoke", s.handleAdminSessionRevoke)
 	s.mux.HandleFunc("/", s.handleLanding)
 
-	h := sessionMiddleware(s.store, s.ttl)(cspMiddleware(s.mux))
+	h := sessionMiddleware(s.store, s.ttl, s.maxAge)(cspMiddleware(s.mux))
 	return proxyHeaderWarningMiddleware(h, s.trustProxy, s.logger)
 }
 

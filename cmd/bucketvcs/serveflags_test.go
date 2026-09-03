@@ -6,6 +6,25 @@ import (
 	"testing"
 )
 
+// TestRegisterServeFlags_HooksFailClosedDefault is the A7 regression:
+// hook enforcement must fail closed out of the box. "allow" lets pushes
+// proceed when the enforcer itself is broken — exactly when policy
+// matters most — so the default must stay "reject".
+func TestRegisterServeFlags_HooksFailClosedDefault(t *testing.T) {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	_ = registerServeFlags(fs)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatalf("parse defaults: %v", err)
+	}
+	f := fs.Lookup("hooks-on-internal-error")
+	if f == nil {
+		t.Fatal("flag hooks-on-internal-error not registered")
+	}
+	if f.DefValue != "reject" {
+		t.Errorf("default = %q, want 'reject' (fail-closed)", f.DefValue)
+	}
+}
+
 // TestRegisterServeFlags_WebhookEgress verifies the repeatable M25 egress
 // flags accumulate into the serveFlags slices and that a malformed CIDR is
 // surfaced as a parse error.
@@ -67,12 +86,13 @@ type nullWriter struct{}
 
 func (nullWriter) Write(p []byte) (int, error) { return len(p), nil }
 
-// TestRegisterServeFlags_OIDCAllowEmailLink is the U-2 regression: browser
-// OIDC first-login must auto-link by verified email (TOFU) out of the box,
-// with an explicit opt-out. Before the fix, OIDCProvider.AllowEmailLink was
-// never wired from any flag, so the callback always rejected first logins
-// with "no_user". The flag is asserted via fs.Lookup so the test fails at
-// runtime (not compile time) when the registration is missing.
+// TestRegisterServeFlags_OIDCAllowEmailLink is the U-2/A1 regression:
+// browser OIDC first-login must NOT auto-link by verified email (TOFU)
+// unless the operator opts in. TOFU-by-email lets a compromised IdP
+// account sharing a victim's email take over the victim's user, so the
+// safe default is false (pre-provisioned identity links required). The
+// flag is asserted via fs.Lookup so the test fails at runtime (not
+// compile time) when the registration is missing.
 func TestRegisterServeFlags_OIDCAllowEmailLink(t *testing.T) {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	_ = registerServeFlags(fs)
@@ -83,24 +103,24 @@ func TestRegisterServeFlags_OIDCAllowEmailLink(t *testing.T) {
 	if f == nil {
 		t.Fatal("flag oidc-login-allow-email-link not registered")
 	}
-	if f.DefValue != "true" {
-		t.Errorf("default = %q, want 'true' (TOFU on out of the box)", f.DefValue)
+	if f.DefValue != "false" {
+		t.Errorf("default = %q, want 'false' (TOFU opt-in only)", f.DefValue)
 	}
-	if f.Value.String() != "true" {
-		t.Errorf("value after default parse = %q, want 'true'", f.Value.String())
+	if f.Value.String() != "false" {
+		t.Errorf("value after default parse = %q, want 'false'", f.Value.String())
 	}
 
-	// Explicit opt-out must be honored.
+	// Explicit opt-in must be honored.
 	fs2 := flag.NewFlagSet("serve", flag.ContinueOnError)
 	_ = registerServeFlags(fs2)
-	if err := fs2.Parse([]string{"--oidc-login-allow-email-link=false"}); err != nil {
-		t.Fatalf("parse opt-out: %v", err)
+	if err := fs2.Parse([]string{"--oidc-login-allow-email-link=true"}); err != nil {
+		t.Fatalf("parse opt-in: %v", err)
 	}
 	f2 := fs2.Lookup("oidc-login-allow-email-link")
 	if f2 == nil {
 		t.Fatal("flag oidc-login-allow-email-link not registered on second FlagSet")
 	}
-	if f2.Value.String() != "false" {
-		t.Errorf("opt-out value = %q, want 'false'", f2.Value.String())
+	if f2.Value.String() != "true" {
+		t.Errorf("opt-in value = %q, want 'true'", f2.Value.String())
 	}
 }

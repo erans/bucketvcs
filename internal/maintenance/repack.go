@@ -3,6 +3,7 @@ package maintenance
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -57,7 +58,12 @@ func Repack(ctx context.Context, bareDir string) (*RepackOutput, error) {
 		return nil, fmt.Errorf("repack: read trailer: %w", err)
 	}
 	// Bitmap is optional — pack-objects may skip it (empty pack, no refs).
+	// But only absence is benign (B15): a permission or I/O error here
+	// must fail the repack, not silently proceed without a bitmap.
 	if _, err := os.Stat(bitmapPath); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("repack: stat bitmap: %w", err)
+		}
 		bitmapPath = ""
 	}
 	return &RepackOutput{

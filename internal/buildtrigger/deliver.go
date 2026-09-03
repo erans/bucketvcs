@@ -37,6 +37,13 @@ func (d *httpDeliverer) Deliver(ctx context.Context, tr Trigger, p BuildPayload)
 	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
 		return 0, permanentf("egress denied: trigger URL scheme must be http or https")
 	}
+	// A8 defense in depth: triggers created before the create-time https
+	// gate (or via paths that bypass it) must still not POST minted
+	// credentials over plaintext. Fail permanent — no retry will fix a
+	// policy violation, and no token is minted for a refused delivery.
+	if strings.HasPrefix(url, "http://") && !tr.Config.AllowHTTP {
+		return 0, permanentf("egress denied: trigger URL is plaintext http and allow_http is not set (would leak minted credentials)")
+	}
 	var token string
 	if tr.TokenMode == TokenInject {
 		tok, err := d.mintFn(ctx, tr, p)

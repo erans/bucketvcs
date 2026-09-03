@@ -105,6 +105,7 @@ func TestGCBYOB_StoreOpenedFromBinding(t *testing.T) {
 		"--auth-db", dbPath,
 		"--byob-encryption-key", keyPath,
 		"--retention", "1s",
+		"--allow-short-retention",
 	}, &stdout, &stderr)
 
 	if code != 0 {
@@ -168,6 +169,7 @@ func TestGCBYOB_NoBindingFallsBackToStore(t *testing.T) {
 		"--auth-db", dbPath,
 		"--byob-encryption-key", keyPath,
 		"--retention", "1s",
+		"--allow-short-retention",
 	}, &stdout, &stderr)
 
 	if code != 0 {

@@ -341,6 +341,7 @@ func (l *Localfs) CompleteMultipartIfAbsent(ctx context.Context, upload storage.
 		_ = err
 	}
 
+	l.bumpListGen()
 	return storage.ObjectVersion{
 		Provider: "localfs",
 		Token:    sum,

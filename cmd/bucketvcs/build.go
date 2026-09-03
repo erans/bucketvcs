@@ -21,7 +21,7 @@ const buildUsage = `Usage: bucketvcs build <object> <action> [flags]
 
 Objects + actions:
   trigger add     --auth-db=<path> --tenant=<t> --repo=<r> --name=<n> --kind=<generic|cloudbuild|codebuild|azurewebhook|azurepipelines>
-                  generic/cloudbuild: --url=<https://...> [--secret=<s>]
+                  generic/cloudbuild: --url=<https://...> [--secret=<s>] [--allow-http]
                   codebuild:          --aws-region=<r> --aws-project=<p> [--aws-connector=<c>]
                   azurewebhook:       --azure-webhook-url=<u> [--secret=<s>] [--azure-sig-header=<h>]
                   azurepipelines:     --azure-connector=<c> --azure-project=<p> --azure-pipeline-id=<n>
@@ -112,6 +112,7 @@ func runBuildTriggerAdd(ctx context.Context, args []string, stdout, stderr io.Wr
 	name := fs.String("name", "", "Trigger name (required)")
 	kind := fs.String("kind", "", "Trigger kind: generic|cloudbuild|codebuild|azurewebhook|azurepipelines (required)")
 	urlFlag := fs.String("url", "", "Receiver URL (generic/cloudbuild)")
+	allowHTTP := fs.Bool("allow-http", false, "Acknowledge sending minted credentials over plaintext http (testing only; never for production)")
 	secret := fs.String("secret", "", "Shared secret (generic/cloudbuild; generated if omitted)")
 	awsRegion := fs.String("aws-region", "", "AWS region (codebuild)")
 	awsProject := fs.String("aws-project", "", "CodeBuild project name (codebuild)")
@@ -141,6 +142,7 @@ func runBuildTriggerAdd(ctx context.Context, args []string, stdout, stderr io.Wr
 		Kind:   buildtrigger.Kind(*kind),
 		Config: buildtrigger.Config{
 			URL:             *urlFlag,
+			AllowHTTP:       *allowHTTP,
 			Secret:          *secret,
 			AWSRegion:       *awsRegion,
 			AWSProject:      *awsProject,

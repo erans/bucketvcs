@@ -271,6 +271,51 @@ func TestSweep_CollectsUnreferencedDeltas(t *testing.T) {
 	}
 }
 
+// TestSweep_BundlesAndOrphanMarkers is the B1/B10 regression: retired
+// bundles and orphan .commit markers must be swept after retention
+// instead of leaking forever.
+func TestSweep_BundlesAndOrphanMarkers(t *testing.T) {
+	store, _ := localfs.Open(t.TempDir())
+	ctx := context.Background()
+	r, _ := repo.Create(ctx, store, "acme", "site", repo.CreateOptions{Actor: "u_test"})
+	k, _ := keys.NewRepo("acme", "site")
+
+	// Retired bundle (.bundle + .json sidecar), unreferenced by manifest.
+	gctest.PutEmpty(t, store, k.BundleKey("retired"))
+	gctest.PutEmpty(t, store, k.BundleManifestKey("retired"))
+	// Orphan marker: no sibling tx record.
+	gctest.PutEmpty(t, store, k.CommitMarkerKey("tx_gone"))
+
+	mark, err := gc.RunMark(ctx, store, r, gc.MarkOptions{Now: time.Now, RetentionSeconds: 1})
+	if err != nil {
+		t.Fatalf("RunMark: %v", err)
+	}
+	if len(mark.Candidates.Bundles) != 2 {
+		t.Fatalf("bundle candidates = %d, want 2 (.bundle + sidecar)", len(mark.Candidates.Bundles))
+	}
+	if len(mark.Candidates.OrphanMarkers) != 1 {
+		t.Fatalf("orphan marker candidates = %d, want 1", len(mark.Candidates.OrphanMarkers))
+	}
+
+	time.Sleep(1100 * time.Millisecond)
+
+	rep, err := gc.RunSweep(ctx, store, r, mark, gc.SweepOptions{Now: time.Now})
+	if err != nil {
+		t.Fatalf("RunSweep: %v", err)
+	}
+	if len(rep.Deleted.Bundles) != 2 {
+		t.Fatalf("deleted bundles = %d, want 2; report=%+v", len(rep.Deleted.Bundles), rep)
+	}
+	if len(rep.Deleted.OrphanMarkers) != 1 {
+		t.Fatalf("deleted orphan markers = %d, want 1; report=%+v", len(rep.Deleted.OrphanMarkers), rep)
+	}
+	for _, key := range []string{k.BundleKey("retired"), k.BundleManifestKey("retired"), k.CommitMarkerKey("tx_gone")} {
+		if _, err := store.Head(ctx, key); err == nil {
+			t.Errorf("swept key %q still exists", key)
+		}
+	}
+}
+
 func makePushTxBody() tx.Body {
 	return tx.Body{Type: "push", Actor: "u_test"}
 }

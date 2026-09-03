@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/auth"
+	"github.com/bucketvcs/bucketvcs/internal/auth/ratelimit"
 	"github.com/bucketvcs/bucketvcs/internal/gateway"
 )
 
@@ -30,6 +31,10 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			s.renderError(w, r, http.StatusBadRequest, "bad form")
 			return
 		}
+		// A10: warn on every login attempt behind a misconfigured proxy,
+		// not just once per process — Secure cookies are downgraded here
+		// and login attempts are low-volume, high-value signals.
+		warnIfProxyHeaderMismatched(r, s.trustProxy, s.logger)
 		if !checkCSRF(r) {
 			s.renderError(w, r, http.StatusForbidden, "invalid CSRF token")
 			return
@@ -37,12 +42,17 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		ip := gateway.ClientIP(r, s.trustProxy)
 		username := r.PostFormValue("username")
 		if s.limiter != nil {
-			if ok, retry, _ := s.limiter.CheckDetailed(ip, username); !ok {
+			if ok, retry, which := s.limiter.CheckDetailed(ip, username); !ok {
 				sec := int(retry.Seconds())
 				if sec < 1 {
 					sec = 1
 				}
+				bucket := "ip"
+				if which == ratelimit.BucketUser {
+					bucket = "user"
+				}
 				w.Header().Set("Retry-After", strconv.Itoa(sec))
+				s.logger.Warn("web: login rate-limited", "ip", ip, "bucket", bucket)
 				EmitLoginMetric(r.Context(), s.logger, "ratelimited", "password")
 				s.renderError(w, r, http.StatusTooManyRequests, "too many attempts; try again later")
 				return

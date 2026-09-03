@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"compress/zlib"
 	"context"
+	"crypto/rand"
 	"crypto/sha1"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/bucketvcs/bucketvcs/internal/gitcli"
@@ -260,6 +263,75 @@ func (s *ctxCheckStore) GetRange(ctx context.Context, key string, start, end int
 		return nil, err
 	}
 	return s.ObjectStore.GetRange(ctx, key, start, end)
+}
+
+// countingStore counts GetRange calls per key.
+type countingStore struct {
+	storage.ObjectStore
+	ranges *atomic.Int64
+}
+
+func (s *countingStore) GetRange(ctx context.Context, key string, start, end int64) (io.ReadCloser, error) {
+	s.ranges.Add(1)
+	return s.ObjectStore.GetRange(ctx, key, start, end)
+}
+
+// TestReader_Open_BoundedRangeGets is the B4 regression: verifying pack
+// integrity must not cost size/64KiB ranged GETs. A 300KiB incompressible
+// pack body would take 5+ round-trips under the old per-chunk ReadAt
+// loop; Open must do it in a constant handful (body stream + trailer).
+func TestReader_Open_BoundedRangeGets(t *testing.T) {
+	skipIfNoGit(t)
+	work := t.TempDir()
+	mustGit := func(args ...string) {
+		t.Helper()
+		out, err := gitcli.RunForTest(work, args...)
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	mustGit("init", "--initial-branch=main")
+	// Incompressible blob so the pack body stays well above 4 chunks.
+	big := make([]byte, 300*1024)
+	if _, err := rand.Read(big); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "big.bin"), big, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	mustGit("add", "big.bin")
+	mustGit("-c", "user.name=t", "-c", "user.email=t@e", "commit", "-m", "big")
+	bareDir := filepath.Join(t.TempDir(), "bare")
+	if err := gitcli.CloneBareMirror(context.Background(), work, bareDir); err != nil {
+		t.Fatalf("CloneBareMirror: %v", err)
+	}
+	out := t.TempDir()
+	prefix := filepath.Join(out, "pack")
+	id, err := gitcli.PackObjectsAll(context.Background(), bareDir, prefix)
+	if err != nil {
+		t.Fatalf("PackObjectsAll: %v", err)
+	}
+	packBytes, err := os.ReadFile(prefix + "-" + id + ".pack")
+	if err != nil {
+		t.Fatalf("ReadFile pack: %v", err)
+	}
+	if len(packBytes) < 4*64*1024 {
+		t.Skipf("pack body %d bytes too small to distinguish chunked hashing", len(packBytes))
+	}
+
+	store := newTestStore(t)
+	uploadFile(t, store, prefix+"-"+id+".pack", "p.pack")
+	uploadFile(t, store, prefix+"-"+id+".idx", "p.idx")
+	var n atomic.Int64
+	wrapped := &countingStore{ObjectStore: store, ranges: &n}
+	r, err := Open(context.Background(), wrapped, "p.pack", "p.idx")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer r.Close()
+	if got := n.Load(); got > 3 {
+		t.Fatalf("Open issued %d GetRange calls for a %d-byte pack, want <= 3 (streaming hash)", got, len(packBytes))
+	}
 }
 
 func TestReader_Get_RejectsIDXOIDMismatch(t *testing.T) {

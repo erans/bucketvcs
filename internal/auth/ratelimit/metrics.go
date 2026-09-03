@@ -6,9 +6,10 @@ import (
 )
 
 // EmitRateLimitMetric logs one auth_ratelimit_total{outcome} sample.
-// Outcomes: limited_ip, failure_counted, success_reset. The successful-pass
-// case is intentionally not emitted — at request-rate granularity it doubles
-// gateway log volume for a counter that is rarely inspected per-event.
+// Outcomes: limited_ip, limited_user, failure_counted, success_reset.
+// The successful-pass case is intentionally not emitted — at request-rate
+// granularity it doubles gateway log volume for a counter that is rarely
+// inspected per-event.
 func EmitRateLimitMetric(ctx context.Context, logger *slog.Logger, outcome string) {
 	if logger == nil {
 		logger = slog.Default()

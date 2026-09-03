@@ -252,9 +252,20 @@ func (h *proxiedHandler) serveObject(ctx context.Context, w *countingResponseWri
 			return
 		}
 		defer obj.Body.Close()
-		_, _ = io.Copy(w, obj.Body)
+		// Headers (including Content-Length) are already committed: a
+		// mid-stream failure surfaces to the client as a truncated body
+		// under a 200. Record it honestly (B5) instead of as a success —
+		// the byte counts below already reflect the short body.
+		if _, copyErr := io.Copy(w, obj.Body); copyErr != nil {
+			h.logger.Error("proxied serve body truncated",
+				"kind", kind, "tenant", tenant, "repo", repo, "key", key,
+				"expected_bytes", meta.Size, "served_bytes", w.n, "error", copyErr)
+			h.emitServed(ctx, kind, hash, tenant, repo, w.n, http.StatusOK, false)
+			h.emitUsage(kind, tenant, repo, w.n, reqStart, true)
+			return
+		}
 		h.emitServed(ctx, kind, hash, tenant, repo, w.n, http.StatusOK, false)
-		h.emitUsage(kind, tenant, repo, w.n, reqStart)
+		h.emitUsage(kind, tenant, repo, w.n, reqStart, false)
 		return
 	}
 	// Range: bytes=<start>-<end>
@@ -309,9 +320,16 @@ func (h *proxiedHandler) serveObject(ctx context.Context, w *countingResponseWri
 	}
 	defer rc.Close()
 	w.WriteHeader(http.StatusPartialContent)
-	_, _ = io.Copy(w, rc)
+	if _, copyErr := io.Copy(w, rc); copyErr != nil {
+		h.logger.Error("proxied serve body truncated",
+			"kind", kind, "tenant", tenant, "repo", repo, "key", key,
+			"expected_bytes", end-start+1, "served_bytes", w.n, "error", copyErr)
+		h.emitServed(ctx, kind, hash, tenant, repo, w.n, http.StatusPartialContent, true)
+		h.emitUsage(kind, tenant, repo, w.n, reqStart, true)
+		return
+	}
 	h.emitServed(ctx, kind, hash, tenant, repo, w.n, http.StatusPartialContent, true)
-	h.emitUsage(kind, tenant, repo, w.n, reqStart)
+	h.emitUsage(kind, tenant, repo, w.n, reqStart, false)
 }
 
 // writeStoreError maps storage sentinel errors to HTTP status codes.
@@ -377,17 +395,23 @@ func (h *proxiedHandler) emitServed(ctx context.Context, kind, hash, tenant, rep
 }
 
 // emitUsage records a bundle_serve / pack_serve usage event after a
-// successful proxied GET. The proxied endpoint is token-authenticated and
+// proxied GET. The proxied endpoint is token-authenticated and
 // carries no actor in context, so the usage actor is recorded as
-// "anonymous". Nil-safe: when log shipping is off, h.usage is nil and this
-// is a no-op.
-func (h *proxiedHandler) emitUsage(kind, tenant, repo string, bytesServed int64, start time.Time) {
+// "anonymous". truncated marks a mid-stream copy failure: headers were
+// already committed, so the client received a short body under a
+// success status — metering must say "truncated", not "ok" (B5).
+// Nil-safe: when log shipping is off, h.usage is nil and this is a no-op.
+func (h *proxiedHandler) emitUsage(kind, tenant, repo string, bytesServed int64, start time.Time, truncated bool) {
 	if h.usage == nil {
 		return
 	}
 	usageKind := shiplog.KindBundleServe
 	if kind == "pack" {
 		usageKind = shiplog.KindPackServe
+	}
+	status := "ok"
+	if truncated {
+		status = "truncated"
 	}
 	h.usage.Usage(shiplog.UsageEvent{
 		Kind:       usageKind,
@@ -397,6 +421,6 @@ func (h *proxiedHandler) emitUsage(kind, tenant, repo string, bytesServed int64,
 		Transport:  "https",
 		Bytes:      bytesServed,
 		DurationMS: h.now().Sub(start).Milliseconds(),
-		Status:     "ok",
+		Status:     status,
 	})
 }

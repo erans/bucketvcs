@@ -39,6 +39,12 @@ func downloadPack(ctx context.Context, s storage.ObjectStore, packKey, idxKey, b
 
 // streamToFile streams an ObjectStore key to a local file, creating
 // parent directories as needed.
+//
+// The download lands in a temp sibling and is renamed into place only
+// after a clean copy, fsync, and (when the store reports a size) a
+// byte-count check (B13). A crash or mid-download error therefore never
+// leaves a truncated pack at its final path for a later retry to
+// mistake as complete.
 func streamToFile(ctx context.Context, s storage.ObjectStore, key, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
@@ -48,12 +54,31 @@ func streamToFile(ctx context.Context, s storage.ObjectStore, key, dst string) e
 		return err
 	}
 	defer obj.Body.Close()
-	f, err := os.Create(dst)
+	tmp, err := os.CreateTemp(filepath.Dir(dst), ".download-*.tmp")
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	if _, err := io.Copy(f, obj.Body); err != nil {
+	tmpName := tmp.Name()
+	// Best-effort cleanup: on success the rename below moves tmpName to
+	// dst, so a Remove then is a harmless no-op miss.
+	defer os.Remove(tmpName)
+	n, err := io.Copy(tmp, obj.Body)
+	if err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if obj.Metadata.Size > 0 && n != obj.Metadata.Size {
+		_ = tmp.Close()
+		return fmt.Errorf("streamToFile: short download %s: got %d of %d bytes", key, n, obj.Metadata.Size)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, dst); err != nil {
 		return err
 	}
 	return nil

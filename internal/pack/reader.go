@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 
@@ -80,21 +79,22 @@ func Open(ctx context.Context, store storage.ObjectStore, packKey, idxKey string
 				ErrPackCorrupt, off, k, 12, bodyEnd)
 		}
 	}
+	// B4: hash the body with ONE streaming range GET, not a 64KiB
+	// ReadAt loop. Each StoreSource.ReadAt is a GetRange round-trip, so
+	// the old loop cost size/64KiB RPCs per pack open on object storage
+	// (e.g. ~16k requests for a 1GiB pack). A short backend stream still
+	// fails integrity below via the trailer compare.
+	rc, rcErr := store.GetRange(ctx, packKey, 0, bodyEnd-1)
+	if rcErr != nil {
+		return nil, fmt.Errorf("%w: stream pack body: %v", ErrPackCorrupt, rcErr)
+	}
 	h := sha1.New()
-	const chunk = 64 * 1024
-	buf := make([]byte, chunk)
-	pos := int64(0)
-	for pos < bodyEnd {
-		want := int64(chunk)
-		if bodyEnd-pos < want {
-			want = bodyEnd - pos
-		}
-		n, readErr := src.ReadAt(buf[:want], pos)
-		if readErr != nil && !errors.Is(readErr, io.EOF) {
-			return nil, fmt.Errorf("%w: hash pack body: %v", ErrPackCorrupt, readErr)
-		}
-		h.Write(buf[:n])
-		pos += int64(n)
+	if _, copyErr := io.Copy(h, rc); copyErr != nil {
+		_ = rc.Close()
+		return nil, fmt.Errorf("%w: hash pack body: %v", ErrPackCorrupt, copyErr)
+	}
+	if cerr := rc.Close(); cerr != nil {
+		return nil, fmt.Errorf("%w: hash pack body close: %v", ErrPackCorrupt, cerr)
 	}
 	gotBodySHA := h.Sum(nil)
 	gotTrailer := make([]byte, 20)

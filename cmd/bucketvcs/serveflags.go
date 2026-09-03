@@ -57,6 +57,7 @@ type serveFlags struct {
 
 	// M18 auth rate-limiting.
 	authRateLimitBurst        *int
+	authRateLimitUserBurst    *int
 	authRateLimitRefillPerMin *float64
 	trustProxyHeaders         *bool
 	authRateLimitDisabled     *bool
@@ -89,6 +90,7 @@ type serveFlags struct {
 	uiAddr          *string
 	uiDir           *string
 	uiSessionTTL    *time.Duration
+	uiSessionMaxAge *time.Duration
 	uiBrowseTimeout *time.Duration
 
 	// M24 Phase 1.5 — OIDC browser login (relying-party).
@@ -96,6 +98,7 @@ type serveFlags struct {
 	oidcIssuer         *string
 	oidcClientID       *string
 	oidcSecretFile     *string
+	oidcHMACKeyFile    *string
 	oidcRedirect       *string
 	oidcScopes         *string
 	oidcLabel          *string
@@ -171,6 +174,8 @@ func registerServeFlags(fs *flag.FlagSet) *serveFlags {
 	// on both transports).
 	sf.authRateLimitBurst = fs.Int("auth-rate-limit-burst", 10,
 		"Max credential failures before throttling per (IP, user)")
+	sf.authRateLimitUserBurst = fs.Int("auth-rate-limit-user-burst", 100,
+		"Max credential failures per account across all IPs before throttling; 0 disables the per-account bucket (IP-only gating)")
 	sf.authRateLimitRefillPerMin = fs.Float64("auth-rate-limit-refill-per-minute", 1,
 		"Failures cleared per minute when idle")
 	sf.trustProxyHeaders = fs.Bool("trust-proxy-headers", false,
@@ -216,8 +221,11 @@ func registerServeFlags(fs *flag.FlagSet) *serveFlags {
 		"absolute directory containing hook script files (required when --hooks-enabled=true)")
 	sf.hooksUnsafeNoSandbox = fs.Bool("hooks-unsafe-no-sandbox", false,
 		"run hooks without bwrap namespace isolation. REQUIRED on macOS/non-Linux. NOT multi-tenant safe.")
+	// A7: fail-closed default pinned. "allow" lets pushes proceed when
+	// hook enforcement itself is broken (missing script, sandbox
+	// failure) — exactly when policy matters most.
 	sf.hooksOnInternalError = fs.String("hooks-on-internal-error", "reject",
-		"behavior when a hook subprocess fails for non-rejection reasons: reject | allow")
+		"behavior when a hook subprocess fails for non-rejection reasons: reject (default, fail-closed) | allow (fail-open: pushes proceed unenforced)")
 	sf.hooksTimeoutSec = fs.Int("hooks-timeout-sec", 30,
 		"wall-clock timeout per hook subprocess")
 	sf.hooksCPUSec = fs.Int("hooks-cpu-sec", 10,
@@ -254,6 +262,11 @@ func registerServeFlags(fs *flag.FlagSet) *serveFlags {
 	sf.uiAddr = fs.String("ui-addr", "", "Optional separate listen address for the web UI; empty shares --addr")
 	sf.uiDir = fs.String("ui-dir", "", "Serve UI templates/static from this dir instead of the embedded assets (dev)")
 	sf.uiSessionTTL = fs.Duration("ui-session-ttl", 168*time.Hour, "Web session lifetime (sliding)")
+	// A2: absolute session lifetime cap. ui-session-ttl alone is a pure
+	// idle timeout — TouchSession slides expiry on every request, so an
+	// active session (including a stolen cookie) never expires. max-age
+	// bounds total session lifetime from creation; <=0 selects the default.
+	sf.uiSessionMaxAge = fs.Duration("ui-session-max-age", 24*time.Hour, "Absolute web session lifetime from creation (sliding ttl cannot extend past this)")
 	sf.uiBrowseTimeout = fs.Duration("ui-browse-timeout", 20*time.Second,
 		"Max wait for cold mirror materialization on a browse request before returning a 503 warming page")
 
@@ -262,15 +275,22 @@ func registerServeFlags(fs *flag.FlagSet) *serveFlags {
 	sf.oidcIssuer = fs.String("oidc-login-issuer", "", "OIDC issuer URL, e.g. https://accounts.google.com")
 	sf.oidcClientID = fs.String("oidc-login-client-id", "", "OAuth2 client id")
 	sf.oidcSecretFile = fs.String("oidc-login-client-secret-file", "", "File with the OAuth2 client secret (or env BUCKETVCS_OIDC_LOGIN_CLIENT_SECRET)")
+	// A6: stable OIDC state HMAC key for multi-node deployments. Without
+	// it, the key is boot-generated ephemeral: logins started on one
+	// instance fail HMAC on another, and restarts invalidate in-flight
+	// (10-minute) flows.
+	sf.oidcHMACKeyFile = fs.String("oidc-login-hmac-key-file", "", "File with the OIDC login-state HMAC key, >= 16 bytes (or env BUCKETVCS_OIDC_HMAC_KEY); empty = ephemeral per-boot key")
 	sf.oidcRedirect = fs.String("oidc-login-redirect-url", "", "OAuth2 redirect URL, e.g. https://host/login/oidc/callback")
 	sf.oidcScopes = fs.String("oidc-login-scopes", "openid,email,profile", "Comma-separated OIDC scopes")
 	sf.oidcLabel = fs.String("oidc-login-label", "Single sign-on", "Login-page SSO button label")
-	// U-2: default true so OIDC onboarding works out of the box; explicit opt-out.
-	// When true, a first OIDC login with no pre-provisioned (issuer, subject)
-	// link resolves the user by verified email and pins the link (TOFU). Set
-	// false to require operators to pre-link identities.
-	sf.oidcAllowEmailLink = fs.Bool("oidc-login-allow-email-link", true,
-		"First OIDC login auto-links by verified email (TOFU); set false to require pre-provisioned identity links")
+	// U-2/A1: default false (opt-in TOFU). When true, a first OIDC login
+	// with no pre-provisioned (issuer, subject) link resolves the user by
+	// verified email and pins the link (TOFU) — convenient, but a
+	// compromised IdP account sharing a victim's email yields account
+	// takeover. Operators who trust their IdP's email verification can
+	// opt back in; otherwise pre-link identities explicitly.
+	sf.oidcAllowEmailLink = fs.Bool("oidc-login-allow-email-link", false,
+		"First OIDC login auto-links by verified email (TOFU); default false, require pre-provisioned identity links unless explicitly enabled")
 
 	// M26 multi-region read replicas. Setting --replica-of activates
 	// replica mode: this gateway serves reads from --store (the regional

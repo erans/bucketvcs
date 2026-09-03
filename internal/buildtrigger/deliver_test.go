@@ -22,7 +22,7 @@ func TestHTTPDeliverer_PostsSignedBodyWithToken(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tr := Trigger{Kind: KindGeneric, TokenMode: TokenInject, Config: Config{URL: srv.URL, Secret: "shh"}}
+	tr := Trigger{Kind: KindGeneric, TokenMode: TokenInject, Config: Config{URL: srv.URL, AllowHTTP: true, Secret: "shh"}}
 	p := BuildPayload{Tenant: "acme", Repo: "app", RefUpdate: RefUpdate{Refname: "refs/heads/main"}}
 
 	d := &httpDeliverer{client: srv.Client(), mintFn: func(context.Context, Trigger, BuildPayload) (string, error) {
@@ -52,7 +52,7 @@ func TestHTTPDeliverer_NoTokenWhenModeNone(t *testing.T) {
 		w.WriteHeader(204)
 	}))
 	defer srv.Close()
-	tr := Trigger{Kind: KindGeneric, TokenMode: TokenNone, Config: Config{URL: srv.URL, Secret: "s"}}
+	tr := Trigger{Kind: KindGeneric, TokenMode: TokenNone, Config: Config{URL: srv.URL, AllowHTTP: true, Secret: "s"}}
 	d := &httpDeliverer{client: srv.Client(), mintFn: func(context.Context, Trigger, BuildPayload) (string, error) {
 		t.Fatal("mint must not be called in TokenNone mode")
 		return "", nil
@@ -67,7 +67,7 @@ func TestHTTPDeliverer_Non2xxIsError(t *testing.T) {
 		w.WriteHeader(500)
 	}))
 	defer srv.Close()
-	tr := Trigger{Kind: KindGeneric, TokenMode: TokenNone, Config: Config{URL: srv.URL, Secret: "s"}}
+	tr := Trigger{Kind: KindGeneric, TokenMode: TokenNone, Config: Config{URL: srv.URL, AllowHTTP: true, Secret: "s"}}
 	d := &httpDeliverer{client: srv.Client()}
 	code, err := d.Deliver(context.Background(), tr, BuildPayload{Repo: "app"})
 	if code != 500 || err == nil {
@@ -86,7 +86,7 @@ func TestHTTPDeliverer_BadSchemeRejected(t *testing.T) {
 func TestHTTPDeliverer_MintErrorIsRetryable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
 	defer srv.Close()
-	tr := Trigger{Kind: KindGeneric, TokenMode: TokenInject, Config: Config{URL: srv.URL, Secret: "s"}}
+	tr := Trigger{Kind: KindGeneric, TokenMode: TokenInject, Config: Config{URL: srv.URL, AllowHTTP: true, Secret: "s"}}
 	d := &httpDeliverer{client: srv.Client(), mintFn: func(context.Context, Trigger, BuildPayload) (string, error) {
 		return "", context.DeadlineExceeded
 	}}
@@ -127,7 +127,7 @@ func TestHTTPDeliverer_4xxIsPermanent(t *testing.T) {
 		w.WriteHeader(404)
 	}))
 	defer srv.Close()
-	tr := Trigger{Kind: KindGeneric, TokenMode: TokenNone, Config: Config{URL: srv.URL, Secret: "s"}}
+	tr := Trigger{Kind: KindGeneric, TokenMode: TokenNone, Config: Config{URL: srv.URL, AllowHTTP: true, Secret: "s"}}
 	d := &httpDeliverer{client: srv.Client()}
 	code, err := d.Deliver(context.Background(), tr, BuildPayload{Repo: "app"})
 	if code != 404 || err == nil {
@@ -143,7 +143,7 @@ func TestHTTPDeliverer_5xxIsRetryable(t *testing.T) {
 		w.WriteHeader(503)
 	}))
 	defer srv.Close()
-	tr := Trigger{Kind: KindGeneric, TokenMode: TokenNone, Config: Config{URL: srv.URL, Secret: "s"}}
+	tr := Trigger{Kind: KindGeneric, TokenMode: TokenNone, Config: Config{URL: srv.URL, AllowHTTP: true, Secret: "s"}}
 	d := &httpDeliverer{client: srv.Client()}
 	_, err := d.Deliver(context.Background(), tr, BuildPayload{Repo: "app"})
 	if err == nil || errors.Is(err, ErrPermanent) {
@@ -156,7 +156,7 @@ func TestHTTPDeliverer_429IsRetryable(t *testing.T) {
 		w.WriteHeader(429)
 	}))
 	defer srv.Close()
-	tr := Trigger{Kind: KindGeneric, TokenMode: TokenNone, Config: Config{URL: srv.URL, Secret: "s"}}
+	tr := Trigger{Kind: KindGeneric, TokenMode: TokenNone, Config: Config{URL: srv.URL, AllowHTTP: true, Secret: "s"}}
 	d := &httpDeliverer{client: srv.Client()}
 	_, err := d.Deliver(context.Background(), tr, BuildPayload{Repo: "app"})
 	if err == nil || errors.Is(err, ErrPermanent) {
@@ -170,5 +170,21 @@ func TestHTTPDeliverer_BadSchemeIsPermanent(t *testing.T) {
 	_, err := d.Deliver(context.Background(), tr, BuildPayload{})
 	if !errors.Is(err, ErrPermanent) {
 		t.Fatalf("bad URL scheme should be permanent, got %v", err)
+	}
+}
+
+// TestHTTPDeliverer_PlaintextRefusedWithoutAllowHTTP is the A8
+// regression: delivery must not POST (minted) credentials over plaintext
+// http for triggers predating the create-time gate. No token may be
+// minted for a refused delivery.
+func TestHTTPDeliverer_PlaintextRefusedWithoutAllowHTTP(t *testing.T) {
+	tr := Trigger{Kind: KindGeneric, TokenMode: TokenInject, Config: Config{URL: "http://internal/hook", Secret: "s"}}
+	d := &httpDeliverer{client: http.DefaultClient, mintFn: func(context.Context, Trigger, BuildPayload) (string, error) {
+		t.Fatal("mint must not be called for a refused plaintext delivery")
+		return "", nil
+	}}
+	_, err := d.Deliver(context.Background(), tr, BuildPayload{})
+	if !errors.Is(err, ErrPermanent) {
+		t.Fatalf("plaintext without allow_http should be permanent, got %v", err)
 	}
 }

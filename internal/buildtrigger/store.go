@@ -112,10 +112,28 @@ func (s *Service) Create(ctx context.Context, in TriggerInput) (Trigger, error) 
 	}
 
 	cfg := in.Config
+	// A8: URL-bearing triggers require https unless the trigger
+	// explicitly opts into plaintext with allow_http. Delivery mints
+	// live Bearer [REDACTED] into the POST body; plaintext would expose them.
+	requireHTTPS := func(what, url string) error {
+		if strings.HasPrefix(url, "https://") || url == "" {
+			return nil
+		}
+		if strings.HasPrefix(url, "http://") && cfg.AllowHTTP {
+			return nil
+		}
+		if strings.HasPrefix(url, "http://") {
+			return fmt.Errorf("%w: %s URL must be https (plaintext leaks minted credentials); set allow_http to acknowledge the risk", ErrInvalidInput, what)
+		}
+		return fmt.Errorf("%w: %s URL scheme must be http or https", ErrInvalidInput, what)
+	}
 	switch in.Kind {
 	case KindGeneric, KindCloudBuild:
 		if cfg.URL == "" {
 			return Trigger{}, fmt.Errorf("%w: %s requires a config url", ErrInvalidInput, in.Kind)
+		}
+		if err := requireHTTPS("config url", cfg.URL); err != nil {
+			return Trigger{}, err
 		}
 		if cfg.Secret == "" {
 			secret, err := generateSecret()
@@ -132,8 +150,8 @@ func (s *Service) Create(ctx context.Context, in TriggerInput) (Trigger, error) 
 		if cfg.AzureWebhookURL == "" {
 			return Trigger{}, fmt.Errorf("%w: azurewebhook requires azure_webhook_url", ErrInvalidInput)
 		}
-		if !strings.HasPrefix(cfg.AzureWebhookURL, "http://") && !strings.HasPrefix(cfg.AzureWebhookURL, "https://") {
-			return Trigger{}, fmt.Errorf("%w: azurewebhook azure_webhook_url must be http or https", ErrInvalidInput)
+		if err := requireHTTPS("azurewebhook azure_webhook_url", cfg.AzureWebhookURL); err != nil {
+			return Trigger{}, err
 		}
 		// Secret is operator-supplied (must match the Azure service-connection
 		// secret) and is NOT auto-generated; an empty secret means unsigned.

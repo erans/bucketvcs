@@ -13,7 +13,7 @@ import (
 func TestLog_AuditTagged(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
-	gc.LogMarkCompleted(logger, "acme/site", "mk_01HZ", 1234, 8, 2, 1)
+	gc.LogMarkCompleted(logger, "acme/site", "mk_01HZ", 1234, 8, 2, 1, 0, 0)
 	if !strings.Contains(buf.String(), `"audit":true`) {
 		t.Fatalf("expected audit:true in log line, got: %s", buf.String())
 	}

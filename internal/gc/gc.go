@@ -94,7 +94,8 @@ func Run(ctx context.Context, s storage.ObjectStore, r *repo.Repo, opts RunOptio
 		}
 		if !opts.DryRun {
 			LogMarkCompleted(opts.Logger, repoIDStr, mark.MarkID, mark.CurrentManifestVersion,
-				len(mark.Candidates.TxRecords), len(mark.Candidates.CanonicalPacks), len(mark.Candidates.Indexes))
+				len(mark.Candidates.TxRecords), len(mark.Candidates.CanonicalPacks), len(mark.Candidates.Indexes),
+				len(mark.Candidates.Bundles), len(mark.Candidates.OrphanMarkers))
 		} else {
 			opts.Logger.Info("gc.mark.dry_run",
 				"subsystem", "gc",
@@ -103,6 +104,8 @@ func Run(ctx context.Context, s storage.ObjectStore, r *repo.Repo, opts RunOptio
 				"candidate_tx_records", len(mark.Candidates.TxRecords),
 				"candidate_canonical_packs", len(mark.Candidates.CanonicalPacks),
 				"candidate_indexes", len(mark.Candidates.Indexes),
+				"candidate_bundles", len(mark.Candidates.Bundles),
+				"candidate_orphan_markers", len(mark.Candidates.OrphanMarkers),
 			)
 		}
 	}
@@ -139,6 +142,21 @@ func Run(ctx context.Context, s storage.ObjectStore, r *repo.Repo, opts RunOptio
 		}
 	}
 
+	// B3: pre-deletion intent record. The mark record (already persisted)
+	// holds the full candidate list, but without this line an operator
+	// reading the audit trail cannot tell a sweep was attempted if the
+	// final sweep record below fails to persist.
+	opts.Logger.Info("gc.sweep.started",
+		"audit", true,
+		"subsystem", "gc",
+		"repo_id", repoIDStr,
+		"mark_id", markRecord.MarkID,
+		"candidate_tx_records", len(markRecord.Candidates.TxRecords),
+		"candidate_canonical_packs", len(markRecord.Candidates.CanonicalPacks),
+		"candidate_indexes", len(markRecord.Candidates.Indexes),
+		"candidate_bundles", len(markRecord.Candidates.Bundles),
+		"candidate_orphan_markers", len(markRecord.Candidates.OrphanMarkers),
+	)
 	sweepStart := opts.Now()
 	sweep, err := RunSweep(ctx, s, r, markRecord, SweepOptions{
 		Now:            opts.Now,
@@ -154,18 +172,23 @@ func Run(ctx context.Context, s storage.ObjectStore, r *repo.Repo, opts RunOptio
 	if !opts.DryRun {
 		if err := sweeps.Write(ctx, s, k, sweep); err != nil {
 			// The sweep deletes already happened on disk but the audit
-			// record is now lost. Emit an audit-tagged log line so the
-			// forensic trail isn't completely silent. Operators reading
-			// §7.4 of the operator guide should cross-reference this log.
+			// record failed to persist. The attempt is reconstructible:
+			// the gc.sweep.started line above plus the persisted mark
+			// record (mark_id) hold the full candidate list; the counts
+			// below say what was actually deleted. Operators reading
+			// §7.4 of the operator guide should cross-reference both.
 			opts.Logger.Error("gc.sweep.audit_write_failed",
 				"audit", true,
 				"subsystem", "gc",
 				"repo_id", repoIDStr,
 				"sweep_id", sweep.SweepID,
 				"mark_id", sweep.MarkID,
+				"recover_candidates_from_mark", sweep.MarkID,
 				"deleted_tx_records", len(sweep.Deleted.TxRecords),
 				"deleted_canonical_packs", len(sweep.Deleted.CanonicalPacks),
 				"deleted_indexes", len(sweep.Deleted.Indexes),
+				"deleted_bundles", len(sweep.Deleted.Bundles),
+				"deleted_orphan_markers", len(sweep.Deleted.OrphanMarkers),
 				"error", err.Error(),
 			)
 			return rep, fmt.Errorf("gc: write sweep (deletes already executed): %w", err)
@@ -187,6 +210,7 @@ func Run(ctx context.Context, s storage.ObjectStore, r *repo.Repo, opts RunOptio
 	if !opts.DryRun {
 		LogSweepCompleted(opts.Logger, repoIDStr, sweep.SweepID, sweep.MarkID,
 			len(sweep.Deleted.TxRecords), len(sweep.Deleted.CanonicalPacks), len(sweep.Deleted.Indexes),
+			len(sweep.Deleted.Bundles), len(sweep.Deleted.OrphanMarkers),
 			skipped["revived"], skipped["retention_not_met"], skipped["version_mismatch"],
 			skipped["not_found"], skipped["tx_sweep_disarmed"],
 			len(sweep.Errors),
@@ -198,6 +222,8 @@ func Run(ctx context.Context, s storage.ObjectStore, r *repo.Repo, opts RunOptio
 			"would_delete_tx_records", len(sweep.Deleted.TxRecords),
 			"would_delete_canonical_packs", len(sweep.Deleted.CanonicalPacks),
 			"would_delete_indexes", len(sweep.Deleted.Indexes),
+			"would_delete_bundles", len(sweep.Deleted.Bundles),
+			"would_delete_orphan_markers", len(sweep.Deleted.OrphanMarkers),
 			"skipped_revived", skipped["revived"],
 			"skipped_retention_not_met", skipped["retention_not_met"],
 			"skipped_version_mismatch", skipped["version_mismatch"],

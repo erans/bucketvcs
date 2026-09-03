@@ -19,10 +19,12 @@ type fakeStore struct {
 	// session list/revoke (self-service + admin)
 	sessionsForUser     []auth.SessionInfo
 	allSessions         []auth.AdminSessionInfo
-	revokeCount         int64  // returned by DeleteSessionByHash* (0 => default 1; -1 => 0 "already gone")
-	lastRevokeUserID    string // recorded by DeleteSessionByHashForUser
-	lastRevokeHash      string // recorded by both revoke-by-hash methods
-	lastRevokeAllUserID string // recorded by DeleteSessionsForUser
+	revokeCount         int64         // returned by DeleteSessionByHash* (0 => default 1; -1 => 0 "already gone")
+	lastRevokeUserID    string        // recorded by DeleteSessionByHashForUser
+	lastRevokeHash      string        // recorded by both revoke-by-hash methods
+	lastRevokeAllUserID string        // recorded by DeleteSessionsForUser
+	lastTouchRaw        string        // recorded by TouchSession
+	lastTouchTTL        time.Duration // recorded by TouchSession
 	repos               func(actor *auth.Actor) []Repo
 	findByEmail         func(email string) (*auth.Actor, error)
 	findIdentity        func(issuer, subject string) (*auth.Actor, error)
@@ -90,6 +92,8 @@ func (f *fakeStore) LookupSession(ctx context.Context, raw string) (*auth.Sessio
 	return s, nil
 }
 func (f *fakeStore) TouchSession(ctx context.Context, raw string, ttl time.Duration) error {
+	f.lastTouchRaw = raw
+	f.lastTouchTTL = ttl
 	return nil
 }
 func (f *fakeStore) DeleteSession(ctx context.Context, raw string) error {
@@ -357,7 +361,7 @@ func TestSessionMiddleware_LoadsAndAnon(t *testing.T) {
 		seen = SessionFromContext(r.Context())
 		w.WriteHeader(200)
 	})
-	mw := sessionMiddleware(store, time.Hour)(next)
+	mw := sessionMiddleware(store, time.Hour, 24*time.Hour)(next)
 
 	// with valid cookie
 	req := httptest.NewRequest("GET", "/", nil)
@@ -381,5 +385,61 @@ func TestSessionMiddleware_LoadsAndAnon(t *testing.T) {
 	mw.ServeHTTP(httptest.NewRecorder(), req2)
 	if seen != nil {
 		t.Fatalf("stale cookie should be anon, got %+v", seen)
+	}
+}
+
+// TestSessionMiddleware_AbsoluteCap is the A2 regression: the sliding ttl
+// alone never expires an active session, so the middleware enforces an
+// absolute max-age from creation — past-cap sessions are revoked and
+// anonymous, and the slide never extends past created+maxAge.
+func TestSessionMiddleware_AbsoluteCap(t *testing.T) {
+	now := time.Now()
+	store := newFakeStore()
+	// Past the cap but still within sliding expiry: must be revoked + anon.
+	store.sessions["old"] = &auth.Session{UserID: "u1", Name: "alice",
+		CreatedAt: now.Add(-25 * time.Hour), ExpiresAt: now.Add(time.Hour)}
+	// Within the cap with 1h of absolute life left and a 2h slide: the
+	// touch must be clamped to the remaining absolute lifetime.
+	store.sessions["young"] = &auth.Session{UserID: "u2", Name: "bob",
+		CreatedAt: now.Add(-23 * time.Hour), ExpiresAt: now.Add(time.Hour)}
+	// Unknown age: cap skipped, session honored (back-compat).
+	store.sessions["ageless"] = &auth.Session{UserID: "u3", Name: "cara",
+		ExpiresAt: now.Add(time.Hour)}
+
+	var seen *auth.Session
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = SessionFromContext(r.Context())
+		w.WriteHeader(200)
+	})
+	mw := sessionMiddleware(store, 2*time.Hour, 24*time.Hour)(next)
+	serve := func(raw string) {
+		seen = nil
+		req := httptest.NewRequest("GET", "/", nil)
+		req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: raw})
+		mw.ServeHTTP(httptest.NewRecorder(), req)
+	}
+
+	serve("old")
+	if seen != nil {
+		t.Fatalf("past-cap session should be anon, got %+v", seen)
+	}
+	if _, ok := store.sessions["old"]; ok {
+		t.Fatal("past-cap session should have been revoked")
+	}
+
+	serve("young")
+	if seen == nil || seen.Name != "bob" {
+		t.Fatalf("within-cap session should attach, got %+v", seen)
+	}
+	if store.lastTouchRaw != "young" {
+		t.Fatalf("expected touch of young, got %q", store.lastTouchRaw)
+	}
+	if store.lastTouchTTL > 70*time.Minute || store.lastTouchTTL <= 0 {
+		t.Fatalf("touch should clamp to ~1h remaining, got %v", store.lastTouchTTL)
+	}
+
+	serve("ageless")
+	if seen == nil || seen.Name != "cara" {
+		t.Fatalf("ageless session should attach, got %+v", seen)
 	}
 }

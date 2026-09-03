@@ -48,6 +48,7 @@ func TestGC_CLI_SingleRepo_HappyPath(t *testing.T) {
 		"--store", "localfs:" + dir,
 		"--repo", "acme/site",
 		"--retention", "1s",
+		"--allow-short-retention",
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("happy path exit = %d, want 0; stderr=%s", code, stderr.String())
@@ -69,9 +70,37 @@ func TestGC_CLI_RetentionWarningBelow24h(t *testing.T) {
 	_ = runGC(ctx, []string{
 		"--store", "localfs:" + dir, "--repo", "acme/site",
 		"--retention", "1s",
+		"--allow-short-retention",
 	}, &stdout, &stderr)
 	if !strings.Contains(stderr.String(), "below 24h") {
 		t.Errorf("expected retention warning on stderr; got: %s", stderr.String())
+	}
+}
+
+// TestGC_CLI_ShortRetentionFloor is the A3 regression: below MinRetention
+// a sweep races outstanding signed URLs, so the CLI rejects unless the
+// operator explicitly acknowledges with --allow-short-retention.
+func TestGC_CLI_ShortRetentionFloor(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := localfs.Open(dir)
+	ctx := context.Background()
+	if _, err := repo.Create(ctx, store, "acme", "site", repo.CreateOptions{Actor: "u_test"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	store.Close()
+
+	base := []string{"--store", "localfs:" + dir, "--repo", "acme/site", "--retention", "1h"}
+	var stdout, stderr bytes.Buffer
+	if code := runGC(ctx, append(append([]string{}, base...), "--mark-only"), &stdout, &stderr); code != 2 {
+		t.Fatalf("sub-floor retention without acknowledgment exit = %d, want 2; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "allow-short-retention") {
+		t.Errorf("expected floor error to name --allow-short-retention; got: %s", stderr.String())
+	}
+
+	var stdout2, stderr2 bytes.Buffer
+	if code := runGC(ctx, append(append([]string{}, base...), "--mark-only", "--allow-short-retention"), &stdout2, &stderr2); code != 0 {
+		t.Fatalf("acknowledged short retention exit = %d, want 0; stderr=%s", code, stderr2.String())
 	}
 }
 
@@ -92,6 +121,7 @@ func TestGC_CLI_DryRun_TextOutputShowsSweepBlock(t *testing.T) {
 		"--store", "localfs:" + dir,
 		"--repo", "acme/site",
 		"--retention", "1s",
+		"--allow-short-retention",
 		"--dry-run",
 	}, &stdout, &stderr)
 	if code != 0 {
@@ -123,6 +153,7 @@ func TestGC_CLI_AllRepos_TouchesEachRepo(t *testing.T) {
 		"--store", "localfs:" + dir,
 		"--all-repos",
 		"--retention", "1s",
+		"--allow-short-retention",
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
@@ -150,6 +181,7 @@ func TestGC_CLI_DryRun_MarkBlockShowsMarkID(t *testing.T) {
 		"--store", "localfs:" + dir,
 		"--repo", "acme/site",
 		"--retention", "1s",
+		"--allow-short-retention",
 		"--dry-run",
 	}, &stdout, &stderr)
 	if code != 0 {
@@ -180,6 +212,7 @@ func TestGC_CLI_DryRun_NoDelete(t *testing.T) {
 		"--store", "localfs:" + dir,
 		"--repo", "acme/site",
 		"--retention", "1s",
+		"--allow-short-retention",
 		"--mark-only",
 	}, &stdout1, &stderr1); code != 0 {
 		t.Fatalf("mark-only exit = %d; stderr=%s", code, stderr1.String())
@@ -195,6 +228,7 @@ func TestGC_CLI_DryRun_NoDelete(t *testing.T) {
 		"--store", "localfs:" + dir,
 		"--repo", "acme/site",
 		"--retention", "1s",
+		"--allow-short-retention",
 		"--sweep-only",
 		"--dry-run",
 	}, &stdout, &stderr)
@@ -233,6 +267,7 @@ func TestGC_CLI_DryRun_TextHasDryRunMarkers(t *testing.T) {
 		"--store", "localfs:" + dir,
 		"--repo", "acme/site",
 		"--retention", "1s",
+		"--allow-short-retention",
 		"--dry-run",
 	}, &stdout, &stderr)
 	if code != 0 {
@@ -261,6 +296,7 @@ func TestGC_CLI_JSON_DeletedSlicesAreEmptyArrays(t *testing.T) {
 		"--store", "localfs:" + dir,
 		"--repo", "acme/site",
 		"--retention", "1h",
+		"--allow-short-retention",
 		"--mark-only",
 		"--format", "json",
 	}, &stdout, &stderr)
@@ -291,6 +327,7 @@ func TestGC_CLI_LFSFlag_LFSOnlyOnEmptyRepo(t *testing.T) {
 		"--store", "localfs:" + dir,
 		"--repo", "acme/site",
 		"--retention", "1s",
+		"--allow-short-retention",
 		"--lfs",
 	}, &stdout, &stderr)
 	if code != 0 {
@@ -320,6 +357,7 @@ func TestGC_CLI_LFSAndIncludeGitObjects_BothSectionsPresent(t *testing.T) {
 		"--store", "localfs:" + dir,
 		"--repo", "acme/site",
 		"--retention", "1s",
+		"--allow-short-retention",
 		"--lfs",
 		"--include-git-objects",
 	}, &stdout, &stderr)
@@ -370,6 +408,7 @@ func TestGC_CLI_LFSFlag_JSON_HasLFSField(t *testing.T) {
 		"--store", "localfs:" + dir,
 		"--repo", "acme/site",
 		"--retention", "1s",
+		"--allow-short-retention",
 		"--lfs",
 		"--format", "json",
 	}, &stdout, &stderr)
@@ -403,6 +442,7 @@ func TestGC_CLI_LFSFlag_MarkOnly_NoSweepInReport(t *testing.T) {
 		"--store", "localfs:" + dir,
 		"--repo", "acme/site",
 		"--retention", "1s",
+		"--allow-short-retention",
 		"--lfs",
 		"--mark-only",
 	}, &stdout, &stderr)
@@ -432,6 +472,7 @@ func TestGC_CLI_LFSFlag_SweepOnlyWithoutPriorMark_ExitsZero(t *testing.T) {
 		"--store", "localfs:" + dir,
 		"--repo", "acme/site",
 		"--retention", "1s",
+		"--allow-short-retention",
 		"--lfs",
 		"--sweep-only",
 	}, &stdout, &stderr)
@@ -482,6 +523,7 @@ func TestGC_CLI_LFSAndIncludeGitObjects_JSON_BothShapes(t *testing.T) {
 		"--store", "localfs:" + dir,
 		"--repo", "acme/site",
 		"--retention", "1s",
+		"--allow-short-retention",
 		"--lfs",
 		"--include-git-objects",
 		"--format", "json",
@@ -522,6 +564,7 @@ func TestGC_CLI_LFS_AllRepos_TouchesEachRepo(t *testing.T) {
 		"--store", "localfs:" + dir,
 		"--all-repos",
 		"--retention", "1s",
+		"--allow-short-retention",
 		"--lfs",
 	}, &stdout, &stderr)
 	if code != 0 {
@@ -558,6 +601,7 @@ func TestGC_CLI_LFS_JSON_DurationsInSeconds(t *testing.T) {
 		"--store", "localfs:" + dir,
 		"--repo", "acme/site",
 		"--retention", "1s",
+		"--allow-short-retention",
 		"--lfs",
 		"--format", "json",
 	}, &stdout, &stderr)
@@ -623,7 +667,8 @@ func TestGC_CLI_LFS_MarkThenSweepOnly_RoundTrip(t *testing.T) {
 	var stdout1, stderr1 bytes.Buffer
 	if code := runGC(ctx, []string{
 		"--store", "localfs:" + dir, "--repo", "acme/site",
-		"--retention", "1s", "--lfs", "--mark-only",
+		"--retention", "1s",
+		"--allow-short-retention", "--lfs", "--mark-only",
 	}, &stdout1, &stderr1); code != 0 {
 		t.Fatalf("mark-only exit=%d; stderr=%s", code, stderr1.String())
 	}
@@ -634,7 +679,8 @@ func TestGC_CLI_LFS_MarkThenSweepOnly_RoundTrip(t *testing.T) {
 	var stdout2, stderr2 bytes.Buffer
 	if code := runGC(ctx, []string{
 		"--store", "localfs:" + dir, "--repo", "acme/site",
-		"--retention", "1s", "--lfs", "--sweep-only",
+		"--retention", "1s",
+		"--allow-short-retention", "--lfs", "--sweep-only",
 	}, &stdout2, &stderr2); code != 0 {
 		t.Fatalf("sweep-only exit=%d; stderr=%s", code, stderr2.String())
 	}
@@ -683,6 +729,7 @@ func TestGC_CLI_LFS_AllRepos_IncludeGitObjects_BothPhasesPerRepo(t *testing.T) {
 		"--store", "localfs:" + dir,
 		"--all-repos",
 		"--retention", "1s",
+		"--allow-short-retention",
 		"--lfs",
 		"--include-git-objects",
 	}, &stdout, &stderr)
@@ -721,6 +768,7 @@ func TestGC_CLI_LFS_DryRun_TextHasDryRunHeader(t *testing.T) {
 		"--store", "localfs:" + dir,
 		"--repo", "acme/site",
 		"--retention", "1s",
+		"--allow-short-retention",
 		"--lfs",
 		"--mark-only",
 		"--dry-run",

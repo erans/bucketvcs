@@ -111,6 +111,7 @@ func TestGCBYOB_DecryptFailure_AbortsAndLeavesOperatorUntouched(t *testing.T) {
 		"--auth-db", dbPath,
 		"--byob-encryption-key", keyPath,
 		"--retention", "1s",
+		"--allow-short-retention",
 	}, &stdout, &stderr)
 
 	if code == 0 {
@@ -165,6 +166,7 @@ func TestGCBYOB_ShortKey_AbortsWhenBindingPresent(t *testing.T) {
 		"--auth-db", dbPath,
 		"--byob-encryption-key", shortKey,
 		"--retention", "1s",
+		"--allow-short-retention",
 	}, &stdout, &stderr)
 
 	if code != 1 {
@@ -200,6 +202,7 @@ func TestGCBYOB_OmittedKeyWithBinding_Aborts_U4Review(t *testing.T) {
 		"--repo", "byobtenant/myrepo",
 		"--auth-db", dbPath,
 		"--retention", "1s",
+		"--allow-short-retention",
 	}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("binding with omitted key exit=%d, want 1; stderr=%s", code, stderr.String())

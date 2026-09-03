@@ -39,9 +39,7 @@ func DiscoverIndexes(ctx context.Context, s storage.ObjectStore, k *keys.Repo, l
 // returns the keys NOT in live. Both .bundle and .json sidecar files
 // live under this prefix and become independent sweep candidates;
 // mark-then-sweep is responsible for filtering anything still
-// referenced by the manifest.
-// Wiring this discoverer into RunMark (and the corresponding sweep
-// path) is a deferred follow-up; see plan §Phase 9 Task 9.2.
+// referenced by the manifest (BundleKey/SidecarKey are both live).
 func DiscoverBundles(ctx context.Context, s storage.ObjectStore, k *keys.Repo, live LiveSet) ([]string, error) {
 	prefix := k.Prefix() + "bundles/"
 	return listExcludingLive(ctx, s, prefix, live)
@@ -50,20 +48,19 @@ func DiscoverBundles(ctx context.Context, s storage.ObjectStore, k *keys.Repo, l
 // DiscoverTxRecords lists all tx records for the repo and returns:
 //   - the keys of tx records that are orphan candidates (no .commit
 //     marker, not the current latest_tx),
+//   - the keys of orphan .commit markers (no sibling tx record),
 //   - the per-repo tx_orphan_sweep_armed flag (true if at least one
 //     .commit marker exists in the listing).
 //
 // Caller is responsible for OR-ing armed with any prior mark record's
 // armed value (sticky once true).
 //
-// Note: markers without a sibling tx record (an unlikely state, but
-// possible if a future repair tool injects one) are tracked here
-// purely for the armed-sweep gate logic; they are NOT enumerated as
-// candidates and will accumulate forever until cleaned by repair
-// tooling. Sweeping orphan markers is intentionally out of M8 scope
-// because the marker is itself a forensic signal — destroying it
-// without a corresponding tx record would lose information.
-func DiscoverTxRecords(ctx context.Context, s storage.ObjectStore, k *keys.Repo, live LiveSet) (candidates []string, armed bool, err error) {
+// Orphan markers were historically never enumerated and accumulated
+// forever. They are now returned as retention-gated sweep candidates of
+// their own (B10): the armed gate keeps working because it counts ALL
+// markers (live markers regenerate on every commit), while debris
+// without a tx record is bounded like every other category.
+func DiscoverTxRecords(ctx context.Context, s storage.ObjectStore, k *keys.Repo, live LiveSet) (candidates, orphanMarkers []string, armed bool, err error) {
 	prefix := k.Prefix() + "tx/"
 	records := map[string]struct{}{}
 	markers := map[string]struct{}{}
@@ -72,7 +69,7 @@ func DiscoverTxRecords(ctx context.Context, s storage.ObjectStore, k *keys.Repo,
 	for {
 		page, err := s.List(ctx, prefix, &storage.ListOptions{ContinuationToken: token})
 		if err != nil {
-			return nil, false, fmt.Errorf("gc: list tx: %w", err)
+			return nil, nil, false, fmt.Errorf("gc: list tx: %w", err)
 		}
 		for _, obj := range page.Objects {
 			rest := strings.TrimPrefix(obj.Key, prefix)
@@ -101,8 +98,14 @@ func DiscoverTxRecords(ctx context.Context, s storage.ObjectStore, k *keys.Repo,
 		}
 		candidates = append(candidates, recKey)
 	}
+	for markerKey := range markers {
+		if _, ok := records[strings.TrimSuffix(markerKey, ".commit")]; !ok {
+			orphanMarkers = append(orphanMarkers, markerKey)
+		}
+	}
 	sort.Strings(candidates)
-	return candidates, armed, nil
+	sort.Strings(orphanMarkers)
+	return candidates, orphanMarkers, armed, nil
 }
 
 // listExcludingLive enumerates all objects under prefix and returns those

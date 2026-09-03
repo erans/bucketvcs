@@ -8,22 +8,20 @@ import (
 )
 
 // LimitedBucket identifies which bucket tripped in CheckDetailed.
-//
-// Only BucketIP is reachable in the current implementation; BucketUser is
-// retained as a reserved label so callers that still switch on it remain
-// safe, but Check never returns it. See the package doc on why we dropped
-// the cross-IP per-user bucket.
 type LimitedBucket int
 
 const (
 	BucketNone LimitedBucket = iota
 	BucketIP
-	// BucketUser is reserved. The original design included a per-user
-	// bucket that accumulated failures across all source IPs; an attacker
-	// could weaponise that for a targeted account-lockout DoS by hammering
-	// a known username from a botnet. The bucket was removed and only
-	// per-IP gating remains. The constant is retained so the existing API
-	// (and any future composite-keyed reintroduction) stays compatible.
+	// BucketUser is the cross-IP per-account bucket: failures against one
+	// username accumulate regardless of source IP, so distributed guessing
+	// spread across a botnet still trips a throttle. Deliberate tradeoff:
+	// the same bucket lets an attacker fill a victim's account quota and
+	// lock the legitimate user out, which is why UserBurst defaults an
+	// order of magnitude above Burst — spraying trips it, casual
+	// lockout-DoS costs 10x the traffic. Operators who prefer no
+	// account-level gating can set --auth-rate-limit-user-burst=0 to
+	// disable the per-user bucket (failures then gate on IP only).
 	BucketUser
 )
 
@@ -35,8 +33,9 @@ type bucket struct {
 	lastDecay time.Time
 }
 
-// Limiter rate-limits credential failures per source IP. A nil *Limiter is
-// a complete no-op (operators disable via --auth-rate-limit-disabled).
+// Limiter rate-limits credential failures per source IP and per account
+// name. A nil *Limiter is a complete no-op (operators disable via
+// --auth-rate-limit-disabled).
 //
 // Caveat — shared egress IPs (corporate NAT, CI farms, reverse proxies
 // running with --trust-proxy-headers=false) share a single bucket. Burst
@@ -45,11 +44,12 @@ type bucket struct {
 // volume CI environments may need a higher --auth-rate-limit-burst or an
 // upstream allowlist (currently deferred; see spec §1.2).
 type Limiter struct {
-	cfg   Config
-	mu    sync.RWMutex
-	perIP map[string]*bucket
-	stop  chan struct{}
-	wg    sync.WaitGroup
+	cfg     Config
+	mu      sync.RWMutex
+	perIP   map[string]*bucket
+	perUser map[string]*bucket
+	stop    chan struct{}
+	wg      sync.WaitGroup
 }
 
 // NewLimiter constructs a Limiter and starts the background sweep goroutine.
@@ -72,10 +72,16 @@ func NewLimiter(cfg Config) *Limiter {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
+	if cfg.UserBurst < 0 {
+		slog.Warn("ratelimit: negative UserBurst clamped to 0 (per-user bucket disabled)",
+			"requested", cfg.UserBurst)
+		cfg.UserBurst = 0
+	}
 	l := &Limiter{
-		cfg:   cfg,
-		perIP: make(map[string]*bucket),
-		stop:  make(chan struct{}),
+		cfg:     cfg,
+		perIP:   make(map[string]*bucket),
+		perUser: make(map[string]*bucket),
+		stop:    make(chan struct{}),
 	}
 	if cfg.SweepInterval > 0 {
 		l.wg.Add(1)
@@ -106,14 +112,13 @@ func (l *Limiter) Check(ip, user string) (bool, time.Duration) {
 // CheckDetailed returns (allowed, retryAfter, which). retryAfter is the
 // time until at least one slot frees up (computed from RefillPerMinute);
 // rounded UP to a whole second by the caller for the Retry-After header.
-// `which` reports BucketIP when allowed=false; BucketNone otherwise.
+// `which` reports BucketIP or BucketUser when allowed=false; BucketNone
+// otherwise.
 //
 // Does NOT increment failure counters — only MarkFailure does. The check
-// is "is the IP bucket over Burst right now?"
-//
-// The user parameter is accepted for API stability and audit attribution
-// but does NOT gate: an attacker on different source IPs cannot accumulate
-// failures against a victim username's bucket. See the Limiter doc.
+// is "is the IP bucket over Burst, or the per-user bucket over UserBurst,
+// right now?" An empty user skips the per-user gate (pre-resolution callers
+// such as the SSH gate pass user="").
 func (l *Limiter) CheckDetailed(ip, user string) (bool, time.Duration, LimitedBucket) {
 	if l == nil {
 		return true, 0, BucketNone
@@ -126,21 +131,26 @@ func (l *Limiter) CheckDetailed(ip, user string) (bool, time.Duration, LimitedBu
 	// bucket on every Check (including for clients that never fail) makes
 	// perIP grow unboundedly between sweeps. Only MarkFailure creates
 	// entries; a missing bucket is implicitly "0 failures, allowed."
-	ipB, ok := l.perIP[ip]
-	if !ok {
-		return true, 0, BucketNone
+	if ipB, ok := l.perIP[ip]; ok {
+		l.decayLocked(ipB, now)
+		if ipB.failures >= float64(l.cfg.Burst) {
+			return false, l.retryAfterLocked(ipB, l.cfg.Burst), BucketIP
+		}
 	}
-	l.decayLocked(ipB, now)
-	if ipB.failures >= float64(l.cfg.Burst) {
-		return false, l.retryAfterLocked(ipB), BucketIP
+	if user != "" && l.cfg.UserBurst > 0 {
+		if uB, ok := l.perUser[user]; ok {
+			l.decayLocked(uB, now)
+			if uB.failures >= float64(l.cfg.UserBurst) {
+				return false, l.retryAfterLocked(uB, l.cfg.UserBurst), BucketUser
+			}
+		}
 	}
 	return true, 0, BucketNone
 }
 
-// MarkFailure increments the IP bucket for ip. The user parameter is
-// accepted for audit attribution; it does NOT affect bucket state.
-// Each increment caps at Burst+1 to bound retryAfter at worst-case
-// ~2x the per-slot refill time.
+// MarkFailure increments the IP bucket for ip and, when user is non-empty,
+// the per-user bucket for user. Each increment caps at burst+1 to bound
+// retryAfter at worst-case ~2x the per-slot refill time.
 func (l *Limiter) MarkFailure(ip, user string) {
 	if l == nil {
 		return
@@ -148,19 +158,30 @@ func (l *Limiter) MarkFailure(ip, user string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.cfg.Now()
-	maxFailures := float64(l.cfg.Burst + 1)
 
 	b := l.getBucketLocked(l.perIP, ip)
 	l.decayLocked(b, now)
-	if b.failures+1 > maxFailures {
+	if maxFailures := float64(l.cfg.Burst + 1); b.failures+1 > maxFailures {
 		b.failures = maxFailures
 	} else {
 		b.failures++
 	}
+	if user != "" && l.cfg.UserBurst > 0 {
+		ub := l.getBucketLocked(l.perUser, user)
+		l.decayLocked(ub, now)
+		if maxFailures := float64(l.cfg.UserBurst + 1); ub.failures+1 > maxFailures {
+			ub.failures = maxFailures
+		} else {
+			ub.failures++
+		}
+	}
 }
 
-// MarkSuccess resets the IP bucket to 0 failures. The user parameter is
-// accepted for audit attribution; it does NOT affect bucket state.
+// MarkSuccess resets the IP bucket to 0 failures and, when user is
+// non-empty, that user's per-user bucket. Resetting only the
+// authenticated principal's bucket (not every bucket on the IP) is what
+// closes throttle laundering: interleaving valid logins as user A no
+// longer clears failures accumulated against user V on the same IP.
 // Good behavior earns full quota back.
 func (l *Limiter) MarkSuccess(ip, user string) {
 	if l == nil {
@@ -172,6 +193,12 @@ func (l *Limiter) MarkSuccess(ip, user string) {
 	if b, ok := l.perIP[ip]; ok {
 		b.failures = 0
 		b.lastDecay = now
+	}
+	if user != "" {
+		if ub, ok := l.perUser[user]; ok {
+			ub.failures = 0
+			ub.lastDecay = now
+		}
 	}
 }
 
@@ -201,16 +228,16 @@ func (l *Limiter) decayLocked(b *bucket, now time.Time) {
 	b.lastDecay = now
 }
 
-// retryAfterLocked computes time until failures drops to (Burst - 1),
+// retryAfterLocked computes time until failures drops to (burst - 1),
 // i.e. one slot frees up. Caller holds l.mu.
-func (l *Limiter) retryAfterLocked(b *bucket) time.Duration {
+func (l *Limiter) retryAfterLocked(b *bucket, burst int) time.Duration {
 	if l.cfg.RefillPerMinute <= 0 {
 		// No decay — operator must wait for MarkSuccess. Return a long
 		// but finite Retry-After (10 minutes) so clients don't hammer.
 		return 10 * time.Minute
 	}
 	r := l.cfg.RefillPerMinute / 60.0
-	excess := b.failures - float64(l.cfg.Burst-1)
+	excess := b.failures - float64(burst-1)
 	if excess <= 0 {
 		return 0
 	}
@@ -255,6 +282,13 @@ func (l *Limiter) sweepOnce() {
 		// normal refill mode retains age-based eviction as its memory bound.
 		if b.failures <= 0 || (l.cfg.RefillPerMinute > 0 && idle > idleCutoff) {
 			delete(l.perIP, k)
+		}
+	}
+	for k, b := range l.perUser {
+		idle := now.Sub(b.lastDecay)
+		l.decayLocked(b, now)
+		if b.failures <= 0 || (l.cfg.RefillPerMinute > 0 && idle > idleCutoff) {
+			delete(l.perUser, k)
 		}
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	mathrand "math/rand"
 	"strings"
@@ -137,9 +138,13 @@ func Create(ctx context.Context, store storage.ObjectStore, tenantID, repoID str
 	// Best-effort commit marker (M8 GC uses these to distinguish winning
 	// tx records from CAS-loss orphans). The CAS that the marker witnesses
 	// has already committed; we never fail Create on marker-write failure.
-	// No structured logger plumbed into Create today; the failure is
-	// silent. M16 doctor tooling can repair missing markers.
-	_ = tx.WriteCommitMarker(ctx, store, k.CommitMarkerKey(txID))
+	// But the failure must not be silent (B2): systematic marker loss
+	// permanently disarms the tx-orphan sweep, leaking orphans forever.
+	// M16 doctor tooling can repair missing markers.
+	if err := tx.WriteCommitMarker(ctx, store, k.CommitMarkerKey(txID)); err != nil {
+		slog.Error("repo: commit marker write failed; run doctor to repair",
+			"key", k.CommitMarkerKey(txID), "error", err)
+	}
 
 	return &Repo{store: store, keys: k}, nil
 }
@@ -319,9 +324,13 @@ func (r *Repo) Commit(
 			return "", err
 		}
 		// Best-effort commit marker; the CAS already committed, so a
-		// marker-write failure is not propagated. M16 doctor tooling can
-		// repair missing markers. See Create for full rationale.
-		_ = tx.WriteCommitMarker(ctx, r.store, r.keys.CommitMarkerKey(txID))
+		// marker-write failure is not propagated — but it is logged (B2):
+		// systematic loss disarms the tx-orphan sweep. M16 doctor tooling
+		// can repair missing markers. See Create for full rationale.
+		if merr := tx.WriteCommitMarker(ctx, r.store, r.keys.CommitMarkerKey(txID)); merr != nil {
+			slog.Error("repo: commit marker write failed; run doctor to repair",
+				"key", r.keys.CommitMarkerKey(txID), "error", merr)
+		}
 		return txID, nil
 	}
 	return "", &repoerrs.CommitGaveUpError{

@@ -30,6 +30,8 @@ type Deleted struct {
 	CanonicalPacks     []string `json:"canonical_packs"`
 	Indexes            []string `json:"indexes"`
 	ReachabilityDeltas []string `json:"reachability_deltas"`
+	Bundles            []string `json:"bundles"`
+	OrphanMarkers      []string `json:"orphan_markers"`
 }
 
 // SkippedEntry records one candidate that was not deleted.
@@ -86,6 +88,12 @@ func (r Record) MarshalJSON() ([]byte, error) {
 	}
 	if m.Deleted.ReachabilityDeltas == nil {
 		m.Deleted.ReachabilityDeltas = []string{}
+	}
+	if m.Deleted.Bundles == nil {
+		m.Deleted.Bundles = []string{}
+	}
+	if m.Deleted.OrphanMarkers == nil {
+		m.Deleted.OrphanMarkers = []string{}
 	}
 	if m.Skipped == nil {
 		m.Skipped = []SkippedEntry{}

@@ -80,7 +80,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	proxiedBundleTTL, proxiedPackTTL, warmCommits, warmAge := sf.proxiedBundleTTL, sf.proxiedPackTTL, sf.warmCommits, sf.warmAge
 	proxiedBaseURL := sf.proxiedBaseURL
 	lfsEnabled, lfsPresignTTL, lfsSSHTokenTTL := sf.lfsEnabled, sf.lfsPresignTTL, sf.lfsSSHTokenTTL
-	authRateLimitBurst, authRateLimitRefillPerMin := sf.authRateLimitBurst, sf.authRateLimitRefillPerMin
+	authRateLimitBurst, authRateLimitUserBurst, authRateLimitRefillPerMin := sf.authRateLimitBurst, sf.authRateLimitUserBurst, sf.authRateLimitRefillPerMin
 	trustProxyHeaders, authRateLimitDisabled := sf.trustProxyHeaders, sf.authRateLimitDisabled
 	hooksEnabled, hooksRoot, hooksUnsafeNoSandbox := sf.hooksEnabled, sf.hooksRoot, sf.hooksUnsafeNoSandbox
 	hooksOnInternalError, hooksTimeoutSec, hooksCPUSec := sf.hooksOnInternalError, sf.hooksTimeoutSec, sf.hooksCPUSec
@@ -89,9 +89,9 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	hooksPostReceiveConcurrency, hooksPostReceiveQueue := sf.hooksPostReceiveConcurrency, sf.hooksPostReceiveQueue
 	oidcEnabled, oidcSweepInterval := sf.oidcEnabled, sf.oidcSweepInterval
 	buildTriggersEnabled, buildConfigPath, buildSweepInterval := sf.buildTriggersEnabled, sf.buildConfigPath, sf.buildSweepInterval
-	uiEnabled, uiAddr, uiDir, uiSessionTTL, uiBrowseTimeout := sf.uiEnabled, sf.uiAddr, sf.uiDir, sf.uiSessionTTL, sf.uiBrowseTimeout
+	uiEnabled, uiAddr, uiDir, uiSessionTTL, uiSessionMaxAge, uiBrowseTimeout := sf.uiEnabled, sf.uiAddr, sf.uiDir, sf.uiSessionTTL, sf.uiSessionMaxAge, sf.uiBrowseTimeout
 	oidcLogin, oidcIssuer, oidcClientID := sf.oidcLogin, sf.oidcIssuer, sf.oidcClientID
-	oidcSecretFile, oidcRedirect, oidcScopes, oidcLabel := sf.oidcSecretFile, sf.oidcRedirect, sf.oidcScopes, sf.oidcLabel
+	oidcSecretFile, oidcHMACKeyFile, oidcRedirect, oidcScopes, oidcLabel := sf.oidcSecretFile, sf.oidcHMACKeyFile, sf.oidcRedirect, sf.oidcScopes, sf.oidcLabel
 	oidcAllowEmailLink := sf.oidcAllowEmailLink
 	replicaOf, replicaCheckInterval, writeRegionURL := sf.replicaOf, sf.replicaCheckInterval, sf.writeRegionURL
 
@@ -641,6 +641,7 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 	if !*authRateLimitDisabled {
 		rateLimiter = ratelimit.NewLimiter(ratelimit.Config{
 			Burst:           *authRateLimitBurst,
+			UserBurst:       *authRateLimitUserBurst,
 			RefillPerMinute: *authRateLimitRefillPerMin,
 			SweepInterval:   5 * time.Minute,
 			Now:             time.Now,
@@ -894,10 +895,20 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 					fmt.Fprintf(stderr, "serve: oidc discovery for %s: %v\n", *oidcIssuer, derr)
 					return 1
 				}
-				hmacKey := make([]byte, 32)
-				if _, kerr := rand.Read(hmacKey); kerr != nil {
-					fmt.Fprintf(stderr, "serve: oidc hmac key: %v\n", kerr)
+				// A6: prefer an operator-provisioned stable key so OIDC
+				// logins survive restarts and verify on every instance.
+				hmacKey, provisioned, kerr := resolveOIDCHMACKey(*oidcHMACKeyFile, os.Getenv)
+				if kerr != nil {
+					fmt.Fprintf(stderr, "serve: %v\n", kerr)
 					return 1
+				}
+				if !provisioned {
+					hmacKey = make([]byte, 32)
+					if _, kerr := rand.Read(hmacKey); kerr != nil {
+						fmt.Fprintf(stderr, "serve: oidc hmac key: %v\n", kerr)
+						return 1
+					}
+					logger.Warn("oidc hmac key is ephemeral: multi-node logins will fail HMAC and restarts invalidate in-flight flows; set --oidc-login-hmac-key-file or BUCKETVCS_OIDC_HMAC_KEY")
 				}
 				oidcProvider = &web.OIDCProvider{
 					Issuer:      *oidcIssuer,
@@ -909,25 +920,26 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 					Scopes:      splitCSV(*oidcScopes),
 					Label:       *oidcLabel,
 					HMACKey:     hmacKey,
-					// U-2: wired from --oidc-login-allow-email-link (default true).
+					// U-2/A1: wired from --oidc-login-allow-email-link (default false).
 					AllowEmailLink: *oidcAllowEmailLink,
 				}
 				logger.Info("oidc browser login enabled", "issuer", *oidcIssuer)
 			}
 			browseSvc := gitbrowse.NewService(store, srv.MirrorManager(), *uiBrowseTimeout, logger)
 			webDeps := web.Deps{
-				Store:      newWebAdapter(authS),
-				Logger:     logger,
-				Limiter:    rateLimiter,
-				UIDir:      *uiDir,
-				SessionTTL: *uiSessionTTL,
-				TrustProxy: *trustProxyHeaders,
-				OIDC:       oidcProvider,
-				Content:    browseSvc,
-				Webhooks:   webhookSvc,
-				Policy:     policySvc,
-				Hooks:      hooksStore,
-				Triggers:   buildSvc, // nil when build triggers disabled
+				Store:         newWebAdapter(authS),
+				Logger:        logger,
+				Limiter:       rateLimiter,
+				UIDir:         *uiDir,
+				SessionTTL:    *uiSessionTTL,
+				SessionMaxAge: *uiSessionMaxAge,
+				TrustProxy:    *trustProxyHeaders,
+				OIDC:          oidcProvider,
+				Content:       browseSvc,
+				Webhooks:      webhookSvc,
+				Policy:        policySvc,
+				Hooks:         hooksStore,
+				Triggers:      buildSvc, // nil when build triggers disabled
 				Connectors: func() web.ConnectorNames {
 					aws, azure := buildtrigger.SortedConnectorNames(buildConnectors, buildAzureConnectors)
 					return web.ConnectorNames{AWS: aws, Azure: azure}

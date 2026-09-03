@@ -61,6 +61,12 @@ type Config struct {
 	AWSProject   string `json:"aws_project,omitempty"`
 	AWSConnector string `json:"aws_connector,omitempty"`
 
+	// AllowHTTP is the explicit per-trigger opt-out of the https default
+	// (A8). Delivery of URL-bearing triggers over plaintext HTTP sends
+	// minted Bearer [REDACTED] and repo payloads on the wire; it is rejected
+	// at create and at delivery unless this is set.
+	AllowHTTP bool `json:"allow_http,omitempty"`
+
 	// Azure webhook (KindAzureWebhook). Reuses Secret for the HMAC shared
 	// secret (SHA-1). AzureSigHeader defaults to "X-Hub-Signature".
 	AzureWebhookURL string `json:"azure_webhook_url,omitempty"`
