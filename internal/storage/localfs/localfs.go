@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bucketvcs/bucketvcs/internal/storage"
@@ -43,6 +44,31 @@ type Localfs struct {
 	lock            *os.File
 	lockfileRemoved bool
 	mutexes         *keyedMutex
+
+	// listCache memoizes collectKeys per prefix within a generation so
+	// paginated List loops (GC discovery) pay one tree walk instead of
+	// one per page (B8). Every successful mutation bumps listGen,
+	// invalidating all entries — cached keys can never outlive the
+	// generation that produced them, so pagination stays exact.
+	listMu    sync.Mutex
+	listGen   uint64
+	listCache map[string]listCacheEntry
+}
+
+type listCacheEntry struct {
+	gen  uint64
+	keys []string
+}
+
+// bumpListGen invalidates memoized listings. Call after every
+// successful mutation.
+func (l *Localfs) bumpListGen() {
+	l.listMu.Lock()
+	defer l.listMu.Unlock()
+	l.listGen++
+	// Drop the map instead of filtering: entries are cheap to rebuild
+	// and a post-mutation listing almost always uses new prefixes.
+	l.listCache = nil
 }
 
 // Compile-time assertion that *Localfs satisfies storage.ObjectStore.
@@ -433,6 +459,7 @@ func (l *Localfs) DeleteIfVersionMatches(ctx context.Context, key string, expect
 	if err := fsyncDir(objDir); err != nil {
 		return err
 	}
+	l.bumpListGen()
 	return nil
 }
 
@@ -454,7 +481,7 @@ func (l *Localfs) List(ctx context.Context, prefix string, opts *storage.ListOpt
 		cont = opts.ContinuationToken
 	}
 
-	keys, err := l.collectKeys(prefix)
+	keys, err := l.cachedKeys(prefix)
 	if err != nil {
 		return nil, err
 	}
@@ -501,6 +528,38 @@ func (l *Localfs) List(ctx context.Context, prefix string, opts *storage.ListOpt
 		}
 	}
 	return page, nil
+}
+
+// cachedKeys returns collectKeys(prefix), memoized per prefix within the
+// current mutation generation. The cached slice is shared read-only:
+// callers must not mutate it (List only reslices).
+func (l *Localfs) cachedKeys(prefix string) ([]string, error) {
+	l.listMu.Lock()
+	if e, ok := l.listCache[prefix]; ok && e.gen == l.listGen {
+		keys := e.keys
+		l.listMu.Unlock()
+		return keys, nil
+	}
+	gen := l.listGen
+	l.listMu.Unlock()
+
+	keys, err := l.collectKeys(prefix)
+	if err != nil {
+		return nil, err
+	}
+
+	l.listMu.Lock()
+	defer l.listMu.Unlock()
+	if gen != l.listGen {
+		// A mutation landed while we walked; the fresh walk is already
+		// stale — return it uncached rather than pinning it.
+		return keys, nil
+	}
+	if l.listCache == nil {
+		l.listCache = map[string]listCacheEntry{}
+	}
+	l.listCache[prefix] = listCacheEntry{gen: gen, keys: keys}
+	return keys, nil
 }
 
 // collectKeys walks the entire objects/ tree and returns keys whose
@@ -803,6 +862,7 @@ func (l *Localfs) writeAtomic(key string, body io.Reader, contentType string) (s
 		return storage.ObjectVersion{}, fmt.Errorf("localfs: write committed, sidecar fsync failed: %w", err)
 	}
 
+	l.bumpListGen()
 	return storage.ObjectVersion{
 		Provider: "localfs",
 		Token:    sum,

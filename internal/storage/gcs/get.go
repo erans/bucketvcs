@@ -24,11 +24,12 @@ func (g *GCS) Get(ctx context.Context, key string, opts *bvstorage.GetOptions) (
 	if err != nil {
 		return nil, classify(opGet, err)
 	}
-	attrs, err := obj.Attrs(ctx)
-	if err != nil {
-		_ = rdr.Close()
-		return nil, classify(opHead, err)
-	}
+	// B12: take metadata from the reader's own attrs (populated by the
+	// same NewReader response that opened the body), not a second
+	// obj.Attrs RPC — one round-trip saved, and Size/Version can no
+	// longer describe a different generation than the open body if the
+	// object is rewritten concurrently.
+	attrs := rdr.Attrs
 	return &bvstorage.Object{
 		Body: rdr,
 		Metadata: bvstorage.ObjectMetadata{
@@ -36,7 +37,7 @@ func (g *GCS) Get(ctx context.Context, key string, opts *bvstorage.GetOptions) (
 			Version:     versionFromGen(attrs.Generation),
 			Size:        attrs.Size,
 			ContentType: attrs.ContentType,
-			ModifiedAt:  attrs.Updated,
+			ModifiedAt:  attrs.LastModified,
 		},
 	}, nil
 }
