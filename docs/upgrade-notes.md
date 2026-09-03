@@ -5,6 +5,61 @@ anything to check before rolling a new version. Newest first. Install
 instructions live in the [README](../README.md#install); full feature docs in
 the [operator guides](operator-guides/).
 
+## Unreleased (adversarial-review hardening)
+
+Behavior changes from the security/correctness review. All live behind
+explicit flags with safe defaults; the breaking items are the four default
+flips below.
+
+- **OIDC email auto-link is now opt-in (breaking).** `--oidc-login-allow-email-link`
+  defaults to `false`. First-time OIDC logins no longer auto-link by verified
+  email (TOFU); operators must pre-link identities (issuer, subject) or pass
+  `--oidc-login-allow-email-link=true` if they trust their IdP's email
+  verification. Existing linked users are unaffected.
+- **Web sessions now have an absolute lifetime (breaking).** New
+  `--ui-session-max-age` (default 24h) caps total session lifetime from
+  creation; the sliding `--ui-session-ttl` can no longer extend a session
+  past it. Active sessions older than the cap are revoked on next request.
+  Raise the flag if 24h is too short for your users.
+- **Short `--retention` now requires acknowledgment (breaking).**
+  `bucketvcs gc --retention` below 4h (`gc.MinRetention`, covering the
+  longest default signed-URL TTL) is rejected unless `--allow-short-retention`
+  is passed. Retention between 4h and 24h still warns. If you raised
+  presigned-URL TTLs above 4h, raise retention to match.
+- **Build-trigger URLs must be https unless acknowledged (breaking).**
+  Generic, Cloud Build, and Azure webhook triggers with `http://` URLs are
+  rejected at creation and refused at delivery (no token is minted for a
+  refused delivery) unless the trigger sets `allow_http` (`--allow-http` on
+  the CLI, `allow_http` in `build apply` YAML). Pre-existing plaintext
+  triggers stop delivering until updated.
+- **Per-account auth rate limiting (new, on by default).** Failures against
+  one username now accumulate across source IPs (`--auth-rate-limit-user-burst`,
+  default 100, an order of magnitude above the per-IP burst to keep targeted
+  lockout-DoS expensive). A successful login resets only that principal's
+  bucket. Set `--auth-rate-limit-user-burst=0` for pure IP-only gating.
+  New `auth_ratelimit_total{outcome="limited_user"}` log metric and
+  per-bucket (`ip`/`user`) attribution on rate-limit audit lines.
+- **Stable OIDC login-state HMAC key (new, opt-in).** Set
+  `--oidc-login-hmac-key-file` or `BUCKETVCS_OIDC_HMAC_KEY` (>= 16 bytes) so
+  OIDC logins verify on every instance and survive restarts. Without it the
+  key stays ephemeral per boot (single instance only) and a warning is
+  logged. A short key or missing key file fails startup closed.
+- **Hooks failure mode documented; default stays fail-closed.** No behavior
+  change: `--hooks-on-internal-error` still defaults to `reject`. The flag
+  help now states the `allow` risk explicitly (pushes proceed unenforced when
+  hook enforcement itself is broken).
+- **GC now sweeps retired bundles and orphan commit markers.** Both are
+  retention-gated like other categories and visible in `gc` text/JSON output
+  (`bundles`, `orphan_markers`) and audit logs. A `gc.sweep.started` audit
+  line now precedes deletions so a failed sweep-record write stays
+  reconstructible from the mark record. Commit-marker write failures are
+  logged (best-effort semantics unchanged).
+- **Observable serving/usage changes.** Truncated proxied bundle/pack bodies
+  are logged with expected-vs-served bytes and metered as `truncated` instead
+  of `ok`. Token-usage queue drops now warn. Azure nil-ContentLength skips
+  are counted per page. GCS reads use single-request metadata (no behavior
+  change). `streamToFile` downloads are temp+rename with byte-count check.
+
 ## v0.6.0
 
 No breaking changes. Two authdb schema migrations (0017 build triggers,
