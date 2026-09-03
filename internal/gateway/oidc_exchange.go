@@ -147,7 +147,15 @@ func (s *Server) handleOIDCExchange(w http.ResponseWriter, r *http.Request) {
 	}
 	sub, _ := claims["sub"].(string)
 	if sub == "" {
-		sub = "unknown"
+		// A9: a token without a stable subject must never mint an
+		// identity-bound credential — substituting "unknown" collides
+		// distinct callers onto one audit label ("oidc:<alias>:unknown")
+		// and weakens non-repudiation. The browser OIDC path already
+		// rejects empty sub as confused-deputy (web/oidc.go); align here.
+		auth.EmitOIDCRejected(ctx, s.logger, issuer.Alias, ip, "invalid_token")
+		emitOIDCMetric(ctx, s.logger, "invalid_token")
+		writeOIDCError(w, http.StatusUnauthorized, "invalid_token", "")
+		return
 	}
 	label := "oidc:" + issuer.Alias + ":" + sub
 	token, err := s.opts.OIDCStore.MintOIDCToken(ctx, rule.Tenant, rule.Repo, perm,

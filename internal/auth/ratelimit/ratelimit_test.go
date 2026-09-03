@@ -74,11 +74,10 @@ func TestLimiter_PerIPIsolation(t *testing.T) {
 }
 
 func TestLimiter_UserParamDoesNotEnableCrossIPLockout(t *testing.T) {
-	// Regression: an earlier design had a cross-IP per-user bucket that an
-	// attacker could weaponise to lock out a victim user by hammering the
-	// known username from a botnet. The bucket was removed; the user
-	// parameter is now accepted for audit attribution but does NOT gate.
-	// This test pins that behavior.
+	// Disabled mode (UserBurst=0): the user parameter is accepted for
+	// audit attribution but does NOT gate. This test pins the opt-out:
+	// operators who set --auth-rate-limit-user-burst=0 get pure IP-only
+	// gating with no cross-IP account throttle.
 	_, now := fakeClock()
 	l := newLimiter(t, 3, 0, now) // refill disabled — failures persist
 	// 10 failures against the same user from 10 distinct IPs.
@@ -86,12 +85,68 @@ func TestLimiter_UserParamDoesNotEnableCrossIPLockout(t *testing.T) {
 		ip := "ip" + string(rune('a'+i))
 		l.MarkFailure(ip, "victim")
 	}
-	// An 11th IP attempting auth as the victim must STILL be allowed:
-	// the per-user bucket would have tripped at attempt 4, locking the
-	// real victim out. The IP-only design does not lock out by user.
+	// An 11th IP attempting auth as the victim must STILL be allowed.
 	allowed, _, which := l.CheckDetailed("ip-fresh", "victim")
 	if !allowed {
-		t.Errorf("cross-IP per-user lockout regression: ip-fresh blocked because user=victim has been hammered elsewhere (which=%v)", which)
+		t.Errorf("disabled per-user bucket blocked ip-fresh (which=%v)", which)
+	}
+}
+
+func newUserLimiter(t *testing.T, burst, userBurst int, refillPerMinute float64, nowFn func() time.Time) *ratelimit.Limiter {
+	t.Helper()
+	l := ratelimit.NewLimiter(ratelimit.Config{
+		Burst:           burst,
+		UserBurst:       userBurst,
+		RefillPerMinute: refillPerMinute,
+		SweepInterval:   24 * time.Hour, // sweep disabled in unit tests
+		Now:             nowFn,
+	})
+	t.Cleanup(l.Close)
+	return l
+}
+
+// TestLimiter_PerUserBucketCatchesDistributedSpray is the A5/M2
+// regression: guessing spread across many source IPs against one account
+// must still trip a throttle via the cross-IP per-user bucket.
+func TestLimiter_PerUserBucketCatchesDistributedSpray(t *testing.T) {
+	_, now := fakeClock()
+	l := newUserLimiter(t, 1000, 5, 0, now) // high IP burst, user burst 5, no decay
+	for i := 0; i < 5; i++ {
+		l.MarkFailure("spray-ip-"+string(rune('a'+i)), "victim")
+	}
+	allowed, _, which := l.CheckDetailed("spray-ip-fresh", "victim")
+	if allowed {
+		t.Fatal("distributed spray against victim should trip the per-user bucket")
+	}
+	if which != ratelimit.BucketUser {
+		t.Errorf("which=%v, want BucketUser", which)
+	}
+	// A different account on a fresh IP is unaffected.
+	if allowed, _, _ := l.CheckDetailed("spray-ip-fresh", "bystander"); !allowed {
+		t.Error("bystander account should not be throttled by victim's bucket")
+	}
+}
+
+// TestLimiter_MarkSuccessOnlyResetsSamePrincipal is the A4/M1
+// regression: interleaving valid logins as user A must NOT clear
+// failures accumulated against user V (throttle laundering).
+func TestLimiter_MarkSuccessOnlyResetsSamePrincipal(t *testing.T) {
+	_, now := fakeClock()
+	l := newUserLimiter(t, 1000, 3, 0, now) // high IP burst, user burst 3, no decay
+	for i := 0; i < 3; i++ {
+		l.MarkFailure("shared-ip", "victim")
+	}
+	// Attacker logs in validly as themselves from the same IP, twice.
+	l.MarkSuccess("shared-ip", "attacker")
+	l.MarkSuccess("shared-ip", "attacker")
+	allowed, _, which := l.CheckDetailed("shared-ip", "victim")
+	if allowed {
+		t.Fatalf("victim bucket should survive attacker's successful logins (which=%v)", which)
+	}
+	// But the victim's own successful login clears their bucket.
+	l.MarkSuccess("shared-ip", "victim")
+	if allowed, _, _ := l.CheckDetailed("shared-ip", "victim"); !allowed {
+		t.Error("victim's own success should reset their bucket")
 	}
 }
 

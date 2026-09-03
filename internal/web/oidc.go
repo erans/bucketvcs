@@ -57,6 +57,9 @@ func (s *server) handleOIDCAuthorize(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
+	// A10: per-attempt proxy-mismatch warning — the session cookie set at
+	// the end of this handler may be Secure-downgraded.
+	warnIfProxyHeaderMismatched(r, s.trustProxy, s.logger)
 	ip := gw.ClientIP(r, s.trustProxy)
 	reject := func(code int, reason, email string) {
 		s.limiter.MarkFailure(ip, "") // nil-safe

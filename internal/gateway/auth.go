@@ -86,17 +86,23 @@ func RunAuth(w http.ResponseWriter, r *http.Request, store auth.Store, rr *Route
 	if user, _, ok := r.BasicAuth(); ok {
 		basicUser = user
 	}
-	if allowed, retryAfter, _ := limiter.CheckDetailed(ip, basicUser); !allowed {
+	if allowed, retryAfter, which := limiter.CheckDetailed(ip, basicUser); !allowed {
 		retrySec := int(retryAfter.Seconds())
 		if retrySec < 1 {
 			retrySec = 1
+		}
+		bucket := "ip"
+		metric := "limited_ip"
+		if which == ratelimit.BucketUser {
+			bucket = "user"
+			metric = "limited_user"
 		}
 		w.Header().Set("Retry-After", strconv.Itoa(retrySec))
 		http.Error(w,
 			fmt.Sprintf("rate limited; retry after %ds", retrySec),
 			http.StatusTooManyRequests)
-		auth.EmitRateLimitHit(ctx, logger, ip, basicUser, "ip", retrySec, "https")
-		ratelimit.EmitRateLimitMetric(ctx, logger, "limited_ip")
+		auth.EmitRateLimitHit(ctx, logger, ip, basicUser, bucket, retrySec, "https")
+		ratelimit.EmitRateLimitMetric(ctx, logger, metric)
 		return nil, false
 	}
 
@@ -129,7 +135,10 @@ func RunAuth(w http.ResponseWriter, r *http.Request, store auth.Store, rr *Route
 		select {
 		case tokenUsageQueue <- tokenUsageJob{store: store, tokenID: tokenID}:
 		default:
-			// Queue full — drop the update (best-effort, like before).
+			// Queue full — drop the update (best-effort), but say so:
+			// silent drops hide auth storms from the audit trail.
+			logger.Warn("gateway: token usage queue full; dropping last_used_at update",
+				"token_id", tokenID, "tenant", rr.Tenant, "repo", rr.Repo)
 		}
 		// Successful credential verification resets the rate-limit bucket
 		// (good behavior earns full quota back). Scope mismatch above is a
