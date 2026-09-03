@@ -743,11 +743,18 @@ func PackObjectsForFetch(ctx context.Context, dir string, opts PackForFetchOptio
 	go func() {
 		defer stdin.Close()
 		bw := bufio.NewWriter(stdin)
+		// B16: stop feeding on the first write error (typically EPIPE
+		// after the child died early) instead of looping pointlessly.
+		// The child's failure still surfaces via Close/Wait.
 		for _, w := range opts.Wants {
-			fmt.Fprintf(bw, "%s\n", w)
+			if _, err := fmt.Fprintf(bw, "%s\n", w); err != nil {
+				return
+			}
 		}
 		for _, h := range opts.Haves {
-			fmt.Fprintf(bw, "^%s\n", h)
+			if _, err := fmt.Fprintf(bw, "^%s\n", h); err != nil {
+				return
+			}
 		}
 		_ = bw.Flush()
 	}()

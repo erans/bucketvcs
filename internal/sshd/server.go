@@ -41,8 +41,9 @@ type Options struct {
 	// If the file is absent, NewServer generates an ed25519 key and
 	// persists it (mode 0600).
 	HostKeyPath string
-	// Grace bounds Close()'s wait for in-flight sessions before forcing
-	// closure. Zero means force-close immediately.
+	// Grace bounds how long Close() waits for in-flight sessions before
+	// returning. In-flight sessions always run to completion — nothing
+	// force-closes them. Zero means return immediately without waiting.
 	Grace time.Duration
 
 	// AgentVersion is the gateway's advertised agent version, plumbed into
@@ -375,8 +376,12 @@ func (s *Server) Serve(ctx context.Context) error {
 }
 
 // Close stops accepting new connections and waits up to opts.Grace for
-// in-flight sessions to drain. After Grace, in-flight ssh.Channels are
-// closed by killing the listener (sshConn.Close in handleConn).
+// in-flight sessions to drain. B22: the previous docstring claimed
+// sessions are force-closed after Grace (or immediately when Grace is
+// zero) — that never happened. Closing the listener only unblocks
+// Accept; established sessions always run to completion detached from
+// Close. Grace bounds the wait, nothing more; Grace == 0 returns
+// immediately without waiting.
 func (s *Server) Close() error {
 	s.mu.Lock()
 	s.closed = true
