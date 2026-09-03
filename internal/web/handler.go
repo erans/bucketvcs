@@ -34,15 +34,15 @@ func cspMiddleware(next http.Handler) http.Handler {
 
 // Deps are the web handler's dependencies (composition-root wired).
 type Deps struct {
-	Store      DataStore
-	Logger     *slog.Logger
-	Limiter    *ratelimit.Limiter // nil => no rate limiting
-	UIDir      string             // "" => embedded assets
-	SessionTTL    time.Duration // 0 => DefaultSessionTTL
-	SessionMaxAge time.Duration // 0 => DefaultSessionMaxAge; absolute cap from creation
-	TrustProxy    bool           // for Secure-cookie / client-IP decisions
-	OIDC       *OIDCProvider      // nil => OIDC login disabled
-	Content    ContentStore       // nil => code browse disabled (routes 404)
+	Store         DataStore
+	Logger        *slog.Logger
+	Limiter       *ratelimit.Limiter // nil => no rate limiting
+	UIDir         string             // "" => embedded assets
+	SessionTTL    time.Duration      // 0 => DefaultSessionTTL
+	SessionMaxAge time.Duration      // 0 => DefaultSessionMaxAge; absolute cap from creation
+	TrustProxy    bool               // for Secure-cookie / client-IP decisions
+	OIDC          *OIDCProvider      // nil => OIDC login disabled
+	Content       ContentStore       // nil => code browse disabled (routes 404)
 
 	// Phase 3 admin services. All nil-able; nil disables the corresponding
 	// settings pages (they render a "not enabled" notice or 404).

@@ -19,10 +19,10 @@ type fakeStore struct {
 	// session list/revoke (self-service + admin)
 	sessionsForUser     []auth.SessionInfo
 	allSessions         []auth.AdminSessionInfo
-	revokeCount         int64  // returned by DeleteSessionByHash* (0 => default 1; -1 => 0 "already gone")
-	lastRevokeUserID    string // recorded by DeleteSessionByHashForUser
-	lastRevokeHash      string // recorded by both revoke-by-hash methods
-	lastRevokeAllUserID string // recorded by DeleteSessionsForUser
+	revokeCount         int64         // returned by DeleteSessionByHash* (0 => default 1; -1 => 0 "already gone")
+	lastRevokeUserID    string        // recorded by DeleteSessionByHashForUser
+	lastRevokeHash      string        // recorded by both revoke-by-hash methods
+	lastRevokeAllUserID string        // recorded by DeleteSessionsForUser
 	lastTouchRaw        string        // recorded by TouchSession
 	lastTouchTTL        time.Duration // recorded by TouchSession
 	repos               func(actor *auth.Actor) []Repo

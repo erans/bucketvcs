@@ -102,7 +102,7 @@ func TestDiscover_OrphanTxRecords_ExcludesMarkedAndCurrent(t *testing.T) {
 		k.CommitMarkerKey("tx_current"): {},
 	}
 
-	cands, armed, err := gc.DiscoverTxRecords(context.Background(), store, k, live)
+	cands, orphanMarkers, armed, err := gc.DiscoverTxRecords(context.Background(), store, k, live)
 	if err != nil {
 		t.Fatalf("DiscoverTxRecords: %v", err)
 	}
@@ -114,5 +114,41 @@ func TestDiscover_OrphanTxRecords_ExcludesMarkedAndCurrent(t *testing.T) {
 	}
 	if cands[0] != k.TxRecordKey("tx_orphan") {
 		t.Fatalf("got candidate %q, want %q", cands[0], k.TxRecordKey("tx_orphan"))
+	}
+	if len(orphanMarkers) != 0 {
+		t.Fatalf("got %d orphan markers, want 0 (sole marker has a record)", len(orphanMarkers))
+	}
+}
+
+// TestDiscoverTxRecords_OrphanMarkers is the B10 regression: markers
+// without a sibling tx record must be enumerated (retention-gated
+// sweep candidates) instead of accumulating forever.
+func TestDiscoverTxRecords_OrphanMarkers(t *testing.T) {
+	ctx := context.Background()
+	store, _ := localfs.Open(t.TempDir())
+	k, _ := keys.NewRepo("acme", "site")
+	// Live tx with live marker.
+	gctest.PutEmpty(t, store, k.TxRecordKey("tx_live"))
+	gctest.PutEmpty(t, store, k.CommitMarkerKey("tx_live"))
+	// Orphan marker: no sibling tx record.
+	gctest.PutEmpty(t, store, k.CommitMarkerKey("tx_gone"))
+
+	live := gc.LiveSet{
+		k.TxRecordKey("tx_live"):     {},
+		k.CommitMarkerKey("tx_live"): {},
+	}
+
+	cands, orphanMarkers, armed, err := gc.DiscoverTxRecords(ctx, store, k, live)
+	if err != nil {
+		t.Fatalf("DiscoverTxRecords: %v", err)
+	}
+	if !armed {
+		t.Error("armed must be true (markers observed)")
+	}
+	if len(cands) != 0 {
+		t.Fatalf("got %d tx candidates, want 0", len(cands))
+	}
+	if len(orphanMarkers) != 1 || orphanMarkers[0] != k.CommitMarkerKey("tx_gone") {
+		t.Fatalf("got orphan markers %v, want [%q]", orphanMarkers, k.CommitMarkerKey("tx_gone"))
 	}
 }

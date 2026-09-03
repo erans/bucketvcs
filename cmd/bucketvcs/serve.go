@@ -927,19 +927,19 @@ func runServeWithListener(ctx context.Context, args []string, stdout, stderr io.
 			}
 			browseSvc := gitbrowse.NewService(store, srv.MirrorManager(), *uiBrowseTimeout, logger)
 			webDeps := web.Deps{
-				Store:      newWebAdapter(authS),
-				Logger:     logger,
-				Limiter:    rateLimiter,
-				UIDir:      *uiDir,
+				Store:         newWebAdapter(authS),
+				Logger:        logger,
+				Limiter:       rateLimiter,
+				UIDir:         *uiDir,
 				SessionTTL:    *uiSessionTTL,
 				SessionMaxAge: *uiSessionMaxAge,
-				TrustProxy: *trustProxyHeaders,
-				OIDC:       oidcProvider,
-				Content:    browseSvc,
-				Webhooks:   webhookSvc,
-				Policy:     policySvc,
-				Hooks:      hooksStore,
-				Triggers:   buildSvc, // nil when build triggers disabled
+				TrustProxy:    *trustProxyHeaders,
+				OIDC:          oidcProvider,
+				Content:       browseSvc,
+				Webhooks:      webhookSvc,
+				Policy:        policySvc,
+				Hooks:         hooksStore,
+				Triggers:      buildSvc, // nil when build triggers disabled
 				Connectors: func() web.ConnectorNames {
 					aws, azure := buildtrigger.SortedConnectorNames(buildConnectors, buildAzureConnectors)
 					return web.ConnectorNames{AWS: aws, Azure: azure}

@@ -33,6 +33,7 @@ func runGC(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	repoFlag := fs.String("repo", "", "<tenant>/<repo> (mutually exclusive with --all-repos)")
 	allRepos := fs.Bool("all-repos", false, "Process every repo discovered under tenants/*/repos/*")
 	retention := fs.Duration("retention", gc.DefaultRetention, "Sweep candidate retention window")
+	allowShortRetention := fs.Bool("allow-short-retention", false, "Acknowledge racing in-flight clones/signed URLs with --retention below 4h (testing only; never for production data)")
 	maxConcurrency := fs.Int("max-concurrency", 1, "RESERVED for future parallel sweep; currently no-op (sequential)")
 	markOnly := fs.Bool("mark-only", false, "Run mark phase only; skip sweep")
 	sweepOnly := fs.Bool("sweep-only", false, "Skip mark phase; sweep most recent mark")
@@ -73,11 +74,19 @@ func runGC(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if *retention < 0 {
-		fmt.Fprintf(stderr, "gc: --retention=%s is negative; use --retention=1s as the floor or omit the flag for the 7d default.\n", *retention)
+		fmt.Fprintf(stderr, "gc: --retention=%s is negative; omit the flag for the 7d default.\n", *retention)
 		return 2
 	}
 	if *retention > 0 && *retention < time.Second {
-		fmt.Fprintf(stderr, "gc: --retention=%s is below the 1s minimum; sub-second values are silently rounded to 0 and the default 7d window applies. Use --retention=1s as the floor.\n", *retention)
+		fmt.Fprintf(stderr, "gc: --retention=%s is below the 1s minimum; sub-second values are silently rounded to 0 and the default 7d window applies.\n", *retention)
+		return 2
+	}
+	// A3: below MinRetention a sweep races outstanding signed URLs
+	// (longest default TTL is the 4h bundle URL). Reject unless the
+	// operator explicitly acknowledges the race — the flag exists for
+	// tests, not production data.
+	if *retention > 0 && *retention < gc.MinRetention && !*allowShortRetention {
+		fmt.Fprintf(stderr, "gc: --retention=%s is below the %s floor and races in-flight clones/signed URLs; raise --retention or pass --allow-short-retention to acknowledge the risk.\n", *retention, gc.MinRetention)
 		return 2
 	}
 	if *retention > 0 && gc.ShouldWarnRetention(*retention) {
@@ -356,11 +365,13 @@ func writeGitReportText(w io.Writer, r gc.RunReport) {
 		fmt.Fprintf(w, "repo %s @ manifest v%d\n", r.RepoID, r.ManifestVersion)
 	}
 	if r.MarkRecord.MarkID != "" {
-		fmt.Fprintf(w, "  mark    %s   candidates: tx=%d packs=%d indexes=%d  (%s)\n",
+		fmt.Fprintf(w, "  mark    %s   candidates: tx=%d packs=%d indexes=%d bundles=%d orphan_markers=%d  (%s)\n",
 			r.MarkRecord.MarkID,
 			len(r.MarkRecord.Candidates.TxRecords),
 			len(r.MarkRecord.Candidates.CanonicalPacks),
 			len(r.MarkRecord.Candidates.Indexes),
+			len(r.MarkRecord.Candidates.Bundles),
+			len(r.MarkRecord.Candidates.OrphanMarkers),
 			r.MarkDuration.Round(time.Millisecond),
 		)
 	}
@@ -374,9 +385,10 @@ func writeGitReportText(w io.Writer, r gc.RunReport) {
 		if r.DryRun {
 			deletedLabel = "would-delete"
 		}
-		fmt.Fprintf(w, "  sweep   %s   %s: tx=%d packs=%d indexes=%d\n",
+		fmt.Fprintf(w, "  sweep   %s   %s: tx=%d packs=%d indexes=%d bundles=%d orphan_markers=%d\n",
 			s.SweepID, deletedLabel,
-			len(s.Deleted.TxRecords), len(s.Deleted.CanonicalPacks), len(s.Deleted.Indexes))
+			len(s.Deleted.TxRecords), len(s.Deleted.CanonicalPacks), len(s.Deleted.Indexes),
+			len(s.Deleted.Bundles), len(s.Deleted.OrphanMarkers))
 		fmt.Fprintf(w, "                       skipped: revived=%d retention=%d vmismatch=%d notfound=%d disarmed=%d\n",
 			byReason["revived"], byReason["retention_not_met"], byReason["version_mismatch"], byReason["not_found"], byReason["tx_sweep_disarmed"])
 		fmt.Fprintf(w, "                       errors: %d  (%s)\n", len(s.Errors), r.SweepDuration.Round(time.Millisecond))
@@ -443,7 +455,8 @@ func runLFSPhase(ctx context.Context, store storage.ObjectStore, r *repo.Repo, m
 	}
 	if !sweepOnly {
 		markStart := time.Now()
-		// retention is validated ≥ 1s upstream. The MarkOptions wire
+		// retention is validated ≥ 1s upstream (4h floor without
+		// --allow-short-retention). The MarkOptions wire
 		// format is integer seconds (persisted on the MarkRecord too),
 		// so sub-second-fractional values like 1500ms truncate to 1s
 		// here. This diverges from the Git path, which uses
@@ -535,7 +548,7 @@ Flags:
   --store=<URL>             Storage URL (required, e.g. localfs:/path, s3://bucket, gcs://bucket, azureblob://container)
   --repo=<tenant>/<repo>    Single repo (mutually exclusive with --all-repos)
   --all-repos               Process every repo discovered under tenants/*/repos/*
-  --retention=<duration>    Sweep candidate retention window (default 168h; minimum 1s; warns if < 24h)
+  --retention=<duration>    Sweep candidate retention window (default 168h; minimum 4h without --allow-short-retention; warns if < 24h)
   --max-concurrency=<n>     RESERVED — currently no-op; sequential sweep (default 1)
   --mark-only               Run mark phase only; skip sweep
   --sweep-only              Skip mark phase; sweep most recent existing mark

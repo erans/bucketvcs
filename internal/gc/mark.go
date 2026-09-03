@@ -63,7 +63,11 @@ func RunMark(ctx context.Context, s storage.ObjectStore, r *repo.Repo, opts Mark
 	if err != nil {
 		return marks.Record{}, err
 	}
-	txCandKeys, armedNow, err := DiscoverTxRecords(ctx, s, k, live)
+	txCandKeys, orphanMarkerKeys, armedNow, err := DiscoverTxRecords(ctx, s, k, live)
+	if err != nil {
+		return marks.Record{}, err
+	}
+	bundleCandKeys, err := DiscoverBundles(ctx, s, k, live)
 	if err != nil {
 		return marks.Record{}, err
 	}
@@ -90,6 +94,8 @@ func RunMark(ctx context.Context, s storage.ObjectStore, r *repo.Repo, opts Mark
 	prevPackByKey := map[string]marks.PackCandidate{}
 	prevTxByKey := map[string]marks.TxCandidate{}
 	prevIdxByKey := map[string]marks.IndexCandidate{}
+	prevBundleByKey := map[string]marks.BundleCandidate{}
+	prevMarkerByKey := map[string]marks.MarkerCandidate{}
 	if hasPrev {
 		for _, p := range prev.Candidates.CanonicalPacks {
 			prevPackByKey[p.Key] = p
@@ -99,6 +105,12 @@ func RunMark(ctx context.Context, s storage.ObjectStore, r *repo.Repo, opts Mark
 		}
 		for _, i := range prev.Candidates.Indexes {
 			prevIdxByKey[i.Key] = i
+		}
+		for _, b := range prev.Candidates.Bundles {
+			prevBundleByKey[b.Key] = b
+		}
+		for _, m := range prev.Candidates.OrphanMarkers {
+			prevMarkerByKey[m.Key] = m
 		}
 	}
 
@@ -135,6 +147,26 @@ func RunMark(ctx context.Context, s storage.ObjectStore, r *repo.Repo, opts Mark
 			continue
 		}
 		out.Candidates.TxRecords = append(out.Candidates.TxRecords, marks.TxCandidate{
+			Key:                    key,
+			FirstSeenUnreachableAt: now,
+		})
+	}
+	for _, key := range bundleCandKeys {
+		if old, ok := prevBundleByKey[key]; ok {
+			out.Candidates.Bundles = append(out.Candidates.Bundles, old)
+			continue
+		}
+		out.Candidates.Bundles = append(out.Candidates.Bundles, marks.BundleCandidate{
+			Key:                    key,
+			FirstSeenUnreachableAt: now,
+		})
+	}
+	for _, key := range orphanMarkerKeys {
+		if old, ok := prevMarkerByKey[key]; ok {
+			out.Candidates.OrphanMarkers = append(out.Candidates.OrphanMarkers, old)
+			continue
+		}
+		out.Candidates.OrphanMarkers = append(out.Candidates.OrphanMarkers, marks.MarkerCandidate{
 			Key:                    key,
 			FirstSeenUnreachableAt: now,
 		})

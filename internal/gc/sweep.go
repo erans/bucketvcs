@@ -96,6 +96,26 @@ func RunSweep(ctx context.Context, s storage.ObjectStore, r *repo.Repo, mark mar
 		decision := classify(i.Key, category, i.FirstSeenUnreachableAt, retention, now, freshLive, true /* armed N/A */)
 		applyDecision(ctx, s, i.Key, category, decision, opts.DryRun, &out)
 	}
+	for _, b := range mark.Candidates.Bundles {
+		decision := classify(b.Key, "bundles", b.FirstSeenUnreachableAt, retention, now, freshLive, true /* armed N/A */)
+		applyDecision(ctx, s, b.Key, "bundles", decision, opts.DryRun, &out)
+	}
+	for _, m := range mark.Candidates.OrphanMarkers {
+		if !opts.DryRun {
+			// A repair tool may have re-created the tx record since the
+			// mark; a marker WITH a record is live forensic signal, not
+			// debris — never sweep it.
+			if _, herr := s.Head(ctx, strings.TrimSuffix(m.Key, ".commit")); herr == nil {
+				out.Skipped = append(out.Skipped, sweeps.SkippedEntry{Key: m.Key, Category: "orphan_markers", Reason: "revived"})
+				continue
+			} else if !errors.Is(herr, storage.ErrNotFound) {
+				out.Errors = append(out.Errors, sweeps.ErrorEntry{Key: m.Key, Category: "orphan_markers", Error: herr.Error()})
+				continue
+			}
+		}
+		decision := classify(m.Key, "orphan_markers", m.FirstSeenUnreachableAt, retention, now, freshLive, true /* armed N/A */)
+		applyDecision(ctx, s, m.Key, "orphan_markers", decision, opts.DryRun, &out)
+	}
 
 	out.CompletedAt = opts.Now().UTC()
 	return out, nil
@@ -150,6 +170,10 @@ func applyDecision(ctx context.Context, s storage.ObjectStore, key, category str
 			out.Deleted.ReachabilityDeltas = append(out.Deleted.ReachabilityDeltas, key)
 		case "indexes":
 			out.Deleted.Indexes = append(out.Deleted.Indexes, key)
+		case "bundles":
+			out.Deleted.Bundles = append(out.Deleted.Bundles, key)
+		case "orphan_markers":
+			out.Deleted.OrphanMarkers = append(out.Deleted.OrphanMarkers, key)
 		default:
 			slog.WarnContext(ctx, "gc.sweep.unknown_category", "category", category, "key", key)
 		}
@@ -189,6 +213,10 @@ func applyDecision(ctx context.Context, s storage.ObjectStore, key, category str
 		out.Deleted.ReachabilityDeltas = append(out.Deleted.ReachabilityDeltas, key)
 	case "indexes":
 		out.Deleted.Indexes = append(out.Deleted.Indexes, key)
+	case "bundles":
+		out.Deleted.Bundles = append(out.Deleted.Bundles, key)
+	case "orphan_markers":
+		out.Deleted.OrphanMarkers = append(out.Deleted.OrphanMarkers, key)
 	default:
 		slog.WarnContext(ctx, "gc.sweep.unknown_category", "category", category, "key", key)
 	}

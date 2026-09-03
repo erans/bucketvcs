@@ -26,9 +26,11 @@ type Record struct {
 
 // Candidates groups per-category candidate lists.
 type Candidates struct {
-	TxRecords      []TxCandidate    `json:"tx_records"`
-	CanonicalPacks []PackCandidate  `json:"canonical_packs"`
-	Indexes        []IndexCandidate `json:"indexes"`
+	TxRecords      []TxCandidate     `json:"tx_records"`
+	CanonicalPacks []PackCandidate   `json:"canonical_packs"`
+	Indexes        []IndexCandidate  `json:"indexes"`
+	Bundles        []BundleCandidate `json:"bundles"`
+	OrphanMarkers  []MarkerCandidate `json:"orphan_markers"`
 }
 
 // TxCandidate is one orphan-tx-record candidate.
@@ -47,6 +49,22 @@ type PackCandidate struct {
 
 // IndexCandidate is one stale-index candidate.
 type IndexCandidate struct {
+	Key                    string    `json:"key"`
+	FirstSeenUnreachableAt time.Time `json:"first_seen_unreachable_at"`
+}
+
+// BundleCandidate is one retired-bundle candidate (.bundle or .json
+// sidecar under bundles/). Live bundles and sidecars are filtered by the
+// live set at discovery and re-checked at sweep time.
+type BundleCandidate struct {
+	Key                    string    `json:"key"`
+	FirstSeenUnreachableAt time.Time `json:"first_seen_unreachable_at"`
+}
+
+// MarkerCandidate is one orphan .commit marker (no sibling tx record).
+// Markers gate the tx-orphan sweep, so only markers WITHOUT a tx record
+// are candidates — live markers are never enumerated.
+type MarkerCandidate struct {
 	Key                    string    `json:"key"`
 	FirstSeenUnreachableAt time.Time `json:"first_seen_unreachable_at"`
 }
@@ -94,6 +112,12 @@ func (r Record) MarshalJSON() ([]byte, error) {
 	}
 	if m.Candidates.Indexes == nil {
 		m.Candidates.Indexes = []IndexCandidate{}
+	}
+	if m.Candidates.Bundles == nil {
+		m.Candidates.Bundles = []BundleCandidate{}
+	}
+	if m.Candidates.OrphanMarkers == nil {
+		m.Candidates.OrphanMarkers = []MarkerCandidate{}
 	}
 	return json.MarshalIndent(m, "", "  ")
 }
